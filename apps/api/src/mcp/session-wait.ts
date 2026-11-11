@@ -149,6 +149,9 @@ export function sessionWaitChangeEventMatches(event: SessionEvent): boolean {
 /** The self-session event that announces a newly pending machine input. */
 export const SESSION_WAIT_OWN_PENDING_EVENT_TYPE =
   "system.update.pending" satisfies SessionEventType;
+/** A Steer for the caller's own running turn; its kind is reported as `steer`. */
+export const SESSION_WAIT_OWN_STEER_EVENT_TYPE =
+  "session.control.steer_requested" satisfies SessionEventType;
 
 /**
  * Whether a pending own machine input of this kind ends the wait. Every
@@ -337,7 +340,11 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
       if (after !== undefined && event.sequence > after && targetEventMatches(event)) {
         return true;
       }
-      if (sessionId === ownSessionId && event.type === SESSION_WAIT_OWN_PENDING_EVENT_TYPE) {
+      if (
+        sessionId === ownSessionId &&
+        (event.type === SESSION_WAIT_OWN_PENDING_EVENT_TYPE ||
+          event.type === SESSION_WAIT_OWN_STEER_EVENT_TYPE)
+      ) {
         return true;
       }
     }

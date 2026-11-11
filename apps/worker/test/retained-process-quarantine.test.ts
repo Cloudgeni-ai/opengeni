@@ -55,4 +55,20 @@ describe("retained-process binding quarantine", () => {
       quarantined: false,
     });
   });
+
+  test("rechecks a stopped command that is still exiting at the reaper cadence", () => {
+    const attempts = { reconcileAttempts: 4 };
+    expect(
+      retainedProcessReconciliationDeferral(settings, attempts, "provider_running").retryAfterMs,
+    ).toBe(240_000);
+    expect(
+      retainedProcessReconciliationDeferral(settings, attempts, "provider_running", false, true)
+        .retryAfterMs,
+    ).toBe(30_000);
+    // A failing provider still backs off while a stop is pending.
+    expect(
+      retainedProcessReconciliationDeferral(settings, attempts, "provider_error", false, true)
+        .retryAfterMs,
+    ).toBe(240_000);
+  });
 });

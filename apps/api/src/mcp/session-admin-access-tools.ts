@@ -1,0 +1,562 @@
+import { isDeepStrictEqual } from "node:util";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import {
+  normalizeOrganizationAccessPolicy,
+  organizationAccessPresetPermissions,
+  type AccessGrant,
+  type Permission,
+} from "@opengeni/contracts";
+import {
+  APP_ACTION_CALL_TOOL_NAME,
+  appActionChangesState,
+  appActionCallCarriesSecrets,
+  appActionNeedsConfirmation,
+  appActionPaymentPage,
+  findAppAction,
+  type ActionCatalogEntry,
+} from "@opengeni/contracts/app-actions";
+import { ExternalIdentityReference } from "@opengeni/contracts/external-identities";
+import { hasPermission } from "@opengeni/core";
+import type { PresentedAppActionPage } from "@opengeni/contracts/session-history";
+import {
+  findWorkspaceByExternalIdentity,
+  listConfirmedAppActionChanges,
+  resolveSessionAppActionAuthority,
+  withAccountRls,
+  type Database,
+  type SessionAppActionUnavailableReason,
+} from "@opengeni/db";
+import * as z4 from "zod/v4";
+
+import {
+  actionInOneWorkspace,
+  callOrganizationAction,
+  describeAction,
+  describeActionResult,
+  searchActions,
+  type OrganizationActionContext,
+} from "../organization-mcp";
+import {
+  contentFlowCheckFailure,
+  withOtherWorkspaceContentFlow,
+  type OtherWorkspaceContentFlow,
+} from "./workspace-content-flow";
+
+/**
+ * How a session reaches the app's actions: the same actions as the
+ * organization MCP server, run in this process as a person, with exactly what
+ * they can do.
+ */
+export type SessionAdminAccessDispatch = {
+  /** This API's own origin; calls never leave the process. */
+  origin: string;
+  /**
+   * Runs one request through the API. It must run outside the calling
+   * agent's request context, so nothing of the agent's own database or
+   * billing scope carries into the action.
+   */
+  dispatch: (request: Request) => Promise<Response>;
+  signal?: AbortSignal;
+};
+
+function text(value: unknown): CallToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+}
+
+function failure(message: string): CallToolResult {
+  return { content: [{ type: "text", text: message }], isError: true };
+}
+
+// Fixed texts, whatever the session's access: what the model reads never
+// changes mid-session. Every refusal says nothing ran.
+const UNAVAILABLE: Record<SessionAppActionUnavailableReason, string> = {
+  organization_off:
+    "Nothing was run: this organization has turned off app actions in chat. The person can do it in the app, or an owner or admin can turn them on again under Security.",
+  not_person_session:
+    "Nothing was run: app actions run only in a chat a person started themselves, never in a child or service session.",
+  no_person_present:
+    "Nothing was run: nobody sent this turn's message, so there is no one to act for or to confirm a change. Scheduled, goal and other unattended turns can't run app actions.",
+  not_signed_in_person:
+    "Nothing was run: this turn's message wasn't sent by a person signed in to a chat (for example it came from an API key or a service), so there is no one to act for.",
+  not_member: "Nothing was run: the person who sent this message can no longer use this workspace.",
+};
+const NOT_CONFIRMED =
+  "Nothing was run: this change needs a confirmation from the person who sent this turn's message, given in this chat where they are signed in; an Allow from anyone else, or sent through a key or another integration, doesn't count. Call it again once with the same arguments so they can allow it. If they declined, or someone else answered, tell them so and don't call it again.";
+const READ_ONLY =
+  "Nothing was run: this chat was opened through an embed or another integration, so app actions here can only read, not change anything. The person can make this change in the app itself.";
+// For someone who uses Opengeni through another product, there is no
+// Opengeni app page to send them to.
+const EXTERNAL_PERSON_READ_ONLY =
+  "Nothing was run: this person uses this chat through another product, and app actions here can only read, not change anything. Tell them plainly, without pointing them to a page.";
+const SECRETS =
+  "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. The person can do it in the app's settings themselves.";
+const EXTERNAL_PERSON_SECRETS =
+  "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. Tell the person plainly that this isn't available here, without pointing them to a page.";
+
+// What's true of each kind of page, added to its successful result.
+const EXACT_LINK =
+  "If you do share it, copy url exactly as returned, including everything after #: a retyped or shortened link doesn't open. Test-mode pages (ids starting cs_test_) are expected where the deployment takes test payments; share them like any other.";
+const PAYMENT_PAGE: Record<PresentedAppActionPage, string> = {
+  credits: `The chat shows the person this page as a button that opens it, and confirms there with their new balance once they've paid, so you needn't repeat the link. ${EXACT_LINK}`,
+  subscription: `The chat shows the person this page as a button that opens it, so you needn't repeat the link. ${EXACT_LINK}`,
+  portal:
+    "The chat shows the person this page as a button that opens it, so you needn't repeat the link. Anyone with this link can change the organization's payment method or plan until it expires, so give it only to this person, never in a shared place.",
+};
+
+// A payment page the person isn't allowed to open: the route's 403 names a
+// permission, which neither they nor the agent should have to decode.
+const PAYMENT_PAGE_FORBIDDEN: Record<PresentedAppActionPage, string> = {
+  credits:
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't buy credits here. Tell them an owner or admin of the organization can add credits in the app.",
+  subscription:
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't subscribe here. Tell them an owner or admin of the organization can change the plan in the app.",
+  portal:
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't open its billing page here. Tell them an owner or admin of the organization can do it in the app.",
+};
+
+const CallInput = z4.object({
+  id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
+  pathParameters: z4
+    .record(z4.string(), z4.string().min(1).max(1024))
+    .default({})
+    .describe("Values for the path's :parameters, for example { workspaceId }."),
+  query: z4
+    .record(
+      z4.string(),
+      z4.union([
+        z4.string(),
+        z4.number(),
+        z4.boolean(),
+        z4.array(z4.union([z4.string(), z4.number()])),
+      ]),
+    )
+    .default({})
+    .describe("Query string parameters."),
+  body: z4
+    .record(z4.string(), z4.unknown())
+    .optional()
+    .describe("The JSON request body, for actions that take one."),
+});
+type CallArgs = z4.infer<typeof CallInput>;
+
+/** Whether a saved, confirmed call is exactly this one, after the same input parsing. */
+function confirmedCall(saved: string, args: CallArgs): boolean {
+  let value: unknown;
+  try {
+    value = JSON.parse(saved);
+  } catch {
+    return false;
+  }
+  const parsed = CallInput.safeParse(value);
+  return parsed.success && isDeepStrictEqual(parsed.data, args);
+}
+
+/**
+ * The path parameters a call may leave out: an action in one workspace runs
+ * in this chat's workspace unless the call names another, so a question about
+ * "my workspace" needs no lookup first. Shown in search and describe results
+ * only; the tool descriptions stay as they are.
+ *
+ * One rule for every caller, full access included: the default is stated in
+ * the results the model reads before calling, so leaving the id out picks this
+ * chat's workspace on purpose, and it never reaches anything the caller
+ * couldn't already reach by naming that workspace.
+ */
+function pathParameterDefaults(workspaceId: string): { workspaceId: string } {
+  return { workspaceId };
+}
+
+function withPathParameterDefaults(
+  entry: ActionCatalogEntry | undefined,
+  pathParameters: CallArgs["pathParameters"],
+  workspaceId: string,
+): CallArgs["pathParameters"] {
+  return entry?.path.includes(":workspaceId") && !pathParameters.workspaceId
+    ? { ...pathParameters, workspaceId }
+    : pathParameters;
+}
+
+/** As whom an app action in this turn runs (see `resolveSessionAppActionAuthority`). */
+export type SessionAppActionAuthority = Awaited<
+  ReturnType<typeof resolveSessionAppActionAuthority>
+>;
+type ActingAuthority = Exclude<SessionAppActionAuthority, { kind: "unavailable" }>;
+
+/**
+ * Reads whose first check (`sessions:create`) an external person's access may
+ * pass but whose route refuses them: the workspace budget is for people of the
+ * organization, never someone using Opengeni through another product (see
+ * `requireAllowanceAuthority`). Not offering them saves a refused call.
+ */
+const EXTERNAL_PERSON_REFUSED_READS: ReadonlySet<string> = new Set([
+  "getWorkspaceAllowance",
+  "getWorkspaceAllowanceState",
+]);
+
+/** Someone who uses Opengeni through another product, such as a person in an embedded chat. */
+function isExternalPerson(subjectId: string): boolean {
+  return subjectId.startsWith("external_user:");
+}
+
+/**
+ * Whether an action can succeed for someone who uses Opengeni through another
+ * product, as far as is known before asking the route: it works inside this
+ * chat's one workspace, this turn may run it (a change, a secret), and their
+ * access includes the permission the route checks first. The route's own
+ * checks still decide everything else.
+ */
+function externalPersonCanRun(entry: ActionCatalogEntry, authority: ActingAuthority): boolean {
+  if (!actionInOneWorkspace(entry)) return false;
+  if (EXTERNAL_PERSON_REFUSED_READS.has(entry.id)) return false;
+  if (authority.kind === "full_access") return true;
+  if (authority.kind === "read_only" && appActionNeedsConfirmation(entry)) return false;
+  if (appActionCallCarriesSecrets(entry, undefined)) return false;
+  return (
+    entry.permission === undefined ||
+    hasPermission(authority.permissions, entry.permission as Permission, "explicit")
+  );
+}
+
+/**
+ * The one authority path for what a session does as a person: the app-action
+ * tools, and the ordinary session tools when they reach a chat in another
+ * workspace. Everything is checked live, on every call.
+ */
+export type SessionAdminReach = {
+  /**
+   * As whom an app action in this turn runs right now: with full access, the
+   * person who gave it; otherwise the person who sent this turn's message,
+   * whose changes need their confirmation; or nobody.
+   */
+  authority(): Promise<SessionAppActionAuthority>;
+  /** How to run an organization action as that person, within what the authority allows. */
+  actAs(authority: ActingAuthority): OrganizationActionContext;
+  /**
+   * Only full access reaches another workspace: how to run an action as the
+   * person who gave it, or null when the session doesn't have full access
+   * right now (turned off, expired, or that person lost the workspace).
+   */
+  fullAccessPerson(): Promise<OrganizationActionContext | null>;
+};
+
+export function createSessionAdminReach(input: {
+  db: Database;
+  grant: AccessGrant;
+  sessionId: string;
+  turnId: string;
+  access: SessionAdminAccessDispatch;
+  authorize: () => Promise<void>;
+}): SessionAdminReach {
+  const { db, grant, sessionId, turnId, access, authorize } = input;
+  const authority = async (): Promise<SessionAppActionAuthority> => {
+    await authorize();
+    return await resolveSessionAppActionAuthority(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId,
+      turnId,
+    });
+  };
+  const actAs = (acting: ActingAuthority): OrganizationActionContext => ({
+    caller: {
+      kind: "person",
+      accountId: grant.accountId,
+      subjectId: acting.subjectId,
+      // Each route still resolves this person's live role and workspace
+      // access, exactly as in their browser. Full access reaches every
+      // workspace they can use, as before. Otherwise the cap is what the
+      // message itself could do when it was sent (frozen with the turn,
+      // so an embed's narrower token stays narrow) in this chat's
+      // workspace, so steps that widen an agent's access stay refused.
+      // Someone who uses Opengeni through another product has exactly one
+      // workspace, so full access for them means everything they can do in
+      // this chat's workspace: every path then asks the same question.
+      access:
+        acting.kind === "full_access" && !isExternalPerson(acting.subjectId)
+          ? {
+              preset: "full",
+              permissions: organizationAccessPresetPermissions("full"),
+              workspaceScope: { kind: "all" },
+            }
+          : normalizeOrganizationAccessPolicy({
+              preset: "custom",
+              permissions:
+                acting.kind === "full_access"
+                  ? organizationAccessPresetPermissions("full")
+                  : acting.permissions,
+              workspaceScope: { kind: "selected", workspaceIds: [grant.workspaceId] },
+            }),
+    },
+    // The agent of this exact session turn acts for the person.
+    auditProvenance: {
+      source: "agent",
+      principalKind: grant.principalKind ?? null,
+      via: "session_admin_access",
+      sessionId,
+      turnId,
+      attemptId: typeof grant.metadata?.attemptId === "string" ? grant.metadata.attemptId : null,
+    },
+    origin: access.origin,
+    dispatch: access.dispatch,
+    ...(access.signal ? { signal: access.signal } : {}),
+  });
+  return {
+    authority,
+    actAs,
+    async fullAccessPerson() {
+      const current = await authority();
+      return current.kind === "full_access" ? actAs(current) : null;
+    },
+  };
+}
+
+/**
+ * Register the app-action tools. The server lists them in a chat a person
+ * started (or one with full access); each call resolves, live, as whom it runs:
+ * with full access, the person who gave it, as before; otherwise the person
+ * who sent this turn's message, whose changes run only after they confirm
+ * each one in the chat. The worker shows that confirmation; this checks it.
+ */
+export function registerSessionAdminAccessTools(input: {
+  server: McpServer;
+  db: Database;
+  grant: AccessGrant;
+  sessionId: string;
+  attempt: { turnId: string; attemptId: string };
+  reach: SessionAdminReach;
+}): void {
+  const { server, db, grant, sessionId, attempt, reach } = input;
+  const currentAuthority = reach.authority;
+
+  server.registerTool(
+    "admin_actions_search",
+    {
+      title: "Find app actions",
+      description:
+        "Find what the person could do themselves in the app's pages and settings, so you can do it for them here instead of sending them there: switch or set models, invite people and share chats, check their plan, credits and usage, change workspace and organization settings, set whether an integration's tools run without asking (Allow, Ask or Block), and manage sessions, connections, schedules, files, knowledge and keys. When a setting blocks what the person asked for, find its action and make the change here. With full access this reaches every workspace the person who gave it can use, including reading, messaging or managing chats and sessions in another workspace; the ordinary session tools also reach such a chat when given its workspaceId. Returns action ids for admin_action_describe and admin_action_call. An empty query lists everything, page by page.",
+      inputSchema: {
+        query: z4
+          .string()
+          .max(200)
+          .default("")
+          .describe("Words to look for, for example 'invite', 'usage' or 'default model'."),
+        limit: z4.number().int().min(1).max(50).default(20).describe("Results per page."),
+        offset: z4.number().int().min(0).default(0).describe("Results to skip, for paging."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ query, limit, offset }) => {
+      const authority = await currentAuthority();
+      if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
+      // Offer only what can succeed: someone who uses Opengeni through another
+      // product reaches this chat's workspace, within this turn's access.
+      return text({
+        pathParameterDefaults: pathParameterDefaults(grant.workspaceId),
+        ...searchActions({
+          query,
+          limit,
+          offset,
+          ...(isExternalPerson(authority.subjectId)
+            ? { reachable: (entry: ActionCatalogEntry) => externalPersonCanRun(entry, authority) }
+            : {}),
+        }),
+      });
+    },
+  );
+
+  server.registerTool(
+    "admin_action_describe",
+    {
+      title: "Describe an app action",
+      description:
+        "Show an app action's method, path, path parameters, the JSON schema of its input and whether it changes anything, so admin_action_call can run it correctly.",
+      inputSchema: {
+        id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ id }) => {
+      const authority = await currentAuthority();
+      if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
+      const entry = findAppAction(id);
+      if (!entry || entry.browserOnly) return describeActionResult(id);
+      return text({
+        ...describeAction(entry),
+        ...(entry.path.includes(":workspaceId")
+          ? { pathParameterDefaults: pathParameterDefaults(grant.workspaceId) }
+          : {}),
+        changes: appActionChangesState(entry),
+      });
+    },
+  );
+
+  server.registerTool(
+    APP_ACTION_CALL_TOOL_NAME,
+    {
+      title: "Run an app action",
+      description:
+        "Run one app action as the person, with exactly what they can do in the app and nothing more. A read (changes: false) runs right away. A change first shows the person a confirmation in this chat and runs only if they allow it, unless they gave this session full access; only the person who sent the message can allow it, and if they decline, don't ask again. Actions that create, show or rotate keys, passwords or other secrets are left to the app unless the session has full access. Pass path parameters (for example workspaceId), query parameters and a JSON body. Returns the HTTP status and response; 403 means the person can't do it. Tell them plainly what changed.",
+      inputSchema: CallInput.shape,
+      annotations: { readOnlyHint: false, openWorldHint: false },
+    },
+    async (args) => {
+      const authority = await currentAuthority();
+      if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
+      const entry = findAppAction(args.id);
+      if (
+        authority.kind !== "full_access" &&
+        entry &&
+        appActionCallCarriesSecrets(entry, args.body)
+      )
+        return failure(isExternalPerson(authority.subjectId) ? EXTERNAL_PERSON_SECRETS : SECRETS);
+      // Opening a checkout charges nothing, so it runs without a confirmation
+      // here and in an embed alike; the page itself asks, and the route still
+      // checks that this person may pay. A billing portal link keeps both
+      // safeguards (see appActionNeedsConfirmation).
+      if (authority.kind === "read_only" && entry && appActionNeedsConfirmation(entry))
+        return failure(
+          isExternalPerson(authority.subjectId) ? EXTERNAL_PERSON_READ_ONLY : READ_ONLY,
+        );
+      if (authority.kind === "confirm" && entry && appActionNeedsConfirmation(entry)) {
+        // Enforced here, not only in the chat: the change runs only if this
+        // attempt is executing exactly these arguments, which this same
+        // person approved.
+        const confirmed = await listConfirmedAppActionChanges(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          turnId: attempt.turnId,
+          attemptId: attempt.attemptId,
+          subjectId: authority.subjectId,
+          toolName: APP_ACTION_CALL_TOOL_NAME,
+        });
+        if (!confirmed.some((saved) => confirmedCall(saved, args))) return failure(NOT_CONFIRMED);
+      }
+      // After the confirmation check, which compares the call as the model made it.
+      const call = {
+        id: args.id,
+        pathParameters: withPathParameterDefaults(entry, args.pathParameters, grant.workspaceId),
+        query: args.query,
+        ...(args.body !== undefined ? { body: args.body } : {}),
+      };
+      const page = entry ? appActionPaymentPage(entry) : undefined;
+      // EU-only content stays in EU-only workspaces, for the workspace the call
+      // really reaches.
+      return await withAppActionContentFlow(db, grant, call, async () =>
+        callOrganizationAction(
+          reach.actAs(authority),
+          call,
+          page ? { note: PAYMENT_PAGE[page], billingForbidden: PAYMENT_PAGE_FORBIDDEN[page] } : {},
+        ),
+      );
+    },
+  );
+}
+
+/** Query keys that only name or page through what a read returns, never this session's text. */
+const ID_OR_PAGING_QUERY_KEY =
+  /^(?:[a-z]+Ids?|ids?|limit|cursor|before|after|offset|page|pageSize|order|direction)$/;
+/** A query value shaped like an id, a cursor or a page setting rather than free text. */
+const ID_OR_PAGING_QUERY_VALUE = /^[A-Za-z0-9._:=+/-]{1,200}$/;
+
+function idOrPagingQueryValue(value: unknown): boolean {
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "boolean") return true;
+  if (typeof value === "string") return ID_OR_PAGING_QUERY_VALUE.test(value);
+  if (Array.isArray(value)) return value.length <= 100 && value.every(idOrPagingQueryValue);
+  return false;
+}
+
+/**
+ * Whether the call only brings the other workspace's content here: a read
+ * with no body whose query holds only ids and paging values. Anything else
+ * (a change, a search, a preview, a read that sends text) also carries this
+ * session's content there.
+ */
+export function appActionContentFlow(
+  entry: ActionCatalogEntry,
+  call: { query?: Record<string, unknown>; body?: unknown },
+): OtherWorkspaceContentFlow {
+  if (appActionChangesState(entry)) return "both_ways";
+  const body = call.body;
+  const emptyBody =
+    body === undefined ||
+    body === null ||
+    (typeof body === "object" && !Array.isArray(body) && Object.keys(body).length === 0);
+  if (!emptyBody) return "both_ways";
+  return Object.entries(call.query ?? {}).every(
+    ([key, value]) => ID_OR_PAGING_QUERY_KEY.test(key) && idOrPagingQueryValue(value),
+  )
+    ? "from_there"
+    : "both_ways";
+}
+
+/**
+ * An app action in another workspace of this organization brings that
+ * workspace's content into this session, and anything carrying this session's
+ * text takes it there: run only when that may happen, checked again when the
+ * call returns.
+ */
+export async function withAppActionContentFlow(
+  db: Database,
+  grant: Pick<AccessGrant, "accountId" | "workspaceId">,
+  call: {
+    id: string;
+    pathParameters: Record<string, string>;
+    query?: Record<string, unknown>;
+    body?: unknown;
+  },
+  run: () => Promise<CallToolResult>,
+): Promise<CallToolResult> {
+  const entry = findAppAction(call.id);
+  if (!entry) return await run();
+  const here = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+  if (entry.path.startsWith("/v1/workspaces/external/:")) {
+    // A workspace named by its external identity in this organization: an
+    // import carries this session's content there, so both ways.
+    let there: string | null;
+    try {
+      there = await externalIdentityWorkspaceId(db, grant.accountId, call.pathParameters);
+    } catch (error) {
+      return contentFlowCheckFailure(error);
+    }
+    if (!there) return await run();
+    return await withOtherWorkspaceContentFlow(
+      db,
+      { here, thereWorkspaceId: there, flow: "both_ways" },
+      run,
+    );
+  }
+  const otherWorkspaceId = call.pathParameters["workspaceId"];
+  if (!entry.path.includes(":workspaceId") || !otherWorkspaceId) return await run();
+  return await withOtherWorkspaceContentFlow(
+    db,
+    { here, thereWorkspaceId: otherWorkspaceId, flow: appActionContentFlow(entry, call) },
+    run,
+  );
+}
+
+/**
+ * The workspace an external identity names in this organization, as the
+ * route resolves it; null when it names none (the route answers that).
+ */
+async function externalIdentityWorkspaceId(
+  db: Database,
+  accountId: string,
+  pathParameters: Record<string, string>,
+): Promise<string | null> {
+  const reference = ExternalIdentityReference.safeParse({
+    source: pathParameters["source"] ?? pathParameters["workspaceSource"],
+    externalId: pathParameters["externalId"] ?? pathParameters["workspaceExternalId"],
+  });
+  if (!reference.success) return null;
+  const workspace = await withAccountRls(db, accountId, (tx) =>
+    findWorkspaceByExternalIdentity(tx, {
+      accountId,
+      externalSource: reference.data.source,
+      externalId: reference.data.externalId,
+    }),
+  );
+  return workspace?.id ?? null;
+}

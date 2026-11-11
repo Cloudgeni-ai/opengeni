@@ -31,3 +31,15 @@ attachments; unrelated personal files remain inaccessible.
 Forking copies accepted grants with destination-local event provenance. A message
 fork includes only grants at or before its selected boundary. Copied grants remain
 independent of subsequent source visibility changes.
+
+## What the model sees
+
+An attached PNG, JPEG, GIF or WebP image reaches an image-capable model as an image
+beside its message (`apps/worker/src/activities/run-input.ts`). HEIC/HEIF photos,
+which no provider accepts, are decoded once per worker process with libheif
+(WebAssembly, `packages/runtime/src/heif-image.ts`) and shown as a JPEG; the file
+itself stays the original. Untyped `.heic`/`.heif` uploads qualify by their bytes.
+A message is stamped at acceptance with the image bound and the converted formats it
+uses, so later changes never alter an image an earlier request already sent; older
+messages keep their reference-only HEIC receipt. `view_image` converts HEIC/HEIF
+files in the sandbox the same way.

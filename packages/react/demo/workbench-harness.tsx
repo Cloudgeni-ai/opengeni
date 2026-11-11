@@ -8,10 +8,11 @@ import {
 } from "@opengeni/react";
 import "./styles.css";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
-import "./workbench-peers";
+import { enableWorkbenchDemoPeers } from "./workbench-peers";
 
 // The demo ships the optional @pierre/diffs peer.
 enablePierreDiffs();
+enableWorkbenchDemoPeers();
 
 /* ----------------------------------------------------------------------------
    M5 workbench harness (static, fixture-driven) — the Changes tab (windowed
@@ -217,7 +218,7 @@ function App() {
       className="og-root h-dvh bg-og-bg p-4"
       data-og-theme={theme === "light" ? "light" : undefined}
     >
-      <div className="mx-auto flex h-full max-w-5xl flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-0">
+      <div className="mx-auto flex h-full max-w-5xl flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-bg">
         {body}
       </div>
     </div>

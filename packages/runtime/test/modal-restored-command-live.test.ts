@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { ModalClient } from "modal";
-import { decodeNativeSnapshotRef, type SandboxProviderCommand } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { decodeNativeSnapshotRef } from "@opengeni/contracts";
+import { testSettings } from "@opengeni/testing/settings";
 import { createSandboxClient } from "../src/sandbox";
 import type { ChannelASession } from "../src/sandbox/channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../src/sandbox/exec-banner";
@@ -59,7 +59,6 @@ test.skipIf(process.env.OPENGENI_LIVE_MODAL_SETUP !== "1")(
         expect(saved).not.toBeNull();
         current.bindProviderCommand!(handle!, saved, {
           load: async () => saved,
-          acknowledge: async (next: SandboxProviderCommand) => (saved = next),
           reserveInput: async () => 1,
           captureRouterPage: async (page) => {
             expect(saved).toEqual(page.expected);

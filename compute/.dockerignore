@@ -1,0 +1,8 @@
+# The control image's build context is compute/: only sources and the lock
+# file matter.
+target
+**/target
+**/node_modules
+**/__pycache__
+guest-out
+dist

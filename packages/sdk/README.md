@@ -1,6 +1,6 @@
 # @opengeni/sdk
 
-Framework-agnostic TypeScript SDK for the OpenGeni public API: a typed client,
+Framework-agnostic TypeScript SDK for the Opengeni public API: a typed client,
 session lifecycle, and the streaming core — SSE event streaming with automatic
 reconnect, resume-by-sequence, gap backfill, and duplicate suppression — plus
 helpers for proxying the stream through your own API.
@@ -24,6 +24,30 @@ Browser clients may call the public API from any origin with an explicitly safe
 bearer design, but an organization API key belongs on the product server.
 Browser cookies are accepted cross-origin only from operator-configured trusted
 origins; arbitrary embedding origins never receive credentialed CORS responses.
+
+## Billing
+
+API and embedded-product usage spends credits, not plan credit. Connected AI
+subscriptions are available in the Opengeni apps on paid plans, not through the
+API. Omit the model to use an eligible credit-billed default; explicitly selecting
+a connected subscription returns `403` with `subscription_api_unavailable`.
+See [billing origin](../../docs/billing-origin.md) for the internal legacy-account
+exception.
+
+## Task usage limits
+
+`createSession(workspaceId, { initialMessage, usageLimitMicros })` sets an
+optional API-equivalent model-usage limit on a new root task;
+`getSessionUsageLimit` and `setSessionUsageLimit` (compare-and-set on
+`expectedVersion`, idempotent on `operationId`, `limitMicros: null` clears)
+read and change it. Both writes verify the server's echo and throw when a
+server that predates usage limits would otherwise run the task unlimited. A
+refused message raises `OpenGeniSessionUsageLimitReachedError` (HTTP 402
+`session_usage_limit_reached`), never the allowance error. The browser-safe
+`@opengeni/sdk/session-usage-limits` subpath exports the free functions, the
+refusal parser and neutral wording. The session proxy never forwards limits
+from a browser; set them from your server. See
+[task usage limits](../../docs/session-usage-limits.md).
 
 ## Allowance lifecycle recovery
 
@@ -52,87 +76,107 @@ change allowances.
 
 ## Embed the conversation (default)
 
-The default product integration is the full OpenGeni conversation:
-`@opengeni/react`'s `SessionConversation` in the browser, backed by this SDK
-through a tenant/user-scoped same-origin proxy on your server.
-`createSessionProxyHandler` is that proxy, packaged:
+Embedding Opengeni is one backend route plus one component, and you only speak
+in your own ids. The browser renders `@opengeni/react`'s `OpenGeniChat` (or
+`SessionConversation`); your server mounts `createSessionProxyHandler`, a
+same-origin proxy that acts as your authenticated user:
 
 ```ts
-// Server: mount at /api/opengeni/* (see the framework adapters below).
-import { OpenGeniClient, createSessionProxyHandler } from "@opengeni/sdk";
+// lib/opengeni.ts (server only: the organization API key never reaches the browser)
+import { Opengeni } from "@opengeni/sdk/chat";
 
-const og = new OpenGeniClient({
-  baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_API_KEY!,
-});
+export const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
+```
 
-export const handler = createSessionProxyHandler(og, {
+```ts
+// app/api/opengeni/[...path]/route.ts (any web-standard host works; see the adapters below)
+import { createSessionProxyRoute } from "@opengeni/sdk/next";
+import { og } from "@/lib/opengeni";
+
+export const dynamic = "force-dynamic";
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   resolve: async (request) => {
-    const me = await authenticate(request); // your session/cookie check
+    const me = await authenticate(request); // your existing session check
     if (!me) return new Response("Unauthorized", { status: 401 });
-    return { workspaceId: me.openGeniWorkspaceId, user: me.userId, source: "acme-app" };
+    return { user: me.id, tenant: me.orgId }; // or { user: me.id }
   },
-  authorizeMutation: (request) => verifyCsrf(request), // your existing CSRF policy
-  // Optional. Omit to keep session creation purely server-side.
-  createSession: ({ initialMessage, idempotencyKey }) => ({
-    initialMessage,
-    idempotencyKey: idempotencyKey ?? crypto.randomUUID(),
-    tools: [{ kind: "mcp", id: "acme" }], // explicit, server-chosen tool selection
-    firstPartyMcpTools: [],
-  }),
 });
 ```
 
 ```tsx
-// Browser: the unmodified SDK client, pointed at your mount.
-import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniChat, OpenGeniProvider } from "@opengeni/react";
+// app/assistant/assistant.tsx (browser): no provider, client, or workspace id.
+"use client";
+import { OpenGeniChat } from "@opengeni/react";
 import "@opengeni/react/compiled.css";
 
-const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
-<OpenGeniProvider client={client} workspaceId={workspaceId}>
-  {/* The user's chat list plus the conversation; or <SessionConversation sessionId={id} />. */}
-  <OpenGeniChat />
-</OpenGeniProvider>;
+export function Assistant() {
+  return <OpenGeniChat baseUrl="/api/opengeni" />; // chat list + conversation
+}
 ```
 
-The proxy and `@opengeni/sdk/chat` facade accept `chats`. The proxy defaults to
-`"private"`; the facade does too when a `user` is present. Without a user and with
-`chats` omitted, the facade keeps workspace visibility, session-only agent reach
-and Knowledge authoring off. Explicit `"private"` requires an authenticated user.
-Private chats use private visibility, session-only agent reach and personal
-Knowledge; `"shared"` uses workspace visibility, agent reach and Knowledge.
-The API wire values are `visibility: "private" | "workspace"`; stored visibility
-is `user_private | workspace_shared`. Explicit hook/create fields override defaults.
+`baseUrl` makes the component create the browser client for your mount and use
+the workspace the proxy resolved for the signed-in user (reported in the
+proxy's client config). One conversation alone is
+`<SessionConversation baseUrl="/api/opengeni" sessionId={id} />`. The
+`<OpenGeniProvider client={client} workspaceId={workspaceId}>` form keeps
+working, for example for several components or the headless hooks.
 
-For `"isolated"`, pass the facade and return `{ tenant, user }` from `resolve`.
-`og.workspaceIdFor({ tenant, user }, { isolation: "user" })` provisions a separate
-workspace and that user's external membership. It uses stable onboarding keys,
-so retries do not restore revoked access. Other modes need explicit onboarding.
-The standalone resolver is on the server-only `@opengeni/sdk/tenant-workspaces`
-subpath. Keep tenant and user values host-authenticated.
+What `resolve` returns decides the workspace:
 
-Isolated members get only workspace read, session create/read/control (including
-sending messages), file upload/read, and `mcp_servers:attach` for host-provided
-per-session servers. No admin permissions are included. Pass `memberPermissions`
-to the `OpenGeni` constructor or `createWorkspaceIdResolver` options to replace
-that list, for example to disable file uploads or MCP attachment. The organization
-key must also permit each operation. This is initial onboarding, not a membership
-update: changing the option does not update existing grants or restore revoked access.
-Keep MCP URLs and credentials in the server's `createSession` hook; the browser
-cannot choose them through the proxy.
-An existing onboarding conflict returns the workspace address without retrying
-or changing the grant. The address is not authorization: later `asUser` calls
-still enforce current permissions. Existing isolated users need an explicit
-`updateExternalWorkspaceMember` to gain newly added permissions such as MCP attachment.
+- `{ user, tenant }`: one workspace per tenant; chats are private per user by
+  default.
+- `{ user }`: one workspace per user. It stays single-user: the SDK adds its
+  owner once, and Opengeni never admits anyone else to it.
+- `{ user, workspaceId }`: bring your own workspace id.
+
+Workspaces are created on first use and cached per `Opengeni` instance.
+`og.workspaceId({ tenant })` and `og.workspaceId({ user })` return the same ids
+the proxy uses. There is no onboarding step: the first request a user makes
+adds them to a tenant (or your own) workspace with conversation permissions
+(workspace read, session create/read/control, file upload/read, and attaching
+your per-session MCP servers; no admin). That needs an organization API key
+with `members:manage` (full access includes it) plus those permissions.
+Opengeni never changes an existing membership, so narrowing or widening one
+with `updateExternalWorkspaceMember` sticks. A user you remove from a tenant
+workspace is added again on their next request, because your product decides
+who its users are; stop resolving a user you no longer admit. A removal from a
+per-user workspace sticks. `organizationId` is optional:
+the facade reads it once from the key. Keep `user` and `tenant`
+host-authenticated, never from the request body or path.
+
+The proxy and facade accept `chats`. `"private"` (the default with a user)
+uses private visibility, session-only agent reach and personal Knowledge;
+`"shared"` uses workspace visibility, agent reach and Knowledge, so a tenant's
+users see each other's chats. Without a user and with `chats` omitted, the
+facade keeps workspace visibility, session-only agent reach and Knowledge
+authoring off. The API wire values are `visibility: "private" | "workspace"`;
+stored visibility is `user_private | workspace_shared`. Explicit hook/create
+fields override defaults. Keep MCP URLs and credentials in the server's
+`createSession` hook; the browser cannot choose them through the proxy.
+
+You can also pass a plain `OpenGeniClient` (organization key) instead of the
+facade; then `resolve` must return `{ user, workspaceId }`. The explicit
+membership APIs (`ensureWorkspace`, `addExternalWorkspaceMember`,
+`updateExternalWorkspaceMember`, `cancelExternalWorkspaceMemberGrant`) keep
+working for products that manage access themselves. Legacy
+`chats: "isolated"` with `{ tenant, user }` still provisions a separate
+workspace per user and tenant. Per-user workspaces add their owner with a
+stable onboarding key, so a retry never restores a revoked grant;
+`memberPermissions` replaces that owner's permissions on first onboarding
+only. Set `memberPermissions` for tenant workspaces too when your users need
+another role than Opengeni's first-use defaults: the facade and the proxy then
+add each signed-in user with exactly those permissions before their first
+request, with the same stable onboarding key, and never change an existing
+grant. The standalone resolver is on the server-only
+`@opengeni/sdk/tenant-workspaces` subpath.
 
 The facade also accepts `agent` (identity, capabilities, instructions, renderer)
-and defaults its renderer to `"markdown"` when the server admits agent configuration.
-Only an implicit renderer retries once without `agent` on `422 agent_config_not_enabled`,
-and that refusal is cached per facade instance. This avoids a bootstrap request
-and supports older servers that cannot advertise admission. Explicit agent settings
-are never stripped: the 422 names `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` for the
-deployment operator. The private default with a user now turns personal Knowledge
+and defaults its renderer to `"markdown"`. Current servers always admit agent
+configuration. For older servers that still gate it, only an implicit renderer
+retries once without `agent` on `422 agent_config_not_enabled`, and that refusal
+is cached per facade instance. Explicit agent settings are never stripped: the
+422 names `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` for that older server's
+operator. The private default with a user now turns personal Knowledge
 on; pass `memory: false` to keep authoring off.
 Missing organization private-session enablement raises `OpenGeniSetupError`,
 with owner/admin API, SDK and web-app instructions; the proxy preserves that
@@ -160,33 +204,150 @@ The Next adapter passes the full URL, including any `basePath`; the Node
 middleware rebuilds it from `originalUrl`, streams bodies and SSE, and aborts
 the request when the client disconnects.
 
-The chat list (`SessionList` / `OpenGeniChat`) uses `listSessionPage`. By
-default (`sessionList: "mine"`) the proxy adds a creator filter for the
-resolved user server-side, so each user sees only the chats they started;
-`sessionList: "visible"` lists every chat OpenGeni lets the user read in the
-workspace, and `false` disables listing. Archive and restore go through
-`updateSessionArchive` unless `archive: false`. A "New chat" in `OpenGeniChat`
-sends only `{ initialMessage, idempotencyKey }`, so it needs the
-`createSession` hook.
+The proxy is a relay: it passes Opengeni's own routes through as the resolved
+user, so the browser can use everything Opengeni lets that user do in that
+workspace (chats and their history, queue, goals, approvals and human input,
+files, artifacts and Sites, voice, schedules, Knowledge) with the same
+requests the Opengeni web app makes. What the user can do is decided by
+Opengeni's permissions, not by a list in the proxy; what the user sees is
+decided by your UI (component props and presets). The chat list
+(`SessionList` / `OpenGeniChat`) shows every root chat Opengeni lets the user
+read; `listProps={{ mineOnly: true }}` narrows it to the user's own chats.
+`listProps={{ archive: false }}` and `newChat={false}` hide "Archive" and
+"New chat". There is one kind of archive, for everyone:
+`updateSessionArchive(workspaceId, sessionId, { archived: true })` (needs
+session control) takes the chat out of every list, offers Undo
+(`{ archived: false }`) for about ten seconds, and then moves its content to
+long-term storage for good. The deployment's idle-session archive does the
+same to long-idle sessions. An archived session stays readable and searchable
+(`archiveStatus: "archived"`) but is read-only, and its state is reported on
+`session.retention`. Pass `keepLive: true` to
+`createSession`, or call
+`updateSessionRetention(workspaceId, sessionId, { keepLive: true })`, to keep a
+persistent agent's session out of it.
+
+Composer uploads are refused for anonymous visitors: return `visitor: true`
+from `resolve` for a user your product has not signed in (for example a
+website visitor keyed by a cookie), and the proxy reports file uploads off and
+refuses the upload routes unless `visitorUploads: true`. Agent-produced media
+still loads.
+
+Live voice (speech-to-speech) and voice input are Opengeni routes like any
+other. The stock conversation shows its voice button only when you opt in with
+the component's `realtimeVoice` prop, and its microphone unless `voiceInput` is
+`false`. Opengeni still checks the user's `sessions:control` permission, binds
+a call to that user and browser, runs spoken requests as steers of the same
+chat, and meters deployment-funded voice against your credits.
+`authorizeSession` runs on every call route, and `beforeForwardMessage` sees
+`delivery: "realtime"` when a call starts (refuse it, or return
+`mcpCredentialUpdates`; the proxy also refreshes the `toolServer` token) and
+before transcripts and spoken requests are saved (refuse them, or add
+`modelContext`, which must be the same when a request is retried).
+
+`listSessionPage` includes personal pinned details by default. A caller with a
+separate `pinsOnly: true` read can pass `includePinned: false` on ordinary pages
+to avoid repeatedly loading those details. Ordinary pages still exclude pinned
+rows; `pinsOnly: true` and `includePinned: false` cannot be combined. Older API
+versions may ignore `includePinned` and return the default pin projection.
+
+For navigation lists, `listSessionSummaryPage` uses the same filters, ordering,
+pin rules and cursors, returning `SessionListEntry` records. Entries include
+display/rename titles, creator, lifecycle, personal state, hierarchy counts and
+the model and reasoning effort shown with a row; prompts and the rest of the
+execution configuration remain available on the default `getSession` response.
+Chat clients explicitly select `client.withSessionResponse("chat")`; those clients
+return `ChatSession` and read
+configuration with `getSessionConfiguration` (requires `sessions:control` and session access).
+The console, mobile and packaged React chat opt in. Compact clients send
+`Accept: application/json; opengeni-session=chat` on JSON requests, without adding
+a CORS request header. Default SDK clients retain the full response and required types. Older APIs return
+full pages that the SDK projects locally. Unknown filters/cursors still fail
+explicitly rather than returning an unfiltered result.
 
 Every request calls `resolve`, then runs through `asUser(user, { source })`
 (there is no service-authority fallback) against exactly the resolved
-workspace. Only the native routes `OpenGeniProvider` and the conversation use
-are served: client config; workspace read, model catalog, live control stream,
-and workspace Resume; session read/rename, events (list and SSE with
-`Last-Event-ID` resume), send/steer/approval/human-input, queue, composer
-draft, pause/resume; and, unless `files: false`, attachment upload and download
-URLs. Every other route or method is a 404 (cancel and workspace Pause are
-refused); unknown query parameters on served reads pass through. Browser session creation is disabled
-unless you supply `createSession`; the browser may then send only
-`initialMessage` and `idempotencyKey`, and your hook returns the full request
-(tools, MCP servers, Skills, instructions, model policy). Message bodies are
-capped by `maxBodyBytes` (1 MiB), cannot rotate MCP credentials or attach
-anything but files, and `modelSelection: false` strips per-message model
-choices. `authorizeSession(sessionId, context)` adds a product-level session
-check on top of OpenGeni's own membership and visibility checks. Without
-`authorizeMutation`, only cross-site (`Sec-Fetch-Site`) mutations are refused,
-so cookie-authenticated hosts should pass their CSRF check.
+workspace:
+
+- **Inside the workspace** (`/v1/workspaces/{workspaceId}/...`), every route
+  and method is forwarded as the user, with its query string, streaming body,
+  and the request headers Opengeni reads (`Accept`, `Content-Type`, `Range`,
+  `Last-Event-ID`, conditional headers, `x-opengeni-session-id`, correlation
+  and chunked-upload headers). Responses keep Opengeni's status, error
+  envelope, and content headers; SSE streams get heartbeats. A path naming
+  another workspace is a 403.
+- **Outside it**, only the bootstrap reads answer, for this workspace alone:
+  `GET /v1/workspaces` (just the resolved workspace), `GET /v1/access/me` (the
+  user's effective grant here, never their other workspaces or the key's
+  authority), and `GET /v1/config/client`, plus the user's own inbox:
+  `GET /v1/inbox` and `PATCH /v1/inbox/items/{id}` limited to this workspace's
+  items, and `GET`/`PUT /v1/inbox/settings`. Everything else is a 404. Your
+  users' questions, approvals, paused goals and agent notifications reach that
+  inbox like an Opengeni member's (the stock app shows it), so you do not need
+  to build notifications from session events.
+- **What narrows it:** an `asUser` request holds only the permissions both the
+  organization key and the user's membership hold, so a key or member role
+  without `files:write`, `schedules:*` or `sessions:control` cannot upload,
+  schedule or pause. `refuse(route, context)` keeps routes closed that
+  Opengeni would allow (return `true` for a 404 or your own `Response`;
+  `route` is `{ method, segments, sessionId }` with the segments after
+  `/v1/workspaces/{workspaceId}`). `authorizeSession(sessionId, context)` adds
+  a product-level check for every `sessions/{id}/...` route and every request
+  naming a chat in `x-opengeni-session-id`.
+- **Server-owned chat setup:** with `createSession`, the browser may send only
+  `initialMessage`, `idempotencyKey`, attached files, explicit model choices,
+  and a few UI fields; your hook returns the full request (tools, MCP servers,
+  Skills, instructions, model policy), and the proxy refuses the routes that
+  would change that setup afterwards (a chat's agent, tool policy, Skills,
+  variable sets, usage limit, visibility, active sandbox and Codex account,
+  forks, and `chat/completions`). Without the hook, the browser creates chats
+  with Opengeni's own request, limited by the user's permissions, with `chats`
+  defaults filling what it leaves out. MCP credential rotation and archived
+  history import (`session-imports`) from the browser are always refused.
+- **Messages** (send, steer, draft submit, realtime) pass through
+  `beforeForwardMessage`; `modelSelection: false` strips per-message model
+  choices, and bodies are capped by `maxBodyBytes` (1 MiB).
+- **Mutations:** without `authorizeMutation`, cross-site (`Sec-Fetch-Site`)
+  requests and the content types a cross-site form can send (`text/plain`,
+  `application/x-www-form-urlencoded`) are refused, so cookie-authenticated
+  hosts should pass their CSRF check.
+
+The client config the proxy serves is Opengeni's for this workspace and user,
+plus the resolved `workspaceId`, the SDK's own `apiContractRevision`, the
+artifact viewer's `artifacts` capability (the editor's live socket and this
+user's cache partition), file uploads off for visitors, and `modelSelection`
+when you set it. Task usage limits stay server-side.
+
+### Your own tools, as the signed-in user
+
+`toolServer` attaches your product's MCP endpoint to every session created
+through the proxy, with a short-lived token for the user `resolve`
+authenticated. The proxy refreshes it on every send, steer, submit, approval,
+and human-input answer. Your endpoint, built with any MCP library, verifies it:
+
+```ts
+createSessionProxyHandler(og, {
+  resolve,
+  createSession,
+  toolServer: {
+    url: "https://app.example.com/api/mcp", // public HTTPS (tunnel locally)
+    approvals: { ask: ["rename_post"] }, // the user approves each call first
+  },
+});
+
+// In the MCP route (Web Request, or an Express/Node request):
+import { ToolRequestError, verifyToolRequest } from "@opengeni/sdk/tool-auth";
+const { user, tenant, workspaceId } = await verifyToolRequest(request); // or ToolRequestError (401)
+```
+
+Scope every tool to the verified `user` and `tenant`; never trust ids the model
+sends; list write tools in `approvals.ask`. Tools act as the chat's creator, also
+in shared chats. Members need `mcp_servers:attach`. Tokens are HS256 JWTs signed
+with a key derived from `OPENGENI_API_KEY` (or the same `secret` on both sides),
+bound to the full tool URL by `aud` (set `OPENGENI_TOOL_SERVER_URL` to configure
+both sides at once), and valid for `ttlSeconds` (default 24 hours). Non-Node
+verifiers use the hex key from `deriveToolTokenKey()`, never the organization key;
+the format is documented in `src/tool-auth.ts`. See
+`examples/tool-server` for a runnable Express version.
 
 `beforeForwardMessage(message, context)` runs before every forwarded user
 message (send, steer, composer submit, and a browser-started create) and may
@@ -215,12 +376,12 @@ still cannot send `mcpCredentialUpdates` itself. With `modelSelection: false`
 the proxy reports `modelSelection: false` in the client config, and
 `SessionConversation` hides its model picker.
 
-Onboard each user explicitly before their first request (see
-[External users](#external-users-asuser)); the proxy never grants membership.
-The conversation needs `workspace:read`, `sessions:read`, `sessions:control`,
-plus `sessions:create` when the user creates sessions and `files:upload` /
-`files:read` for attachments. Pass the facade from `@opengeni/sdk/chat` instead
-of a client to resolve `{ tenant, user }` through `ensureWorkspace`.
+Opengeni adds each user to the workspace on their first request (see
+[External users](#external-users-asuser)), with `workspace:read`,
+`sessions:create`, `sessions:read`, `sessions:control`, `files:upload`,
+`files:read`, and `mcp_servers:attach`. Pass the facade from `@opengeni/sdk/chat`
+instead of a client to resolve `{ tenant, user }` or `{ user }` to a workspace
+created on first use.
 
 ## Quick start
 
@@ -249,7 +410,7 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 ## Organization-backed product setup
 
 A multi-tenant product should hold one organization API key on its backend and
-idempotently map each product tenant to an OpenGeni organization workspace. The
+idempotently map each product tenant to an Opengeni organization workspace. The
 wire kind for an organization workspace is `"shared"`; Personal workspaces are
 excluded.
 
@@ -275,17 +436,40 @@ if (workspace.kind !== "shared") {
 The response is `{ workspace, created }`. Replays return the original nested
 workspace with `created: false`. For an organization key, `getAccessContext()`
 does not enumerate every workspace grant; call `listWorkspaces()` for the
-complete organization-workspace inventory.
+organization-workspace inventory allowed by the key's live scope.
 
 Organization key administration uses `listOrganizationApiKeys`,
-`createOrganizationApiKey`, and `deleteOrganizationApiKey`. The key token from a
+`getOrganizationApiKey`, `createOrganizationApiKey`, `updateOrganizationApiKey`,
+and `deleteOrganizationApiKey`. GET detail and PATCH return the raw `ApiKey`;
+creation returns `{ apiKey, token }`. The key token from a
 create response is shown once and must be stored in the backend's secret
 manager. `createOrganizationApiKey(organizationId, { name, access: "read" })`
 mints a read-only master key: it inventories shared workspaces and reads their
 sessions, events, and files, but cannot create sessions, send messages, or mint
-keys, and every key reports its tier as `apiKey.access`. Either tier can call
+keys. This legacy `access: "read"` tier is distinct from the broader explicit
+`read_only` preset, which includes every read/list/view/search permission
+except the secret-value read `secrets:read`.
+
+Create or edit with `policy: { preset, permissions, workspaceScope }` for exact
+grants. `OrganizationAccessPreset` is `"read_only" | "full" | "custom"`;
+the label never adds permissions and the server recomputes it from the selected
+set. Explicit `full` selects every canonical non-deprecated permission; `custom`
+has no implicit grants or scope. Even `workspace:admin` grants no wildcard under
+an explicit policy. Scope is `{ kind: "all" }` (current and future shared
+workspaces) or `{ kind: "selected", workspaceIds }` (up to 500 unique same-org
+shared-workspace IDs; empty reaches none). Personal workspaces are always excluded.
+
+`updateOrganizationApiKey(organizationId, apiKeyId, { name?, description?, policy? })`
+requires at least one change; `description: null` clears it. Metadata-only edits
+preserve legacy stored permissions and wildcard semantics. A policy edit replaces
+the policy, transitions legacy keys to explicit semantics, and applies narrowing
+on the next request without rotating the token. Omitting policy at creation
+retains legacy `access`/`preset` inputs and the full legacy default.
+See [the canonical policy guide](../../docs/product-integration.md#explicit-organization-key-policies).
+
+Keys with session-read authority can call
 `listOrganizationSessions(organizationId, { limit, cursor, scopeSubjectId, status })`
-for one page of sessions across every shared workspace (each row carries its
+for one page of sessions across authorized shared workspaces (each row carries its
 `workspaceId`; private sessions and Personal workspaces never appear), or
 `iterateOrganizationSessions` to follow `nextCursor` to the end.
 
@@ -298,7 +482,7 @@ security boundary, and delivery checklist.
 Installed Skills can be workspace-managed or marked `session_selected`.
 Session-selected guidance is exposed to no agent
 until `createSession` names the reviewed immutable component in
-`installedSkillIds`. OpenGeni copies that exact artifact into the new session,
+`installedSkillIds`. Opengeni copies that exact artifact into the new session,
 so omitting the field from customer-facing creates is a real contamination
 boundary rather than a prompt convention.
 The ordered selection is part of keyed-create identity: reusing an
@@ -333,17 +517,34 @@ On a product backend, `client.asUser(externalId, { source? })` returns a separat
 client that sends the external actor assertion with the organization key. IDs
 are opaque and case-sensitive; the default source is `default`. Keep the key and
 this client server-side. Each request requires the intersection of the key's
-permissions and the user's explicit workspace membership. API-key rotation does
-not change the external identity.
+permissions and the user's workspace membership. API-key rotation does not
+change the external identity.
+
+Membership is automatic: when an `asUser` request reaches a shared workspace of
+the key's own organization and the user has no membership there, Opengeni adds
+one with conversation permissions (workspace read, session create/read/control,
+file upload/read, `mcp_servers:attach`) and continues the request. This needs
+the same authority as explicit onboarding: the key holds `members:manage` (or a
+legacy `workspace:admin`) and every one of those permissions, with the
+workspace in its scope; otherwise the request is a `403` as before. It never
+applies to linked native identities, Personal workspaces, SDK per-user
+workspaces (`opengeni-sdk:user-isolation:*` external source), other
+organizations, requests that need a permission outside those defaults, or any
+non-key caller, and it never changes an existing membership. The identity is
+re-checked as active under the same lock, and the grant writes the same
+receipt and lifecycle event as explicit onboarding, attributed to the key. A
+user removed from a shared workspace is added again on their next request; a
+suspended or offboarded identity stays refused.
 
 Use the service client—not an `asUser` client—to call
 `addExternalWorkspaceMember(workspaceId, { identity: { externalId, source? }, permissions })`
-for explicit onboarding. It requires `members:manage`, cannot grant more than
-the key permits, excludes Personal workspaces, and refuses to overwrite an
-existing membership with different permissions; change an existing member's permissions with the keyed
+to choose permissions up front. It requires `members:manage`, cannot grant more
+than the key permits, excludes Personal workspaces, and refuses to overwrite an
+existing membership with different permissions (`409`, also when automatic
+membership already created it); change an existing member's permissions with the keyed
 `updateExternalWorkspaceMember(organizationId, workspaceId, organizationMembershipId,
-{ operationId, permissions })`, which never tears down work. Ordinary `asUser` calls never
-restore removed workspace membership or reactivate disabled identities.
+{ operationId, permissions })`, which never tears down work. `asUser` calls never
+reactivate disabled identities.
 
 Service `removeWorkspaceMember` supports external members through the existing
 fenced workspace teardown. Account-wide `updateExternalIdentityMembership(
@@ -392,25 +593,17 @@ Tenants map to organization workspaces, conversations map to deterministic
 sessions, and the organization API key never leaves your server.
 
 ```ts
-import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+import { Opengeni, createChatHandler } from "@opengeni/sdk/chat";
 
-const og = new OpenGeni({
+const og = new Opengeni({
   baseUrl: process.env.OPENGENI_API_BASE_URL!, // omitted = production https://app.opengeni.ai
-  apiKey: process.env.OPENGENI_API_KEY!,
-  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+  apiKey: process.env.OPENGENI_API_KEY!, // the organization id is derived from the key
   source: "acme-app", // labels your product's tenants and users (default "app")
 });
 
-// Once per user, when your product admits them to the tenant. Chat requests
-// never grant workspace membership; without it the API answers 403.
-await og.client.addExternalWorkspaceMember(await og.workspaceId({ tenant: "acme" }), {
-  identity: { externalId: "u_42", source: og.source },
-  permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
-});
-
 const chat = await og.chat({
-  tenant: "acme", // one workspace per customer, created on first use
-  user: "u_42", // authenticated product user; onboard workspace membership first
+  tenant: "acme", // one workspace per customer, created on first use; omit for one per user
+  user: "u_42", // authenticated product user; added to the workspace on first use
   conversation: "c_9", // stable conversation id, independent of the acting user
   agentAccess: "session", // "session" (default) | "user" | "workspace"
   memory: "user", // "user" | "workspace" | false; session-only agent reach defaults to false
@@ -453,11 +646,11 @@ export const POST = handler; // send a message, or answer a pending request at .
 Conversation IDs do not change with the acting user. Authorized collaborators
 can use the same session; private visibility prevents access by other users.
 Use `chatBySessionId` for existing and legacy user-namespaced conversations.
-User mode requires explicit workspace membership and never restores removed
-membership automatically. Without a `user`, the host must name the conversation
+A user is added to the workspace on their first request (see
+[External users](#external-users-asuser)). Without a `user`, the host must name the conversation
 from `resolve`. The Vercel and OpenAI adapters send only the latest user
 message; the earlier messages in that request are imported once, as context on
-the first message of a conversation, after which OpenGeni owns the history.
+the first message of a conversation, after which Opengeni owns the history.
 
 Pick the isolation per session with `agentAccess` (which other sessions the
 agent may reach) and `memory` (what it remembers), all inside one workspace that
@@ -495,7 +688,7 @@ export async function POST(request: Request) {
 }
 ```
 
-OpenGeni's own tool activity is omitted by default because those tools are not
+Opengeni's own tool activity is omitted by default because those tools are not
 in your typed tool set; pass `toolParts: true` (or `createChatHandler(og, {
 toolParts: true })`) to emit them as `dynamic`, provider-executed tool parts.
 Pending approvals are always emitted as dynamic tool parts with a
@@ -610,7 +803,7 @@ user decision. A quiescence conflict identifies the stable blocker after live
 turns, goals, realtime, schedules, workspace writers, retained processes, and
 sandbox access have been settled. Forks copy exact same-workspace durable
 conversation content but no live turn, goal, credential, Connection/delegation,
-personal grant, Variable Set, Sandbox Environment, MCP server configuration, process, sandbox
+personal grant, vault policy, task vault, Sandbox Environment, MCP server configuration, process, sandbox
 identity, pin, or workflow. Destination visibility and acknowledgement are
 idempotency-bound.
 
@@ -635,7 +828,7 @@ const og = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL!,
   apiKey: process.env.OPENGENI_API_KEY!,
 });
-// Existing tenant mapping + explicitly onboarded original creator.
+// Existing tenant mapping; the original creator is admitted on first use.
 const actor = og.asUser(originalExternalUserId, { source });
 const imported = await importArchivedSession(actor, workspaceId, {
   importId: "embedded:thread-42", // Stable; persist the exact request before sending.
@@ -689,7 +882,7 @@ offer Send or Steer. Continuing an imported archive is unsupported in v1.
 The proxy does not expose import routes. Re-upload files through existing APIs
 and replace references before import; preserve additional source metadata and
 source/destination IDs in the host ledger. See
-[Migrating from embedded OpenGeni](../../docs/product-integration.md#migrating-from-embedded-opengeni).
+[Migrating from embedded Opengeni](../../docs/product-integration.md#migrating-from-embedded-opengeni).
 
 ## Connected accounts
 
@@ -704,7 +897,7 @@ const accounts = await browserClient.listOwnConnectionAccounts(workspaceId);
 const selection = { serverId: "mail", connectionId: accounts[0]!.id };
 ```
 
-General personal-resource grants for documents, variable sets and other resource
+General personal-resource grants for documents and other resource
 kinds remain available through the root/core SDK. They do not authorize native
 connected accounts.
 
@@ -765,7 +958,7 @@ Service-owned schedules retain service execution and do not acquire a human's
 personal accounts. Run history remains credential-free.
 
 A schedule freezes its connectors, accounts and (when an agent created it)
-OpenGeni tools. For the owner, `listScheduledTasks` and `getScheduledTask`
+Opengeni tools. For the owner, `listScheduledTasks` and `getScheduledTask`
 include a read-only `policyDrift` naming what is out of date, and
 `listScheduledTaskRuns` includes `accessFailures` for runs that could not use a
 connector. `listScheduledTaskAccessAttention` lists schedules whose latest run
@@ -773,7 +966,7 @@ failed that way, and schedules that cannot start because a chosen account can no
 longer be used (`unavailableAccounts`, with a null `runId`). A signed-in owner
 re-freezes with their current access through
 `refreshScheduledTaskAccess(workspaceId, taskId, { executionDigest, leaveOut })`,
-where the optional `leaveOut` keeps named default connectors or OpenGeni tools
+where the optional `leaveOut` keeps named default connectors or Opengeni tools
 off; API keys and agents cannot. See [`docs/scheduled-task-access.md`](../../docs/scheduled-task-access.md).
 
 Deleting a task is externally idempotent and immediately removes it from live
@@ -895,7 +1088,7 @@ shown below; it owns no state or authority of its own.
 
 `OpenGeniClient.interaction` is the framework-free resource facade over the same
 public BrowserSession, ComputerSession, identity, auth, network-route, and human
-intervention APIs used by OpenGeni itself. It adds no second state or execution
+intervention APIs used by Opengeni itself. It adds no second state or execution
 path: facade methods call the ordinary typed transport, and every mutation still
 uses the canonical generation fences, operation receipt, permission check, and
 placement controller.
@@ -932,6 +1125,13 @@ if (receipt.state === "outcome_unknown") {
 tree. `browser.readDom(targetId, request)` returns a bounded element or count
 query using those fences; sensitive values are redacted.
 
+The flat `client.openBrowserTargetWithInventory(workspaceId, browserSessionId,
+{ url })` explicitly opens a tab and returns the owned tab inventory and its
+generation fences without a page observation. The default
+`client.openBrowserTarget(...)` and `browser.tabs.open(...)` still return page
+observations. Older controllers can refuse the inventory method; do not retry an
+uncertain creation through another tab-open method.
+
 Browser identities are immutable version graphs: live browser state stays
 private until `browser.publishRevision(...)` explicitly creates a new revision.
 Protected auth fills resolve connection secrets only inside the broker/controller
@@ -959,6 +1159,27 @@ never enter the iframe; `@opengeni/sdk/site` uses a single parent-owned
 `MessagePort` that exposes only the retained tool allowlist intersected with the
 current viewer's live workspace catalog.
 
+Site AI can return directly into an app without any conversation UI:
+
+```ts
+import { createOpenGeniSiteClient } from "@opengeni/sdk/site";
+const site = createOpenGeniSiteClient();
+const result = await site.ai.run({ initialMessage: appPrompt, idempotencyKey: actionId });
+if (result.status === "completed") renderResult(result.text);
+```
+
+The app defines the prompt, context and output presentation. This helper uses
+native sessions and events with the same permissions, approvals, model access
+and billing; it is not a second executor. New Site work is private per viewer
+and excluded from ordinary workspace discovery. `pending` and `cancelled` are
+not successful results; model failure rejects. Retain the `onSession` handle
+to observe again using `site.ai.result(id, { turnId })`, without creating work.
+An `after` cursor returns only subsequent output; omit it for full replay.
+Aborting observation does not cancel native execution. See
+[`site-conversations.md`](../../docs/site-conversations.md) and
+[`site-session-embed`](../../examples/site-session-embed) for optional chat and
+headless inline examples. Do not store private handles in shared Site Data.
+
 ```ts
 let cursor: string | undefined;
 do {
@@ -984,6 +1205,38 @@ model MCP calls and Codemode. Generated declarations augment the lazy namespace
 for exact installed-tool types; canonical `{ serverId, toolName }` identity and
 the server-side catalog remain authoritative.
 
+Known calls use `POST tools/invoke` directly, with no preceding workspace
+catalog request. The API selects one exact authorized account/connector; a
+selected MCP provider may still require its own `tools/list`. Symbolic paths
+use the canonical registry projection and reject ambiguity before connecting.
+Cold calls use the current definition. `$resolve({ identity })` returns one
+entry and a `definitionDigest`; pass it as `expectedDefinitionDigest` to require
+that complete public definition before execution. Digests never grant access.
+Returned executed metadata preserves structured-output unwrapping without a
+catalog load.
+
+`$catalog()` and `$declarations()` remain explicit full discovery. For an older
+API or Site host, set `toolGatewayMode: "catalog"` explicitly on the client;
+there is no automatic downgrade or retry after an unknown invocation outcome.
+The targeted SDK caches bounded per-target metadata, shares only resolution
+loads, and retries at most once after a typed pre-execution
+`tool_definition_stale`; explicit nonretryable or outcome-unknown flags veto
+replay even when a transport labels an error stale. Explicit pins are not
+silently dropped when malformed: only `undefined` means no explicit pin.
+The same retry veto applies to retained v1/catalog mode and Site host adapters.
+For saved Site bundles with code-only retry classifiers, the host's legacy call
+projection wraps executed stale-named provider errors as
+`site_tool_execution_failed`, retaining the complete original diagnostic at
+`result.structuredContent.error.providerError`. Success outputs and ordinary
+provider errors are unchanged; genuine known preexecution stale refresh remains
+available. Stale-named transport errors without that proof use
+`site_tool_call_failed` and retain the original code in their message.
+Pins are not silently advanced. An approved call uses the server's executable-effect and
+private-authority binding, not an implicit full-public-entry pin; supply
+`expectedDefinitionDigest` when that additional precondition is wanted.
+Changed executable effect or private authority requires reapproval. Operation IDs are correlation
+keys, not general idempotency for unapproved calls.
+
 ```ts
 const tools = client.tools.forWorkspace(workspaceId);
 const documents = await tools.docs.search({ query: "launch plan" });
@@ -991,7 +1244,13 @@ const documents = await tools.docs.search({ query: "launch plan" });
 
 An approval-required call needs a server-issued capability. A trusted host
 shows its approval UI first, then asks for one token bound to the current human,
-workspace, operation id, catalog digest, exact tool identity, and arguments.
+workspace, operation id, exact tool identity, executable effect, Site context,
+private authority and arguments. Targeted approvals use a distinct version-2 binding, never a v1
+catalog digest.
+An Ask-to-Allow policy transition can settle matching pending provenance with
+or without the token, but never ignores a supplied invalid token or a consumed
+operation. Public definition pins remain optional and may reject policy/prose
+drift without consuming the pending approval.
 The token expires after five minutes, is stored only as a hash, and is consumed
 once by the matching call.
 
@@ -1003,7 +1262,7 @@ preflight credential and resource authorization before consuming the token.
 const operationId = crypto.randomUUID();
 const identity = { serverId: "linear", toolName: "issues_update" };
 const input = { issueId, state: "Done" };
-const approval = await tools.$approve(identity, input, { operationId });
+const approval = await tools.$approveTarget(identity, input, { operationId });
 
 await tools.$call(identity, input, {
   operationId,
@@ -1011,7 +1270,13 @@ await tools.$call(identity, input, {
 });
 ```
 
-When a call or approval request receives the typed
+The retained `$approve()` method and explicit `toolGatewayMode: "catalog"` use
+the legacy protocol described below. Tokens returned by `$approve()` on the
+same facade retain that routing; externally retained legacy tokens must pass
+`approvalBinding: "catalog"`. Never reinterpret a legacy token as a targeted
+approval.
+
+When a legacy call or approval request receives the typed
 `409 details.code = "catalog_stale"` response, the SDK refreshes the catalog,
 re-resolves the exact identity or generated namespace path, preserves the
 operation id (generating it before the first attempt when omitted), and retries
@@ -1019,6 +1284,19 @@ once. A call that already carries an approval token cannot reuse that
 single-use capability after the catalog digest changes; instead it throws
 `OpenGeniToolReapprovalRequiredError` with the refreshed identity and digest so
 the trusted host can show approval again for the same operation id.
+
+Concurrent callers share one in-flight catalog request (`$catalog` and every
+call path). Each caller's `signal` cancels only its own wait; the shared request
+is cancelled only when every waiter has aborted, and a failed load is not
+cached. Calls rejected as stale on the same digest share one refresh started
+after the first such rejection while it remains the current catalog, and an
+explicit `$catalog({ refresh: true })` always starts a new request.
+
+A call's `catalogDigest` is checked against the exact catalog entry it invokes:
+the API may accept an unchanged entry from a catalog digest whose unrelated
+entries have since changed, and then echoes that digest in the response. A
+changed, removed, or no-longer-authorized target entry still returns
+`catalog_stale` before execution.
 
 Reapproval is valid only before the original capability is consumed. Once a
 call crosses that boundary, the server retains a hash-only tombstone for the
@@ -1035,7 +1313,16 @@ version and viewer's live authority. The requested set is a maximum allowlist,
 not an authority grant; ordinary gateway approval still applies. Archived Sites
 receive no tool bridge.
 
-Omit `firstPartyMcpTools` for the complete OpenGeni tool catalog. An explicit
+An upgraded host advertises targeted calls to modern Site clients. Existing
+bundled Site clients retain their catalog/call protocol: the host obtains a
+bounded manifest for only that saved version's requested identities and
+translates calls using retained per-entry pins. They still make their initial
+catalog request; republishing with the modern client removes it. Unknown or
+evicted manifest digests fail before execution. Host-owned Site/version context
+and approval tokens are stripped from iframe requests. Local previews instead
+use their frozen attempt catalog and existing Codemode operation journal.
+
+Omit `firstPartyMcpTools` for the complete Opengeni tool catalog. An explicit
 `[]` exposes no broad first-party tools; attached resources and separately
 selected `files`/`docs` MCP servers are unaffected.
 
@@ -1088,6 +1375,53 @@ API rejection has `outcomeUnknown: false`. A raw `502`/`503`/`504` or an
 unexpected successful non-JSON response to a mutation has `outcomeUnknown:
 true` because the mutation might already have been accepted. Never turn that
 condition into a new operation by changing its idempotency key.
+
+### Transient read retry
+
+Safe JSON reads (`GET` and `HEAD`) that fail transiently are retried quietly
+inside a small budget, so an API rolling deploy or a short network blip does
+not surface as an error. A failure is transient when the request never got a
+response (`fetch` rejected with a `TypeError`, such as a reset connection) or a
+gateway answered `502`, `503` or `504`. Retries use jittered exponential
+backoff, or the server's `Retry-After` when it fits the budget, and stop as
+soon as the caller's signal aborts. Every attempt of one call carries the same
+correlation ID. Mutations are never retried; they keep the `outcomeUnknown`
+semantics above. Auth, permission, not-found, validation, rate-limit and other
+server errors, and a success response the client cannot accept, surface
+immediately. A `Retry-After` gets up to 20% extra spread so clients told the
+same instant do not return together.
+
+```ts
+const client = new OpenGeniClient({
+  baseUrl,
+  // Defaults: 4 attempts, 250 ms first backoff, 2000 ms backoff cap, 5000 ms total.
+  readRetry: { maxAttempts: 4, initialDelayMs: 250, maxDelayMs: 2_000, maxElapsedMs: 5_000 },
+  // readRetry: false turns it off.
+});
+```
+
+`isTransientRequestError(error)` reports whether an error is this kind of
+transient failure, for callers that keep their own longer retry loop.
+
+While a deployment is parked for an update, the API answers every request with
+`{"error":"maintenance"}` (normally HTTP 503). The client decodes it into an
+`OpenGeniApiError` with `code: "maintenance"` (`OPENGENI_MAINTENANCE_ERROR_CODE`),
+`retryable: true` and `outcomeUnknown: false`: nothing ran, so a mutation can be
+retried with the same idempotency key. Its message carries no support
+reference. `isMaintenanceError(error)` detects it, and `isTransientRequestError`
+treats it as transient. A park can last minutes, so keep retrying it at a calm
+pace rather than reporting a failure.
+
+```ts
+import { isMaintenanceError } from "@opengeni/sdk";
+
+try {
+  await client.sendMessage(workspaceId, sessionId, { text, clientEventId });
+} catch (error) {
+  if (isMaintenanceError(error)) showUpdating(); // retry later with the same clientEventId
+  else throw error;
+}
+```
 
 ## Streaming guarantees
 
@@ -1167,8 +1501,17 @@ for await (const event of client.streamEvents(workspaceId, sessionId, {
 ## Messages, the turn queue, and steering
 
 Messages sent while a turn is running **queue by default** — visible,
-editable, reorderable, and deletable until the worker claims them. Steering is
-the explicit alternative: deliver now by interrupting the running turn.
+editable, reorderable, and deletable until the worker claims them, and they run
+after the whole running turn. Steering is the explicit alternative: the running
+turn reads the message within seconds and nothing in progress is killed. A
+model answer still being written is cut short (its completed text stays), short
+tool calls finish, and long command or session waits return early while the
+work keeps running. The turn then hands over (`turn.superseded` with reason
+`steer`, `atModelStep: true` and, when an answer was cut short, `cutOffText`)
+and the Steer runs next with the full history. The session screens show it
+only as the person's message, and the queue snapshot does not list it.
+`steerQueueItem` with `interrupt: true` on the turn that `steerMessage`
+returned stops the running attempt now instead, including tool calls in flight.
 
 ```ts
 // Queue (default): stacks behind the running turn.
@@ -1177,9 +1520,17 @@ await client.sendMessage(workspaceId, sessionId, {
   clientEventId: crypto.randomUUID(),
 });
 
-// Steer: send + promote to the queue front + interrupt the running turn.
-await client.steerMessage(workspaceId, sessionId, {
+// Steer: send + promote to the queue front; read within seconds.
+const steered = await client.steerMessage(workspaceId, sessionId, {
   text: "Stop — prod is paging, look at that first",
+  clientEventId: crypto.randomUUID(),
+});
+
+// Hard interrupt: stop the running attempt for that Steer now, including
+// tool calls in flight (rarely needed; the Steer is read within seconds).
+await client.steerQueueItem(workspaceId, sessionId, steered.turn.id, {
+  expectedTurnVersion: steered.turn.version,
+  interrupt: true,
   clientEventId: crypto.randomUUID(),
 });
 
@@ -1242,8 +1593,12 @@ selection. The selected policy is revalidated for new admission. A duplicate
 operation replays its receipt even after execution advances.
 
 HTTP 409 codes distinguish `RETRY_STALE_FAILURE`, `RETRY_EXECUTION_UNRESOLVED`,
-`RETRY_PAUSED`, `RETRY_UNSUPPORTED_FAILURE`, and `IDEMPOTENCY_KEY_REUSED`.
-Unresolved tool outcomes cannot be blindly replayed. A deliberate Pause must
+`RETRY_TOOL_OUTCOME_UNKNOWN`, `RETRY_PAUSED`, `RETRY_UNSUPPORTED_FAILURE`, and
+`IDEMPOTENCY_KEY_REUSED`. `RETRY_EXECUTION_UNRESOLVED` is transient: earlier
+execution is still settling. `RETRY_TOOL_OUTCOME_UNKNOWN` is permanent: a tool
+call in the turn has an unknown outcome and cannot be blindly replayed, so
+continue with a new message instead. A call proven never started does not block
+Retry. A deliberate Pause must
 be resumed separately. Failure without a retained logical turn, a settled
 scheduled occurrence, and idle credit exhaustion are not supported retry
 boundaries. See [run lifecycle](../../docs/run-lifecycle.md).
@@ -1279,7 +1634,7 @@ receipt without a second write. Old receipt verification fails explicitly with
 Omitting `tools` when creating a top-level session selects the current
 workspace-default capability policy, including the built-in `files` server.
 Passing `tools`, including `[]`, is an intentional fixed narrowing and can
-therefore disable file-download access for that session. OpenGeni's own web UI
+therefore disable file-download access for that session. Opengeni's own web UI
 keeps `files` enabled as a hidden default, while API and embedded clients retain
 exact control over the explicit list. Supported Responses providers attach
 their native bounded web-search tool independently of this MCP policy.
@@ -1297,7 +1652,7 @@ const updated = await client.updateSessionToolPolicy(workspaceId, sessionId, {
 ```
 
 To keep a fixed allow-list, replace both connected MCP servers and individual
-OpenGeni tools atomically:
+Opengeni tools atomically:
 
 ```ts
 await client.updateSessionToolPolicy(workspaceId, sessionId, {
@@ -1316,6 +1671,7 @@ it is not public web search.
 
 ```ts
 const goal = await client.getGoal(workspaceId, sessionId); // counters: autoContinuations, noProgressStreak
+const maybeGoal = await client.findGoal(workspaceId, sessionId); // null for a goal-less session (no 404)
 await client.pauseGoal(workspaceId, sessionId, { rationale: "manual review" });
 await client.resumeGoal(workspaceId, sessionId); // resets counters, re-arms continuations
 
@@ -1337,7 +1693,7 @@ await client.rollbackGoalRevision(workspaceId, sessionId, appliedRevisionId, {
 call; the lower-level steps are exported for resumable/custom flows.
 
 Browser hosts need no storage credentials or per-application registration.
-OpenGeni authorizes the workspace request and returns a short-lived,
+Opengeni authorizes the workspace request and returns a short-lived,
 object-scoped signed URL; operators must configure the private object store to
 allow CORS from `*` so any product embedding the SDK can use that URL.
 
@@ -1413,9 +1769,9 @@ Every public endpoint group has typed methods:
 | Sessions + events | `createSession`, `listSessions`, `listSessionPage`, `listAgentTopology`, `getSession`, `getSessionLineage`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
-| Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal`, `listGoalRevisions`, `listGoalRevisionPage`, `applyGoalRevision`, `rejectGoalRevision`, `rollbackGoalRevision` |
+| Goal | `getGoal`, `findGoal`, `updateGoal`, `pauseGoal`, `resumeGoal`, `listGoalRevisions`, `listGoalRevisionPage`, `applyGoalRevision`, `rejectGoalRevision`, `rollbackGoalRevision` |
 | Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns`, `refreshScheduledTaskAccess`, `listScheduledTaskAccessAttention` |
-| Variable sets | `listVariableSets`, `createVariableSet`, `getVariableSet`, `updateVariableSet`, `deleteVariableSet`, `setVariableSetVariable`, `deleteVariableSetVariable`; generic reads are metadata-only, while dedicated permissioned exact-value reads are part of the held client train |
+| Vaults | `client.vaults(workspaceId)` returns `listVaults`, `getVault`, `createVault`, `updateVault`, `deleteVault`, `syncVault`, `listItems`, `getItem`, `createItem`, `updateItem`, `deleteItem`, `restoreItem`, `moveItem`, `revealField`, `listFieldVersions`, `restoreFieldVersion`, `getSessionSecrets`, `setSessionVaultPolicy`, `installOnePassword`, `listOnePasswordConnections`, `replaceOnePasswordToken`, `disconnectOnePassword`, `listProviderVaults`, `linkProviderVault` and `createManagedProviderVault`. Reads are metadata-only; `revealField` is the one audited plaintext read. Agents use `{{secret:Vault/Item/field}}` references instead of values. Variable Sets were removed in 2.0.0 |
 | Files | `uploadFile`, `beginFileUpload`, `completeFileUpload`, `getFile`, `createFileDownloadUrl` |
 | Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments`, `searchKnowledge` (effective organization + workspace + immutable initiating-user personal scope) |
 | Capabilities | `listCapabilities`, `createCapability`, `enableCapability`, `disableCapability`, `discoverMcpCapabilities` |
@@ -1457,21 +1813,29 @@ reconsider — they can change with their counterpart, not with the SDK.
 
 ## Compatibility
 
-Clients and servers are compatible within the same **major** version of this
-SDK; evolution is additive within a major and both sides are tolerant readers.
-Official server builds expose `serverVersion` on `/healthz` and
-`/v1/config/client`. A route scheduled for removal answers with `Deprecation`
-and `Sunset` headers at least 90 days (and a major) ahead; the client reports
-each deprecated route once through the `onDeprecation` option (default: one
-`console.warn` per route; `false` silences it). Full policy:
+Server updates do not break existing integrations. The API only grows: routes,
+fields, event types and documented behaviour that a published SDK uses keep
+working, so a pinned SDK version keeps working against the managed service.
+Upgrade when you want new features. Replacements for older designs ship beside
+them, and `@deprecated` members keep working. Clients should ignore unknown
+response fields, enum values and event types. Official server builds expose
+`serverVersion` on `/healthz` and `/v1/config/client`. Full policy:
 `docs/design/api-compatibility-policy.md`.
+Rare exceptions (an emergency security fix or an explicit product-owner decision) are announced with migration notes.
+
+The committed `test/integration/sdk-compatibility/versions.json` matrix tests
+pinned stable releases and known customer pins against the current API; it is
+not a limit on the compatibility promise. Requests include
+`x-opengeni-sdk-version` (`OPENGENI_SDK_VERSION_HEADER`) for server
+diagnostics; missing or unknown versions never change authorization or
+compatibility admission.
 
 ## Proxy through your own API
 
 For the React conversation, use the packaged
 [`createSessionProxyHandler`](#embed-the-conversation-default). For a custom
 backend route, keep your organization API key on your server and re-emit the
-stream to your own browser clients. The re-emitted wire format is identical to OpenGeni's SSE
+stream to your own browser clients. The re-emitted wire format is identical to Opengeni's SSE
 stream, so the browser side can consume it with this same SDK (or a plain
 `EventSource`), including resume via `?after=` / `Last-Event-ID`:
 
@@ -1497,6 +1861,30 @@ For custom layers, the pieces are exported individually:
 `sessionEventsToSseStream`, `sessionEventsToSseResponse`, `formatSseEvent`,
 `resumeSequenceFromRequest`, and `parseSseStream`.
 
+### Cross-origin proxies and CORS
+
+When your web app and the route that proxies Opengeni (the session proxy or
+your own) live on different origins, every browser request with an Opengeni
+header is preflighted. Allow every header the SDK's browser clients may send,
+or every preflight fails and the chat sits on "reconnecting".
+`OPENGENI_BROWSER_REQUEST_HEADERS` lists them, lower-cased, and grows when the
+SDK starts sending a new header, so build your allow-list from it rather than
+copying names:
+
+```ts
+import { OPENGENI_BROWSER_REQUEST_HEADERS } from "@opengeni/sdk";
+
+const allowHeaders = [...OPENGENI_BROWSER_REQUEST_HEADERS, "x-my-app-header"].join(", ");
+// Answer the OPTIONS preflight on your proxy route with:
+// Access-Control-Allow-Headers: <allowHeaders>
+```
+
+It covers `accept`, `authorization`, `content-type`, `range` and Opengeni's own
+`x-opengeni-*` request headers, including `x-opengeni-sdk-version`
+(`OPENGENI_SDK_VERSION_HEADER`), which every request carries. Add any header
+your app sets through the client's `headers` option. The `asUser` and
+`asService` attribution headers are server-only and not in the list.
+
 ## Types
 
 The SDK ships hand-written mirrors of the public wire shapes (sessions, turns,
@@ -1511,3 +1899,31 @@ Hosts, test doubles, and same-origin proxies must import
 configuration or contract header. Do not copy its string value: the revision is
 an executable compatibility boundary, and `getClientConfig()` intentionally
 fails closed when server and SDK revisions differ.
+
+### Action review facts
+
+`getToolActionReview(workspaceId, sessionId, approvalId)` returns version 1 facts
+for an exact prepared connector action: title, selected account/count, material
+effects, optional provider-sourced examples, bounded fields, reason, status and
+available actions. Use `sendApprovalDecision` for the existing authenticated
+human decision. Facts never grant execution authority.
+
+`getToolReviewDetails(workspaceId, sessionId, approvalId, { actionDigest, path,
+offset })` pages through the saved selection/values (25 rows per page). The
+reference is tied to the original action digest and requires the same session
+visibility permission; it never re-runs a search. Secret/write-only fields stay
+hidden. A missing legacy snapshot may return 404; other authorization or transport
+failures must not be interpreted as permission to execute. Responses are private
+and non-cacheable. Review states distinguish waiting, execution, cancellation,
+failure and uncertain outcome. Exact stored arguments are never client-editable.
+
+## Stateless decisions
+
+`client.decide(workspaceId, { input, questions, tenantLabel? }, { signal? })`
+returns typed predicate, choice or score answers (or typed refusals) from the
+deployment's configured decision model. It uses the same API key and
+`sessions:create` authority as chat completions. The deployment pays; customer
+agent allowances are not consulted or debited. The optional tenant label appears
+on usage receipts for reporting only.
+See [stateless decisions](../../docs/model-inference.md) for examples,
+configuration, receipt durability and residency requirements.

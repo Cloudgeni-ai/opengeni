@@ -1,35 +1,84 @@
+import {
+  failureOrigin,
+  isCustomerManagedMetricProvider,
+  type FailureOrigin,
+} from "@opengeni/observability";
 import { createHash } from "node:crypto";
+import type { ResponsesTransportDiagnostic } from "@opengeni/network/responses-websocket";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
 import {
   BundledSkillId,
+  CREDIT_GRANT_CLASSES,
   SandboxBackend,
   type SessionEventType,
   type SkillReadKind,
   type SkillUseSource,
 } from "@opengeni/contracts";
-import type { SessionEventAppendPhaseObservation } from "@opengeni/db";
+import {
+  ACTIVE_USER_WINDOWS,
+  QUEUED_TURN_HOLDS,
+  type ActiveUserWindow,
+  type CreditGrantTotals,
+  type IdleInteractionInspection,
+  type ModelCallTiming,
+  type QueuedTurnHold,
+  type QueuedTurnHoldSummary,
+  type SessionEventAppendPhaseObservation,
+} from "@opengeni/db";
 import {
   natsSubscriptionTerminationCounter,
   type EventBusOptions,
   type EventLogger,
 } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
+import type { PromptCacheDiagnostics } from "@opengeni/contracts";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
+import {
+  createTelemetryClock,
+  telemetryInterval,
+  telemetryScheduler,
+  type TelemetryScheduler,
+} from "./telemetry-scheduler";
 import {
   OPENSANDBOX_BATCHSANDBOX_PHASES,
   OPENSANDBOX_WORKLOAD_POD_CONDITIONS,
   type OpenSandboxKubernetesInventory,
 } from "./opensandbox-kubernetes-inventory";
 import {
+  MCP_TOOL_METRIC_EXTERNAL_LABEL,
+  type ModelPreparationMeasurement,
+  REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES,
+  SANDBOX_OPERATION_PURPOSES,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
+  WORKSPACE_CAPTURE_SKIP_REASONS,
+  isMcpToolMetricLabel,
   modelUsageTokenCountOrNull,
   type RuntimeMetricsHooks,
   type SelfhostedOpObservation,
   type SelfhostedOpObserver,
   type ToolPreparationPhaseMeasurement,
 } from "@opengeni/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
+/**
+ * Why a turn attempt ended recovering. A closed set chosen at each recovery
+ * site: `provider` (the model provider or its subscription lease), `route_change`
+ * (the session's active sandbox was deliberately moved mid-turn, so the turn
+ * continues on its new machine in a fresh attempt), `sandbox`,
+ * `tool` (MCP and first-party tool setup), `worker` (shutdown or death),
+ * `database` (settlement could not be written), `control` (admission holds)
+ * and `other`.
+ */
+export type TurnRecoveryCause =
+  | "provider"
+  | "route_change"
+  | "sandbox"
+  | "tool"
+  | "worker"
+  | "database"
+  | "control"
+  | "other";
 export type WorkerDeathRecoveryOutcome = "recovering" | "exhausted";
 export type CreditMicrosKind = "usage" | "grant" | "topup" | "refund";
 export type SandboxLeaseLiveness = "cold" | "warming" | "warm" | "draining";
@@ -41,9 +90,23 @@ export type TurnTaskQueueStats = {
   tasksAddRate: number;
   tasksDispatchRate: number;
 };
+export type TurnTaskQueueIdentity = { temporalNamespace: string; taskQueue: string };
+export type TurnTaskQueueReadOptions = { signal: AbortSignal; deadline: number };
+
+export function turnTaskQueueMetricLabels(identity: TurnTaskQueueIdentity) {
+  return { temporal_namespace: identity.temporalNamespace, task_queue: identity.taskQueue };
+}
+export type SessionRecoveryBacklogStateSummary = {
+  /** Every durable recovering session in this state with no active attempt. */
+  count: number;
+  /** Of those, sessions still inside the backoff their recovery request recorded. */
+  scheduled: number;
+  /** Seconds the single oldest candidate has been past its recovery due time; 0 when none is. */
+  oldestOverdueSeconds: number;
+};
 export type SessionRecoveryBacklog = {
-  quiescence_missing: number;
-  projection_stale: number;
+  quiescence_missing: SessionRecoveryBacklogStateSummary;
+  projection_stale: SessionRecoveryBacklogStateSummary;
 };
 export type ContextCompactionPendingSummary = {
   pendingCount: number;
@@ -72,6 +135,20 @@ const initializedContextCompactionMetrics = new WeakSet<Observability>();
 // process-local Prometheus registry and this guard together.
 const MAX_MODEL_CACHE_COUNTER_TOTAL = 1_000_000_000_000;
 const TURN_OUTCOMES: readonly TurnOutcome[] = ["completed", "failed", "cancelled", "recovering"];
+const TURN_RECOVERY_CAUSES: readonly TurnRecoveryCause[] = [
+  "provider",
+  "route_change",
+  "sandbox",
+  "tool",
+  "worker",
+  "database",
+  "control",
+  "other",
+];
+const TURN_RECOVERIES_METRIC = {
+  name: "opengeni_turn_recoveries_total",
+  help: 'Agent turn attempts that ended recovering, by bounded cause. Each also counts as opengeni_turns_total{outcome="recovering"}.',
+} as const;
 const WORKER_DEATH_RECOVERY_OUTCOMES: readonly WorkerDeathRecoveryOutcome[] = [
   "recovering",
   "exhausted",
@@ -135,11 +212,27 @@ function eventAttributeValue(value: unknown): AttributeValue {
   }
 }
 
+const SANDBOX_SETUP_OPERATIONS = new Set([
+  "exec",
+  "execCommand",
+  "readFile",
+  "writeFile",
+  "listDir",
+  "pathExists",
+  "materializeEntry",
+]);
+
+/** Single provider round trips are sub-second when healthy; the tail covers
+ * clone and long setup commands. */
+const SANDBOX_SETUP_OPERATION_BUCKETS = [
+  0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2.5, 5, 10, 30, 120,
+];
+
 export function runtimeMetricsHooksForObservability(
   observability: Observability,
 ): RuntimeMetricsHooks {
   return {
-    onModelCall: ({ provider, outcome, durationSeconds }) => {
+    onModelCall: ({ provider, outcome, durationSeconds, httpStatus, providerAccountRefusal }) => {
       completedOperationSpan(observability, "worker.model.call", durationSeconds, {
         provider,
         outcome,
@@ -147,13 +240,29 @@ export function runtimeMetricsHooksForObservability(
       observability.incrementCounter({
         name: "opengeni_model_calls_total",
         help: "Total model calls by provider and outcome.",
-        labels: { provider, outcome },
+        labels: {
+          provider,
+          outcome,
+          failure_origin: failureOrigin({
+            customerManaged: isCustomerManagedMetricProvider(provider),
+            outcome,
+            ...(httpStatus !== undefined ? { httpStatus } : {}),
+            ...(providerAccountRefusal ? { providerAccountRefusal } : {}),
+          }),
+        },
       });
       observability.observeHistogram({
         name: "opengeni_model_call_duration_seconds",
         help: "Model call duration in seconds by provider.",
         labels: { provider },
         value: durationSeconds,
+      });
+    },
+    onModelInvalidRequest: ({ provider, path, code }) => {
+      observability.incrementCounter({
+        name: "opengeni_model_invalid_requests_total",
+        help: "Provider 400 invalid-request answers to model calls by request path (indices collapsed) and error code. Monitoring only.",
+        labels: { provider, path, code },
       });
     },
     onSandboxCreate: ({ backend, imageSource, outcome, durationSeconds }) => {
@@ -218,6 +327,38 @@ export function runtimeMetricsHooksForObservability(
         value: durationSeconds,
       });
     },
+    onSandboxSetupOperation: ({ backend, op, purpose, outcome, durationSeconds }) => {
+      if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
+      const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+      const safeOp = SANDBOX_SETUP_OPERATIONS.has(op) ? op : "other";
+      const safePurpose = (SANDBOX_OPERATION_PURPOSES as readonly string[]).includes(purpose)
+        ? purpose
+        : "other";
+      completedOperationSpan(observability, "worker.sandbox_setup.operation", durationSeconds, {
+        backend: safeBackend,
+        outcome,
+        op: safeOp,
+        purpose: safePurpose,
+      });
+      observability.observeHistogram({
+        name: "opengeni_sandbox_setup_operation_duration_seconds",
+        help: "Platform setup operations on a raw provider session (lifecycle hooks, run credentials, file resources, repository skills), by purpose. Count is the number of provider round trips. outcome=not_found is a read-only probe that found no such path (an expected answer, not a failure), as in the routed per-operation metric.",
+        buckets: SANDBOX_SETUP_OPERATION_BUCKETS,
+        labels: { backend: safeBackend, op: safeOp, purpose: safePurpose, outcome },
+        value: durationSeconds,
+      });
+    },
+    onWorkspaceCaptureSkipped: ({ backend, reason }) => {
+      const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+      const safeReason = (WORKSPACE_CAPTURE_SKIP_REASONS as readonly string[]).includes(reason)
+        ? reason
+        : "unknown";
+      observability.incrementCounter({
+        name: "opengeni_workspace_capture_skipped_total",
+        help: "Due warm workspace checkpoints that could not start, by backend and fixed reason. Not-yet-due (throttled) and already-complete checkpoints are excluded.",
+        labels: { backend: safeBackend, reason: safeReason },
+      });
+    },
     onWorkspaceArchiveObject: ({ outcome, backend }) => {
       observability.incrementCounter({
         name: "opengeni_workspace_archive_object_total",
@@ -225,17 +366,23 @@ export function runtimeMetricsHooksForObservability(
         labels: { outcome, backend },
       });
     },
-    onMcpToolCall: ({ outcome, durationSeconds }) => {
-      completedOperationSpan(observability, "worker.mcp.tool_call", durationSeconds, { outcome });
+    onMcpToolCall: ({ outcome, tool, durationSeconds }) => {
+      // Re-check the closed label set at the export boundary so a caller can
+      // never turn a raw user-defined tool name into a metric series.
+      const safeTool = isMcpToolMetricLabel(tool) ? tool : MCP_TOOL_METRIC_EXTERNAL_LABEL;
+      completedOperationSpan(observability, "worker.mcp.tool_call", durationSeconds, {
+        outcome,
+        tool: safeTool,
+      });
       observability.incrementCounter({
         name: "opengeni_mcp_tool_calls_total",
-        help: "Total physical MCP tool calls by bounded structural outcome.",
-        labels: { outcome },
+        help: "Total physical MCP tool calls by bounded structural outcome and first-party tool (other tools are 'external').",
+        labels: { outcome, tool: safeTool },
       });
       observability.observeHistogram({
         name: "opengeni_mcp_tool_call_duration_seconds",
-        help: "MCP tool-call duration in seconds by bounded structural outcome.",
-        labels: { outcome },
+        help: "MCP tool-call duration in seconds by bounded structural outcome and first-party tool (other tools are 'external').",
+        labels: { outcome, tool: safeTool },
         value: durationSeconds,
       });
     },
@@ -394,10 +541,19 @@ export function initializeWorkerOutcomeMetrics(observability: Observability): vo
     observability.incrementCounter({
       name: "opengeni_turns_total",
       help: "Total agent turns by terminal outcome.",
-      labels: { outcome },
+      labels: { outcome, failure_origin: failureOrigin({ customerManaged: false, outcome }) },
       amount: 0,
     });
   }
+  for (const cause of TURN_RECOVERY_CAUSES) {
+    observability.incrementCounter({ ...TURN_RECOVERIES_METRIC, labels: { cause }, amount: 0 });
+  }
+  observability.incrementCounter({
+    name: "opengeni_turns_total",
+    help: "Total agent turns by terminal outcome.",
+    labels: { outcome: "failed", failure_origin: "customer_provider" },
+    amount: 0,
+  });
   for (const outcome of WORKER_DEATH_RECOVERY_OUTCOMES) {
     for (const timeoutType of WORKER_DEATH_TIMEOUT_TYPES) {
       observability.incrementCounter({
@@ -455,8 +611,14 @@ export function recordWorkerDeathRecoveryMetrics(
   observability.incrementCounter({
     name: "opengeni_turns_total",
     help: "Total agent turns by terminal outcome.",
-    labels: { outcome: turnOutcome },
+    labels: {
+      outcome: turnOutcome,
+      failure_origin: failureOrigin({ customerManaged: false, outcome: turnOutcome }),
+    },
   });
+  if (turnOutcome === "recovering") {
+    observability.incrementCounter({ ...TURN_RECOVERIES_METRIC, labels: { cause: "worker" } });
+  }
 }
 
 export class TurnLifecycleMetrics {
@@ -487,7 +649,10 @@ export class TurnLifecycleMetrics {
   finish(input: {
     attemptId: string;
     outcome: TurnOutcome | null;
+    failureOrigin?: FailureOrigin;
     durationSeconds?: number;
+    /** Required in spirit for `recovering`; an unset cause is counted as `other`. */
+    recoveryCause?: TurnRecoveryCause | null | undefined;
   }): void {
     const startedAt = this.attempts.get(input.attemptId)?.startedAt;
     if (startedAt !== undefined) {
@@ -500,8 +665,17 @@ export class TurnLifecycleMetrics {
       this.observability.incrementCounter({
         name: "opengeni_turns_total",
         help: "Total agent turns by terminal outcome.",
-        labels: { outcome: input.outcome },
+        labels: {
+          outcome: input.outcome,
+          failure_origin: input.outcome === "failed" ? (input.failureOrigin ?? "platform") : "none",
+        },
       });
+      if (input.outcome === "recovering") {
+        this.observability.incrementCounter({
+          ...TURN_RECOVERIES_METRIC,
+          labels: { cause: input.recoveryCause ?? "other" },
+        });
+      }
       this.observability.observeHistogram({
         name: "opengeni_turn_duration_seconds",
         help: "Agent turn duration in seconds by terminal outcome.",
@@ -688,13 +862,41 @@ export class ModelRequestLifecycleMetrics {
 export function recordTurnsQueuedGauge(observability: Observability, value: number): void {
   observability.setGauge({
     name: "opengeni_turns_queued",
-    help: "Current number of queued session turns.",
+    help: "Current number of durable queued session turns, including prompts held behind a running turn, a Pause, a failed turn or a required human action. Not a worker backlog; see opengeni_turns_queued_by_hold.",
     value,
   });
 }
 
 /**
- * Record the authoritative turn activity queue rather than aggregate Postgres
+ * Split the durable queued-turn count by what holds each prompt. Only `ready`
+ * prompts are waiting for dispatch. A `ready` prompt older than a few seconds
+ * is waiting somewhere before it runs: in the session's control activities
+ * before any turn-queue task exists, or in the turn-queue backlog. Every class
+ * is always published so an emptied class drops to 0.
+ */
+export function recordQueuedTurnHoldGauges(
+  observability: Observability,
+  summary: Record<QueuedTurnHold, QueuedTurnHoldSummary>,
+): void {
+  for (const hold of QUEUED_TURN_HOLDS) {
+    const entry = summary[hold];
+    observability.setGauge({
+      name: "opengeni_turns_queued_by_hold",
+      help: "Durable queued session turns by what holds them: ready (waiting for dispatch), behind_active_turn, paused, failed (resumes on the next message), requires_action, waiting_capacity or cancelled.",
+      labels: { hold },
+      value: nonnegativeFinite(entry?.count ?? 0),
+    });
+    observability.setGauge({
+      name: "opengeni_turns_queued_oldest_age_seconds",
+      help: "Age in seconds of the oldest durable queued session turn in each hold class; 0 when the class is empty.",
+      labels: { hold },
+      value: nonnegativeFinite(entry?.oldestAgeSeconds ?? 0),
+    });
+  }
+}
+
+/**
+ * Record the approximate shared turn-worker activity queue rather than Postgres
  * prompts. A paused human prompt is durable queue truth but is not runnable and
  * never reaches this Temporal task queue. DescribeTaskQueue's approximate
  * backlog count and age are explicitly documented by Temporal as autoscaling
@@ -703,26 +905,40 @@ export function recordTurnsQueuedGauge(observability: Observability, value: numb
 export function recordTurnTaskQueueStats(
   observability: Observability,
   stats: TurnTaskQueueStats,
+  identity: TurnTaskQueueIdentity,
 ): void {
+  const labels = turnTaskQueueMetricLabels(identity);
+  // Invalid observations are failures, not a fabricated fresh zero. Validate
+  // every field before publishing any portion of a new observation.
+  const values = {
+    backlog: requiredTemporalNumber(stats.eligibleBacklog, "eligibleBacklog", { integer: true }),
+    age: requiredTemporalNumber(stats.oldestBacklogAgeSeconds, "oldestBacklogAgeSeconds"),
+    add: requiredTemporalNumber(stats.tasksAddRate, "tasksAddRate"),
+    dispatch: requiredTemporalNumber(stats.tasksDispatchRate, "tasksDispatchRate"),
+  };
   observability.setGauge({
     name: "opengeni_turn_eligible_backlog",
-    help: "Temporal runAgentTurn activity tasks eligible for immediate worker admission.",
-    value: nonnegativeFinite(stats.eligibleBacklog),
+    help: "Approximate Temporal activity backlog on the shared turn-worker queue, including video and retries.",
+    labels,
+    value: values.backlog,
   });
   observability.setGauge({
     name: "opengeni_turn_eligible_backlog_oldest_age_seconds",
-    help: "Approximate age of the oldest eligible runAgentTurn activity task.",
-    value: nonnegativeFinite(stats.oldestBacklogAgeSeconds),
+    help: "Approximate age of the oldest eligible activity task on the shared turn-worker queue.",
+    labels,
+    value: values.age,
   });
   observability.setGauge({
     name: "opengeni_turn_eligible_tasks_add_rate",
-    help: "Temporal runAgentTurn tasks added per second over its rolling window.",
-    value: nonnegativeFinite(stats.tasksAddRate),
+    help: "Temporal activities added per second to the shared turn-worker queue over its rolling window.",
+    labels,
+    value: values.add,
   });
   observability.setGauge({
     name: "opengeni_turn_eligible_tasks_dispatch_rate",
-    help: "Temporal runAgentTurn tasks dispatched per second over its rolling window.",
-    value: nonnegativeFinite(stats.tasksDispatchRate),
+    help: "Temporal activities dispatched per second from the shared turn-worker queue over its rolling window.",
+    labels,
+    value: values.dispatch,
   });
 }
 
@@ -732,13 +948,22 @@ export function normalizeTurnTaskQueueStats(
   if (!stats) {
     throw new Error("Temporal DescribeTaskQueue response omitted required stats");
   }
+  if (typeof stats !== "object" || Array.isArray(stats)) {
+    throw new Error("Temporal DescribeTaskQueue returned malformed stats");
+  }
   const eligibleBacklog = requiredTemporalNumber(
     stats.approximateBacklogCount,
     "approximateBacklogCount",
     { integer: true },
   );
   let oldestBacklogAgeSeconds = 0;
-  if (stats.approximateBacklogAge) {
+  if (stats.approximateBacklogAge !== null && stats.approximateBacklogAge !== undefined) {
+    if (
+      typeof stats.approximateBacklogAge !== "object" ||
+      Array.isArray(stats.approximateBacklogAge)
+    ) {
+      throw new Error("Temporal stats returned invalid approximateBacklogAge");
+    }
     const seconds = optionalTemporalNumber(
       stats.approximateBacklogAge.seconds,
       "approximateBacklogAge.seconds",
@@ -764,24 +989,62 @@ export function normalizeTurnTaskQueueStats(
   };
 }
 
+/** Requires a fresh metric registry/schema; pre-registered legacy unlabelled
+ * queue gauges are not migrated in place. Each collector owns its native read. */
 export function startTurnCapacityMonitor(input: {
   observability: Observability;
-  read: () => Promise<TurnTaskQueueStats>;
+  identity: TurnTaskQueueIdentity;
+  read: (options: TurnTaskQueueReadOptions) => Promise<TurnTaskQueueStats>;
   intervalMs?: number;
+  readTimeoutMs?: number;
+  closeTimeoutMs?: number;
   now?: () => number;
+  monotonicNow?: () => number;
+  scheduler?: TelemetryScheduler;
 }): { close: () => Promise<void> } {
-  const intervalMs = input.intervalMs ?? 15_000;
-  const now = input.now ?? Date.now;
-  const startedAt = now();
+  const intervalMs = telemetryInterval(input.intervalMs ?? 15_000, "queue monitor intervalMs");
+  const readTimeoutMs = telemetryInterval(
+    input.readTimeoutMs ?? 5_000,
+    "queue monitor readTimeoutMs",
+  );
+  const closeTimeoutMs = telemetryInterval(
+    input.closeTimeoutMs ?? 1_000,
+    "queue monitor closeTimeoutMs",
+  );
+  const scheduler = input.scheduler ?? telemetryScheduler;
+  const labels = turnTaskQueueMetricLabels(input.identity);
+  const wallClock = createTelemetryClock(input.now ?? Date.now);
+  const monotonicClock = createTelemetryClock(input.monotonicNow ?? (() => performance.now()));
+  let startedAt = wallClock.read();
+  const readClock = () => {
+    const wall = wallClock.read();
+    const monotonic = monotonicClock.read();
+    return wall === null || monotonic === null ? null : { wall, monotonic };
+  };
   let lastSuccessAt: number | null = null;
   let lastReadSucceeded = false;
   let stopped = false;
-  let running: Promise<void> | null = null;
-  const recordStatus = () => {
-    const observedAt = now();
-    const successAgeMs = observedAt - (lastSuccessAt ?? startedAt);
+  let running: {
+    controller: AbortController;
+    done: Promise<void>;
+    cancelTimeout: () => void;
+  } | null = null;
+  let closePromise: Promise<void> | undefined;
+  const safely = (action: () => void) => {
+    try {
+      action();
+    } catch {
+      /* Telemetry must not break the worker. */
+    }
+  };
+  const recordStatus = (observation = readClock()) => {
+    if (observation === null) lastReadSucceeded = false;
+    const observedAt = wallClock.latest();
+    startedAt ??= observedAt;
+    const successAgeMs =
+      observedAt === null ? 0 : observedAt - (lastSuccessAt ?? startedAt ?? observedAt);
     const set = (name: string, help: string, value: number) =>
-      input.observability.setGauge({ name, help, value });
+      safely(() => input.observability.setGauge({ name, help, labels, value }));
     set(
       "opengeni_turn_capacity_monitor_last_read_success",
       "Whether the latest Temporal turn-queue capacity read completed successfully.",
@@ -799,59 +1062,133 @@ export function startTurnCapacityMonitor(input: {
     );
     set(
       "opengeni_turn_capacity_monitor_fresh",
-      "Whether eligible-backlog gauges have a successful Temporal read within three monitor intervals.",
+      "Whether the latest read succeeded and the shared activity-queue gauges are within three monitor intervals.",
       lastReadSucceeded && lastSuccessAt !== null && successAgeMs <= intervalMs * 3 ? 1 : 0,
     );
   };
   const refresh = () => {
     // Advance freshness age even while a Temporal read is hung. Old backlog
     // values remain observable for diagnosis but cease to be authoritative.
-    recordStatus();
-    if (stopped || running) return;
-    running = input
-      .read()
+    if (stopped) return;
+    const observation = readClock();
+    recordStatus(observation);
+    if (running || observation === null) return;
+    const deadline = observation.wall + readTimeoutMs;
+    if (!Number.isFinite(deadline) || deadline > Number.MAX_SAFE_INTEGER) {
+      recordStatus(null);
+      return;
+    }
+    const controller = new AbortController();
+    const attempt = { controller, done: Promise.resolve(), cancelTimeout: () => {} };
+    running = attempt;
+    attempt.cancelTimeout = scheduler.timeout(() => {
+      if (stopped || running !== attempt) return;
+      lastReadSucceeded = false;
+      recordStatus();
+      controller.abort();
+      // Keep the attempt owned until its native call settles. A misbehaving
+      // reader ignoring cancellation must not cause overlapping RPCs.
+    }, readTimeoutMs);
+    let read: Promise<TurnTaskQueueStats>;
+    try {
+      read = input.read({ signal: controller.signal, deadline });
+    } catch (error) {
+      read = Promise.reject(error);
+    }
+    attempt.done = read
       .then((stats) => {
-        recordTurnTaskQueueStats(input.observability, stats);
-        lastSuccessAt = now();
+        if (stopped || controller.signal.aborted || running !== attempt) return;
+        const completedAt = readClock();
+        // A native RPC may settle before its deadline but its Promise callback
+        // can run after it, ahead of a delayed JS timeout. Never restamp that old
+        // response as fresh. Monotonic age also fences wall-clock adjustments.
+        if (
+          completedAt === null ||
+          completedAt.wall >= deadline ||
+          completedAt.monotonic - observation.monotonic >= readTimeoutMs
+        ) {
+          lastReadSucceeded = false;
+          recordStatus(completedAt);
+          controller.abort();
+          return;
+        }
+        recordTurnTaskQueueStats(input.observability, stats, input.identity);
+        lastSuccessAt = completedAt.wall;
         lastReadSucceeded = true;
-        recordStatus();
+        recordStatus(completedAt);
       })
-      .catch((error) => {
+      .catch(() => {
+        if (stopped || controller.signal.aborted || running !== attempt) return;
         lastReadSucceeded = false;
         recordStatus();
-        input.observability.warn("turn capacity monitor: Temporal task-queue stats failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
+        safely(() =>
+          input.observability.warn("turn capacity monitor: Temporal task-queue stats failed", {
+            // Do not export arbitrary server errors or credentials.
+            errorClass: "WorkerTelemetryReadError",
+            origin: "turn-capacity-monitor",
+          }),
+        );
       })
       .finally(() => {
-        running = null;
+        attempt.cancelTimeout();
+        if (running === attempt) running = null;
       });
   };
   refresh();
-  const timer = setInterval(refresh, intervalMs);
-  timer.unref?.();
+  const stopTimer = scheduler.interval(refresh, intervalMs);
   return {
-    close: async () => {
+    close: () => {
+      if (closePromise) return closePromise;
       stopped = true;
-      clearInterval(timer);
-      await running;
+      stopTimer();
+      lastReadSucceeded = false;
+      recordStatus();
+      const attempt = running;
+      attempt?.cancelTimeout();
+      attempt?.controller.abort();
+      closePromise = attempt
+        ? new Promise<void>((resolve) => {
+            const cancel = scheduler.timeout(resolve, closeTimeoutMs);
+            void attempt.done.then(() => {
+              cancel();
+              resolve();
+            });
+          })
+        : Promise.resolve();
+      return closePromise;
     },
   };
 }
 
 export function recordSessionRecoveryBacklogGauges(
   observability: Observability,
-  counts: SessionRecoveryBacklog,
+  backlog: SessionRecoveryBacklog,
 ): void {
   for (const state of ["quiescence_missing", "projection_stale"] as const) {
+    const summary = backlog[state];
     observability.setGauge({
       name: "opengeni_session_recovery_backlog",
-      help: "Current durable recovering-session obligations with no active attempt, by bounded reconciliation state.",
+      help: "Current durable recovering-session obligations with no active attempt, by bounded reconciliation state. Includes sessions legitimately sleeping in their recorded recovery backoff.",
       labels: { state },
-      value: nonnegativeFinite(counts[state]),
+      value: nonnegativeFinite(summary.count),
+    });
+    observability.setGauge({
+      name: "opengeni_session_recovery_scheduled",
+      help: "Durable recovering sessions still inside the recovery backoff (provider Retry-After or connectivity pacing) their recovery request recorded, by bounded reconciliation state.",
+      labels: { state },
+      value: nonnegativeFinite(summary.scheduled),
+    });
+    observability.setGauge({
+      name: "opengeni_session_recovery_oldest_overdue_seconds",
+      help: "Seconds the single oldest durable recovering session with no active attempt has been past its recovery due time, by bounded reconciliation state; 0 when none is overdue.",
+      labels: { state },
+      value: nonnegativeFinite(summary.oldestOverdueSeconds),
     });
   }
 }
+
+/** How often the control worker re-reads the durable recovery aggregate. */
+export const SESSION_RECOVERY_MONITOR_INTERVAL_MS = 60_000;
 
 export function startSessionRecoveryMonitor(input: {
   observability: Observability;
@@ -859,7 +1196,7 @@ export function startSessionRecoveryMonitor(input: {
   intervalMs?: number;
   now?: () => number;
 }): { close: () => Promise<void> } {
-  const intervalMs = input.intervalMs ?? 60_000;
+  const intervalMs = input.intervalMs ?? SESSION_RECOVERY_MONITOR_INTERVAL_MS;
   const now = input.now ?? Date.now;
   const startedAt = now();
   let lastSuccessAt: number | null = null;
@@ -892,8 +1229,8 @@ export function startSessionRecoveryMonitor(input: {
     if (stopped || running) return;
     running = input
       .read()
-      .then((counts) => {
-        recordSessionRecoveryBacklogGauges(input.observability, counts);
+      .then((backlog) => {
+        recordSessionRecoveryBacklogGauges(input.observability, backlog);
         lastSuccessAt = now();
         lastReadSucceeded = true;
         recordStatus();
@@ -902,7 +1239,7 @@ export function startSessionRecoveryMonitor(input: {
         lastReadSucceeded = false;
         recordStatus();
         input.observability.warn("session recovery monitor: durable aggregate read failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       })
       .finally(() => {
@@ -992,7 +1329,7 @@ export function startContextCompactionPendingMonitor(input: {
         lastReadSucceeded = false;
         recordStatus();
         input.observability.warn("context compaction monitor: durable aggregate read failed", {
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         });
       })
       .finally(() => {
@@ -1065,6 +1402,9 @@ export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
   "retained_processes",
   "expired_drains",
   "opensandbox_kubernetes",
+  "modal_provider",
+  "interaction_idle",
+  "checkpoint_staleness",
 ] as const;
 
 export type SandboxInventoryProjectionDomain =
@@ -1123,6 +1463,56 @@ export function recordCreditBalanceGauges(
 }
 
 /**
+ * Distinct managed people with authenticated browser activity in each fixed
+ * window (migration 0565 presence). Every control worker publishes the same
+ * global value, so dashboards must aggregate with `max()` across pods, never
+ * `sum()`. API keys, services and embedded hosts are never counted.
+ */
+export function recordActiveUserGauges(
+  observability: Observability,
+  counts: Record<ActiveUserWindow, number>,
+): void {
+  for (const window of ACTIVE_USER_WINDOWS) {
+    observability.setGauge({
+      name: "opengeni_active_users",
+      help: "Distinct managed users with authenticated activity within the window (global; use max across pods).",
+      labels: { window },
+      value: counts[window],
+    });
+  }
+}
+
+/**
+ * Positive credit grants observed by the ledger trigger since migration 0565,
+ * by closed class. These are cumulative database totals published as gauges by
+ * every control worker: aggregate with `max()` across pods, then subtract the
+ * same expression `offset` by the window. A per-pod `increase()` sees only one
+ * pod's lifetime and undercounts across control-worker restarts.
+ * Counting in the database covers the grants no application process writes:
+ * the verified-signup trial grant (a setup trigger) and operator grants.
+ */
+export function recordCreditGrantGauges(
+  observability: Observability,
+  totals: CreditGrantTotals,
+): void {
+  for (const grantClass of CREDIT_GRANT_CLASSES) {
+    const total = totals[grantClass];
+    observability.setGauge({
+      name: "opengeni_credit_grants_total",
+      help: "Positive credit grants observed in the ledger since migration 0565, by grant class (global cumulative; use max across pods).",
+      labels: { grant_class: grantClass },
+      value: total.count,
+    });
+    observability.setGauge({
+      name: "opengeni_credit_granted_micros_total",
+      help: "Credit micros granted in the ledger since migration 0565, by grant class (global cumulative; use max across pods).",
+      labels: { grant_class: grantClass },
+      value: total.micros,
+    });
+  }
+}
+
+/**
  * The deployment-level runtime switch for the one-time verified signup trial
  * credit (migration 0521): 1 while it allows grants, 0 when an operator has
  * disabled it or no revision exists. A grant also needs the API's
@@ -1141,6 +1531,24 @@ export function recordVerifiedSignupTrialSwitchGauge(
 }
 
 /**
+ * The deployment-level runtime switch for new managed account sign-ups
+ * (migration 0585): 1 while it allows new accounts (also when no revision
+ * exists), 0 when an operator has paused them. The API additionally honours
+ * its OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED ceiling, which this gauge does
+ * not see; `GET /v1/config/client` reports the combined decision.
+ */
+export function recordManagedAuthNewSignupsSwitchGauge(
+  observability: Observability,
+  signupsEnabled: boolean,
+): void {
+  observability.setGauge({
+    name: "opengeni_managed_auth_new_signups_runtime_enabled",
+    help: "Whether the runtime switch allows new managed account sign-ups (1) or has paused them (0).",
+    value: signupsEnabled ? 1 : 0,
+  });
+}
+
+/**
  * The OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in as this
  * worker's configuration sees it. The API reads the same shared setting; new
  * grants happen only while this gauge and the runtime switch gauge are both 1.
@@ -1154,6 +1562,49 @@ export function recordVerifiedSignupTrialDeploymentFlagGauge(
     help: "Whether the OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in is on (1) or off (0) in this deployment's configuration.",
     value: enabled ? 1 : 0,
   });
+}
+
+/**
+ * Provider-side Modal inventory reconciled against live leases by the orphan
+ * sweep: `running` = every running box in the app, `unleased` = running boxes
+ * no live lease protects (orphans, counted before termination), and
+ * `lease_missing_instance` = warm leases whose exact provider instance is no
+ * longer running (zombies).
+ */
+export function recordModalSandboxInventoryGauges(
+  observability: Observability,
+  inventory: { running: number; unleased: number; liveLeaseInstancesMissing: number },
+): void {
+  const states = {
+    running: inventory.running,
+    unleased: inventory.unleased,
+    lease_missing_instance: inventory.liveLeaseInstancesMissing,
+  };
+  for (const [state, value] of Object.entries(states)) {
+    observability.setGauge({
+      name: "opengeni_modal_sandbox_inventory",
+      help: "Running Modal sandboxes reconciled against live sandbox leases by the orphan sweep.",
+      labels: { state },
+      value: Math.max(0, value),
+    });
+  }
+}
+
+/** Warm leases held only by Browser/Computer interaction holders, by time since
+ * the newest interaction activity. Such boxes never drain on their own until the
+ * interaction session ends or the provider deadline. */
+export function recordInteractionOnlyLeaseGauges(
+  observability: Observability,
+  counts: Record<string, number>,
+): void {
+  for (const [idleBucket, value] of Object.entries(counts)) {
+    observability.setGauge({
+      name: "opengeni_sandbox_leases_interaction_only",
+      help: "Warm sandbox leases held only by Browser/Computer sessions, by time since last interaction activity.",
+      labels: { idle_bucket: idleBucket },
+      value: Math.max(0, value),
+    });
+  }
 }
 
 export function recordSandboxOrphansTerminated(observability: Observability, count: number): void {
@@ -1231,6 +1682,47 @@ export function recordSandboxDeadlineRotationsRequested(
   });
 }
 
+/** Fixed outcomes of legacy retained-command containment: per-candidate
+ * enrollment inspection, then the enrolled drain's exact cold commit. */
+export const SANDBOX_COMMAND_CONTAINMENT_OUTCOMES = [
+  "idle_enrolled",
+  "deadline_enrolled",
+  "forced_deadline_enrolled",
+  "quiescence_enrolled",
+  "resumed_enrolled",
+  "not_eligible",
+  "inspection_failed",
+  "contained",
+  "provider_missing",
+] as const;
+
+export type SandboxCommandContainmentOutcome =
+  (typeof SANDBOX_COMMAND_CONTAINMENT_OUTCOMES)[number];
+
+/** Idle browser/desktop release inspections by fixed outcome: `checkpointing`
+ * (idle browser saves prepared), `released` (holders released without a save). */
+export function recordSandboxIdleInteractionRelease(
+  observability: Observability,
+  outcome: IdleInteractionInspection,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_idle_interaction_release_total",
+    help: "Idle browser and desktop release inspections on warm boxes, by fixed outcome.",
+    labels: { outcome },
+  });
+}
+
+export function recordSandboxCommandContainment(
+  observability: Observability,
+  outcome: SandboxCommandContainmentOutcome,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_command_containment_total",
+    help: "Legacy retained-command containment inspections and enrolled drain commits by fixed outcome.",
+    labels: { outcome },
+  });
+}
+
 /** Only call after the exact draining->cold commit reports wentCold. The
  * backend is validated against the closed contract so provider IDs and other
  * per-sandbox values can never become metric labels. */
@@ -1243,6 +1735,19 @@ export function recordSandboxProviderMissingBeforeCapture(
     name: "opengeni_sandbox_provider_missing_before_capture_total",
     help: "Exact sandbox cold commits after definitive provider disappearance before workspace capture.",
     labels: { backend: safeBackend },
+  });
+}
+
+/** Host workspace directory outcome after a Docker drain's exact-container
+ * teardown (`retained` means the directory stays on disk). */
+export function recordSandboxDockerWorkspaceRelease(
+  observability: Observability,
+  status: "released" | "already_released" | "retained",
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_docker_workspace_release_total",
+    help: "Docker drain host workspace directories released or retained after exact-container teardown.",
+    labels: { status },
   });
 }
 
@@ -1300,6 +1805,31 @@ export function recordSandboxAutomaticRecoverySelected(
   });
 }
 
+/** How long live boxes have held changes no checkpoint covers yet. */
+export function recordSandboxCheckpointStalenessGauges(
+  observability: Observability,
+  staleness: { dirty: number; stale4h: number; stale12h: number; maxAgeSeconds: number },
+): void {
+  const values = {
+    dirty: staleness.dirty,
+    stale_4h: staleness.stale4h,
+    stale_12h: staleness.stale12h,
+  } as const;
+  for (const [kind, value] of Object.entries(values)) {
+    observability.setGauge({
+      name: "opengeni_sandbox_checkpoint_staleness",
+      help: "Live Modal sandboxes holding a write their last checkpoint did not capture, by age of the first such write.",
+      labels: { kind },
+      value,
+    });
+  }
+  observability.setGauge({
+    name: "opengeni_sandbox_checkpoint_age_max_seconds",
+    help: "Age in seconds of the oldest write a live Modal sandbox's last checkpoint did not capture.",
+    value: Number.isFinite(staleness.maxAgeSeconds) ? Math.max(0, staleness.maxAgeSeconds) : 0,
+  });
+}
+
 export function recordSandboxRotationBacklogGauges(
   observability: Observability,
   backlog: {
@@ -1330,6 +1860,11 @@ export function recordSandboxRotationBacklogGauges(
 }
 
 const RETAINED_PROCESS_OWNER_STATES = [
+  // Session-owned background commands (migration 0637). Running is live
+  // session work after its launch turn ended; stopping already has a stop
+  // request, so it still counts as terminal-owner backlog.
+  "background_running",
+  "background_stopping",
   "direct",
   "queued",
   "running",
@@ -1377,7 +1912,7 @@ export function recordRetainedProcessInventoryGauges(
     });
     observability.setGauge({
       name: "opengeni_retained_processes_terminal_owner_backlog",
-      help: "Current active retained processes whose exact owner attempt is terminal.",
+      help: "Current active retained processes whose owner is gone: a closed launch attempt or released direct request, or a background command already asked to stop. A running session background command is never counted.",
       labels: { owner_state: ownerState },
       value: count.terminal,
     });
@@ -1415,13 +1950,118 @@ export function recordExpiredDrainingSandboxLeaseGauges(
   }
 }
 
+/** Consecutive settled drain snapshot failures one lease epoch has reached. */
+export const SANDBOX_DRAIN_CAPTURE_CONSECUTIVE_FAILURE_BUCKETS = [1, 2, 3, 5, 8, 13, 21];
+
+function safeSandboxBackend(backend: string): string {
+  return SandboxBackend.safeParse(backend).success ? backend : "unknown";
+}
+
+/** Drain metrics are diagnostics: a sink that lacks a method or throws must
+ * never change a drain's outcome. */
+function bestEffortDrainMetric(record: () => void): void {
+  try {
+    record();
+  } catch {
+    // Ignored: the drain's own result never depends on a metric.
+  }
+}
+
+/** One settled drain snapshot failure, observed with the lease epoch's new
+ * consecutive failure count so alerts can tell one flaky attempt from a box
+ * that keeps failing without a per-lease label. */
+export function recordSandboxDrainCaptureFailure(
+  observability: Observability,
+  input: { backend: string; consecutiveFailures: number },
+): void {
+  const backend = safeSandboxBackend(input.backend);
+  bestEffortDrainMetric(() =>
+    observability.incrementCounter({
+      name: "opengeni_sandbox_drain_capture_failures_total",
+      help: "Settled workspace snapshot failures while draining an idle sandbox.",
+      labels: { backend },
+    }),
+  );
+  bestEffortDrainMetric(() =>
+    observability.observeHistogram({
+      name: "opengeni_sandbox_drain_capture_consecutive_failures",
+      help: "Consecutive settled drain snapshot failures of one sandbox lease epoch, observed at each failure.",
+      buckets: SANDBOX_DRAIN_CAPTURE_CONSECUTIVE_FAILURE_BUCKETS,
+      labels: { backend },
+      value: Math.max(1, Math.floor(input.consecutiveFailures)),
+    }),
+  );
+}
+
+/** What a drain did once full snapshots of a lease epoch kept failing:
+ * `reduced_saved` published a save without rebuildable folders,
+ * `reduced_failed` tried one and it failed, `reduced_unavailable` could not
+ * try one (nothing to leave out, or what remains is too large), and
+ * `abandoned` stopped the box without a new save. */
+export function recordSandboxDrainCaptureFallback(
+  observability: Observability,
+  input: {
+    backend: string;
+    outcome: "reduced_saved" | "reduced_failed" | "reduced_unavailable" | "abandoned";
+  },
+): void {
+  bestEffortDrainMetric(() =>
+    observability.incrementCounter({
+      name: "opengeni_sandbox_drain_capture_fallback_total",
+      help: "Drain snapshot fallbacks after repeated failures: reduced saves and boxes stopped without a new save.",
+      labels: { backend: safeSandboxBackend(input.backend), outcome: input.outcome },
+    }),
+  );
+}
+
+const SANDBOX_WORKSPACE_SNAPSHOT_BYTE_BUCKETS = [
+  1e6, 1e7, 1e8, 5e8, 1e9, 2e9, 5e9, 1e10, 2e10, 5e10,
+];
+const SANDBOX_WORKSPACE_SNAPSHOT_FILE_BUCKETS = [1e3, 1e4, 5e4, 1e5, 2.5e5, 5e5, 1e6, 2.5e6, 5e6];
+
+/** Size of /workspace when a drain snapshot settled: from the archive itself
+ * when it carries a tree fingerprint, otherwise from a bounded probe taken
+ * only after a failed snapshot. */
+export function recordSandboxWorkspaceSnapshotSize(
+  observability: Observability,
+  input: {
+    backend: string;
+    outcome: "captured" | "failed";
+    fileCount: number;
+    totalFileBytes: number;
+  },
+): void {
+  if (!Number.isFinite(input.fileCount) || !Number.isFinite(input.totalFileBytes)) return;
+  const labels = { backend: safeSandboxBackend(input.backend), outcome: input.outcome };
+  bestEffortDrainMetric(() =>
+    observability.observeHistogram({
+      name: "opengeni_sandbox_workspace_snapshot_bytes",
+      help: "Total regular-file bytes under /workspace when a drain snapshot settled.",
+      buckets: SANDBOX_WORKSPACE_SNAPSHOT_BYTE_BUCKETS,
+      labels,
+      value: Math.max(0, input.totalFileBytes),
+    }),
+  );
+  bestEffortDrainMetric(() =>
+    observability.observeHistogram({
+      name: "opengeni_sandbox_workspace_snapshot_files",
+      help: "Regular files under /workspace when a drain snapshot settled.",
+      buckets: SANDBOX_WORKSPACE_SNAPSHOT_FILE_BUCKETS,
+      labels,
+      value: Math.max(0, input.fileCount),
+    }),
+  );
+}
+
 export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
   "claim_failed",
+  "background_recovered",
   "proof_exited",
   "proof_lost",
   "proof_checkpoint_failed",
   "settled_exited",
   "settled_lost",
+  "provider_lost_whole_box",
   "settlement_failed",
   "identity_mismatch",
   "resume_state_missing",
@@ -1470,6 +2110,207 @@ export function recordCreditMicros(
   });
 }
 
+// ── Per-model usage and money ───────────────────────────────────────────────
+// `model` is the deployment catalog product id (resolved by the caller), or
+// `custom` for a workspace-owned model. The recorder bounds it again: a value
+// outside a conservative id shape becomes `custom`, and after
+// MAX_MODEL_METRIC_LABELS distinct values per process every new value becomes
+// `other`, so a catalog change or a bug can never grow the series count without
+// bound. Account, workspace, user and session ids are never labels here.
+
+/** Who pays the upstream provider for the call. */
+export type ModelUsagePayer = "deployment" | "external";
+
+const MODEL_METRIC_LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
+const MAX_MODEL_METRIC_LABELS = 64;
+const modelMetricLabels = new WeakMap<Observability, Set<string>>();
+
+export function boundedModelMetricLabel(observability: Observability, model: string): string {
+  if (model === "custom" || model === "other") return model;
+  if (!MODEL_METRIC_LABEL_PATTERN.test(model)) return "custom";
+  let seen = modelMetricLabels.get(observability);
+  if (!seen) {
+    seen = new Set<string>();
+    modelMetricLabels.set(observability, seen);
+  }
+  if (seen.has(model)) return model;
+  if (seen.size >= MAX_MODEL_METRIC_LABELS) return "other";
+  seen.add(model);
+  return model;
+}
+
+function nonnegativeSafeInteger(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+/**
+ * One authoritative model response, by provider and catalog model. Recorded
+ * behind the same durable usage-event fence as the provider-only cache metrics,
+ * so a duplicate or late response is not counted twice.
+ *   - `opengeni_model_responses_total{provider,model,priced}` — responses with
+ *     reported usage; `priced="false"` means no provider cost estimate exists.
+ *   - `opengeni_model_tokens_total{provider,model,type}` — `input` (all prompt
+ *     tokens, including cached and cache-write), `cached_input` and
+ *     `cache_write` (subsets of `input`), `output`, and `reasoning` (a subset
+ *     of `output`).
+ *   - `opengeni_model_provider_cost_micros_total{provider,model,payer,pricing_source}`
+ *     — estimated upstream cost in USD micros: configured list price, or the
+ *     gateway-reported cost. `payer="external"` is a customer-paid subscription
+ *     or key, so that cost is a list-price equivalent Opengeni does not pay.
+ */
+export function recordModelResponseUsage(
+  observability: Observability,
+  input: {
+    provider: string;
+    model: string;
+    payer: ModelUsagePayer;
+    tokens: {
+      inputTokens: number | null;
+      cachedTokens: number | null;
+      cacheWriteTokens: number | null;
+      outputTokens: number | null;
+      reasoningTokens: number | null;
+    };
+    estimatedProviderCostMicros: number | null;
+    pricingSource: "configured_list_price" | "gateway_reported" | null;
+    webSearchRequests?: number;
+  },
+): void {
+  const model = boundedModelMetricLabel(observability, input.model);
+  const base = { provider: input.provider, model };
+  const priced = input.pricingSource !== null && input.estimatedProviderCostMicros !== null;
+  observability.incrementCounter({
+    name: "opengeni_model_responses_total",
+    help: "Authoritative model responses with reported usage, by provider, catalog model and whether a cost estimate exists.",
+    labels: { ...base, priced: priced ? "true" : "false" },
+  });
+  const tokenTypes = [
+    ["input", input.tokens.inputTokens],
+    ["cached_input", input.tokens.cachedTokens],
+    ["cache_write", input.tokens.cacheWriteTokens],
+    ["output", input.tokens.outputTokens],
+    ["reasoning", input.tokens.reasoningTokens],
+  ] as const;
+  for (const [type, value] of tokenTypes) {
+    const amount = modelUsageTokenCountOrNull(value);
+    if (amount === null || amount === 0) continue;
+    incrementBoundedModelCacheCounter(observability, {
+      name: "opengeni_model_tokens_total",
+      help: "Tokens of authoritative model responses by provider, catalog model and token type (cached_input and cache_write are subsets of input; reasoning is a subset of output).",
+      provider: input.provider,
+      labels: { ...base, type },
+      amount,
+    });
+  }
+  const searches = nonnegativeSafeInteger(input.webSearchRequests ?? 0);
+  if (searches > 0)
+    observability.incrementCounter({
+      name: "opengeni_model_web_search_requests_total",
+      help: "Provider-run web searches billed with authoritative model responses, by provider, catalog model and payer.",
+      labels: { ...base, payer: input.payer },
+      amount: searches,
+    });
+  const cost = nonnegativeSafeInteger(input.estimatedProviderCostMicros);
+  if (priced && input.pricingSource !== null && cost > 0) {
+    observability.incrementCounter({
+      name: "opengeni_model_provider_cost_micros_total",
+      help: "Estimated upstream provider cost in USD micros by provider, catalog model, payer and pricing source.",
+      labels: { ...base, payer: input.payer, pricing_source: input.pricingSource },
+      amount: cost,
+    });
+  }
+}
+
+/**
+ * Prompt-cache health of one recorded model call, for alerting:
+ *   - `opengeni_model_prompt_cache_warm_misses_total{provider,model,class}`
+ *     counts calls that read much less cache than the previous call of the
+ *     same model in the session made warm, by cause. `context_replaced` is
+ *     expected after compaction; `idle_gap` usually is; every other class
+ *     means a request rewrote a prefix the provider had cached.
+ *   - `opengeni_model_prompt_cache_missed_tokens_total{provider,model,class}`
+ *     the tokens those misses failed to read.
+ *   - `opengeni_model_thinking_blocks_dropped_total{provider,model,reason}`
+ *     signed thinking blocks the provider dropped before inference.
+ * Recorded after the fact write, which is fenced like the usage metrics.
+ */
+export function recordPromptCacheDiagnostics(
+  observability: Observability,
+  input: {
+    provider: string;
+    model: string;
+    diagnostics: PromptCacheDiagnostics | null;
+    cachedTokens?: number | null;
+  },
+): void {
+  const diagnostics = input.diagnostics;
+  if (!diagnostics) return;
+  try {
+    const model = boundedModelMetricLabel(observability, input.model);
+    const miss = diagnostics.warmMiss;
+    if (miss) {
+      const labels = { provider: input.provider, model, class: miss.class };
+      observability.incrementCounter({
+        name: "opengeni_model_prompt_cache_warm_misses_total",
+        help: "Model calls that read much less prompt cache than the previous call of the same model in the session made warm, by provider, catalog model and cause.",
+        labels,
+      });
+      const missed = nonnegativeSafeInteger(
+        miss.expectedCachedTokens - nonnegativeSafeInteger(input.cachedTokens ?? 0),
+      );
+      if (missed > 0)
+        observability.incrementCounter({
+          name: "opengeni_model_prompt_cache_missed_tokens_total",
+          help: "Prompt tokens a warm prompt cache should have served but did not, by provider, catalog model and cause.",
+          labels,
+          amount: missed,
+        });
+    }
+    for (const [reason, count] of Object.entries(diagnostics.thinkingBlocksDropped ?? {})) {
+      const amount = nonnegativeSafeInteger(count);
+      if (amount > 0)
+        observability.incrementCounter({
+          name: "opengeni_model_thinking_blocks_dropped_total",
+          help: "Signed thinking blocks the provider dropped from model requests before inference, by provider, catalog model and reason.",
+          labels: { provider: input.provider, model, reason },
+          amount,
+        });
+    }
+  } catch {
+    // The fact is already committed; metrics are best-effort only.
+  }
+}
+
+/**
+ * Credits actually debited for one model response, recorded once when the
+ * ledger row is inserted (an idempotent replay debits 0 and records nothing).
+ * `funding="promotional"` is the part paid by scoped promotional grants
+ * (verified-signup trial, scoped coupon offers); `funding="general"` is the
+ * rest, paid from general credit: purchased credits plus any unscoped grant.
+ */
+export function recordModelCreditsCharged(
+  observability: Observability | undefined,
+  input: { provider: string; model: string; debitedMicros: number; grantDebitedMicros: number },
+): void {
+  if (!observability) return;
+  const debited = nonnegativeSafeInteger(input.debitedMicros);
+  if (debited === 0) return;
+  const promotional = Math.min(debited, nonnegativeSafeInteger(input.grantDebitedMicros));
+  const model = boundedModelMetricLabel(observability, input.model);
+  for (const [funding, amount] of [
+    ["promotional", promotional],
+    ["general", debited - promotional],
+  ] as const) {
+    if (amount === 0) continue;
+    observability.incrementCounter({
+      name: "opengeni_model_credits_charged_micros_total",
+      help: "Credit micros debited for model usage by provider, catalog model and funding (promotional grant or general credit).",
+      labels: { provider: input.provider, model, funding },
+      amount,
+    });
+  }
+}
+
 const MODEL_REQUEST_PHASE_BUCKETS = [
   0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 1, 2, 5, 10, 30, 60, 300,
 ];
@@ -1479,36 +2320,154 @@ const MODEL_REQUEST_PHASE_BUCKETS = [
  * Provider ids come from the resolved provider registry; phase/outcome are closed
  * enums. This function never performs I/O outside the in-memory metrics registry.
  */
+/**
+ * How a model request reached its provider, where the provider has more than
+ * one transport (Codex: a new or reused Responses WebSocket, a reused one
+ * continuing the previous response with only new input, or HTTP). Empty for
+ * providers with a single transport.
+ */
+export type ModelRequestTransportLabel =
+  | ""
+  | "websocket_new"
+  | "websocket_reused"
+  | "websocket_incremental"
+  | "http";
+
+/** The bounded metric label for how a Codex request was carried. */
+export function codexRequestTransportLabel(
+  transport:
+    | { kind: "websocket"; connection: "new" | "reused"; input: "full" | "incremental" }
+    | { kind: "http" },
+): ModelRequestTransportLabel {
+  if (transport.kind === "http") return "http";
+  if (transport.input === "incremental") return "websocket_incremental";
+  return transport.connection === "reused" ? "websocket_reused" : "websocket_new";
+}
+
 export function recordModelRequestPhase(
   observability: Observability,
   input: {
     provider: string;
-    phase: "headers" | "first_byte" | "terminal";
+    /** `handshake`: the time a request waited for its new WebSocket to open. */
+    phase: "handshake" | "headers" | "first_byte" | "terminal";
     outcome?: "completed" | "failed" | "timed_out";
     durationSeconds: number;
+    transport?: ModelRequestTransportLabel;
   },
 ): void {
   const outcome = input.outcome ?? "";
+  const transport = input.transport ?? "";
   observability.incrementCounter({
     name: "opengeni_model_request_phases_total",
-    help: "Provider model-request lifecycle phases by bounded phase and outcome.",
-    labels: { provider: input.provider, phase: input.phase, outcome },
+    help: "Provider model-request lifecycle phases by bounded phase, outcome and transport.",
+    labels: { provider: input.provider, phase: input.phase, outcome, transport },
   });
   observability.observeHistogram({
     name: "opengeni_model_request_phase_duration_seconds",
     help: "Monotonic seconds from provider dispatch to a model-request lifecycle phase.",
     buckets: MODEL_REQUEST_PHASE_BUCKETS,
-    labels: { provider: input.provider, phase: input.phase },
+    labels: { provider: input.provider, phase: input.phase, transport },
     value: Math.max(0, input.durationSeconds),
   });
 }
 
+/** One bounded metric family shared by every persistent Responses provider. */
+export function recordResponsesTransportDiagnostic(
+  observability: Observability,
+  provider: string,
+  event: ResponsesTransportDiagnostic,
+): void {
+  const labels = {
+    provider,
+    phase: event.phase,
+    position: event.position,
+    transport: codexRequestTransportLabel(event.transport),
+  };
+  observability.observeHistogram({
+    name: "opengeni_model_transport_phase_seconds",
+    help: "Persistent model transport phase duration, including final-prefix startup overlap.",
+    buckets: MODEL_REQUEST_PHASE_BUCKETS,
+    labels,
+    value: Math.max(0, event.durationMs / 1000),
+  });
+  if (event.phase === "terminal") {
+    observability.incrementCounter({
+      name: "opengeni_model_transport_requests_total",
+      help: "Persistent model transport request outcomes.",
+      labels: {
+        ...labels,
+        outcome: event.outcome ?? "completed",
+        reason: event.transport.kind === "http" ? event.transport.reason : "",
+      },
+    });
+    if (
+      event.promptTokens !== undefined &&
+      event.promptTokens > 0 &&
+      event.cachedTokens !== undefined
+    ) {
+      observability.observeHistogram({
+        name: "opengeni_model_transport_cache_ratio",
+        help: "Provider-reported cache ratio on completed persistent requests, first versus later in a turn.",
+        labels: { provider, position: event.position },
+        buckets: MODEL_CACHE_HIT_RATIO_BUCKETS,
+        value: Math.min(1, event.cachedTokens / event.promptTokens),
+      });
+    }
+  }
+  if (event.inputBytes !== undefined && event.fullInputBytes !== undefined) {
+    for (const [kind, value] of [
+      ["wire", event.inputBytes],
+      ["full", event.fullInputBytes],
+    ] as const) {
+      observability.incrementCounter({
+        name: "opengeni_model_transport_input_bytes_total",
+        help: "Wire and equivalent full request bytes for persistent model transport.",
+        labels: { provider, kind },
+        amount: value,
+      });
+    }
+  }
+}
+
 export type TurnStartupPhase =
+  | "services_initialization"
+  | "claim_catalog_read"
+  | "claim_atomic"
+  | "claim_transaction_admission"
+  | "claim_savepoint_admission"
+  | "claim_rls_setup"
+  | "claim_scoped_callback"
+  | "claim_continued_accounts"
+  | "claim_update_authority"
+  | "claim_session_read"
+  | "claim_capability_settings"
+  | "claim_provider_settings"
+  | "learning_policy_freeze"
+  | "attachment_authority_projection"
   | "claim_and_policy"
   | "turn_start_settlement"
   | "credential_selection"
+  | "credential_identity_read"
+  | "credential_entitlements"
+  | "credential_entitlement_refresh"
+  | "credential_health_recovery"
+  | "credential_placement"
+  | "credential_selection_receipt"
   | "runtime_preparation"
+  | "session_mcp_settings"
   | "sandbox_establish"
+  | "credential_resolution"
+  | "credential_mint"
+  | "credential_materialization"
+  | "client_publication"
+  | "client_readiness"
+  | "credential_seed"
+  | "credential_hooks"
+  | "artifact_runtime"
+  | "run_credential_binding"
+  | "run_git_credential_mint"
+  | "sandbox_provision_receipt"
+  | "startup_phase_delivery"
   | "file_resolution"
   | "tool_context_preparation"
   | "tool_preparation"
@@ -1687,6 +2646,104 @@ export function recordTurnStartupPhase(
   });
 }
 
+const REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET: ReadonlySet<string> = new Set(
+  REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES,
+);
+const REPOSITORY_SKILL_DISCOVERY_HANDLING = new Set(["propagated", "degraded", "unreachable"]);
+
+/** Failed repository skill discovery runs by bounded error class. `handling`
+ * says whether the turn continued without repository skills (`degraded`,
+ * `unreachable`) or the error reached turn recovery (`propagated`). */
+export function recordRepositorySkillDiscoveryFailure(
+  observability: Observability,
+  input: { backend: string; errorClass: string; handling: string },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_repository_skill_discovery_failures_total",
+    help: "Failed repository skill discovery runs by bounded error class and handling (propagated reached turn recovery; degraded and unreachable continued without repository skills).",
+    labels: {
+      backend: SandboxBackend.safeParse(input.backend).success ? input.backend : "unknown",
+      error_class: REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET.has(input.errorClass)
+        ? input.errorClass
+        : "other",
+      handling: REPOSITORY_SKILL_DISCOVERY_HANDLING.has(input.handling) ? input.handling : "other",
+    },
+  });
+}
+
+/** One unusable repository skill search path or skill folder skipped in a
+ * run that otherwise completed. Counts entries, not runs. */
+export function recordRepositorySkillEntrySkipped(
+  observability: Observability,
+  input: { backend: string; errorClass: string },
+): void {
+  observability.incrementCounter({
+    name: "opengeni_repository_skill_entries_skipped_total",
+    help: "Repository skill search paths or skill folders skipped because the workspace answered but the entry could not be used, by bounded error class. Counts entries, not discovery runs.",
+    labels: {
+      backend: SandboxBackend.safeParse(input.backend).success ? input.backend : "unknown",
+      error_class: REPOSITORY_SKILL_DISCOVERY_ERROR_CLASS_SET.has(input.errorClass)
+        ? input.errorClass
+        : "other",
+    },
+  });
+}
+
+/** One model-preparation phase measurement from the runtime: its startup
+ * phase timing, plus the bounded discovery-failure counter when it failed. */
+export function recordModelPreparationPhase(
+  observability: Observability,
+  input: {
+    provider: string;
+    backend: string;
+    measurement: ModelPreparationMeasurement;
+  },
+): void {
+  const { measurement } = input;
+  recordTurnStartupPhase(observability, {
+    phase: `model_prepare_${measurement.phase}`,
+    provider: input.provider,
+    backend: input.backend,
+    outcome: measurement.outcome,
+    durationSeconds: measurement.durationSeconds,
+    ...(measurement.count === undefined ? {} : { count: measurement.count }),
+  });
+  if (measurement.failure)
+    recordRepositorySkillDiscoveryFailure(observability, {
+      backend: input.backend,
+      errorClass: measurement.failure.errorClass,
+      handling: measurement.failure.handling,
+    });
+  for (const errorClass of measurement.skipped ?? [])
+    recordRepositorySkillEntrySkipped(observability, { backend: input.backend, errorClass });
+}
+
+/** Observe an existing dependency only. Child intervals can overlap and are
+ * not additive; observer failure must never change authority or error identity. */
+export async function measureTurnStartupPhase<T>(
+  observability: Observability,
+  input: Omit<Parameters<typeof recordTurnStartupPhase>[1], "durationSeconds" | "outcome">,
+  work: () => Promise<T>,
+): Promise<T> {
+  const started = performance.now();
+  let outcome: TurnStartupOutcome = "failed";
+  try {
+    const result = await work();
+    outcome = "completed";
+    return result;
+  } finally {
+    try {
+      recordTurnStartupPhase(observability, {
+        ...input,
+        outcome,
+        durationSeconds: (performance.now() - started) / 1_000,
+      });
+    } catch {
+      // Telemetry is not an execution gate.
+    }
+  }
+}
+
 /** Background MCP preparation must not inflate startup phase distributions. */
 export function recordToolPreparationPhase(
   observability: Observability,
@@ -1733,6 +2790,9 @@ function completedOperationSpan(
     outcome: string;
     provider?: string;
     backend?: string;
+    tool?: string;
+    op?: string;
+    purpose?: string;
     correlationId?: string | undefined;
   },
 ): void {
@@ -1930,20 +2990,50 @@ export function recordTurnStartupMilestone(
     provider: string;
     backend: string;
     outcome: TurnStartupOutcome;
+    failureOrigin?: FailureOrigin;
     durationSeconds: number;
+    /**
+     * Seconds from the start of the turn attempt that reached the milestone.
+     * Ignored for the queue milestone.
+     */
+    sinceAttemptStartSeconds?: number | null;
   },
 ): void {
+  const labels = {
+    milestone: input.milestone,
+    provider: input.provider,
+    backend: input.backend,
+    outcome: input.outcome,
+  };
   observability.observeHistogram({
     name: "opengeni_turn_startup_milestone_duration_seconds",
     help: "Cumulative seconds from durable turn queueing to a bounded startup milestone.",
     buckets: TURN_STARTUP_MILESTONE_BUCKETS,
     labels: {
-      milestone: input.milestone,
-      provider: input.provider,
-      backend: input.backend,
-      outcome: input.outcome,
+      ...labels,
+      failure_origin: input.outcome === "failed" ? (input.failureOrigin ?? "platform") : "none",
     },
     value: Math.max(0, input.durationSeconds),
+  });
+  if (
+    input.milestone === "queue" ||
+    input.sinceAttemptStartSeconds === null ||
+    input.sinceAttemptStartSeconds === undefined ||
+    !Number.isFinite(input.sinceAttemptStartSeconds)
+  ) {
+    return;
+  }
+  // Same milestone measured from the start of the attempt that reached it
+  // rather than from acceptance. It excludes time a prompt spent queued behind
+  // an earlier turn in its session, a subscription capacity wait or a gap
+  // before a recovery attempt, so it reflects only this attempt's claim,
+  // preparation and provider latency.
+  observability.observeHistogram({
+    name: "opengeni_turn_startup_since_attempt_start_seconds",
+    help: "Seconds from the start of the turn attempt that reached a startup milestone; excludes time queued behind an earlier turn, capacity waits and recovery gaps.",
+    buckets: TURN_STARTUP_MILESTONE_BUCKETS,
+    labels,
+    value: Math.max(0, input.sinceAttemptStartSeconds),
   });
 }
 
@@ -1969,34 +3059,114 @@ function contentDeltaClass(type: SessionEventType): StreamDeltaClass | null {
   return null;
 }
 
-// TTFT and inter-delta live on a human-perceptible scale (tens of ms to a few
-// seconds), so they get their own SHORT buckets — the default duration buckets
-// (which run to 3600s) would collapse every real streaming value into one bucket.
-const STREAM_TTFT_BUCKETS = [0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10];
+// TTFT lives on a human-perceptible scale, but reasoning models legitimately
+// think for tens of seconds before their first streamed token. The finite
+// buckets therefore run well past 10s: a top bucket at 10s made every slower
+// first token land in +Inf, so p50/p99 saturated at exactly "10" and hid how
+// slow the tail really was.
+const STREAM_TTFT_BUCKETS = [
+  0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300,
+];
 const STREAM_INTER_DELTA_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 1, 2, 5];
+// Opengeni's own per-request work before the provider sees bytes: admission,
+// durable history/audit checkpoints, request build. Normally milliseconds to a
+// second; tens of seconds means our database or consumer is the bottleneck.
+const MODEL_REQUEST_PRE_DISPATCH_BUCKETS = [
+  0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120,
+];
 
 /**
- * Per-turn stream-timing tracker fed every normalized runtime event in push order.
- * It emits two model-responsiveness SLIs from the worker's seat on the stream:
+ * Exclusive, consecutive stages of one model request's pre-dispatch time. Each
+ * runs from the moment it is entered until the next stage is entered or the
+ * request is dispatched, so the stages of one request add up to its
+ * `opengeni_model_request_pre_dispatch_seconds` sample.
  *
- *   - `opengeni_stream_ttft_seconds{provider}` — time from a model (re)start to its
- *     first streamed content delta. The anchor starts at construction (≈ runStream
- *     start, so the first observation is "how long until text appears") and re-arms
- *     on every non-content event (a tool call, a completed message, a usage frame),
- *     so a post-tool response measures the model's restart latency, NOT our own
- *     tool-execution time.
+ *   - `settlement_wait`: the previous response's durable settlement.
+ *   - `admission`: the per-call admission (durable history reconcile, run and
+ *     credit revalidation, Steer check).
+ *   - `request_build`: SDK request serialization and provider body policy,
+ *     up to the provider transport.
+ *   - `credential`: the provider credential for this request.
+ *   - `dispatch_checkpoint`: the durable history and route checkpoint.
+ *   - `request_audit`: the durable request audit event.
+ *   - `provider_admission`: provider-side admission, such as the durable
+ *     one-shot subscription reservation.
+ *   - `transport`: the remaining transport work: residency, wire capture and
+ *     the connection, up to the bytes leaving this process.
+ */
+export const MODEL_REQUEST_PRE_DISPATCH_STAGES = [
+  "settlement_wait",
+  "admission",
+  "request_build",
+  "credential",
+  "dispatch_checkpoint",
+  "request_audit",
+  "provider_admission",
+  "transport",
+] as const;
+export type ModelRequestPreDispatchStage = (typeof MODEL_REQUEST_PRE_DISPATCH_STAGES)[number];
+
+/** First streamed content of a provider response. `any` is the first reasoning
+ *  or answer delta; `text` is the first answer-text delta. They overlap — never
+ *  sum across `content`. */
+export type ProviderFirstContent = "any" | "text";
+
+/**
+ * Per-stream timing tracker fed every normalized runtime event in push order,
+ * plus two producer-side hooks. It separates OUR latency from the PROVIDER's:
+ *
+ *   - `opengeni_stream_ttft_seconds{provider}` — user-perceived (re)start latency:
+ *     time from a stream start / structural boundary (tool call, tool result,
+ *     completed message, usage frame) to the first streamed content delta. It
+ *     mixes our between-call work with provider time; keep it for the absolute
+ *     dashboard view, not for provider alerting.
+ *   - `opengeni_model_request_pre_dispatch_seconds{provider}` — OUR per-request
+ *     latency: SDK model entry (the first admission check) to the literal
+ *     provider dispatch. Covers admission, the durable history checkpoint,
+ *     credit revalidation, the durable request audit and request build.
+ *   - `opengeni_model_request_pre_dispatch_stage_seconds{provider,stage}` —
+ *     the same per-request latency split into exclusive consecutive stages
+ *     (`MODEL_REQUEST_PRE_DISPATCH_STAGES`) that add up to it.
+ *   - `opengeni_model_provider_ttft_seconds{provider,content}` — the PROVIDER's
+ *     latency: literal dispatch to the first streamed `any` (reasoning or text)
+ *     delta and to the first answer `text` delta. Includes network, provider
+ *     queueing, prompt prefill and reasoning before the first streamed token.
  *   - `opengeni_stream_inter_delta_gap_seconds{provider,class}` — gap between
- *     consecutive content deltas of the SAME class. The run resets on any
- *     non-content event so a gap never spans a tool call or a model boundary — it
- *     measures only the choppiness of a live token stream.
+ *     consecutive content deltas of the SAME class, reset at every structural
+ *     event so a gap never spans a tool call or a model boundary.
  *
- * Purely observational and clock-injectable; it never touches the events it sees.
+ * Dispatch timing deliberately survives structural events: the consumer may
+ * still be persisting the previous response's tool results when the producer
+ * dispatches the next request, but the next request's first delta always
+ * follows its own dispatch. Purely observational and clock-injectable.
+ *
+ * `completeResponse` also returns the same measurements for one model call,
+ * which the worker stores on its usage event and Insights fact. The next model
+ * entry waits until the consumer has settled the previous response, so a
+ * response's terminal event is always read before the next dispatch.
+ * A call that needs several requests before its one terminal response (a
+ * transport retry, or a provider continuation such as Claude's `pause_turn`)
+ * is measured from its first dispatch and keeps that request's pre-dispatch
+ * work, so its duration and first token cover the whole response.
  */
 export class StreamTimingMetrics {
   private readonly now: () => number;
   private ttftAnchor: number;
   private ttftArmed = true;
   private readonly lastDeltaAt = new Map<StreamDeltaClass, number>();
+  private modelEntryAt: number | null = null;
+  /** The pre-dispatch stage now running, and since when. */
+  private stage: { name: ModelRequestPreDispatchStage; since: number } | null = null;
+  private readonly stageMs = new Map<ModelRequestPreDispatchStage, number>();
+  private dispatchedAt: number | null = null;
+  private readonly providerFirstRecorded = new Set<ProviderFirstContent>();
+  /** The model call awaiting its terminal response, if one was dispatched. */
+  private openCall: {
+    dispatchedAt: number;
+    preDispatchMs: number | null;
+    firstContentAt: number | null;
+    firstTextAt: number | null;
+  } | null = null;
 
   constructor(
     private readonly observability: Observability,
@@ -2004,6 +3174,72 @@ export class StreamTimingMetrics {
   ) {
     this.now = options.now ?? (() => performance.now());
     this.ttftAnchor = this.now();
+  }
+
+  /** Producer side: the SDK entered a model request (first admission check).
+   *  Keep the earliest model entry, but ignore transport rechecks: native
+   *  providers can run those after dispatch, while the response is in flight. */
+  onModelRequestEntry(point: "model_entry" | "transport" = "model_entry"): void {
+    if (point !== "model_entry") return;
+    if (this.modelEntryAt !== null) return;
+    this.modelEntryAt = this.now();
+    this.stageMs.clear();
+    this.stage = { name: "settlement_wait", since: this.modelEntryAt };
+  }
+
+  /**
+   * Producer side: the model request now in preparation entered `stage`. The
+   * stage before it ends here. Ignored between a dispatch and the next model
+   * entry, so post-dispatch work (a continuation's re-admission, a transport
+   * recheck) never lands in a later request's stages.
+   */
+  enterPreDispatchStage(stage: ModelRequestPreDispatchStage): void {
+    if (this.modelEntryAt === null || this.stage === null) return;
+    if (this.stage.name === stage) return;
+    const at = this.now();
+    this.closeStage(at);
+    this.stage = { name: stage, since: at };
+  }
+
+  private closeStage(at: number): void {
+    if (!this.stage) return;
+    const elapsed = Math.max(0, at - this.stage.since);
+    this.stageMs.set(this.stage.name, (this.stageMs.get(this.stage.name) ?? 0) + elapsed);
+  }
+
+  /** Producer side: request bytes are about to leave this process. */
+  onProviderDispatch(): void {
+    const at = this.now();
+    let preDispatchMs: number | null = null;
+    if (this.modelEntryAt !== null) {
+      preDispatchMs = Math.max(0, at - this.modelEntryAt);
+      this.observability.observeHistogram({
+        name: "opengeni_model_request_pre_dispatch_seconds",
+        help: "Seconds of Opengeni work from SDK model-request entry to literal provider dispatch.",
+        buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
+        labels: { provider: this.options.provider },
+        value: preDispatchMs / 1000,
+      });
+      this.closeStage(at);
+      for (const [stage, ms] of this.stageMs) {
+        this.observability.observeHistogram({
+          name: "opengeni_model_request_pre_dispatch_stage_seconds",
+          help: "Seconds of one model request's pre-dispatch time spent in each exclusive stage; a request's stages add up to its pre-dispatch time.",
+          buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
+          labels: { provider: this.options.provider, stage },
+          value: ms / 1000,
+        });
+      }
+      this.stageMs.clear();
+      this.stage = null;
+      this.modelEntryAt = null;
+    }
+    // A transport retry re-dispatches the same request; the first delta then
+    // belongs to the latest dispatch.
+    this.dispatchedAt = at;
+    this.providerFirstRecorded.clear();
+    // Later dispatches before the terminal response belong to the same call.
+    this.openCall ??= { dispatchedAt: at, preDispatchMs, firstContentAt: null, firstTextAt: null };
   }
 
   onEvent(type: SessionEventType): void {
@@ -2018,15 +3254,23 @@ export class StreamTimingMetrics {
       return;
     }
     const at = this.now();
+    if (this.openCall) {
+      this.openCall.firstContentAt ??= at;
+      if (deltaClass === "message") this.openCall.firstTextAt ??= at;
+    }
     if (this.ttftArmed) {
       this.observability.observeHistogram({
         name: "opengeni_stream_ttft_seconds",
-        help: "Seconds from a model (re)start to its first streamed content delta.",
+        help: "Seconds from a stream start or structural boundary to the next streamed content delta (user-perceived; includes Opengeni between-call work).",
         buckets: STREAM_TTFT_BUCKETS,
         labels: { provider: this.options.provider },
         value: Math.max(0, (at - this.ttftAnchor) / 1000),
       });
       this.ttftArmed = false;
+    }
+    if (this.dispatchedAt !== null) {
+      this.observeProviderFirst("any", at);
+      if (deltaClass === "message") this.observeProviderFirst("text", at);
     }
     const last = this.lastDeltaAt.get(deltaClass);
     if (last !== undefined) {
@@ -2039,6 +3283,38 @@ export class StreamTimingMetrics {
       });
     }
     this.lastDeltaAt.set(deltaClass, at);
+  }
+
+  /**
+   * Consumer side: the dispatched call's terminal response was read. Returns its
+   * timing once, measured from the call's first dispatch, or null when no call
+   * is open (for example a mirrored terminal event, or a provider that reports
+   * no dispatch).
+   */
+  completeResponse(): ModelCallTiming | null {
+    const call = this.openCall;
+    if (!call) return null;
+    this.openCall = null;
+    const since = (at: number | null) =>
+      at === null ? null : Math.round(Math.max(0, at - call.dispatchedAt));
+    return {
+      preDispatchMs: call.preDispatchMs === null ? null : Math.round(call.preDispatchMs),
+      timeToFirstTokenMs: since(call.firstContentAt),
+      timeToFirstTextMs: since(call.firstTextAt),
+      durationMs: since(this.now()),
+    };
+  }
+
+  private observeProviderFirst(content: ProviderFirstContent, at: number): void {
+    if (this.dispatchedAt === null || this.providerFirstRecorded.has(content)) return;
+    this.providerFirstRecorded.add(content);
+    this.observability.observeHistogram({
+      name: "opengeni_model_provider_ttft_seconds",
+      help: "Seconds from literal provider dispatch to the first streamed content delta (any = reasoning or text, text = answer text).",
+      buckets: STREAM_TTFT_BUCKETS,
+      labels: { provider: this.options.provider, content },
+      value: Math.max(0, (at - this.dispatchedAt) / 1000),
+    });
   }
 }
 
@@ -2065,6 +3341,50 @@ export function recordBatchFlush(
     buckets: STREAM_IO_BUCKETS,
     value: input.durationSeconds,
   });
+}
+
+const MODEL_STEP_PHASE_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30];
+
+/**
+ * Opengeni work between two model requests of one stream, measured with local
+ * clocks on the side that does it:
+ *
+ *   - `response_settlement` — consumer: a terminal model response arrived to
+ *     the moment the next model request is allowed to proceed (`settle`).
+ *   - `response_usage` — the part of settlement that meters the response
+ *     (lease renewal, usage and credit recording, the usage event).
+ *   - `response_history` — the part that retains media and reconciles history.
+ *   - `settlement_wait` — producer: a model request entered and waited this
+ *     long for the previous response's settlement.
+ *   - `admission` — producer: the per-request admission revalidation (durable
+ *     history checkpoint, subscription source, usage limits).
+ *
+ * Tool execution runs between a response and the next model entry, in parallel
+ * with settlement; only `settlement_wait` and `admission` delay the next
+ * request beyond the tools themselves.
+ */
+export type ModelStepPhase =
+  | "response_settlement"
+  | "response_usage"
+  | "response_history"
+  | "settlement_wait"
+  | "admission";
+
+export function recordModelStepPhase(
+  observability: Observability,
+  input: { provider: string; phase: ModelStepPhase; durationSeconds: number },
+): void {
+  try {
+    observability.observeHistogram({
+      name: "opengeni_model_step_phase_duration_seconds",
+      help: "Seconds of Opengeni work between model requests of one stream, by phase.",
+      buckets: MODEL_STEP_PHASE_BUCKETS,
+      labels: { provider: input.provider, phase: input.phase },
+      value: Math.max(0, input.durationSeconds),
+    });
+  } catch {
+    // Metrics emission must never affect a model call.
+  }
 }
 
 /** Latency of the durable `appendSessionEvents` DB write — the write path. A p99
@@ -2235,7 +3555,11 @@ const MODEL_CACHE_HIT_RATIO_BUCKETS = [
  *     A reported cached-token zero records a real 0%; absent/null telemetry remains
  *     unknown and must not fabricate a low-cache signal.
  *   - `opengeni_model_cache_read_telemetry_total{provider,status}` — one bounded
- *     availability observation per authoritative call (`reported` or `missing`).
+ *     availability observation per authoritative call: `reported`, `missing` (the
+ *     call reported token usage but left out the cached-token field) or
+ *     `no_usage` (the call reported no token usage at all, for example a
+ *     terminal response without a usage object, which the SDK turns into zeros).
+ *     A call without any usage says nothing about the provider's cache fields.
  * Invalid, fractional, unsafe, or over-contract token telemetry is rejected. A call
  * with no prompt tokens has no ratio (skipped).
  */
@@ -2246,16 +3570,25 @@ export function recordModelCacheTokens(
     cachedTokens: number | null | undefined;
     cacheWriteTokens?: number | null | undefined;
     promptTokens: number | null | undefined;
+    /**
+     * False when the call reported no token usage at all (no counts, nothing
+     * rejected). Counted as `no_usage`, never as a missing cache field.
+     */
+    usageReported?: boolean;
   },
 ): void {
   const cached = modelUsageTokenCountOrNull(input.cachedTokens);
   const cacheWrite = modelUsageTokenCountOrNull(input.cacheWriteTokens);
   const prompt = modelUsageTokenCountOrNull(input.promptTokens);
+  const noUsage = cached === null && input.usageReported === false;
   incrementBoundedModelCacheCounter(observability, {
     name: "opengeni_model_cache_read_telemetry_total",
-    help: "Authoritative model calls with reported or missing cache-read telemetry, by provider.",
+    help: "Authoritative model calls with reported, missing or no-usage cache-read telemetry, by provider.",
     provider,
-    labels: { provider, status: cached === null ? "missing" : "reported" },
+    labels: {
+      provider,
+      status: noUsage ? "no_usage" : cached === null ? "missing" : "reported",
+    },
     amount: 1,
   });
   if (cached !== null && cached > 0) {
@@ -2337,13 +3670,26 @@ function requiredTemporalNumber(
   if (value === null || value === undefined) {
     throw new Error(`Temporal stats omitted required ${field}`);
   }
-  const parsed = Number(value);
+  // protobuf Long is supported through its string representation. Refuse JS
+  // coercions (booleans, arrays, blanks) and hostile toString implementations.
+  let raw: unknown = value;
+  try {
+    if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) raw = raw.toString();
+  } catch {
+    throw new Error(`Temporal stats returned invalid ${field}`);
+  }
+  const parsed =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string" && /^\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(raw)
+        ? Number(raw)
+        : Number.NaN;
   if (
     !Number.isFinite(parsed) ||
     parsed < 0 ||
     (options.integer && !Number.isSafeInteger(parsed))
   ) {
-    throw new Error(`Temporal stats returned invalid ${field}: ${String(value)}`);
+    throw new Error(`Temporal stats returned invalid ${field}`);
   }
   return parsed;
 }
@@ -2398,27 +3744,27 @@ export function modelCallAccountContext(input: {
 
 export type CodeSearchCallOutcome =
   | "completed"
-  | "jev_unavailable"
-  | "jev_rejected"
+  | "decision_unavailable"
+  | "decision_rejected"
   | "workspace_unavailable"
   | "invalid_arguments"
   | "breaker_open"
   | "cancelled"
   | "failed";
 
-/** One `code_search` tool call: outcome, wall time and the Jev work it used. */
+/** One code-search call and the typed decision inference it used. */
 export function recordCodeSearchCall(
   observability: Observability,
   input: {
     outcome: CodeSearchCallOutcome;
     durationSeconds: number;
-    jevRequests: number;
-    jevCostUsd: number;
+    decisionRequests: number;
+    decisionCostUsd: number | null;
   },
 ): void {
   observability.incrementCounter({
     name: "opengeni_code_search_calls_total",
-    help: "Jev-backed code_search tool calls by outcome.",
+    help: "Decision-model-backed code_search tool calls by outcome.",
     labels: { outcome: input.outcome },
   });
   observability.observeHistogram({
@@ -2428,18 +3774,18 @@ export function recordCodeSearchCall(
     labels: { outcome: input.outcome },
     value: Math.max(0, input.durationSeconds),
   });
-  if (input.jevRequests > 0) {
+  if (input.decisionRequests > 0) {
     observability.incrementCounter({
-      name: "opengeni_code_search_jev_requests_total",
-      help: "Jev requests made by code_search.",
-      amount: input.jevRequests,
+      name: "opengeni_code_search_decision_requests_total",
+      help: "Typed decision requests made by code_search.",
+      amount: input.decisionRequests,
     });
   }
-  if (input.jevCostUsd > 0) {
+  if (input.decisionCostUsd !== null && input.decisionCostUsd > 0) {
     observability.incrementCounter({
-      name: "opengeni_code_search_jev_cost_micro_usd_total",
-      help: "Estimated Jev list-price cost of code_search, in micro-USD.",
-      amount: Math.round(input.jevCostUsd * 1_000_000),
+      name: "opengeni_code_search_decision_cost_micro_usd_total",
+      help: "Known decision cost of code_search, in micro-USD; usage events identify estimates.",
+      amount: Math.round(input.decisionCostUsd * 1_000_000),
     });
   }
 }

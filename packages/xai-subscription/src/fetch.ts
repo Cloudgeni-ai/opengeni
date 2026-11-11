@@ -2,20 +2,22 @@ import { randomUUID } from "node:crypto";
 
 import {
   XAI_CLIENT_MODE,
-  XAI_CLIENT_VERSION,
   XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS,
   XAI_SUBSCRIPTION_MODEL_SLUGS,
   XAI_TOKEN_AUTH_HEADER_VALUE,
 } from "./constants";
+import { adoptXaiClientVersionFloor, currentXaiClientVersion } from "./client-version";
 import {
   isXaiSubscriptionRateLimitDiagnostic,
   XaiSubscriptionStreamIdleTimeoutError,
   XaiSubscriptionStreamingTerminalError,
 } from "./errors";
 import { normalizeXaiResponseEventJson, normalizeXaiSubscriptionRequestBody } from "./normalize";
+import { hasMeaningfulXaiOutput } from "./meaningful-output";
 import {
   type XaiFinalContextUsage,
   type XaiModelRequestEvent,
+  type XaiProviderRequestSettlement,
   type XaiSubscriptionRequestContext,
   xaiSubscriptionRequestStorage,
 } from "./request-context";
@@ -59,7 +61,26 @@ type RequestAudit = {
   lastProgressAt: number | null;
   terminal: boolean;
   terminalEventEmitted: boolean;
+  /** The custody fence admitted this physical request (it may be on the wire). */
+  admitted: boolean;
+  /** The one custody settlement of an admitted request. */
+  settlement: Promise<void> | null;
+  /** A definite refusal observed in the stream (a capacity terminal before output). */
+  refused: boolean;
+  /** The stream carried an event beyond the response lifecycle preamble. */
+  outputObserved: boolean;
+  /** The response carried real work (see `hasMeaningfulXaiOutput`). */
+  meaningfulOutput: boolean;
 };
+
+/** SSE terminal codes that are a capacity refusal: the provider did no model work. */
+const CAPACITY_SSE_ERROR_CODES = new Set(["insufficient_quota", "usage_limit_reached"]);
+/** Lifecycle events that precede any model output. */
+const PREAMBLE_SSE_EVENT_TYPES = new Set([
+  "response.created",
+  "response.in_progress",
+  "response.queued",
+]);
 
 type SseProgress = {
   valid: boolean;
@@ -109,17 +130,23 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
     const streamIdleTimeoutMs = boundedStreamIdleTimeout(
       context.streamIdleTimeoutMs ?? context.hostedToolContinuationTimeoutMs,
     );
+    let presentedClientVersion = currentXaiClientVersion(context.clientVersion);
     const send = async (
       refresh: boolean,
       transportAttempt: number,
     ): Promise<{ response: Response; audit: RequestAudit }> => {
+      // An already-cancelled request resolves no token and reserves nothing.
+      init?.signal?.throwIfAborted();
       const token = refresh ? await context.refresh() : await context.getToken();
+      // A cancellation while the token resolved reserves nothing either.
+      init?.signal?.throwIfAborted();
       const headers = new Headers(originalHeaders);
+      presentedClientVersion = currentXaiClientVersion(context.clientVersion);
       headers.set("authorization", `Bearer ${token.accessToken}`);
       headers.set("content-type", "application/json");
       headers.set("accept", "text/event-stream");
-      headers.set("user-agent", `opengeni/${context.clientVersion || XAI_CLIENT_VERSION}`);
-      headers.set("x-grok-client-version", context.clientVersion || XAI_CLIENT_VERSION);
+      headers.set("user-agent", `opengeni/${presentedClientVersion}`);
+      headers.set("x-grok-client-version", presentedClientVersion);
       headers.set("x-grok-client-identifier", "opengeni");
       headers.set("x-grok-client-mode", XAI_CLIENT_MODE);
       headers.set("x-authenticateresponse", "authenticate-response");
@@ -143,6 +170,11 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
         lastProgressAt: null,
         terminal: false,
         terminalEventEmitted: false,
+        admitted: false,
+        settlement: null,
+        refused: false,
+        outputObserved: false,
+        meaningfulOutput: false,
       };
       let response: Response | undefined;
       try {
@@ -150,6 +182,16 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
           phase: "started",
           responseObserved: false,
         });
+        // The one-shot custody admission is the last awaited step before the
+        // physical fetch; a refusal here sends nothing.
+        await context.beforeProviderDispatch?.({ requestId, transportAttempt });
+        audit.admitted = true;
+        if (init?.signal?.aborted) {
+          // Cancelled between admission and the send: nothing reached the
+          // provider, so the admitted request settles as refused, not unknown.
+          audit.refused = true;
+          throw init.signal.reason ?? new DOMException("The request was aborted", "AbortError");
+        }
         response = await base(url, {
           ...init,
           method: init?.method ?? (input instanceof Request ? input.method : "POST"),
@@ -191,6 +233,35 @@ export function xaiSubscriptionFetch(base: XaiFetchLike): XaiFetchLike {
       });
       sent = await send(true, 2);
     }
+    if (!sent.response.ok && definiteErrorStatus(sent.response.status)) {
+      // xAI refuses a Grok client below its minimum and names the version it
+      // requires. The refusal is definite (nothing ran), so adopt that
+      // minimum and send this request once more presenting it.
+      const refused = sent.response;
+      const bytes = new Uint8Array(
+        await readBodySettled(sent.audit, refused, () => refused.arrayBuffer()),
+      );
+      const text = new TextDecoder().decode(bytes.subarray(0, MAX_ERROR_BODY_BYTES));
+      if (adoptXaiClientVersionFloor(text, presentedClientVersion)) {
+        await emitRequestEvent(sent.audit, {
+          phase: "failed",
+          responseObserved: true,
+          status: refused.status,
+          willRetry: true,
+          ...providerRequestIdFields(refused.headers),
+        });
+        sent = await send(false, sent.audit.transportAttempt + 1);
+      } else {
+        sent = {
+          audit: sent.audit,
+          response: new Response(bytes, {
+            status: refused.status,
+            statusText: refused.statusText,
+            headers: refused.headers,
+          }),
+        };
+      }
+    }
     return await normalizeResponse(sent.response, sent.audit, context.onFinalContextUsage);
   };
 }
@@ -213,7 +284,9 @@ async function normalizeResponse(
   onFinalContextUsage: ((usage: XaiFinalContextUsage) => void) | undefined,
 ): Promise<Response> {
   if (!response.ok) {
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    const bytes = new Uint8Array(
+      await readBodySettled(audit, response, () => response.arrayBuffer()),
+    );
     const bounded =
       bytes.byteLength > MAX_ERROR_BODY_BYTES ? bytes.slice(0, MAX_ERROR_BODY_BYTES) : bytes;
     const headers = new Headers(response.headers);
@@ -235,26 +308,36 @@ async function normalizeResponse(
       phase: "completed",
       responseObserved: true,
       status: response.status,
+      meaningfulOutput: false,
       ...providerRequestIdFields(response.headers),
     });
     return response;
   }
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("text/event-stream")) {
-    const value = await response.json();
-    const normalized = normalizeXaiResponseEventJson({
-      type: "response.completed",
-      response: value,
+    const { value, normalized } = await readBodySettled(audit, response, async () => {
+      const decoded: unknown = await response.json();
+      const decodedEvent = normalizeXaiResponseEventJson({
+        type: "response.completed",
+        response: decoded,
+      });
+      emitContextUsage(decodedEvent.value, decodedEvent.finalContextTokens, onFinalContextUsage);
+      return { value: decoded, normalized: decodedEvent };
     });
-    emitContextUsage(normalized.value, normalized.finalContextTokens, onFinalContextUsage);
     const responseValue =
       normalized.value && typeof normalized.value === "object" && !Array.isArray(normalized.value)
         ? (normalized.value as Record<string, unknown>).response
         : value;
+    audit.meaningfulOutput ||= hasMeaningfulXaiOutput(
+      responseValue && typeof responseValue === "object"
+        ? (responseValue as Record<string, unknown>).output
+        : undefined,
+    );
     await emitRequestEvent(audit, {
       phase: "completed",
       responseObserved: true,
       status: response.status,
+      meaningfulOutput: audit.meaningfulOutput,
       ...providerRequestIdFields(response.headers),
     });
     return Response.json(responseValue, {
@@ -353,6 +436,10 @@ async function normalizeResponse(
             audit.eventCount = Math.min(Number.MAX_SAFE_INTEGER, audit.eventCount + 1);
             audit.lastEventType = progress.eventType;
             audit.lastProgressAt = now;
+            if (!progress.eventType || !PREAMBLE_SSE_EVENT_TYPES.has(progress.eventType)) {
+              if (progress.terminal !== "failed") audit.outputObserved = true;
+            }
+            observeMeaningfulOutput(audit, progress);
             silenceStartedAt = now;
             if (audit.eventCount === 1) {
               await emitRequestEvent(audit, {
@@ -374,13 +461,17 @@ async function normalizeResponse(
               audit.terminal = true;
               clearIdleTimer();
               await reader.cancel().catch(() => undefined);
+              const terminalError = xaiSseTerminalError(response, audit, progress);
+              audit.refused =
+                !audit.outputObserved &&
+                (terminalError.status === 429 || CAPACITY_SSE_ERROR_CODES.has(terminalError.code));
               await emitRequestEvent(audit, {
                 phase: "failed",
                 responseObserved: true,
                 status: response.status,
                 ...providerRequestIdFields(response.headers),
               });
-              errorStream(xaiSseTerminalError(response, audit, progress));
+              errorStream(terminalError);
               return;
             }
             controller.enqueue(
@@ -395,6 +486,7 @@ async function normalizeResponse(
                 phase: "completed",
                 responseObserved: true,
                 status: response.status,
+                meaningfulOutput: audit.meaningfulOutput,
                 ...providerRequestIdFields(response.headers),
               });
               closeStream();
@@ -453,6 +545,18 @@ async function normalizeResponse(
     statusText: response.statusText,
     headers: response.headers,
   });
+}
+
+function observeMeaningfulOutput(audit: RequestAudit, progress: SseProgress): void {
+  if (audit.meaningfulOutput || !progress.payload) return;
+  if (progress.eventType === "response.output_item.done") {
+    audit.meaningfulOutput = hasMeaningfulXaiOutput([progress.payload.item]);
+  } else if (progress.terminal === "completed") {
+    const final = progress.payload.response;
+    audit.meaningfulOutput = hasMeaningfulXaiOutput(
+      final && typeof final === "object" ? (final as Record<string, unknown>).output : undefined,
+    );
+  }
 }
 
 function sseProgress(block: string): SseProgress {
@@ -593,6 +697,61 @@ function xaiSseTerminalError(
   });
 }
 
+/**
+ * Read and decode a whole non-stream body; a failure still settles the
+ * request once: refused for a definite error status, unknown otherwise (a
+ * 200 was produced).
+ */
+async function readBodySettled<T>(
+  audit: RequestAudit,
+  response: Response,
+  read: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    await emitRequestEvent(audit, {
+      phase: "failed",
+      responseObserved: true,
+      status: response.status,
+      ...providerRequestIdFields(response.headers),
+    }).catch(() => undefined);
+    throw error;
+  }
+}
+
+function settleProviderRequest(
+  audit: RequestAudit,
+  outcome: XaiProviderRequestSettlement["outcome"],
+): Promise<void> {
+  if (!audit.admitted) return Promise.resolve();
+  audit.settlement ??= (async () => {
+    await audit.ctx.onProviderRequestSettled?.({
+      requestId: audit.requestId,
+      transportAttempt: audit.transportAttempt,
+      outcome,
+    });
+  })();
+  return audit.settlement;
+}
+
+/**
+ * An HTTP error status the provider returned is a definite answer: no model
+ * response was produced. Timeouts (408, 504) and conflicts (409) stay
+ * ambiguous because the provider may still be processing the request; an
+ * absent response is ambiguous too. The same rule as the Codex transport.
+ */
+function definiteErrorStatus(status: number | undefined): boolean {
+  return (
+    status !== undefined &&
+    status >= 400 &&
+    status < 600 &&
+    status !== 408 &&
+    status !== 409 &&
+    status !== 504
+  );
+}
+
 function boundedStreamIdleTimeout(value: number | undefined): number {
   const resolved = value ?? XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS;
   if (!Number.isSafeInteger(resolved) || resolved < 1 || resolved > MAX_STREAM_IDLE_TIMEOUT_MS) {
@@ -662,6 +821,15 @@ async function emitRequestEvent(
   if (event.phase === "completed" || event.phase === "failed" || event.phase === "timed_out") {
     if (audit.terminalEventEmitted) return;
     audit.terminalEventEmitted = true;
+    // Custody settles before the audit sink, independently of its delivery.
+    await settleProviderRequest(
+      audit,
+      audit.refused || definiteErrorStatus(event.status)
+        ? "refused"
+        : event.phase === "completed"
+          ? "response_received"
+          : "unknown",
+    );
   }
   const observed = emitDiagnosticEvent(audit, event);
   await audit.ctx.onModelRequestEvent?.(observed);

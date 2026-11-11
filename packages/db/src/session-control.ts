@@ -1,17 +1,25 @@
+import {
+  childRequiresActionRouteTx,
+  parentOutboxAuthorityTx,
+  recordedChildNoticeTargetTx,
+  type ChildRequiresActionRoute,
+} from "./child-outbox-authority";
+import { lockSiteRuntimeAdmission } from "./site-runtime-admission";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
   boundWorkspaceControlEvent,
   childPausedClassification,
-  McpPersonalConnectionDelegations,
   workspaceControlUtf8Bytes,
   type WorkspacePauseTimerRequest,
   type SessionMcpApprovalPolicy,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, getTableColumns, inArray, sql, type SQL } from "drizzle-orm";
+import { anyOf } from "./sql-arrays";
 import type { Database, SessionActivityDatabase } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
+import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { getExternalLinkTurnAuthorization } from "./external-link-work";
 import * as schema from "./schema";
@@ -20,10 +28,14 @@ import {
   childLifecycleNoticesEnabled,
   childPausedDedupeKey,
   childPausedSummary,
+  childRequiresActionDedupeKey,
   childRequiresActionResolvedDedupeKey,
   childRequiresActionResolvedSummary,
 } from "./child-lifecycle-notices";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
+import { releaseCapacityWaitingTurnInTransaction } from "./capacity-wait-release";
+import { copySubscriptionAuthorityCompatInTransaction } from "./subscription-core-acceptance-authority";
+import { deleteSubscriptionCoreWaitersForTurns } from "./subscription-core/waiters";
 import {
   mirrorSessionRealtimeContextInTransaction,
   renderRealtimeHumanInputResponseContext,
@@ -238,7 +250,12 @@ export class SessionCommandIdempotencyError extends Error {
 
 export class AgentCommandAuthorityError extends Error {
   constructor(
-    readonly code: "CALLER_STALE" | "CALLER_INTERRUPTED" | "TARGET_NOT_VERTICAL" | "SELF_STEER",
+    readonly code:
+      | "CALLER_STALE"
+      | "CALLER_INTERRUPTED"
+      | "TARGET_NOT_VERTICAL"
+      | "SELF_STEER"
+      | "PERSONAL_MACHINE_OWNER_REQUIRED",
     message: string,
   ) {
     super(message);
@@ -252,10 +269,21 @@ export async function assertAgentCommandAuthorityInTransaction(
     workspaceId: string;
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     targetSessionId: string;
-    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait" | "model_settings";
+    action:
+      | "pause"
+      | "resume"
+      | "steer"
+      | "message"
+      | "goal"
+      | "wait"
+      | "model_settings"
+      | "context";
   },
 ): Promise<void> {
-  if (["goal", "wait"].includes(input.action) && input.targetSessionId !== input.actor.sessionId) {
+  if (
+    ["goal", "wait", "context"].includes(input.action) &&
+    input.targetSessionId !== input.actor.sessionId
+  ) {
     throw new SessionControlInvariantError("An agent self command must target its own session");
   }
   // Every command caller establishes the control/workspace prefix first.
@@ -548,6 +576,9 @@ export async function lockWorkspaceInferenceControl(
   mode: WorkspaceControlLockMode,
   options: WorkspaceControlLockOptions = {},
 ): Promise<WorkspaceControlRow> {
+  // Some admission commands acquire control before the session writer helper.
+  // Keep the Site conversation -> control -> session order on those paths too.
+  await lockSiteRuntimeAdmission(db, workspaceId);
   const budget = lockBudgetFor(options);
   const [prior] = budget
     ? await db.execute<{ value: string }>(sql`select current_setting('lock_timeout') as value`)
@@ -684,6 +715,68 @@ export type SessionEventWriteLocks = {
   attempts: Array<typeof schema.sessionTurnAttempts.$inferSelect>;
 };
 
+type SessionEventWriteProjectionInput = SessionEventWriteLockInput & {
+  /** Event-only appenders need identity, ownership and projection fields, not frozen inputs. */
+  rowProjection?: "full" | "event";
+};
+
+const eventWorkspaceColumns = {
+  id: schema.workspaces.id,
+  accountId: schema.workspaces.accountId,
+};
+const eventSessionColumns = {
+  id: schema.sessions.id,
+  accountId: schema.sessions.accountId,
+  workspaceId: schema.sessions.workspaceId,
+  activeTurnId: schema.sessions.activeTurnId,
+  lastSequence: schema.sessions.lastSequence,
+  authorityEpoch: schema.sessions.authorityEpoch,
+  executionAuthorityEpoch: schema.sessions.executionAuthorityEpoch,
+  visibility: schema.sessions.visibility,
+  ownerOrganizationMembershipId: schema.sessions.ownerOrganizationMembershipId,
+  parentSessionId: schema.sessions.parentSessionId,
+  directControlState: schema.sessions.directControlState,
+  directPauseRevision: schema.sessions.directPauseRevision,
+  subtreeRunOverrideRevision: schema.sessions.subtreeRunOverrideRevision,
+  controlVersion: schema.sessions.controlVersion,
+};
+const eventTurnColumns = {
+  id: schema.sessionTurns.id,
+  accountId: schema.sessionTurns.accountId,
+  workspaceId: schema.sessionTurns.workspaceId,
+  sessionId: schema.sessionTurns.sessionId,
+  executionGeneration: schema.sessionTurns.executionGeneration,
+  activeAttemptId: schema.sessionTurns.activeAttemptId,
+  status: schema.sessionTurns.status,
+  metadata: schema.sessionTurns.metadata,
+  createdAt: schema.sessionTurns.createdAt,
+  version: schema.sessionTurns.version,
+};
+const eventAttemptColumns = {
+  id: schema.sessionTurnAttempts.id,
+  accountId: schema.sessionTurnAttempts.accountId,
+  workspaceId: schema.sessionTurnAttempts.workspaceId,
+  sessionId: schema.sessionTurnAttempts.sessionId,
+  turnId: schema.sessionTurnAttempts.turnId,
+  executionGeneration: schema.sessionTurnAttempts.executionGeneration,
+  state: schema.sessionTurnAttempts.state,
+  authorityEpoch: schema.sessionTurnAttempts.authorityEpoch,
+  authorityVisibility: schema.sessionTurnAttempts.authorityVisibility,
+  authorityOwnerOrganizationMembershipId:
+    schema.sessionTurnAttempts.authorityOwnerOrganizationMembershipId,
+};
+
+export type SessionEventWriteFenceLocks = {
+  control: WorkspaceControlRow | null;
+  workspace: Pick<typeof schema.workspaces.$inferSelect, keyof typeof eventWorkspaceColumns> | null;
+  sessions: Array<Pick<typeof schema.sessions.$inferSelect, keyof typeof eventSessionColumns>>;
+  cursors: SessionEventWriteLocks["cursors"];
+  turns: Array<Pick<typeof schema.sessionTurns.$inferSelect, keyof typeof eventTurnColumns>>;
+  attempts: Array<
+    Pick<typeof schema.sessionTurnAttempts.$inferSelect, keyof typeof eventAttemptColumns>
+  >;
+};
+
 /**
  * Establish the one canonical lock prefix for every `session_events` writer:
  *
@@ -718,48 +811,66 @@ export type SessionEventWriteLocks = {
  * They use the explicit `already_locked` stages, while retaining the same
  * monotonic table order. New event writers should prefer one complete call.
  *
- * Retained-screenshot prepare is not an event writer, but its INSERT still
- * KEY SHAREs the turn and attempt through FKs. It must take this same prefix
+ * Retained-screenshot and generated-image prepare are not event writers, but
+ * their INSERTs KEY SHARE the turn and attempt through FKs. They take this prefix
  * first: PostgreSQL fires those FK checks in catalog name/OID order, which can
  * be attempt-then-turn and otherwise deadlocks against this helper.
  */
+export function lockSessionEventWriteRows(
+  db: Database,
+  input: SessionEventWriteLockInput & { rowProjection: "event" },
+): Promise<SessionEventWriteFenceLocks>;
+export function lockSessionEventWriteRows(
+  db: Database,
+  input: SessionEventWriteLockInput & { rowProjection?: "full" },
+): Promise<SessionEventWriteLocks>;
+export function lockSessionEventWriteRows(
+  db: Database,
+  input: SessionEventWriteProjectionInput,
+): Promise<SessionEventWriteFenceLocks>;
 export async function lockSessionEventWriteRows(
   db: Database,
-  input: SessionEventWriteLockInput,
-): Promise<SessionEventWriteLocks> {
+  input: SessionEventWriteProjectionInput,
+): Promise<SessionEventWriteFenceLocks> {
+  await lockSiteRuntimeAdmission(db, input.workspaceId, input.sessionIds ?? []);
   const controlLock = input.controlLock;
   const control =
     controlLock === "share" || controlLock === "update"
       ? await lockWorkspaceInferenceControl(db, input.workspaceId, controlLock)
       : null;
 
-  let workspace: typeof schema.workspaces.$inferSelect | null = null;
-  if ((input.workspaceLock ?? "key_share") === "key_share") {
-    const [lockedWorkspace] = await db
-      .select()
-      .from(schema.workspaces)
-      .where(eq(schema.workspaces.id, input.workspaceId))
-      .for("key share")
-      .limit(1);
-    workspace = lockedWorkspace ?? null;
-  }
-
+  const eventOnly = input.rowProjection === "event";
+  const sessionColumns = eventOnly ? eventSessionColumns : getTableColumns(schema.sessions);
   const sessionIds = [...new Set(input.sessionIds ?? [])].sort();
   const sessionLock = input.sessionLock ?? "no_key_update";
-  let sessions =
+  // Submit in canonical lock order on the transaction-pinned connection. The
+  // server still executes separate statements with fresh READ COMMITTED
+  // snapshots; only the client waits overlap. Cursor-dependent work stays below.
+  const [workspaces, lockedSessions] = await Promise.all([
+    (input.workspaceLock ?? "key_share") === "key_share"
+      ? db
+          .select(eventOnly ? eventWorkspaceColumns : getTableColumns(schema.workspaces))
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, input.workspaceId))
+          .for("key share")
+          .limit(1)
+      : [],
     sessionIds.length > 0
-      ? await db
-          .select()
+      ? db
+          .select(sessionColumns)
           .from(schema.sessions)
           .where(
             and(
               eq(schema.sessions.workspaceId, input.workspaceId),
-              inArray(schema.sessions.id, sessionIds),
+              anyOf(schema.sessions.id, sessionIds),
             ),
           )
           .orderBy(schema.sessions.id)
           .for(sessionLock === "key_share" ? "key share" : "no key update")
-      : [];
+      : [],
+  ]);
+  const workspace = workspaces[0] ?? null;
+  let sessions = lockedSessions;
 
   const cursors =
     sessions.length > 0
@@ -790,12 +901,12 @@ export async function lockSessionEventWriteRows(
     // Re-read only after owning the cursor so the attempt fence evaluates the
     // latest committed session state while later semantic writers wait here.
     sessions = await db
-      .select()
+      .select(sessionColumns)
       .from(schema.sessions)
       .where(
         and(
           eq(schema.sessions.workspaceId, input.workspaceId),
-          inArray(schema.sessions.id, sessionIds),
+          anyOf(schema.sessions.id, sessionIds),
         ),
       )
       .orderBy(schema.sessions.id)
@@ -826,36 +937,35 @@ export async function lockSessionEventWriteRows(
   });
 
   const turnIds = [...new Set(input.turnIds ?? [])].sort();
-  const turns =
+  const attemptIds = [...new Set(input.attemptIds ?? [])].sort();
+  const [turns, attempts] = await Promise.all([
     turnIds.length > 0
-      ? await db
-          .select()
+      ? db
+          .select(eventOnly ? eventTurnColumns : getTableColumns(schema.sessionTurns))
           .from(schema.sessionTurns)
           .where(
             and(
               eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              inArray(schema.sessionTurns.id, turnIds),
+              anyOf(schema.sessionTurns.id, turnIds),
             ),
           )
           .orderBy(schema.sessionTurns.id)
           .for("update")
-      : [];
-
-  const attemptIds = [...new Set(input.attemptIds ?? [])].sort();
-  const attempts =
+      : [],
     attemptIds.length > 0
-      ? await db
-          .select()
+      ? db
+          .select(eventOnly ? eventAttemptColumns : getTableColumns(schema.sessionTurnAttempts))
           .from(schema.sessionTurnAttempts)
           .where(
             and(
               eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-              inArray(schema.sessionTurnAttempts.id, attemptIds),
+              anyOf(schema.sessionTurnAttempts.id, attemptIds),
             ),
           )
           .orderBy(schema.sessionTurnAttempts.id)
           .for("update")
-      : [];
+      : [],
+  ]);
 
   return { control, workspace, sessions: canonicalSessions, cursors, turns, attempts };
 }
@@ -1112,9 +1222,123 @@ function targetValues(sessionIds: string[]) {
   );
 }
 
-const TARGET_PATH_PROJECTION_LIMIT = 128;
+// Who can read a session and who it controls are separate. A paused Only-me
+// ancestor still pauses a workspace-visible descendant. The control walk reads
+// under the caller's visibility first; only when that chain stops short of a
+// root is it re-read in full and the part the caller could not see redacted:
+// a hidden ancestor contributes its pause state, never its title, actor or
+// reason. The ordinary path costs no extra statement.
+// Same label the related-access projection uses for an ancestor the caller cannot read.
+const HIDDEN_ANCESTOR_DISPLAY_NAME = "An ancestor session";
+
+/**
+ * Re-run a read outside the active viewer's session visibility, then restore
+ * it. Null when no viewer is set: a gap is then a genuine invariant failure.
+ */
+async function readOutsideViewerVisibility<T>(
+  db: Database,
+  read: () => Promise<T>,
+): Promise<T | null> {
+  const [row] = await db.execute<{ subjectId: string | null }>(
+    sql`select nullif(current_setting('opengeni.subject_id', true), '') as "subjectId"`,
+  );
+  const viewer = row?.subjectId ?? null;
+  if (!viewer) return null;
+  const restore = () => db.execute(sql`select set_config('opengeni.subject_id', ${viewer}, true)`);
+  await db.execute(sql`select set_config('opengeni.subject_id', '', true)`);
+  let value: T;
+  try {
+    value = await read();
+  } catch (error) {
+    await restore().catch(() => undefined);
+    throw error;
+  }
+  await restore();
+  return value;
+}
+
+async function sessionsHiddenFromViewer(
+  db: Database,
+  workspaceId: string,
+  sessionIds: Iterable<string>,
+): Promise<Set<string>> {
+  const ids = [...new Set(sessionIds)];
+  if (ids.length === 0) return new Set();
+  const visible = await db.execute<{ id: string }>(sql`
+    select session.id
+    from ${schema.sessions} session
+    where session.workspace_id = ${workspaceId}
+      and session.id in (${sql.join(
+        ids.map((id) => sql`${id}::uuid`),
+        sql`, `,
+      )})
+  `);
+  const visibleIds = new Set(visible.map((row: { id: string }) => row.id));
+  return new Set(ids.filter((id) => !visibleIds.has(id)));
+}
+
+function redactHiddenAncestor<T extends AncestryNode>(row: T): T {
+  return {
+    ...row,
+    title: HIDDEN_ANCESTOR_DISPLAY_NAME,
+    directControlChangedBy: null,
+    directControlReason: null,
+  };
+}
+
+/** True when some target's visible chain ends below its root. */
+function ancestryStopsShort(rows: AncestryRow[]): boolean {
+  const deepest = new Map<string, AncestryRow>();
+  for (const row of rows) {
+    const current = deepest.get(row.targetId);
+    if (!current || Number(row.depth) > Number(current.depth)) deepest.set(row.targetId, row);
+  }
+  for (const row of deepest.values()) {
+    if (row.parentSessionId !== null && !row.cycle && Number(row.depth) < SESSION_ANCESTRY_LIMIT) {
+      return true;
+    }
+  }
+  return false;
+}
 
 async function loadTargetAncestryRows(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<AncestryRow[]> {
+  const visible = await queryTargetAncestryRows(db, workspaceId, sessionIds);
+  if (!ancestryStopsShort(visible)) return visible;
+  const complete = await readOutsideViewerVisibility(db, () =>
+    queryTargetAncestryRows(db, workspaceId, sessionIds),
+  );
+  if (!complete) return visible;
+  const visibleIds = new Set(visible.map((row) => row.sessionId));
+  return complete.map((row) => (visibleIds.has(row.sessionId) ? row : redactHiddenAncestor(row)));
+}
+
+async function loadAncestryNodes(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<Map<string, AncestryNode>> {
+  const visible = await queryAncestryNodes(db, workspaceId, sessionIds);
+  const stopsShort = [...visible.values()].some(
+    (node) => node.parentSessionId !== null && !visible.has(node.parentSessionId),
+  );
+  if (!stopsShort) return visible;
+  const complete = await readOutsideViewerVisibility(db, () =>
+    queryAncestryNodes(db, workspaceId, sessionIds),
+  );
+  if (!complete) return visible;
+  for (const [sessionId, node] of complete) {
+    if (!visible.has(sessionId)) complete.set(sessionId, redactHiddenAncestor(node));
+  }
+  return complete;
+}
+
+const TARGET_PATH_PROJECTION_LIMIT = 128;
+
+async function queryTargetAncestryRows(
   db: Database,
   workspaceId: string,
   sessionIds: string[],
@@ -1182,7 +1406,7 @@ async function loadTargetAncestryRows(
   `);
 }
 
-async function loadAncestryNodes(
+async function queryAncestryNodes(
   db: Database,
   workspaceId: string,
   sessionIds: string[],
@@ -1413,6 +1637,31 @@ function projectEffectiveControl(
   };
 }
 
+/**
+ * Open settlement work (stopping background commands, unfinished
+ * interruptions) is rare, while requested targets can root large subtrees with
+ * long histories. Both summaries therefore start from the small open set and
+ * walk parent edges upward to the requested targets. Sessions have one parent,
+ * so a descendant within SESSION_ANCESTRY_LIMIT edges of a target is exactly an
+ * open row whose bounded ancestor walk reaches that target; the path array
+ * stops legacy cycles the same way the downward walk did.
+ */
+function openSettlementAncestorsSql(workspaceId: string, origins: SQL): SQL {
+  return sql`ancestors(origin_session_id, session_id, depth, path) as (
+      select origin.session_id, origin.session_id, 0::integer, array[origin.session_id]::uuid[]
+      from (select distinct session_id from ${origins}) origin
+      union all
+      select ancestor.origin_session_id, step.parent_session_id, ancestor.depth + 1,
+        ancestor.path || step.parent_session_id
+      from ancestors ancestor
+      join ${schema.sessions} step
+        on step.workspace_id = ${workspaceId} and step.id = ancestor.session_id
+      where step.parent_session_id is not null
+        and not step.parent_session_id = any(ancestor.path)
+        and ancestor.depth < ${SESSION_ANCESTRY_LIMIT}
+    )`;
+}
+
 async function stoppingBackgroundCommandCounts(
   db: Database,
   workspaceId: string,
@@ -1420,21 +1669,20 @@ async function stoppingBackgroundCommandCounts(
 ): Promise<Map<string, number>> {
   const rows = await db.execute<{ sessionId: string; commandCount: number | string }>(sql`
     with recursive targets(id) as (values ${targetValues(sessionIds)}),
-    descendants(target_id, session_id, depth, path) as (
-      select target.id, target.id, 0::integer, array[target.id]::uuid[] from targets target
-      union all
-      select parent.target_id, child.id, parent.depth + 1, parent.path || child.id
-      from descendants parent
-      join ${schema.sessions} child
-        on child.workspace_id = ${workspaceId} and child.parent_session_id = parent.session_id
-      where not child.id = any(parent.path) and parent.depth < ${SESSION_ANCESTRY_LIMIT}
-    )
-    select descendant.target_id as "sessionId", count(distinct command.id)::integer as "commandCount"
-    from descendants descendant
-    join ${schema.sessionBackgroundCommands} command
-      on command.workspace_id = ${workspaceId} and command.session_id = descendant.session_id
-      and command.state = 'stopping'
-    group by descendant.target_id
+    stopping as materialized (
+      -- session_background_commands_active_session_idx holds only running and
+      -- stopping commands.
+      select command.id, command.session_id
+      from ${schema.sessionBackgroundCommands} command
+      where command.workspace_id = ${workspaceId}
+        and command.state = 'stopping'
+    ),
+    ${openSettlementAncestorsSql(workspaceId, sql`stopping`)}
+    select target.id as "sessionId", count(distinct command.id)::integer as "commandCount"
+    from targets target
+    join ancestors ancestor on ancestor.session_id = target.id
+    join stopping command on command.session_id = ancestor.origin_session_id
+    group by target.id
   `);
   return new Map(
     rows.map((row: { sessionId: string; commandCount: number | string }) => [
@@ -1449,10 +1697,9 @@ async function settlementAttemptCounts(
   workspaceId: string,
   sessionIds: string[],
 ): Promise<Map<string, SettlementAttemptCounts>> {
-  // Drive the projection from the requested targets through the indexed
-  // parent_session_id edge. The inverse plan scanned every interruption in a
-  // workspace before walking upward, making one session read proportional to
-  // a high-volume orchestrator workspace's entire interruption history.
+  // session_attempt_interruptions_open_settlement_idx holds only interruptions
+  // that are unsettled or whose attempt may not have quiesced yet, so this read
+  // is proportional to open work, not to subtree size or interruption history.
   const rows = await db.execute<{
     sessionId: string;
     attemptCount: number | string;
@@ -1460,57 +1707,52 @@ async function settlementAttemptCounts(
     quiescencePendingCount: number | string;
   }>(sql`
     with recursive targets(id) as (values ${targetValues(sessionIds)}),
-    descendant_sessions(target_id, session_id, depth, path) as (
-      select target.id, target.id, 0::integer, array[target.id]::uuid[]
-      from targets target
-      union all
+    open_interruptions as materialized (
       select
-        descendant.target_id,
-        child.id,
-        descendant.depth + 1,
-        descendant.path || child.id
-      from descendant_sessions descendant
-      join ${schema.sessions} child
-        on child.workspace_id = ${workspaceId}
-       and child.parent_session_id = descendant.session_id
-      where not child.id = any(descendant.path)
-        and descendant.depth < ${SESSION_ANCESTRY_LIMIT}
-    ), interruptions as (
-      select
-        descendant.target_id,
+        interruption.session_id,
         interruption.attempt_id,
-        bool_or(interruption.state in ('pending', 'delivered', 'acknowledged'))
-          as interruption_pending,
-        bool_or(
-          interruption.state in ('settled', 'rejected_stale')
-          and attempt.quiesced_at is null
-        ) as quiescence_pending
-      from descendant_sessions descendant
-      join ${schema.sessionAttemptInterruptions} interruption
-        on interruption.workspace_id = ${workspaceId}
-       and interruption.session_id = descendant.session_id
+        interruption.state in ('pending', 'delivered', 'acknowledged') as interruption_pending,
+        interruption.state in ('settled', 'rejected_stale')
+          and attempt.quiesced_at is null as quiescence_pending
+      from ${schema.sessionAttemptInterruptions} interruption
       join ${schema.sessionTurnAttempts} attempt
         on attempt.workspace_id = interruption.workspace_id
        and attempt.id = interruption.attempt_id
-      where (
+      where interruption.workspace_id = ${workspaceId}
+        and (
+          interruption.state in ('pending', 'delivered', 'acknowledged')
+          or not interruption.attempt_quiesced
+        )
+        and (
           interruption.state in ('pending', 'delivered', 'acknowledged')
           or (
             interruption.state in ('settled', 'rejected_stale')
             and attempt.quiesced_at is null
           )
         )
-      group by descendant.target_id, interruption.attempt_id
+    ),
+    ${openSettlementAncestorsSql(workspaceId, sql`open_interruptions`)},
+    interruptions as (
+      select
+        target.id as target_id,
+        interruption.attempt_id,
+        bool_or(interruption.interruption_pending) as interruption_pending,
+        bool_or(interruption.quiescence_pending) as quiescence_pending
+      from targets target
+      join ancestors ancestor on ancestor.session_id = target.id
+      join open_interruptions interruption
+        on interruption.session_id = ancestor.origin_session_id
+      group by target.id, interruption.attempt_id
     )
     select
-      target.id as "sessionId",
-      count(interruption.attempt_id)::integer as "attemptCount",
-      count(interruption.attempt_id)
-        filter (where interruption.interruption_pending)::integer as "interruptionPendingCount",
-      count(interruption.attempt_id)
-        filter (where interruption.quiescence_pending)::integer as "quiescencePendingCount"
-    from targets target
-    join interruptions interruption on interruption.target_id = target.id
-    group by target.id
+      target_id as "sessionId",
+      count(attempt_id)::integer as "attemptCount",
+      count(attempt_id) filter (where interruption_pending)::integer
+        as "interruptionPendingCount",
+      count(attempt_id) filter (where quiescence_pending)::integer
+        as "quiescencePendingCount"
+    from interruptions
+    group by target_id
   `);
   return new Map(
     rows.map(
@@ -1529,6 +1771,95 @@ async function settlementAttemptCounts(
       ],
     ),
   );
+}
+
+type SingleTargetControlRow = AncestryRow & {
+  hasChildren: boolean;
+  attemptCount: number | string;
+  interruptionPendingCount: number | string;
+  quiescencePendingCount: number | string;
+  commandCount: number | string;
+};
+
+/**
+ * A leaf's settlement summaries need no descendant walk. Detect children and
+ * read its direct summaries in ONE statement: a separate EXISTS followed by
+ * direct counts could miss a child committed between READ COMMITTED snapshots.
+ * This is only a projection, never a subtree writer/admission shortcut.
+ */
+async function loadSingleTargetControlRow(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SingleTargetControlRow | undefined> {
+  const rows = await db.execute<SingleTargetControlRow>(sql`
+    with target as materialized (
+      select session.id, session.parent_session_id, session.title,
+        session.direct_control_state, session.direct_pause_revision,
+        session.subtree_run_override_revision, session.control_version,
+        session.direct_control_changed_by, session.direct_control_reason,
+        session.direct_control_changed_at, exists (
+        select 1 from ${schema.sessions} child
+        where child.workspace_id = ${workspaceId}
+          and child.parent_session_id = session.id
+      ) as has_children
+      from ${schema.sessions} session
+      where session.workspace_id = ${workspaceId} and session.id = ${sessionId}
+    )
+    select
+      target.id as "targetId",
+      target.id as "sessionId",
+      target.parent_session_id as "parentSessionId",
+      target.title,
+      target.direct_control_state as "directState",
+      target.direct_pause_revision as "directPauseRevision",
+      target.subtree_run_override_revision as "subtreeRunOverrideRevision",
+      target.control_version as "controlVersion",
+      target.direct_control_changed_by as "directControlChangedBy",
+      target.direct_control_reason as "directControlReason",
+      target.direct_control_changed_at as "directControlChangedAt",
+      0::integer as depth,
+      false as cycle,
+      target.has_children as "hasChildren",
+      stopping.attempt_count as "attemptCount",
+      stopping.interruption_pending_count as "interruptionPendingCount",
+      stopping.quiescence_pending_count as "quiescencePendingCount",
+      commands.command_count as "commandCount"
+    from target
+    cross join lateral (
+      select
+        count(*)::integer as attempt_count,
+        count(*) filter (where interruption_pending)::integer as interruption_pending_count,
+        count(*) filter (where quiescence_pending)::integer as quiescence_pending_count
+      from (
+        select interruption.attempt_id,
+          bool_or(interruption.state in ('pending', 'delivered', 'acknowledged'))
+            as interruption_pending,
+          bool_or(interruption.state in ('settled', 'rejected_stale')
+            and attempt.quiesced_at is null) as quiescence_pending
+        from ${schema.sessionAttemptInterruptions} interruption
+        join ${schema.sessionTurnAttempts} attempt
+          on attempt.workspace_id = interruption.workspace_id
+          and attempt.id = interruption.attempt_id
+        where not target.has_children
+          and interruption.workspace_id = ${workspaceId}
+          and interruption.session_id = target.id
+          and (interruption.state in ('pending', 'delivered', 'acknowledged')
+            or (interruption.state in ('settled', 'rejected_stale')
+              and attempt.quiesced_at is null))
+        group by interruption.attempt_id
+      ) interruptions
+    ) stopping
+    cross join lateral (
+      select count(distinct command.id)::integer as command_count
+      from ${schema.sessionBackgroundCommands} command
+      where not target.has_children
+        and command.workspace_id = ${workspaceId}
+        and command.session_id = target.id
+        and command.state = 'stopping'
+    ) commands
+  `);
+  return rows[0];
 }
 
 export async function evaluateSessionControls(
@@ -1553,6 +1884,38 @@ export async function evaluateSessionControls(
   const workspace =
     options.workspaceControl ??
     (await lockWorkspaceInferenceControl(db, workspaceId, options.lock ?? "share"));
+  if (uniqueIds.length === 1) {
+    const sessionId = uniqueIds[0]!;
+    const target = await loadSingleTargetControlRow(db, workspaceId, sessionId);
+    if (!target) {
+      throw new SessionControlInvariantError(
+        `Session ${sessionId} does not exist in its workspace`,
+      );
+    }
+    const stopping = target.hasChildren
+      ? ((await settlementAttemptCounts(db, workspaceId, uniqueIds)).get(sessionId) ??
+        NO_SETTLEMENT_ATTEMPTS)
+      : {
+          attemptCount: Number(target.attemptCount),
+          interruptionPendingCount: Number(target.interruptionPendingCount),
+          quiescencePendingCount: Number(target.quiescencePendingCount),
+        };
+    const stoppingCommands = target.hasChildren
+      ? ((await stoppingBackgroundCommandCounts(db, workspaceId, uniqueIds)).get(sessionId) ?? 0)
+      : Number(target.commandCount);
+    // A root's control node is already complete; nonroots retain the bounded
+    // recursive ancestry validation (including missing ancestors and cycles).
+    const ancestry =
+      target.parentSessionId === null
+        ? [target]
+        : await loadTargetAncestryRows(db, workspaceId, uniqueIds);
+    return new Map([
+      [
+        sessionId,
+        projectEffectiveControl(workspace, sessionId, ancestry, stopping, stoppingCommands),
+      ],
+    ]);
+  }
   const stopping = await settlementAttemptCounts(db, workspaceId, uniqueIds);
   const stoppingCommands = await stoppingBackgroundCommandCounts(db, workspaceId, uniqueIds);
   const result = new Map<string, EffectiveSessionControl>();
@@ -1616,6 +1979,17 @@ export async function evaluateSessionWriteAdmissionControl(
   options: {
     lock?: WorkspaceControlLockMode;
     workspaceControl?: WorkspaceControlRow | undefined;
+    /** Same-transaction NO KEY UPDATE row; KEY SHARE is not sufficient. */
+    lockedSession?: Pick<
+      typeof schema.sessions.$inferSelect,
+      | "id"
+      | "workspaceId"
+      | "parentSessionId"
+      | "directControlState"
+      | "directPauseRevision"
+      | "subtreeRunOverrideRevision"
+      | "controlVersion"
+    >;
   } = {},
 ): Promise<SessionWriteAdmissionControl> {
   if (options.workspaceControl && options.workspaceControl.workspaceId !== workspaceId) {
@@ -1626,6 +2000,41 @@ export async function evaluateSessionWriteAdmissionControl(
   const workspace =
     options.workspaceControl ??
     (await lockWorkspaceInferenceControl(db, workspaceId, options.lock ?? "share"));
+  const locked = options.lockedSession;
+  if (locked && (locked.id !== sessionId || locked.workspaceId !== workspaceId)) {
+    throw new SessionControlInvariantError("Locked session does not match write admission scope");
+  }
+  if (locked?.parentSessionId === null) {
+    // A locked root is its complete ancestry. Keep the same revision validation
+    // and blocker precedence as projectEffectiveControl, without re-reading the
+    // row or building display names, resume options and settlement projections.
+    const workspaceRevision = asSafeRevision(workspace.revision, "workspace control revision")!;
+    const pauseRevision = asSafeRevision(locked.directPauseRevision, "direct pause revision");
+    const overrideRevision = asSafeRevision(
+      locked.subtreeRunOverrideRevision,
+      "subtree run override revision",
+    );
+    const controlVersion = asSafeRevision(locked.controlVersion, "session control version")!;
+    const workspacePauseRevision = asSafeRevision(
+      workspace.workspacePauseRevision,
+      "workspace pause revision",
+    );
+    if (workspace.workspaceState === "paused" && workspacePauseRevision === null) {
+      throw new SessionControlInvariantError("Paused workspace is missing its pause revision");
+    }
+    const primaryBlockerKind =
+      locked.directControlState === "paused" && pauseRevision !== null
+        ? "session"
+        : workspace.workspaceState === "paused" &&
+            !(overrideRevision !== null && overrideRevision > workspacePauseRevision!)
+          ? "workspace"
+          : null;
+    return {
+      state: primaryBlockerKind === null ? "active" : "paused",
+      controlVersion: Math.max(workspaceRevision, controlVersion),
+      primaryBlockerKind,
+    };
+  }
   const projected = projectEffectiveControl(
     workspace,
     sessionId,
@@ -1687,7 +2096,8 @@ export async function evaluateSessionDiscoveryControls(
     throw new SessionControlInvariantError("Paused workspace is missing its pause revision");
   }
 
-  const rows = await db.execute<SessionDiscoveryControlRow>(sql`
+  const readRows = async () => [
+    ...(await db.execute<SessionDiscoveryControlRow>(sql`
     with recursive targets(id) as (values ${targetValues(uniqueIds)}),
     ancestry as (
       select
@@ -1808,7 +2218,34 @@ export async function evaluateSessionDiscoveryControls(
     left join blocker_counts counts on counts.target_id = target.id
     left join primary_blockers primary_blocker on primary_blocker.target_id = target.id
     order by target.id
-  `);
+  `)),
+  ];
+  let rows = await readRows();
+  const stopsShort = rows.some(
+    (row) =>
+      !row.reachedRoot &&
+      Number(row.ancestryCount) > 0 &&
+      (row.maxDepth === null || Number(row.maxDepth) < SESSION_ANCESTRY_LIMIT),
+  );
+  const complete = stopsShort ? await readOutsideViewerVisibility(db, readRows) : null;
+  if (complete) {
+    const hiddenBlockers = await sessionsHiddenFromViewer(
+      db,
+      workspaceId,
+      complete.flatMap((row) =>
+        row.primarySessionId && row.primarySessionId !== row.targetId ? [row.primarySessionId] : [],
+      ),
+    );
+    rows = complete.map((row) =>
+      row.primarySessionId && hiddenBlockers.has(row.primarySessionId)
+        ? {
+            ...row,
+            primaryDisplayName: HIDDEN_ANCESTOR_DISPLAY_NAME,
+            primaryDisplayNameOriginalChars: HIDDEN_ANCESTOR_DISPLAY_NAME.length,
+          }
+        : row,
+    );
+  }
 
   const result = new Map<string, SessionDiscoveryControl>();
   for (const row of rows) {
@@ -2278,6 +2715,10 @@ async function registerInterruptionWakes(
  * cannot discover them. Signal-with-start is intentional here: a closed
  * workflow cheaply re-reads the terminal row and exits, while an open workflow
  * is released from an otherwise unbounded durable wait.
+ *
+ * A sub-chat whose content is already stored (or being stored) has no
+ * workflow left to release and refuses new wakes, so it is left out; without
+ * that, cancelling an archived chat with a stored sub-chat failed outright.
  */
 async function registerCancellationWakes(
   db: Database,
@@ -2299,6 +2740,7 @@ async function registerCancellationWakes(
       from ${schema.sessions} session
       where session.workspace_id = ${input.workspaceId}
         and session.id in (${sessionIds})
+        and session.content_archive_state is null
     ), upserted as (
       insert into ${schema.sessionWorkflowWakeOutbox} (
         session_id, account_id, workspace_id, temporal_workflow_id, reason, control_revision
@@ -2379,8 +2821,9 @@ export async function registerSessionWorkflowWakeInTransaction(
  * to now alone leaves the input waiting for the periodic dispatcher. The signal
  * is only a hint: the workflow re-reads PostgreSQL, one claim consumes the
  * whole pending batch, and the admission-aware acknowledgement keeps this
- * revision open until it does. Terminal background-command settlement does not
- * signal from its settlement callers yet, so the dispatcher delivers that wake.
+ * revision open until it does. Terminal background-command settlement returns
+ * its committed wakes so each settlement caller signals them after commit; the
+ * dispatcher delivers any a caller could not signal.
  */
 export async function registerInternalUpdateWakeInTransaction(
   db: Database,
@@ -2787,6 +3230,38 @@ async function loadParentSessionId(
 }
 
 /**
+ * The sessions whose active turn waits for subscription capacity: among
+ * `sessionIds`, or across the whole workspace when it is null.
+ */
+async function loadCapacityWaitingTurns(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[] | null,
+): Promise<Array<{ sessionId: string; turnId: string }>> {
+  if (sessionIds !== null && sessionIds.length === 0) return [];
+  const rows = await db
+    .select({ sessionId: schema.sessions.id, turnId: schema.sessionTurns.id })
+    .from(schema.sessions)
+    .innerJoin(
+      schema.sessionTurns,
+      and(
+        eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
+        eq(schema.sessionTurns.id, schema.sessions.activeTurnId),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        sessionIds === null ? undefined : inArray(schema.sessions.id, sessionIds),
+        eq(schema.sessions.status, "waiting_capacity"),
+        eq(schema.sessionTurns.status, "waiting_capacity"),
+      ),
+    )
+    .orderBy(schema.sessions.id);
+  return rows;
+}
+
+/**
  * The one control-plane child -> parent outbox insert (terminal cancellation,
  * direct Pause, and cancelled human-input resolutions). The caller holds the
  * canonical prefix with the child and its parent locked UUID-ordered; the
@@ -2804,6 +3279,8 @@ async function insertChildOutboxRowInTransaction(
     summary: string;
     payload: Record<string, unknown> & { type: string };
     lineage?: Record<string, unknown>;
+    /** A resolution follows its question to the ancestor that received it. */
+    route?: ChildRequiresActionRoute;
   },
 ): Promise<void> {
   const parentSessionId = input.childSession.parentSessionId;
@@ -2819,38 +3296,14 @@ async function insertChildOutboxRowInTransaction(
       `Child outbox ${input.kind} payload discriminator mismatch`,
     );
   }
-  let personalConnectionDelegations: (typeof schema.sessionTurns.$inferSelect)["personalConnectionDelegations"] =
-    [];
-  let mcpAccountBindings: (typeof schema.sessionTurns.$inferSelect)["mcpAccountBindings"] = null;
-  if (input.childSession.parentTurnId) {
-    const [parentTurn] = await db
-      .select({
-        delegations: schema.sessionTurns.personalConnectionDelegations,
-        mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
-      })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, input.workspaceId),
-          eq(schema.sessionTurns.sessionId, parentSessionId),
-          eq(schema.sessionTurns.id, input.childSession.parentTurnId),
-        ),
-      )
-      .limit(1);
-    if (parentTurn) {
-      mcpAccountBindings = parentTurn.mcpAccountBindings;
-      const parsed = McpPersonalConnectionDelegations.safeParse(parentTurn.delegations);
-      if (!parsed.success) {
-        throw new SessionControlInvariantError(
-          `Invalid personal MCP delegation snapshot at session_turns:${input.workspaceId}:${parentSessionId}:${input.childSession.parentTurnId}`,
-        );
-      }
-      personalConnectionDelegations = parsed.data.map((delegation) => ({
-        ...delegation,
-      }));
-    }
-  }
-  await db
+  const targetSessionId = input.route?.targetSessionId ?? parentSessionId;
+  const authority = await parentOutboxAuthorityTx(db, input.workspaceId, {
+    ...(input.route?.via ?? input.childSession),
+    parentSessionId: targetSessionId,
+  });
+  const routeLineage =
+    targetSessionId !== parentSessionId ? { childSessionId: input.childSession.id } : {};
+  const inserted = await db
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
       withLosslessContentWriteVersion(
@@ -2859,23 +3312,15 @@ async function insertChildOutboxRowInTransaction(
             accountId: input.childSession.accountId,
             workspaceId: input.workspaceId,
             sourceSessionId: input.childSession.id,
-            targetSessionId: parentSessionId,
+            targetSessionId,
             dedupeKey: input.dedupeKey,
             kind: input.kind,
             classification: input.classification,
             sourceId: input.childSession.id,
             summary: input.summary,
             payload: input.payload,
-            lineage: {
-              childSessionId: input.childSession.id,
-              parentSessionId,
-              ...(input.childSession.parentTurnId
-                ? { parentTurnId: input.childSession.parentTurnId }
-                : {}),
-              ...(input.lineage ?? {}),
-            },
-            personalConnectionDelegations,
-            mcpAccountBindings,
+            ...authority,
+            lineage: { ...authority.lineage, ...routeLineage, ...(input.lineage ?? {}) },
           },
           "summary",
           "summaryCodecVersion",
@@ -2889,7 +3334,16 @@ async function insertChildOutboxRowInTransaction(
         schema.sessionSystemUpdateOutbox.workspaceId,
         schema.sessionSystemUpdateOutbox.dedupeKey,
       ],
-    });
+    })
+    .returning({ id: schema.sessionSystemUpdateOutbox.id });
+  await copySubscriptionAuthorityCompatInTransaction(
+    db,
+    inserted.map((row) => ({
+      kind: "session_system_update_outbox" as const,
+      workspaceId: input.workspaceId,
+      id: row.id,
+    })),
+  );
 }
 
 async function enqueueCancelledChildOutboxInTransaction(
@@ -2984,6 +3438,27 @@ async function enqueueCancelledChildRequiresActionResolvedOutboxInTransaction(
       outcome: "cancelled" as const,
       respondedByKind: "system" as const,
     };
+    const parentSessionId = input.rootSession.parentSessionId;
+    const recordedTarget = parentSessionId
+      ? await recordedChildNoticeTargetTx(
+          db,
+          input.workspaceId,
+          childRequiresActionDedupeKey({
+            childSessionId: input.rootSession.id,
+            turnId: humanInput.turnId,
+            turnGeneration: humanInput.turnGeneration,
+          }),
+        )
+      : null;
+    const route =
+      parentSessionId && recordedTarget && recordedTarget !== parentSessionId
+        ? await childRequiresActionRouteTx(
+            db,
+            input.workspaceId,
+            { ...input.rootSession, parentSessionId },
+            recordedTarget,
+          )
+        : undefined;
     await insertChildOutboxRowInTransaction(db, {
       workspaceId: input.workspaceId,
       childSession: input.rootSession,
@@ -3000,6 +3475,7 @@ async function enqueueCancelledChildRequiresActionResolvedOutboxInTransaction(
       summary: childRequiresActionResolvedSummary(input.rootSession.id, payload),
       payload,
       lineage: { turnId: humanInput.turnId },
+      ...(route ? { route } : {}),
     });
   }
 }
@@ -3145,6 +3621,7 @@ async function cancelSessionSubtreeInTransaction(
           eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
           inArray(schema.sessionHumanInputRequests.turnId, immediatelyCancelledTurnIds),
           eq(schema.sessionHumanInputRequests.status, "pending"),
+          eq(schema.sessionHumanInputRequests.origin, "tool_call"),
         ),
       )
       .returning({
@@ -3154,20 +3631,13 @@ async function cancelSessionSubtreeInTransaction(
         turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
         questions: schema.sessionHumanInputRequests.questions,
       });
-    await db
-      .update(schema.codexCapacityWaiters)
-      .set({
-        status: "superseded",
-        lastWakeReason: "session_cancelled",
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-          inArray(schema.codexCapacityWaiters.blockedTurnId, immediatelyCancelledTurnIds),
-          eq(schema.codexCapacityWaiters.status, "waiting"),
-        ),
-      );
+    // A core waiter (of whichever provider) exists only while its turn
+    // waits; cancelling the turn removes it (and its pending wake
+    // deliveries) in the same commit.
+    await deleteSubscriptionCoreWaitersForTurns(db, null, {
+      workspaceId: input.workspaceId,
+      turnIds: immediatelyCancelledTurnIds,
+    });
   }
   const cancelledSystemUpdates = await db
     .update(schema.sessionSystemUpdates)
@@ -3205,20 +3675,9 @@ async function cancelSessionSubtreeInTransaction(
     let sequence = session.lastSequence + (session.id === input.rootSessionId ? 1 : 0);
     const cancelledTurns = cancelledTurnsBySession.get(session.id) ?? [];
     const preinsertedEvents: Array<{ id: string; sequence: number }> = [];
-    const eventValues: SessionEventInsertWithPayload[] = [];
-    for (const update of (systemUpdatesBySession.get(session.id) ?? []).sort((left, right) =>
-      left.id.localeCompare(right.id),
-    )) {
-      eventValues.push({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: session.id,
-        sequence: ++sequence,
-        type: "system.update.cancelled",
-        payload: { updateId: update.id, reason: "session_cancelled" },
-        occurredAt: now,
-      });
-    }
+    // Closing a turn's pending tool calls inserts its events right away, so
+    // it comes before every event batched below: the cursor accepts only
+    // inserts that continue it exactly.
     for (const turn of cancelledTurns) {
       const closedTools = await closePendingSessionToolCallsInTransaction(db, {
         accountId: input.accountId,
@@ -3236,6 +3695,22 @@ async function cancelSessionSubtreeInTransaction(
           sequence: event.sequence,
         })),
       );
+    }
+    const eventValues: SessionEventInsertWithPayload[] = [];
+    for (const update of (systemUpdatesBySession.get(session.id) ?? []).sort((left, right) =>
+      left.id.localeCompare(right.id),
+    )) {
+      eventValues.push({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+        sequence: ++sequence,
+        type: "system.update.cancelled",
+        payload: { updateId: update.id, reason: "session_cancelled" },
+        occurredAt: now,
+      });
+    }
+    for (const turn of cancelledTurns) {
       for (const humanInput of (humanInputsByTurn.get(turn.id) ?? []).sort((left, right) =>
         left.id.localeCompare(right.id),
       )) {
@@ -3290,7 +3765,13 @@ async function cancelSessionSubtreeInTransaction(
       eventValues.length > 0
         ? await db
             .insert(schema.sessionEvents)
-            .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+            .values(
+              withLosslessContentWriteVersion(
+                withBoundSessionEventPayloads(eventValues),
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
             .returning({
               id: schema.sessionEvents.id,
               sequence: schema.sessionEvents.sequence,
@@ -3343,6 +3824,12 @@ async function cancelSessionSubtreeInTransaction(
         queueVersion: sql`${schema.sessions.queueVersion} + 1`,
         queueHeadPosition: 0,
         queueTailPosition: 0,
+        // A cancelled chat has no turn left to wake: its input wait ends with
+        // it, so it no longer counts as waiting (nor keeps it from storage).
+        inputWaitTurnId: null,
+        inputWaitUntil: null,
+        inputWaitReason: null,
+        inputWaitSetAt: null,
         lastSequence: sequence,
         updatedAt: now,
       })
@@ -3371,6 +3858,37 @@ async function cancelSessionSubtreeInTransaction(
     cancelledTurnCount: candidateTurns.length,
     affectedSessionEvents,
   };
+}
+
+/**
+ * Whether a chat or anything it started still has work: a turn, a wait for
+ * input, an active goal or a running background command. Archive cancels such
+ * work when its undo window ends.
+ */
+export async function sessionWorkstreamHasActiveWork(
+  db: Database | SessionActivityDatabase,
+  workspaceId: string,
+  sessionId: string,
+): Promise<boolean> {
+  const [activity] = await db.execute<{ active: boolean }>(sql`
+    select exists (
+      select 1 from ${schema.sessions} session
+      where session.workspace_id = ${workspaceId}
+        and (session.id = ${sessionId} or session.root_session_id = ${sessionId})
+        and (
+          session.status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+          or session.active_turn_id is not null
+          or session.input_wait_turn_id is not null
+          or exists (select 1 from ${schema.sessionGoals} goal
+            where goal.workspace_id = session.workspace_id and goal.session_id = session.id
+              and goal.status = 'active')
+          or exists (select 1 from ${schema.sessionBackgroundCommands} command
+            where command.workspace_id = session.workspace_id and command.session_id = session.id
+              and command.state in ('running', 'stopping'))
+        )
+    ) as active
+  `);
+  return activity?.active === true;
 }
 
 export async function mutateSessionControlInTransaction(
@@ -3402,6 +3920,17 @@ export async function mutateSessionControlInTransaction(
     input.action === "cancel"
       ? await loadCancellationTurnIds(db, input.workspaceId, cancellationSessionIds)
       : [];
+  // Pause stops turns parked on subscription capacity in the paused subtree
+  // (a wait has no attempt to interrupt). The workspace control lock taken
+  // above keeps any new wait from arming until this commit.
+  const capacityWaitingTurns =
+    input.action === "pause"
+      ? await loadCapacityWaitingTurns(
+          db,
+          input.workspaceId,
+          (await loadSessionSubtreeIds(db, input.workspaceId, input.sessionId)).sessionIds,
+        )
+      : [];
   // A direct Pause of a child notifies its parent (child_paused) through the
   // outbox in this same commit, so the parent joins the UUID-ordered session
   // lock exactly like Cancel locks the root's surviving parent.
@@ -3418,13 +3947,22 @@ export async function mutateSessionControlInTransaction(
         ? [
             input.actor.sessionId,
             ...cancellationSessionIds,
+            ...capacityWaitingTurns.map((row) => row.sessionId),
             ...(lineageParentSessionId ? [lineageParentSessionId] : []),
           ]
-        : [...cancellationSessionIds, ...(lineageParentSessionId ? [lineageParentSessionId] : [])],
+        : [
+            ...cancellationSessionIds,
+            ...capacityWaitingTurns.map((row) => row.sessionId),
+            ...(lineageParentSessionId ? [lineageParentSessionId] : []),
+          ],
     turnIds:
       input.actor.type === "agent_attempt"
-        ? [input.actor.turnId, ...cancellationTurnIds]
-        : cancellationTurnIds,
+        ? [
+            input.actor.turnId,
+            ...cancellationTurnIds,
+            ...capacityWaitingTurns.map((row) => row.turnId),
+          ]
+        : [...cancellationTurnIds, ...capacityWaitingTurns.map((row) => row.turnId)],
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
   if (input.action === "cancel" || pauseParentSessionId !== null) {
@@ -3533,6 +4071,8 @@ export async function mutateSessionControlInTransaction(
       input.action === "pause"
         ? targetSession.directControlState !== "paused" ||
           directPauseRevision === null ||
+          // Before Pause released waits, a paused chat could keep one.
+          capacityWaitingTurns.length > 0 ||
           (await sessionPauseEffectsNeeded(db, {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -3799,6 +4339,25 @@ export async function mutateSessionControlInTransaction(
           cancelledTurnCount: 0,
           affectedSessionEvents: [{ sessionId: input.sessionId, eventIds: [controlEvent.id] }],
         };
+  for (const waiting of capacityWaitingTurns) {
+    const released = await releaseCapacityWaitingTurnInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: waiting.sessionId,
+      turnId: waiting.turnId,
+      trigger: "session_pause",
+    });
+    if (!released) continue;
+    const affected = cancellation.affectedSessionEvents.find(
+      (entry) => entry.sessionId === waiting.sessionId,
+    );
+    if (affected) affected.eventIds.push(...released.eventIds);
+    else
+      cancellation.affectedSessionEvents.push({
+        sessionId: waiting.sessionId,
+        eventIds: released.eventIds,
+      });
+  }
   if (input.action === "pause" && pauseParentSessionId !== null) {
     // Direct Pause only (a recursive ancestor pause never reaches this command
     // for the child), and never when the parent's own live attempt issued it:
@@ -3941,6 +4500,15 @@ export async function autoResumeSessionBranchInTransaction(
     reason: input.reason,
     actor: input.actor,
   });
+  // The override unblocks the whole branch, exactly like an explicit Resume:
+  // descendants whose workflows closed under the Pause (capacity waits, parked
+  // recoveries, active goals, pending updates, decided approvals) need the
+  // same fresh wake. The steered session's own input carries its wake too.
+  await registerDescendantWakes(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    reason: "session_auto_resume",
+  });
   return {
     revision,
     control: await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
@@ -3959,12 +4527,14 @@ export type WorkspaceControlMutationResult = {
   interruptionCount: number;
   backgroundCommandCount: number;
   wakeCount: number;
+  /** Session events the mutation appended (Pause releasing capacity waits), for live fanout. */
+  affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }>;
   outcome: "changed" | "unchanged" | "replayed";
   replay: boolean;
 };
 
 export async function mutateWorkspaceControlInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -4026,6 +4596,12 @@ export async function mutateWorkspaceControlInTransaction(
       interruptionCount: Number(reserved.receipt.result.interruptionCount ?? 0),
       backgroundCommandCount: Number(reserved.receipt.result.backgroundCommandCount ?? 0),
       wakeCount: Number(reserved.receipt.result.wakeCount ?? 0),
+      affectedSessionEvents: Array.isArray(reserved.receipt.result.affectedSessionEvents)
+        ? (reserved.receipt.result.affectedSessionEvents as Array<{
+            sessionId: string;
+            eventIds: string[];
+          }>)
+        : [],
       outcome: "replayed",
       replay: true,
     };
@@ -4034,6 +4610,10 @@ export async function mutateWorkspaceControlInTransaction(
     if (input.expectedRevision !== currentRevision) throw new SessionControlConflictError();
   }
 
+  // The workspace control lock held above keeps any new wait from arming
+  // until this commit.
+  const capacityWaitingTurns =
+    input.action === "pause" ? await loadCapacityWaitingTurns(db, input.workspaceId, null) : [];
   const workspacePauseRevision = asSafeRevision(
     workspace.workspacePauseRevision,
     "workspace pause revision",
@@ -4043,6 +4623,8 @@ export async function mutateWorkspaceControlInTransaction(
     (input.action === "pause"
       ? workspace.workspaceState !== "paused" ||
         workspacePauseRevision === null ||
+        // Before Pause released waits, a paused workspace could keep them.
+        capacityWaitingTurns.length > 0 ||
         (await workspacePauseEffectsNeeded(db, {
           workspaceId: input.workspaceId,
           workspacePauseRevision,
@@ -4069,6 +4651,7 @@ export async function mutateWorkspaceControlInTransaction(
       interruptionCount: 0,
       backgroundCommandCount: 0,
       wakeCount: 0,
+      affectedSessionEvents: [],
       outcome: "unchanged",
       replay: false,
     };
@@ -4127,8 +4710,33 @@ export async function mutateWorkspaceControlInTransaction(
           controlRevision: revision,
         })
       : 0;
+  // Pause stops the capacity waits it pauses, exactly as a chat's Pause does
+  // (a wait has no attempt to interrupt): each waiting turn is released, its
+  // person's "continues by itself" notice withdrawn, and Resume continues it.
+  const affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }> = [];
+  if (capacityWaitingTurns.length > 0) {
+    await lockSessionEventWriteRows(db, {
+      workspaceId: input.workspaceId,
+      controlLock: "already_locked",
+      sessionIds: capacityWaitingTurns.map((row) => row.sessionId),
+      turnIds: capacityWaitingTurns.map((row) => row.turnId),
+    });
+  }
+  for (const waiting of capacityWaitingTurns) {
+    const released = await releaseCapacityWaitingTurnInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: waiting.sessionId,
+      turnId: waiting.turnId,
+      trigger: "session_pause",
+    });
+    if (released)
+      affectedSessionEvents.push({ sessionId: waiting.sessionId, eventIds: released.eventIds });
+  }
   const wakeCount =
-    input.action === "pause"
+    // Each release registered its own workflow wake.
+    affectedSessionEvents.length +
+    (input.action === "pause"
       ? await registerInterruptionWakes(db, {
           operationId: reserved.receipt.id,
           reason: "workspace_pause_interruption",
@@ -4136,7 +4744,7 @@ export async function mutateWorkspaceControlInTransaction(
       : await registerWorkspaceWakes(db, {
           workspaceId: input.workspaceId,
           reason: "workspace_resume",
-        });
+        }));
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: revision,
     result: {
@@ -4145,6 +4753,7 @@ export async function mutateWorkspaceControlInTransaction(
       backgroundCommandCount,
       wakeCount,
       workspaceControlEventId,
+      affectedSessionEvents,
     },
   });
   return {
@@ -4155,6 +4764,7 @@ export async function mutateWorkspaceControlInTransaction(
     interruptionCount,
     backgroundCommandCount,
     wakeCount,
+    affectedSessionEvents,
     outcome: "changed",
     replay: false,
   };
@@ -4225,9 +4835,12 @@ const clearWorkspaceTimerFields = {
 
 /** Called under workspace RLS. The same control fence serializes timers and human actions. */
 export async function setWorkspacePauseTimerInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: WorkspacePauseTimerRequest & { accountId: string; workspaceId: string; subjectId: string },
-): Promise<{ workspaceControlEventId: string | null }> {
+): Promise<{
+  workspaceControlEventId: string | null;
+  affectedSessionEvents: WorkspaceControlMutationResult["affectedSessionEvents"];
+}> {
   let workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update", {
     lockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
   });
@@ -4250,12 +4863,14 @@ export async function setWorkspacePauseTimerInTransaction(
     return {
       workspaceControlEventId:
         (reserved.receipt.result.workspaceControlEventId as string | null) ?? null,
+      affectedSessionEvents: [],
     };
   if (Number(workspace.revision) !== input.expectedRevision)
     throw new SessionControlConflictError();
   let action: "pause" | "resume" = "pause";
   let delay = input.pauseInSeconds ?? 0;
   let pauseRevision: number | null = null;
+  let affectedSessionEvents: WorkspaceControlMutationResult["affectedSessionEvents"] = [];
   if (input.action === "set") {
     if (workspace.workspaceState === "paused") {
       if (delay !== 0 || input.pauseForSeconds == null) {
@@ -4265,13 +4880,14 @@ export async function setWorkspacePauseTimerInTransaction(
       delay = input.pauseForSeconds;
       pauseRevision = Number(workspace.workspacePauseRevision);
     } else if (delay === 0) {
-      await mutateWorkspaceControlInTransaction(db, {
+      const paused = await mutateWorkspaceControlInTransaction(db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         actor: { type: "human", subjectId: input.subjectId },
         operationKey: `timer-pause:${reserved.receipt.id}`,
         action: "pause",
       });
+      affectedSessionEvents = paused.affectedSessionEvents;
       workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
       action = "resume";
       delay = input.pauseForSeconds ?? 0;
@@ -4313,14 +4929,17 @@ export async function setWorkspacePauseTimerInTransaction(
     controlRevision: revision,
     result: { workspaceControlEventId },
   });
-  return { workspaceControlEventId };
+  return { workspaceControlEventId, affectedSessionEvents };
 }
 
 /** Discovery is a hint. Identity, deadline and pause ownership are rechecked under the fence. */
 export async function fireWorkspacePauseTimerInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: { workspaceId: string; timerId: string },
-): Promise<{ workspaceControlEventId: string | null; wakeCount: number } | null> {
+): Promise<Pick<
+  WorkspaceControlMutationResult,
+  "workspaceControlEventId" | "wakeCount" | "affectedSessionEvents"
+> | null> {
   const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update", {
     lockTimeoutMs: 1000,
   });

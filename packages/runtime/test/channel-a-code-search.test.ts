@@ -17,10 +17,13 @@ import { gzipSync } from "node:zlib";
 import {
   ChannelAUnavailableError,
   ChannelAValidationError,
+  MAC_HOME_FILES_DIRS,
+  MAC_HOME_PRIVACY_GUARDED_DIRS,
   SandboxChannelAService,
   validateCodeSearchRipgrepArgs,
   type ChannelASession,
 } from "../src/sandbox";
+import { MAC_FOLDERS_ALLOWED_ENV } from "@opengeni/sdk/this-computer";
 
 const roots: string[] = [];
 afterAll(() => {
@@ -628,6 +631,120 @@ describe("SandboxChannelAService.codeSearchRipgrep", () => {
     });
     await svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 10 });
     expect(calls[0]).not.toMatch(/(^|[;&|()\s])timeout([;&|()\s]|$)/);
+  });
+});
+
+describe("code search from a Mac's home folder", () => {
+  /** A home folder with code and every privacy-guarded folder holding a match. */
+  function homeFixture(): string {
+    const root = fixtureRepo();
+    for (const dir of MAC_HOME_PRIVACY_GUARDED_DIRS) {
+      mkdirSync(join(root, dir, "inner"), { recursive: true });
+      writeFileSync(join(root, dir, "inner", "note.ts"), "// approvalPolicy kept here\n");
+    }
+    // A nested folder with a guarded name is ordinary code.
+    mkdirSync(join(root, "src", "Library"), { recursive: true });
+    writeFileSync(join(root, "src", "Library", "lib.ts"), "// approvalPolicy library\n");
+    return root;
+  }
+
+  /** A bin directory whose `uname` reports `system`. */
+  function fakeUname(system: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "code-search-uname-"));
+    roots.push(dir);
+    addFakeTool(dir, "uname", `echo ${system}`);
+    return dir;
+  }
+
+  async function search(
+    root: string,
+    system: string,
+    home: string,
+    paths: string[],
+    env: Record<string, string> = {},
+  ) {
+    const svc = new SandboxChannelAService({
+      session: hostShellSession(root, [], fakeUname(system), { HOME: home, ...env }),
+    });
+    const result = await svc.codeSearchRipgrep(
+      ["--null", "--with-filename", "--no-heading", "-e", "approvalPolicy", "--", ...paths],
+      { timeoutMs: 20_000, maxBytes: 1024 * 1024 },
+    );
+    return result.stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => line.split("\u0000")[0]!.replace(/^\.\//u, ""))
+      .sort();
+  }
+
+  test.skipIf(!hasRipgrep)("skips the guarded folders when the search starts at home", async () => {
+    const root = homeFixture();
+    expect(await search(root, "Darwin", root, ["."])).toEqual([
+      "src/Library/lib.ts",
+      "src/approval.ts",
+      "src/nested/other.ts",
+    ]);
+  });
+
+  test.skipIf(!hasRipgrep)(
+    "includes each of Desktop, Documents and Downloads the owner allowed",
+    async () => {
+      const root = homeFixture();
+      const allowed = mkdtempSync(join(tmpdir(), "code-search-allowed-"));
+      roots.push(allowed);
+      const env = { [MAC_FOLDERS_ALLOWED_ENV]: allowed };
+      const code = ["src/Library/lib.ts", "src/approval.ts", "src/nested/other.ts"];
+      // None allowed yet: all skipped.
+      expect(await search(root, "Darwin", root, ["."], env)).toEqual(code);
+      writeFileSync(join(allowed, "Documents"), "");
+      expect(await search(root, "Darwin", root, ["."], env)).toEqual(
+        ["Documents/inner/note.ts", ...code].sort(),
+      );
+      for (const dir of MAC_HOME_FILES_DIRS) writeFileSync(join(allowed, dir), "");
+      expect(await search(root, "Darwin", root, ["."], env)).toEqual(
+        [...MAC_HOME_FILES_DIRS.map((dir) => `${dir}/inner/note.ts`), ...code].sort(),
+      );
+    },
+  );
+
+  test.skipIf(!hasRipgrep)("still searches a guarded folder the engine names", async () => {
+    const root = homeFixture();
+    expect(await search(root, "Darwin", root, ["Documents", "Library/inner"])).toEqual([
+      "Documents/inner/note.ts",
+      "Library/inner/note.ts",
+    ]);
+  });
+
+  test.skipIf(!hasRipgrep)("searches everything off a Mac or outside its home folder", async () => {
+    const root = homeFixture();
+    const everything = [
+      ...MAC_HOME_PRIVACY_GUARDED_DIRS.map((dir) => `${dir}/inner/note.ts`),
+      "src/Library/lib.ts",
+      "src/approval.ts",
+      "src/nested/other.ts",
+    ].sort();
+    // Hidden folders such as .Trash are skipped by ripgrep unless asked.
+    const visible = everything.filter((path) => !path.startsWith("."));
+    expect(await search(root, "Linux", root, ["."])).toEqual(visible);
+    expect(await search(root, "Darwin", tmpdir(), ["."])).toEqual(visible);
+  });
+
+  test("the generated command adds the excludes only behind the macOS home check", async () => {
+    const calls: string[] = [];
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async (args) => {
+          calls.push(args.cmd);
+          return { stdout: "__OPENGENI_CODE_SEARCH_RG_END__127:0__", stderr: "", exitCode: 0 };
+        },
+      },
+    });
+    await svc.codeSearchRipgrep(["-e", "x", "--", "."], { timeoutMs: 5_000, maxBytes: 10 });
+    expect(calls[0]).toContain("Darwin");
+    expect(calls[0]).toContain('-g "!/$mac_home_dir"');
+    expect(calls[0]).toContain(MAC_FOLDERS_ALLOWED_ENV);
+    for (const dir of MAC_HOME_PRIVACY_GUARDED_DIRS) expect(calls[0]).toContain(`'${dir}'`);
   });
 });
 

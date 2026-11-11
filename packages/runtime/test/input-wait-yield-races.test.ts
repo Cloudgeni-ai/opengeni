@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { MaxTurnsExceededError, tool } from "@openai/agents";
-import { functionCall, ScriptedModel, testSettings } from "@opengeni/testing";
+import { functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniAgent, InputWaitYield, runAgentStream } from "../src/index";
 
 const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });

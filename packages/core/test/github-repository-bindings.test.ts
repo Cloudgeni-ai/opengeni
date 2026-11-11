@@ -6,7 +6,7 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   applyGitHubRepositoryBindings,
   listGitHubRepositoryBindingCandidates,
@@ -351,6 +351,7 @@ describe("GitHub repository binding candidates (Postgres)", () => {
         authorityExpiresAt: new Date(authorityCheckedAt.getTime() + 10 * 60_000),
         authorityNonce: `core-github-bindings-${crypto.randomUUID()}`,
         repositoryIds,
+        eventRouteSecret: null,
       });
     await bind(own, 501, "acme", [456, 457]);
     await bind(own, 502, "globex", [900]);

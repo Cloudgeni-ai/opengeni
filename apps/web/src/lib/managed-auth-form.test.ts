@@ -1,11 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import { AuthApiError } from "@/api";
-import {
-  ManagedAuthSessionUnavailableError,
-  managedAuthFailure,
-  validateManagedAuthInput,
-} from "./managed-auth-form";
+import { ManagedAuthSessionUnavailableError } from "@opengeni/react/app/lib/managed-auth-transition";
+import { managedAuthFailure, validateManagedAuthInput } from "./managed-auth-form";
 import {
   clearVerificationLinkErrorFromLocation,
   managedAuthModeFromSearch,
@@ -71,10 +68,64 @@ describe("managed auth form", () => {
     });
   });
 
+  test("explains paused sign-ups and offers sign-in instead", () => {
+    expect(
+      managedAuthFailure(
+        "signup",
+        new AuthApiError(
+          403,
+          "NEW_SIGNUPS_PAUSED",
+          null,
+          "We're at capacity for new accounts right now. Please try again later.",
+        ),
+      ),
+    ).toEqual({
+      fields: {},
+      message:
+        "We're at capacity for new accounts right now. Please try again later. If you already have an account, sign in instead.",
+      switchTo: "signin",
+      canResendVerification: false,
+    });
+  });
+
+  test("explains an unapproved address instead of asking to try again", () => {
+    const failure = managedAuthFailure(
+      "signup",
+      new AuthApiError(403, "SIGNUP_EMAIL_NOT_ALLOWED", null, "signup email not allowed"),
+    );
+    expect(failure).toMatchObject({ fields: {}, switchTo: "signin" });
+    expect(failure.message).toContain(
+      "This email can't create an account here. Ask your admin for access.",
+    );
+    expect(failure.message).not.toContain("try again");
+  });
+
   test("explains a signup that created an account without a browser session", () => {
     expect(
       managedAuthFailure("signup", new ManagedAuthSessionUnavailableError("signup")),
     ).toMatchObject({ switchTo: "signin" });
+  });
+
+  test("tells an address the deployment doesn't allow that it can't sign in, not to retry", () => {
+    const failure = managedAuthFailure(
+      "signin",
+      new AuthApiError(403, "SIGN_IN_EMAIL_NOT_ALLOWED", null, "sign in email not allowed"),
+    );
+    expect(failure).toEqual({
+      fields: {},
+      message: "This email can't sign in here. Ask your admin for access.",
+      switchTo: null,
+      canResendVerification: false,
+    });
+  });
+
+  test("keeps the generic retry message for a session that couldn't be created", () => {
+    expect(
+      managedAuthFailure(
+        "signin",
+        new AuthApiError(401, "FAILED_TO_CREATE_SESSION", null, "Failed to create session"),
+      ).message,
+    ).toBe("We couldn't sign you in. Please try again.");
   });
 
   test("opens Sign up only for the exact mode=signup deep link", () => {
@@ -88,6 +139,14 @@ describe("managed auth form", () => {
     expect(managedAuthModeFromSearch("?mode=signin")).toBeUndefined();
     expect(managedAuthModeFromSearch("?mode=admin")).toBeUndefined();
     expect(managedAuthModeFromSearch("?mode=signup&mode=signin")).toBeUndefined();
+  });
+
+  test("the /sign-up and /signup paths open Sign up", () => {
+    expect(managedAuthModeFromSearch("", "/sign-up")).toBe("signup");
+    expect(managedAuthModeFromSearch("", "/signup/")).toBe("signup");
+    expect(managedAuthModeFromSearch("?utm_source=producthunt", "/Sign-Up")).toBe("signup");
+    expect(managedAuthModeFromSearch("", "/sign-in")).toBeUndefined();
+    expect(managedAuthModeFromSearch("", "/")).toBeUndefined();
   });
 
   test("recognizes only Better Auth's verification-link failure codes", () => {

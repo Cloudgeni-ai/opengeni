@@ -19,6 +19,8 @@ export type DnsLookup = (hostname: string) => Promise<readonly DnsAddress[]>;
 export type OutboundNetworkSettings = {
   environment: string;
   integrationsAllowPrivateNetworkTargets: boolean;
+  /** Operator-approved exact hostnames, optionally restricted to one port. */
+  integrationsPrivateNetworkAllowedHosts?: readonly string[];
 };
 
 export type PinnedDestination = {
@@ -274,6 +276,9 @@ const pinnedRequestFetch: FetchLike = async (input, init) => {
   if (init?.headers) {
     new Headers(init.headers).forEach((value, name) => headers.set(name, value));
   }
+  // The low-level request adapter supplies no Fetch default user agent. Some
+  // providers reject otherwise valid requests without a client identity.
+  if (!headers.has("user-agent")) headers.set("user-agent", "Opengeni");
   // Undici request() deliberately does not auto-decompress. Asking providers
   // for identity encoding keeps the returned web Response body truthful.
   if (!headers.has("accept-encoding")) headers.set("accept-encoding", "identity");
@@ -435,7 +440,10 @@ export async function resolvePinnedDestination(
     );
   }
 
-  const privateEscape = localTestEscape || settings.integrationsAllowPrivateNetworkTargets === true;
+  const privateEscape =
+    localTestEscape ||
+    settings.integrationsAllowPrivateNetworkTargets === true ||
+    privateNetworkHostAllowed(url, settings.integrationsPrivateNetworkAllowedHosts);
   if (
     !privateEscape &&
     (isLocalHostname(hostname) ||
@@ -447,6 +455,19 @@ export async function resolvePinnedDestination(
     );
   }
   return { url, hostname, addresses: preferIpv4Addresses(normalizedAddresses) };
+}
+
+function privateNetworkHostAllowed(url: URL, entries: readonly string[] = []): boolean {
+  const hostname = normalizeHostname(url.hostname);
+  const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+  return entries.some((entry) => {
+    const [allowedHost, allowedPort, extra] = entry.trim().toLowerCase().split(":");
+    return (
+      extra === undefined &&
+      normalizeHostname(allowedHost ?? "") === hostname &&
+      (allowedPort === undefined || Number(allowedPort) === port)
+    );
+  });
 }
 
 /**
@@ -618,7 +639,7 @@ function responseWithDispatcherLifecycle(
       try {
         const chunk = await reader.read();
         if (chunk.done) {
-          // The dispatcher cannot finish gracefully while OpenGeni still owns
+          // The dispatcher cannot finish gracefully while Opengeni still owns
           // the provider response's reader lock. Release it before teardown;
           // otherwise Undici can wait forever after the complete body arrived.
           releaseReader();

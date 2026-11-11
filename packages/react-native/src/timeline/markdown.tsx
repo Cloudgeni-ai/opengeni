@@ -1,0 +1,845 @@
+import {
+  createContext,
+  Fragment,
+  useContext,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentRef,
+  type ReactNode,
+} from "react";
+import { Image, Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
+import Markdown, { MarkdownIt, renderRules, type RenderRules } from "react-native-markdown-display";
+import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
+import {
+  isReservedOpenGeniLink,
+  parseOpenGeniLink,
+  parseRetainedFileReference,
+  type OpenGeniLinkTarget,
+} from "@opengeni/sdk";
+import {
+  interactivePreviewKind,
+  type InteractivePreviewKind,
+} from "@opengeni/react/native-previews";
+import { MAX_MARKDOWN_LENGTH, prepareBoundedMarkdown } from "./markdown-limit";
+import { PlainTextMessage } from "./plain-text-message";
+import { Icon } from "./icon";
+import { isStandaloneLinkGroup, soleTextGroupOf } from "./markdown-standalone-links";
+import { DisplayMath, InlineMath } from "./markdown-math";
+import { markdownItMath } from "./markdown-math-parser";
+import { withAlpha as withAlphaColor } from "./primitives";
+import type { NativeMarkdownRenderer } from "./message-timeline";
+import {
+  fontStyle,
+  insetSurface,
+  MONO_FALLBACK,
+  useNativeTimelineTheme,
+  type NativeTimelineTheme,
+} from "./theme";
+import { useNativeTimelineMessages } from "./messages";
+import { NativeInteractiveAnswer } from "./interactive-answer";
+import {
+  INTERACTIVE_ANSWER_FENCE,
+  trailingOpenFence,
+} from "@opengeni/react/interactive-answer-model";
+import { tableColumns, tableLayout } from "./markdown-table-layout";
+
+/**
+ * One parser for every message, configured like the web's `remark-gfm`: no typographic
+ * substitution (quotes, dashes and `(c)` stay as written), and bare `http(s)://` URLs
+ * autolink while file-like words (`fib.py`) do not. The library default would build a
+ * new typographer parser on every render, including every streaming delta.
+ */
+const PARSER = (() => {
+  const parser = MarkdownIt({ typographer: false, linkify: true });
+  parser.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
+  return parser;
+})();
+
+/** The same parser plus `$$` math, used only for messages that contain math. */
+const MATH_PARSER = (() => {
+  const parser = MarkdownIt({ typographer: false, linkify: true });
+  parser.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
+  parser.use(markdownItMath);
+  return parser;
+})();
+
+/* ----------------------------------------------------------------------------
+   Web Markdown (components/markdown.tsx) styles for react-native-markdown-display.
+   Prose 15/28 (`text-og-md leading-7`), paragraphs `my-2.5`, lists `ml-5 gap-1`,
+   code blocks `rounded-og-md bg-surface-1/70 px-3 py-2.5 text-og-sm leading-5`.
+   -------------------------------------------------------------------------- */
+
+export function webMarkdownStyles(
+  theme: NativeTimelineTheme,
+  tone: "body" | "muted",
+): Record<string, TextStyle> {
+  const c = theme.colors;
+  const muted = tone === "muted";
+  const size = muted ? theme.size.base : theme.size.md;
+  const line = muted ? 24 : 28;
+  const body = {
+    ...fontStyle(theme),
+    color: muted ? c["fg-muted"] : c.fg,
+    fontSize: size,
+    lineHeight: line,
+  };
+  const mono = fontStyle(theme, 400, "mono");
+  const heading = { ...fontStyle(theme, 600), color: c.fg, letterSpacing: -0.2 };
+  return {
+    body,
+    paragraph: { marginTop: 0, marginBottom: 10 },
+    // Web margins collapse against the 10pt paragraph margin; native margins add up.
+    heading1: { ...heading, fontSize: 20, lineHeight: 28, marginTop: 10, marginBottom: 10 },
+    heading2: { ...heading, fontSize: 18, lineHeight: 26, marginTop: 10, marginBottom: 8 },
+    heading3: {
+      ...heading,
+      fontSize: theme.size.md,
+      lineHeight: 24,
+      marginTop: 6,
+      marginBottom: 6,
+    },
+    heading4: {
+      ...heading,
+      fontSize: theme.size.sm,
+      lineHeight: 18,
+      marginTop: 6,
+      marginBottom: 6,
+      textTransform: "uppercase" as const,
+    },
+    strong: { ...fontStyle(theme, 600), color: muted ? c["fg-muted"] : c.fg },
+    em: theme.fonts.sansItalic
+      ? { fontFamily: theme.fonts.sansItalic }
+      : { fontStyle: "italic" as const },
+    bullet_list: { marginTop: 0, marginBottom: 10 },
+    ordered_list: { marginTop: 0, marginBottom: 10 },
+    list_item: { marginBottom: 4 },
+    bullet_list_icon: { color: c["fg-subtle"], marginLeft: 6, marginRight: 8, lineHeight: line },
+    ordered_list_icon: { color: c["fg-subtle"], marginLeft: 2, marginRight: 6, lineHeight: line },
+    code_inline: {
+      ...mono,
+      fontFamily: (mono.fontFamily as string | undefined) ?? MONO_FALLBACK,
+      fontSize: theme.size.sm,
+      backgroundColor: c["surface-2"],
+      color: c.fg,
+      borderRadius: theme.radius.xs,
+      paddingHorizontal: 4,
+      borderWidth: 0,
+    },
+    fence: {
+      ...mono,
+      fontSize: theme.size.sm,
+      lineHeight: 20,
+      color: c["fg-muted"],
+      backgroundColor: insetSurface(theme),
+      borderWidth: 0,
+      borderRadius: theme.radius.md,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      marginTop: 2,
+      marginBottom: 10,
+    },
+    code_block: {
+      ...mono,
+      fontSize: theme.size.sm,
+      lineHeight: 20,
+      color: c["fg-muted"],
+      backgroundColor: insetSurface(theme),
+      borderWidth: 0,
+      borderRadius: theme.radius.md,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+    },
+    // Web MARKDOWN_LINK_CLASS: medium weight in accent-strong, no underline.
+    link: {
+      ...fontStyle(theme, 500),
+      color: c["accent-strong"],
+      textDecorationLine: "none" as const,
+    },
+    blockquote: {
+      // Web blockquote text is fg-muted; text styles inherit through the renderer.
+      color: c["fg-muted"],
+      backgroundColor: "transparent",
+      borderLeftColor: c["border-strong"],
+      borderLeftWidth: 2,
+      paddingLeft: 14,
+      marginLeft: 0,
+      marginVertical: 12,
+    },
+    hr: { backgroundColor: c.border, height: 1, marginVertical: 16 },
+    // Web tables: unboxed, text-og-base, hairline rules, content-sized columns.
+    table: { borderWidth: 0, marginTop: 12, marginBottom: 10 },
+    thead: {},
+    th: {
+      ...fontStyle(theme, 500),
+      color: c.fg,
+      fontSize: theme.size.base,
+      lineHeight: 20,
+      paddingVertical: 6,
+      paddingRight: 16,
+    },
+    tr: { borderBottomWidth: 0 },
+    td: {
+      color: c["fg-muted"],
+      fontSize: theme.size.base,
+      lineHeight: 20,
+      paddingVertical: 6,
+      paddingRight: 16,
+    },
+  };
+}
+
+function CodeFence({
+  content,
+  language,
+  onCopy,
+}: {
+  content: string;
+  language: string;
+  onCopy?: ((text: string) => void) | undefined;
+}) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const styles = webMarkdownStyles(theme, "body");
+  const [copied, setCopied] = useState(false);
+  // The code scrolls in the space left of the language label and copy button, which
+  // vary in width ("SH" vs "TYPESCRIPT"); reserve their measured width plus a gap.
+  const [chromeWidth, setChromeWidth] = useState(64);
+  return (
+    <View style={{ marginTop: 2, marginBottom: 10 }}>
+      <View
+        style={{
+          borderRadius: theme.radius.md,
+          backgroundColor: insetSurface(theme),
+          paddingLeft: 12,
+          paddingRight: chromeWidth,
+          paddingVertical: 10,
+        }}
+      >
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <Text
+            selectable
+            style={{
+              ...styles.code_block,
+              backgroundColor: "transparent",
+              paddingHorizontal: 0,
+              paddingVertical: 0,
+            }}
+          >
+            {content}
+          </Text>
+        </ScrollView>
+      </View>
+      <View
+        onLayout={(event) => {
+          const next = Math.ceil(event.nativeEvent.layout.width) + 6 + 10;
+          if (next !== chromeWidth) setChromeWidth(next);
+        }}
+        style={{
+          position: "absolute",
+          top: 6,
+          right: 6,
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 4,
+        }}
+      >
+        {language ? (
+          <Text
+            style={{
+              ...fontStyle(theme, 400, "mono"),
+              fontSize: 10,
+              letterSpacing: 0.5,
+              textTransform: "uppercase",
+              color: theme.colors["fg-subtle"],
+              opacity: 0.7,
+            }}
+          >
+            {language}
+          </Text>
+        ) : null}
+        {onCopy ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={m.copyCode}
+            hitSlop={8}
+            onPress={() => {
+              onCopy(content);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1400);
+            }}
+            style={{ width: 28, height: 28, alignItems: "center", justifyContent: "center" }}
+          >
+            <Icon name={copied ? "check" : "copy"} size={14} color={theme.colors["fg-subtle"]} />
+          </Pressable>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+/* Tables ------------------------------------------------------------------- */
+
+type AstNode = { type: string; content?: string; children?: AstNode[] };
+
+function astText(node: AstNode): string {
+  // Container nodes carry an empty content string; text lives in their leaves.
+  if (node.children && node.children.length > 0) return node.children.map(astText).join("");
+  return typeof node.content === "string" ? node.content : "";
+}
+
+function tableRows(table: AstNode): string[][] {
+  const rows: string[][] = [];
+  const visit = (node: AstNode) => {
+    if (node.type === "tr") rows.push((node.children ?? []).map((cell) => astText(cell).trim()));
+    else (node.children ?? []).forEach(visit);
+  };
+  visit(table);
+  return rows;
+}
+
+/** A cell's column: its sibling index in the row (set by the AST builder). */
+function cellIndex(node: { index?: unknown }): number {
+  return typeof node.index === "number" && node.index >= 0 ? node.index : 0;
+}
+
+/** Explicit column widths for a measured table; empty until the table lays out. */
+const TableColumnsContext = createContext<number[]>([]);
+
+function MarkdownTable({
+  node,
+  children,
+  onCopy,
+}: {
+  node: AstNode;
+  children: ReactNode;
+  onCopy?: ((text: string) => void) | undefined;
+}) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const rows = useMemo(() => tableRows(node), [node]);
+  const columns = useMemo(() => tableColumns(rows), [rows]);
+  const [available, setAvailable] = useState(0);
+  // Web wraps tables in overflow-x-auto: a table that cannot fit keeps readable
+  // columns and scrolls sideways instead of crushing every cell.
+  const layout = useMemo(
+    () => (available > 0 ? tableLayout(columns, available) : { widths: [], scrolls: false }),
+    [available, columns],
+  );
+  const { widths, scrolls } = layout;
+  const scrollWidth = widths.reduce((sum, width) => sum + width, 0);
+  const [copied, setCopied] = useState(false);
+  // A soft edge says "more columns this way" until the reader reaches the end.
+  const [atEnd, setAtEnd] = useState(false);
+  const scroller = useRef<ComponentRef<typeof ScrollView>>(null);
+  const body = (
+    <TableColumnsContext.Provider value={widths}>{children}</TableColumnsContext.Provider>
+  );
+  return (
+    <View
+      style={{ marginTop: onCopy ? 4 : 12, marginBottom: 10 }}
+      onLayout={(event) => setAvailable(Math.round(event.nativeEvent.layout.width))}
+    >
+      {/* Copy sits on its own line above the table, so it never covers a
+          header cell, whether the table fits or scrolls sideways. */}
+      {onCopy ? (
+        <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={m.copyTable}
+            hitSlop={8}
+            onPress={() => {
+              onCopy(rows.map((row) => row.join("\t")).join("\n"));
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1400);
+            }}
+            style={{
+              width: 28,
+              height: 28,
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: 8,
+            }}
+          >
+            <Icon name={copied ? "check" : "copy"} size={14} color={theme.colors["fg-subtle"]} />
+          </Pressable>
+        </View>
+      ) : null}
+      {scrolls ? (
+        <View>
+          <ScrollView
+            ref={scroller}
+            horizontal
+            nestedScrollEnabled
+            directionalLockEnabled
+            showsHorizontalScrollIndicator
+            scrollEventThrottle={32}
+            onLayout={() => scroller.current?.flashScrollIndicators()}
+            onScroll={(event) => {
+              const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+              setAtEnd(contentOffset.x + layoutMeasurement.width >= contentSize.width - 8);
+            }}
+            accessibilityHint={m.scrollTableHint}
+          >
+            <View style={{ width: scrollWidth }}>{body}</View>
+          </ScrollView>
+          {atEnd ? null : (
+            <Svg
+              pointerEvents="none"
+              width={36}
+              height="100%"
+              style={{ position: "absolute", top: 0, right: 0, bottom: 0 }}
+            >
+              <Defs>
+                <LinearGradient id="table-edge" x1="0" y1="0" x2="1" y2="0">
+                  <Stop offset="0" stopColor={theme.colors.bg} stopOpacity={0} />
+                  <Stop offset="1" stopColor={theme.colors.bg} stopOpacity={0.95} />
+                </LinearGradient>
+              </Defs>
+              <Rect x="0" y="0" width="36" height="100%" fill="url(#table-edge)" />
+            </Svg>
+          )}
+        </View>
+      ) : (
+        body
+      )}
+    </View>
+  );
+}
+
+function TableRow({ head, last, children }: { head: boolean; last: boolean; children: ReactNode }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        borderBottomWidth: last ? 0 : 1,
+        // Header rule in border; body rules at 70% (web border-og-border/70).
+        borderBottomColor: head ? c.border : withAlphaColor(c.border, 0.7),
+      }}
+    >
+      {children}
+    </View>
+  );
+}
+
+function TableCell({
+  index,
+  style,
+  children,
+}: {
+  index: number;
+  style: object;
+  children: ReactNode;
+}) {
+  const width = useContext(TableColumnsContext)[index];
+  return (
+    <View
+      style={[
+        style,
+        // The renderer's default cell style is flex: 1 (equal columns); a measured
+        // table replaces it with content-sized widths.
+        width !== undefined ? { flex: 0, width } : null,
+      ]}
+    >
+      {children}
+    </View>
+  );
+}
+
+function webRules(
+  theme: NativeTimelineTheme,
+  tone: "body" | "muted",
+  onCopy?: (text: string) => void,
+  media: MarkdownMediaOptions & MarkdownLinkOptions = {},
+): RenderRules {
+  const line = tone === "muted" ? 24 : 28;
+  return {
+    ...renderRules,
+    // Every run of text is selectable, as on the web: a long press selects
+    // words (and, inside a timeline message, offers Add note). A standalone
+    // link the host drew as a block sits in a view instead, since a block
+    // nested in text does not lay out. The view spans the message: a paragraph
+    // lays its children out in a wrapping row, where a plain view would size
+    // to its content.
+    textgroup: (node, children, _parent, styles) =>
+      BLOCK_LINK_GROUPS.has(node) ? (
+        <View key={node.key} style={{ width: "100%" }}>
+          {children}
+        </View>
+      ) : (
+        <Text key={node.key} selectable style={styles.textgroup}>
+          {children}
+        </Text>
+      ),
+    link: (node, children, parent, styles, onLinkPress) => {
+      const href = node.attributes?.href;
+      if (
+        media.renderLink &&
+        typeof href === "string" &&
+        href &&
+        !parseOpenGeniLink(href) &&
+        !isReservedOpenGeniLink(href)
+      ) {
+        const group = parent[0];
+        const standalone = group !== undefined && isStandaloneLinkGroup(group, parent[1]);
+        const drawn = media.renderLink({ href, children, standalone });
+        if (drawn !== undefined) {
+          // Children render before their parent, so the group's rule sees this.
+          if (standalone && group) BLOCK_LINK_GROUPS.add(group);
+          return <Fragment key={node.key}>{drawn}</Fragment>;
+        }
+      }
+      return renderRules.link!(node, children, parent, styles, onLinkPress);
+    },
+    // Web lists use a disc marker in fg-subtle; the library's iOS default is a middle dot.
+    list_item: (node, children, parent, styles, inheritedStyles = {}) => {
+      // A host-drawn block link is its own marker: the item drops the bullet or
+      // number and its indent, so it lines up with the same card on its own line.
+      const group = soleTextGroupOf(node);
+      if (group && BLOCK_LINK_GROUPS.has(group)) {
+        return (
+          <View key={node.key} style={{ marginBottom: 4 }}>
+            {children}
+          </View>
+        );
+      }
+      if (parent.some((entry: { type: string }) => entry.type === "bullet_list")) {
+        // A drawn disc: the text bullet glyph renders noticeably smaller than
+        // the browser's list-disc marker at the same line height.
+        const disc = 5.5;
+        return (
+          <View key={node.key} style={{ flexDirection: "row", marginBottom: 4 }}>
+            <View
+              accessible={false}
+              style={{ width: 20, height: line, alignItems: "center", justifyContent: "center" }}
+            >
+              <View
+                style={{
+                  width: disc,
+                  height: disc,
+                  borderRadius: disc / 2,
+                  backgroundColor: theme.colors["fg-subtle"],
+                }}
+              />
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>{children}</View>
+          </View>
+        );
+      }
+      return renderRules.list_item!(node, children, parent, styles, inheritedStyles);
+    },
+    table: (node, children) => (
+      <MarkdownTable key={node.key} node={node} onCopy={onCopy}>
+        {children}
+      </MarkdownTable>
+    ),
+    tr: (node, children, parent) => {
+      const head = parent.some((entry: { type: string }) => entry.type === "thead");
+      const body = parent.find((entry: { type: string }) => entry.type === "tbody") as
+        | { children?: unknown[] }
+        | undefined;
+      const last = !head && body?.children?.[body.children.length - 1] === node;
+      return (
+        <TableRow key={node.key} head={head} last={last}>
+          {children}
+        </TableRow>
+      );
+    },
+    th: (node, children, _parent, styles) => (
+      <TableCell key={node.key} index={cellIndex(node)} style={styles._VIEW_SAFE_th}>
+        {children}
+      </TableCell>
+    ),
+    td: (node, children, _parent, styles) => (
+      <TableCell key={node.key} index={cellIndex(node)} style={styles._VIEW_SAFE_td}>
+        {children}
+      </TableCell>
+    ),
+    fence: (node) => {
+      const raw = typeof node.content === "string" ? node.content : "";
+      const content = raw.endsWith("\n") ? raw.slice(0, -1) : raw;
+      const info = (node as { sourceInfo?: unknown }).sourceInfo;
+      const language = typeof info === "string" ? (info.trim().split(/\s+/)[0] ?? "") : "";
+      if (language === INTERACTIVE_ANSWER_FENCE) {
+        return (
+          <AnswerFence
+            key={node.key}
+            content={content}
+            renderSource={() => <CodeFence content={content} language={language} onCopy={onCopy} />}
+          />
+        );
+      }
+      const kind = interactivePreviewKind(language);
+      if (kind && media.renderInteractiveBlock) {
+        return (
+          <InteractiveFence
+            key={node.key}
+            kind={kind}
+            content={content}
+            render={media.renderInteractiveBlock}
+          />
+        );
+      }
+      return <CodeFence key={node.key} content={content} language={language} onCopy={onCopy} />;
+    },
+    image: (node) => {
+      const attributes = (node as { attributes?: { src?: unknown; alt?: unknown } }).attributes;
+      const src = typeof attributes?.src === "string" ? attributes.src : "";
+      const alt = typeof attributes?.alt === "string" ? attributes.alt : "";
+      const custom = src ? media.renderImage?.({ src, alt }) : undefined;
+      return custom !== undefined && custom !== null ? (
+        <View key={node.key}>{custom}</View>
+      ) : (
+        <MarkdownImage key={node.key} src={src} alt={alt} />
+      );
+    },
+    // `$$…$$` math (messages with math only; see MATH_PARSER).
+    math_inline: (node, _children, _parent, styles, inheritedStyles = {}) => {
+      const inherited = inheritedStyles as TextStyle;
+      const body = styles.body as TextStyle;
+      return (
+        <InlineMath
+          key={node.key}
+          tex={typeof node.content === "string" ? node.content : ""}
+          fontSize={inherited.fontSize ?? body.fontSize ?? theme.size.md}
+          lineHeight={inherited.lineHeight ?? body.lineHeight}
+          color={String(inherited.color ?? body.color ?? theme.colors.fg)}
+          fallbackStyle={styles.code_inline as TextStyle}
+        />
+      );
+    },
+    math_block: (node, _children, _parent, styles) => {
+      const body = styles.body as TextStyle;
+      return (
+        <DisplayMath
+          key={node.key}
+          tex={typeof node.content === "string" ? node.content : ""}
+          fontSize={body.fontSize ?? theme.size.md}
+          color={String(body.color ?? theme.colors.fg)}
+          fallbackStyle={styles.code_block as TextStyle}
+        />
+      );
+    },
+  };
+}
+
+/** An assistant-authored interactive preview fence, as the host should draw it. */
+export type NativeInteractiveBlock = {
+  kind: InteractivePreviewKind;
+  /** The fence body (complete only when `state` is "complete"). */
+  content: string;
+  /**
+   * "streaming": still being written (show a loading surface, never the body);
+   * "incomplete": generation stopped before the fence closed; "complete".
+   */
+  state: "streaming" | "incomplete" | "complete";
+};
+
+export interface MarkdownMediaOptions {
+  /**
+   * Draw a Markdown image. Retained files arrive as `artifact:<id>` sources,
+   * which only the host can resolve; return null to use the built-in image.
+   */
+  renderImage?: ((image: { src: string; alt: string }) => ReactNode) | undefined;
+  /**
+   * Draw `opengeni-html` / `opengeni-site` fences (web `renderInteractiveBlock`).
+   * Without it they show as code, like the web without the host opt-in.
+   */
+  renderInteractiveBlock?: ((block: NativeInteractiveBlock) => ReactNode) | undefined;
+}
+
+/**
+ * One ordinary link in an agent's Markdown that the host may draw itself: its
+ * own scheme (`myapp:order/42`), an in-app path, or a web URL. The native
+ * counterpart of the web `OpenGeniHostLink`.
+ */
+export type NativeHostLink = {
+  /** The destination exactly as the agent wrote it. It is not sanitized: check it before use. */
+  href: string;
+  /** The rendered link text (text nodes: draw it inside a `Text`). */
+  children: ReactNode;
+  /**
+   * The link is the only content of its paragraph or list item, so the host
+   * can draw it as a block (a card or preview) instead of inline text.
+   */
+  standalone: boolean;
+};
+
+export interface MarkdownLinkOptions {
+  /**
+   * Draw a host-owned link (web `renderLink`). Return `undefined` to keep the
+   * default link. Inline links sit inside text, so draw them with `Text`; a
+   * standalone link may be any block. Opengeni object links (`artifact:`,
+   * `sandbox:`) never reach it; they go to `onOpenGeniLink`.
+   */
+  renderLink?: ((link: NativeHostLink) => ReactNode | undefined) | undefined;
+}
+
+/** Text groups whose only link the host drew as a block, so they render as views. */
+const BLOCK_LINK_GROUPS = new WeakSet<object>();
+
+export { trailingOpenFence };
+
+const FenceStateContext = createContext<{ openTail: string | null; streaming: boolean }>({
+  openTail: null,
+  streaming: false,
+});
+
+function InteractiveFence({
+  kind,
+  content,
+  render,
+}: {
+  kind: InteractivePreviewKind;
+  content: string;
+  render: (block: NativeInteractiveBlock) => ReactNode;
+}) {
+  const { openTail, streaming } = useContext(FenceStateContext);
+  const open = openTail !== null && openTail.trimEnd() === content.trimEnd();
+  const state = !open ? "complete" : streaming ? "streaming" : "incomplete";
+  return <>{render({ kind, content: state === "complete" ? content : "", state })}</>;
+}
+
+/** An `opengeni-ui` answer: drawn natively, growing in place while it streams. */
+function AnswerFence({
+  content,
+  renderSource,
+}: {
+  content: string;
+  renderSource: () => ReactNode;
+}) {
+  const { openTail, streaming } = useContext(FenceStateContext);
+  const open = openTail !== null && openTail.trimEnd() === content.trimEnd();
+  const state = !open ? "complete" : streaming ? "streaming" : "incomplete";
+  return <NativeInteractiveAnswer source={content} state={state} renderSource={renderSource} />;
+}
+
+/** Plain image URLs load directly; retained files need the host's `renderImage`. */
+function MarkdownImage({ src, alt }: { src: string; alt: string }) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const [ratio, setRatio] = useState<number | null>(null);
+  const [failed, setFailed] = useState(false);
+  const remote = /^https?:\/\//i.test(src) && !parseRetainedFileReference(src);
+  if (!remote || failed) {
+    return (
+      <Text
+        style={{ ...fontStyle(theme), color: theme.colors["fg-muted"], fontSize: theme.size.sm }}
+      >
+        {m.previewUnavailable(alt || m.image)}
+      </Text>
+    );
+  }
+  return (
+    <Image
+      accessibilityLabel={alt || m.image}
+      source={{ uri: src }}
+      resizeMode="contain"
+      onLoad={(event) => {
+        const { width, height } = event.nativeEvent.source;
+        if (width > 0 && height > 0) setRatio(width / height);
+      }}
+      onError={() => setFailed(true)}
+      style={{
+        width: "100%",
+        aspectRatio: ratio ?? 4 / 3,
+        maxHeight: 420,
+        marginVertical: 8,
+        borderRadius: theme.radius.md,
+        backgroundColor: theme.colors["surface-2"],
+      }}
+    />
+  );
+}
+
+/** Trim the trailing paragraph margin (web `last:mb-0`). */
+function TrimmedMarkdown({
+  text,
+  tone,
+  textStyle,
+  streaming,
+  onLinkPress,
+  onCopy,
+  media,
+}: {
+  text: string;
+  tone: "body" | "muted";
+  textStyle?: TextStyle | undefined;
+  streaming: boolean;
+  onLinkPress?: ((url: string) => boolean) | undefined;
+  onCopy?: ((text: string) => void) | undefined;
+  media: MarkdownMediaOptions & MarkdownLinkOptions;
+}) {
+  const theme = useNativeTimelineTheme();
+  const math = useMemo(() => prepareBoundedMarkdown(text), [text]);
+  const styles = useMemo(() => {
+    const base = webMarkdownStyles(theme, tone);
+    return textStyle ? { ...base, body: { ...base.body, ...textStyle } } : base;
+  }, [theme, tone, textStyle]);
+  const rules = useMemo(() => webRules(theme, tone, onCopy, media), [theme, tone, onCopy, media]);
+  // Previews and interactive answers both need to know whether the last fence is still open.
+  const openTail = useMemo(
+    () =>
+      math && (media.renderInteractiveBlock || text.includes(INTERACTIVE_ANSWER_FENCE))
+        ? trailingOpenFence(text)
+        : null,
+    [math, media.renderInteractiveBlock, text],
+  );
+  const fenceState = useMemo(() => ({ openTail, streaming }), [openTail, streaming]);
+  if (!math) return <PlainTextMessage text={text} style={styles.body!} />;
+  return (
+    <View style={{ marginBottom: -10 }}>
+      <FenceStateContext.Provider value={fenceState}>
+        <Markdown
+          markdownit={math.hasMath ? MATH_PARSER : PARSER}
+          style={styles}
+          rules={rules}
+          {...(onLinkPress ? { onLinkPress } : {})}
+        >
+          {math.hasMath ? math.text : text}
+        </Markdown>
+      </FenceStateContext.Provider>
+    </View>
+  );
+}
+
+export function createWebMarkdownRenderer(
+  options: {
+    onLinkPress?: (url: string) => boolean;
+    onCopy?: (text: string) => void;
+    /** Opengeni links (sandbox files, artifacts, Sites); never handed to the OS. */
+    onOpenGeniLink?: (target: OpenGeniLinkTarget) => void;
+  } & MarkdownMediaOptions &
+    MarkdownLinkOptions = {},
+): NativeMarkdownRenderer {
+  const onLinkPress = (url: string): boolean => {
+    const target = parseOpenGeniLink(url);
+    if (target || isReservedOpenGeniLink(url)) {
+      if (target) options.onOpenGeniLink?.(target);
+      return false;
+    }
+    return options.onLinkPress ? options.onLinkPress(url) : true;
+  };
+  // One stable object, so the memoized rules survive every streaming delta.
+  const media: MarkdownMediaOptions & MarkdownLinkOptions = {
+    renderImage: options.renderImage,
+    renderInteractiveBlock: options.renderInteractiveBlock,
+    renderLink: options.renderLink,
+  };
+  return (text, { tone, streaming, textStyle }): ReactNode =>
+    text.length > MAX_MARKDOWN_LENGTH || text.trim() ? (
+      <TrimmedMarkdown
+        text={text}
+        tone={tone}
+        textStyle={textStyle}
+        streaming={streaming === true}
+        onLinkPress={onLinkPress}
+        onCopy={options.onCopy}
+        media={media}
+      />
+    ) : (
+      <Text />
+    );
+}

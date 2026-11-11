@@ -3,19 +3,35 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>OpenGeni Browser</title>
+    <title>{{name}}</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <main>
       <header>
-        <span class="signal" aria-hidden="true"></span>
+        <img class="brand-mark" src="icons/brand-mark.svg" alt="" width="28" height="22" />
         <div>
-          <h1>OpenGeni Browser</h1>
-          <p data-state>Connecting…</p>
+          <h1>{{heading}}</h1>
+          <p class="status">
+            <span class="signal" aria-hidden="true"></span
+            ><span data-state role="status">Connecting…</span>
+          </p>
         </div>
       </header>
       <p class="detail" data-detail>Connecting this Chrome profile to your machine agent.</p>
+      <section class="site-permissions" data-site-permissions hidden>
+        <div class="section-head">
+          <h2>Site permissions agents set</h2>
+          <button type="button" class="link" data-manage>Manage</button>
+        </div>
+        <ul class="entries" data-entries></ul>
+        <p class="empty" data-empty>None yet.</p>
+        <p class="empty" data-request hidden></p>
+        <p class="empty" data-stale hidden>
+          Still in effect, but this extension is no longer allowed to change them. To remove them,
+          open Manage and click Allow.
+        </p>
+      </section>
       <form>
         <label for="profile-label">Profile label</label>
         <div class="field">
@@ -28,7 +44,7 @@
           />
           <button type="submit">Save</button>
         </div>
-        <small>Used only to recognize this profile in OpenGeni.</small>
+        <small>Used only to recognize this profile in {{product}}.</small>
       </form>
     </main>
     <script type="module" src="popup.js"></script>

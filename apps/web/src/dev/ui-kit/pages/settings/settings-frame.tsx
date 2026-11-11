@@ -20,19 +20,19 @@ import {
   SparklesIcon,
   TriangleAlertIcon,
   UsersIcon,
-  VariableIcon,
+  LockKeyholeIcon,
   type LucideIcon,
 } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { EmptyState } from "@/components/ui/empty-state";
-import { LineTabsLink, LineTabsNav } from "@/components/ui/line-tabs";
-import { PageHeader, PageHeaderStyleProvider } from "@/components/ui/page-header";
-import { ScopeSwitcherTrigger } from "@/components/ui/scope-switcher-trigger";
-import { NavGroup, NavItem, SettingsNav } from "@/components/ui/settings-nav";
-import { cn } from "@/lib/utils";
+import { Avatar, AvatarFallback } from "@opengeni/react/ui/avatar";
+import { Button } from "@opengeni/react/ui/button";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { LineTabsLink, LineTabsNav } from "@opengeni/react/ui/line-tabs";
+import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
+import { ScopeSwitcherTrigger } from "@opengeni/react/ui/scope-switcher-trigger";
+import { NavGroup, NavItem, SettingsNav } from "@opengeni/react/ui/settings-nav";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { chats, organization, organizationRoles, type Person } from "../../fixtures";
 import type { SectionKey } from "../../sections/registry";
@@ -51,7 +51,7 @@ export type SettingsPageId =
   | "access"
   | "models"
   | "api-keys"
-  | "variable-sets"
+  | "secrets"
   | "sandbox-environments"
   | "machines"
   | "agent-learning"
@@ -101,20 +101,19 @@ function destinations(workspaceName: string): Record<SettingsPageId, Destination
       icon: KeyRoundIcon,
       description: "Keys that let your own tools start work in this workspace.",
     },
-    "variable-sets": {
-      id: "variable-sets",
-      label: "Variable sets",
-      icon: VariableIcon,
-      description: "Environment variables and secrets your agents get in their sandbox.",
-      preview: { section: "page-variable-sets", label: "Open the Variable sets preview" },
+    secrets: {
+      id: "secrets",
+      label: "Secrets",
+      icon: LockKeyholeIcon,
+      description: "Vaults of passwords, keys and logins agents use by reference.",
+      note: "Secrets isn't part of the page previews yet.",
     },
     "sandbox-environments": {
       id: "sandbox-environments",
       label: "Sandbox environments",
       icon: ContainerIcon,
       description: "Setup scripts and checks for the sandboxes agents work in.",
-      note: "Sandbox environments follows the Variable sets layout: a list, and a detail page per environment.",
-      preview: { section: "page-variable-sets", label: "Open the Variable sets preview" },
+      note: "Sandbox environments isn't part of the page previews yet.",
     },
     machines: {
       id: "machines",
@@ -176,7 +175,7 @@ function settingsGroups({
   const danger: SettingsPageId[] = dangerZonePage ? ["danger-zone"] : [];
   const runtime = {
     label: "Runtime",
-    items: ["variable-sets", "sandbox-environments", "machines"] as SettingsPageId[],
+    items: ["secrets", "sandbox-environments", "machines"] as SettingsPageId[],
   };
   if (settingsOnly) {
     return [{ items: ["general", "access", "models", "api-keys", ...danger] }, runtime];

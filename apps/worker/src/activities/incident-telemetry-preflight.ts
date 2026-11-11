@@ -1,5 +1,6 @@
 import {
   IncidentTelemetryPreflight,
+  secretNameKey,
   stableJson,
   type FirstPartyMcpToolName,
   type Permission,
@@ -26,9 +27,10 @@ export type IncidentTelemetryRigMetadata = {
   checkHealth: "passing" | "failing" | "unknown";
 };
 
-export type IncidentTelemetryVariableSetMetadata = {
+/** A vault the responder can reach, with its item names (never values). */
+export type IncidentTelemetryVaultMetadata = {
   name: string;
-  variables: readonly { name: string }[];
+  items: readonly { name: string }[];
 };
 
 export type IncidentTelemetryResponderMetadata = {
@@ -39,7 +41,11 @@ export type IncidentTelemetryResponderMetadata = {
   firstPartyMcpTools: readonly FirstPartyMcpToolName[];
   firstPartyMcpPermissions: readonly Permission[];
   rig: IncidentTelemetryRigMetadata | null;
-  variableSets: readonly IncidentTelemetryVariableSetMetadata[];
+  /**
+   * Vaults the responder reaches under the task's vault policy, matched by
+   * name case-insensitively (vault and item names in the preflight).
+   */
+  vaults: readonly IncidentTelemetryVaultMetadata[];
   /** Exact durable session policy version, or null for a not-yet-created session. */
   toolPolicyVersion: number | null;
 };
@@ -149,14 +155,16 @@ export function evaluateIncidentTelemetryPreflight(
     return blocked("incident_responder_under_capable");
   }
 
-  const variableSetsByName = new Map(input.responder.variableSets.map((set) => [set.name, set]));
-  if (preflight.requiredVariableSetNames.some((name) => !variableSetsByName.has(name))) {
+  const vaultsByName = new Map(
+    input.responder.vaults.map((vault) => [secretNameKey(vault.name), vault]),
+  );
+  if (preflight.requiredVaultNames.some((name) => !vaultsByName.has(secretNameKey(name)))) {
     return blocked("incident_responder_under_capable");
   }
-  const attachedVariableNames = new Set(
-    input.responder.variableSets.flatMap((set) => set.variables.map((variable) => variable.name)),
+  const reachableItemNames = new Set(
+    input.responder.vaults.flatMap((vault) => vault.items.map((item) => secretNameKey(item.name))),
   );
-  if (preflight.requiredVariableNames.some((name) => !attachedVariableNames.has(name))) {
+  if (preflight.requiredSecretNames.some((name) => !reachableItemNames.has(secretNameKey(name)))) {
     return blocked("incident_responder_under_capable");
   }
 
@@ -167,10 +175,10 @@ export function evaluateIncidentTelemetryPreflight(
   if (route.kind === "first_party" && !selectedFirstPartyTools.has(route.tool)) {
     return blocked("incident_responder_under_capable");
   }
-  if (route.kind === "variable_set") {
-    const selected = variableSetsByName.get(route.variableSetName);
-    const names = new Set(selected?.variables.map((variable) => variable.name) ?? []);
-    if (!selected || route.variableNames.some((name) => !names.has(name))) {
+  if (route.kind === "vault") {
+    const selected = vaultsByName.get(secretNameKey(route.vaultName));
+    const names = new Set(selected?.items.map((item) => secretNameKey(item.name)) ?? []);
+    if (!selected || route.secretNames.some((name) => !names.has(secretNameKey(name)))) {
       return blocked("incident_responder_under_capable");
     }
   }
@@ -224,10 +232,10 @@ export function incidentTelemetryAuthorityFence(input: {
           checkHealth: responder.rig.checkHealth,
         }
       : null,
-    variableSets: [...responder.variableSets]
-      .map((set) => ({
-        name: set.name,
-        variables: set.variables.map((variable) => variable.name).sort(),
+    vaults: [...responder.vaults]
+      .map((vault) => ({
+        name: vault.name,
+        items: vault.items.map((item) => item.name).sort(),
       }))
       .sort((left, right) => left.name.localeCompare(right.name)),
   };

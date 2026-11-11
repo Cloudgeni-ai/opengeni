@@ -3,24 +3,24 @@ import { SquareStackIcon } from "lucide-react";
 import { useMemo } from "react";
 
 import { useOrganizationDirectory } from "@/components/organization/organization-directory";
-import { DetailPage, DetailPageHeader } from "@/components/ui/detail-page";
-import { DetailSkeleton } from "@/components/ui/detail-sheet";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { RowButton } from "@/components/ui/page-actions";
-import { Section, SectionStack } from "@/components/ui/section";
-import { useAppContext } from "@/context";
-import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { DetailPage, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { apiErrorDetails, userErrorTextWithoutReference } from "@opengeni/react/ui/api-error";
+import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { formatBudget, formatCredits, ordinalDay } from "@/lib/usage-allowances";
 import { BudgetForm } from "./budget-form";
 import { MemberLimitsSection, type MemberName } from "./member-limits-section";
 import { useWorkspaceBudget } from "./use-workspace-budget";
 
 /**
- * Organization settings > Billing & usage > one workspace: its monthly budget,
+ * Organization settings > Billing > one workspace: its monthly budget,
  * this month's usage, and every member against their own limit.
  */
 export function WorkspaceBudgetPage({
@@ -47,7 +47,7 @@ export function WorkspaceBudgetPage({
     "workspace:admin",
   );
   const budget = useWorkspaceBudget(context.client, workspaceId, { roster: true, budget: true });
-  const back = { label: "Billing & usage", onClick: onBack };
+  const back = { label: "Billing", onClick: onBack };
 
   const names = useMemo(() => {
     const map = new Map<string, MemberName>();
@@ -75,7 +75,7 @@ export function WorkspaceBudgetPage({
           icon={<SquareStackIcon />}
           title="This workspace is gone"
           description="It may have been deleted. Budgets apply to shared workspaces in this organization."
-          action={<RowButton onClick={onBack}>Back to Billing & usage</RowButton>}
+          action={<RowButton onClick={onBack}>Back to Billing</RowButton>}
         />
       </DetailPage>
     );

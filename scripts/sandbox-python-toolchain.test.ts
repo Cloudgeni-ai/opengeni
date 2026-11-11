@@ -6,12 +6,16 @@ const root = resolve(import.meta.dir, "..");
 const BLOCK_START = "# Agent Python toolchain";
 const BLOCK_END = "rm -rf /root/.cache /var/cache/pip /var/cache/uv\n";
 const PREINSTALLED = [
+  "certifi",
   "matplotlib",
   "numpy",
+  "openpyxl",
   "pandas",
   "psycopg",
   "psycopg-binary",
   "pytest",
+  "python-docx",
+  "python-pptx",
   "requests",
 ];
 
@@ -118,13 +122,14 @@ describe("sandbox Python toolchain", () => {
     expect(block).not.toContain("PIP_BREAK_SYSTEM_PACKAGES");
     expect(block).toContain(
       "uv pip install --system --no-cache --compile-bytecode --only-binary :all: \\\n" +
-        '      --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" ${OPENGENI_PYTHON_PACKAGES};',
+        '      --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" \\\n' +
+        "      --exclude-newer-package certifi=2026-10-21T00:00:00Z ${OPENGENI_PYTHON_PACKAGES};",
     );
     expect(block).toContain(
       "python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}",
     );
     expect(block).toContain(
-      `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'`,
+      `python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests, openpyxl, docx, pptx'`,
     );
   });
 

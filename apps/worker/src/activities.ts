@@ -21,8 +21,6 @@ export type {
   ControlActivityServices,
   DispatchScheduledTaskRunInput,
   DispatchScheduledTaskRunResult,
-  DispatchAutomationRunInput,
-  DispatchAutomationRunResult,
   ExpireSessionHumanInputInput,
   ExpireSessionHumanInputResult,
   IndexDocumentInput,
@@ -42,8 +40,6 @@ export type {
   ReconcileSessionAttemptQuiescenceResult,
   FailSessionAttemptInput,
   FailSessionAttemptResult,
-  RunKnowledgeSourceSyncBatchInput,
-  RunKnowledgeSourceSyncBatchResult,
   RunAgentTurnInput,
   RunAgentTurnResult,
   VideoGenerationReconcileResult,
@@ -69,6 +65,12 @@ export function createActivityTestHarness(dependencies: ActivityDependencies = {
           createProductionAgentRuntime({
             metrics: runtimeMetricsHooksForObservability(common.observability),
           }),
+        requestWorkerDrain:
+          dependencies.requestWorkerDrain ??
+          (() => {
+            throw new Error("Test host must provide requestWorkerDrain for stalled cleanup");
+          }),
+        turnFinalizationTimeoutMs: dependencies.turnFinalizationTimeoutMs,
         summarizeContextForCompaction:
           dependencies.summarizeContextForCompaction ?? summarizeForCompaction,
         documentServices: dependencies.documentServices ?? createDocumentServices(common.settings),
@@ -91,6 +93,7 @@ const defaultTurnActivities = createTurnActivities();
 export const runAgentTurn = defaultTurnActivities.runAgentTurn;
 export const reconcileVideoGenerationOperation =
   defaultTurnActivities.reconcileVideoGenerationOperation;
+export const reconcileSessionTitleOperation = defaultTurnActivities.reconcileSessionTitleOperation;
 export const indexDocument = defaultControlActivities.indexDocument;
 export const indexKnowledge = defaultControlActivities.indexKnowledge;
 export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
@@ -99,6 +102,8 @@ export const persistSessionAttemptQuiescence =
   defaultControlActivities.persistSessionAttemptQuiescence;
 export const reconcileSessionAttemptQuiescence =
   defaultControlActivities.reconcileSessionAttemptQuiescence;
+export const reconcileSettledSessionAttempt =
+  defaultControlActivities.reconcileSettledSessionAttempt;
 export const recoverDispatch = defaultControlActivities.recoverDispatch;
 export const recoverEscapedMcpTimeout = defaultControlActivities.recoverEscapedMcpTimeout;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
@@ -109,23 +114,49 @@ export const expireSessionInteractionIntervention =
 export const expireScheduledRunHumanWait = defaultControlActivities.expireScheduledRunHumanWait;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
-export const dispatchAutomationRun = defaultControlActivities.dispatchAutomationRun;
-export const settleAutomationRunFailure = defaultControlActivities.settleAutomationRunFailure;
-export const runKnowledgeSourceSyncBatch = defaultControlActivities.runKnowledgeSourceSyncBatch;
 export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;
 export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;
 export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWait;
 export const reconcileCodexCapacityWait = defaultControlActivities.reconcileCodexCapacityWait;
 export const prepareSandboxLeaseSweep = defaultControlActivities.prepareSandboxLeaseSweep;
+export const listDueBrowserCheckpoints = defaultControlActivities.listDueBrowserCheckpoints;
+export const checkpointBrowserBeforeDeadline =
+  defaultControlActivities.checkpointBrowserBeforeDeadline;
 export const drainSandboxLease = defaultControlActivities.drainSandboxLease;
+export const listIdleSandboxCheckpoints = defaultControlActivities.listIdleSandboxCheckpoints;
+export const checkpointIdleSandboxLease = defaultControlActivities.checkpointIdleSandboxLease;
 export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandboxLeaseSweep;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
+export const deleteTransientObjects = defaultControlActivities.deleteTransientObjects;
+export const maintainSessionStorage = defaultControlActivities.maintainSessionStorage;
+export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
+export const stopArchivedSessionWork = defaultControlActivities.stopArchivedSessionWork;
+export const storeArchivedSession = defaultControlActivities.storeArchivedSession;
+export const restoreArchivedSessions = defaultControlActivities.restoreArchivedSessions;
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
+export const recoverSessionTitleWorkflows = defaultControlActivities.recoverSessionTitleWorkflows;
+export const transcribeRecordingVersion = defaultControlActivities.transcribeRecordingVersion;
+export const scanRecordingSpeakers = defaultControlActivities.scanRecordingSpeakers;
+export const failRecordingTranscript = defaultControlActivities.failRecordingTranscript;
+export const archiveDeletedMeetingSummaries =
+  defaultControlActivities.archiveDeletedMeetingSummaries;
+export const deleteRecordingMedia = defaultControlActivities.deleteRecordingMedia;
+export const expireDictation = defaultControlActivities.expireDictation;
+export const recoverRecordingWorkflows = defaultControlActivities.recoverRecordingWorkflows;
+export const applyRecordingRetention = defaultControlActivities.applyRecordingRetention;
+export const createBrowserRecordingFromBundle =
+  defaultControlActivities.createBrowserRecordingFromBundle;
+export const encodeBrowserRecordingVideo = defaultControlActivities.encodeBrowserRecordingVideo;
+export const failBrowserRecording = defaultControlActivities.failBrowserRecording;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
 export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBrowserStateArtifacts;
+export const reconcileRecentModelCallFacts = defaultControlActivities.reconcileRecentModelCallFacts;
+export const recordRecentTurnTimingProfiles =
+  defaultControlActivities.recordRecentTurnTimingProfiles;
 export const maintainSiteAuthConnections = defaultControlActivities.maintainSiteAuthConnections;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
+export const maintainSessionWorkflowWakes = defaultControlActivities.maintainSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;
 export const verifyRigVersion = defaultControlActivities.verifyRigVersion;

@@ -2,11 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { registerSlackTaskPolicyRoutes } from "../src/routes/slack-task-policy";
 

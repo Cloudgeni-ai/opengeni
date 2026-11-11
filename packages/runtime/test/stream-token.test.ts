@@ -59,6 +59,22 @@ describe("@opengeni/runtime/sandbox stream-token mint/verify", () => {
     expect(verified?.subjectId).toBeUndefined();
     expect(verified?.authorityEpoch).toBeUndefined();
   });
+
+  test("a relay token is minted for the machine's channel, not the chat's workspace", async () => {
+    const machineWorkspaceId = "55555555-5555-4555-8555-555555555555";
+    const token = await mintStreamToken(SECRET, {
+      ...baseInput,
+      relayChannel: { workspaceId: machineWorkspaceId, agentId: "agent-1", channelId: "ch-1" },
+    });
+    const verified = await verifyStreamToken(SECRET, token);
+    expect(verified?.workspaceId).toBe(machineWorkspaceId);
+    expect(verified?.agentId).toBe("agent-1");
+    expect(verified?.channelId).toBe("ch-1");
+    const plain = await verifyStreamToken(SECRET, await mintStreamToken(SECRET, baseInput));
+    expect(plain?.workspaceId).toBe(baseInput.workspaceId);
+    expect(plain?.agentId).toBeUndefined();
+    expect(plain?.channelId).toBeUndefined();
+  });
 });
 
 describe("negotiateCapabilities — desktop graceful degrade (stream-token availability contract)", () => {

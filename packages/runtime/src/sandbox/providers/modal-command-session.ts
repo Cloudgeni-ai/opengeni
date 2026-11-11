@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { truncateOutput } from "@openai/agents-core/sandbox/internal";
 import type { ChannelASession } from "../channel-a";
+import {
+  aliasNativeSynchronousCommandOutput,
+  retainSynchronousTerminalProviderPage,
+  synchronousTerminalProviderPage,
+} from "../native-synchronous-collection";
 import { ModalProcessObservationUnavailableError } from "../errors";
+import { classifyProviderSandboxFailure } from "../provider-errors";
 import { markTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
 import {
   MAX_PROVIDER_COMMAND_HANDLE,
@@ -11,8 +17,11 @@ import {
   type ProviderCommandSession,
   admittedProviderCommandHandle,
   ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandInputOutcomeUnknownError,
 } from "../provider-command-session";
 import type { ModalCommandControl, ModalProviderCommand } from "./modal-command-control";
+import { MODAL_ROUTER_READ_MAX_WAIT_MS } from "./modal-command-router-wire";
+import { modalShellStartFailureNotice } from "./modal-process-start";
 import { verifyModalMaterializedPath } from "./modal-materialization-verification";
 
 type Entry = {
@@ -34,6 +43,21 @@ function sameExecution(a: ModalProviderCommand, b: ModalProviderCommand): boolea
   );
 }
 
+const SLICE_PAUSE_MS = 25;
+
+/** True when a router page moved neither output cursor: nothing was read. */
+function unchangedCursor(page: ProviderCommandOutput): boolean {
+  const { command, expected } = page;
+  return (
+    command.kind === "modal-router-v1" &&
+    expected?.kind === "modal-router-v1" &&
+    command.streams.stdout.byteOffset === expected.streams.stdout.byteOffset &&
+    command.streams.stderr.byteOffset === expected.streams.stderr.byteOffset &&
+    command.streams.stdout.utf8Remainder === expected.streams.stdout.utf8Remainder &&
+    command.streams.stderr.utf8Remainder === expected.streams.stderr.utf8Remainder
+  );
+}
+
 /** Bridges the SDK's numeric/banner surface to provider-owned execution
  * locators. The local maps are only caches: a fresh adapter can adopt the same
  * handle from protected persistence and replay any unacknowledged page. */
@@ -42,15 +66,39 @@ export function installModalCommandSession(
     execCommand?: ChannelASession["execCommand"];
     writeStdin?: ChannelASession["writeStdin"];
     verifyMaterializedPath?: (path: string, workdir: string) => Promise<void>;
+    verifyExecReadiness?: (signal: AbortSignal) => Promise<number>;
   },
   control: Pick<ModalCommandControl, "start" | "read" | "readProbe" | "write"> &
-    Partial<Pick<ModalCommandControl, "supervisionControl" | "verifySupervisionCapability">>,
+    Partial<
+      Pick<
+        ModalCommandControl,
+        "supervisionControl" | "verifySupervisionCapability" | "verifyExecReadiness"
+      >
+    >,
 ): void {
   markTypedExecHandleLoss(session);
   const originalExec = session.execCommand?.bind(session);
   const originalWrite = session.writeStdin?.bind(session);
   const cancelLegacyStart = session.cancelPendingExecCommand?.bind(session);
   const pendingStarts = new Set<AbortController>();
+  if (control.verifyExecReadiness) {
+    const verify = control.verifyExecReadiness.bind(control);
+    session.verifyExecReadiness = async (signal: AbortSignal) => {
+      const cancellation = new AbortController();
+      const abort = () => cancellation.abort(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+      pendingStarts.add(cancellation);
+      try {
+        const exit = await verify(cancellation.signal);
+        cancellation.signal.throwIfAborted();
+        return exit;
+      } finally {
+        signal.removeEventListener("abort", abort);
+        pendingStarts.delete(cancellation);
+      }
+    };
+  }
   session.verifyCommandSupervisionCapability = async () => {
     if (!control.verifySupervisionCapability)
       throw new Error("Modal instance lacks supervised command capability verification");
@@ -134,10 +182,12 @@ export function installModalCommandSession(
       throw new ModalProcessObservationUnavailableError(handle);
     // The parser validated the unique status in the metadata header, before
     // command-controlled Output. Replace only that first trusted status line.
-    return raw.replace(
+    const aliased = raw.replace(
       /^Process running with session ID \d+(?=\r?$)/mu,
       `Process running with session ID ${handle}`,
     );
+    aliasNativeSynchronousCommandOutput(session, raw, aliased, handle);
+    return aliased;
   };
 
   const formatPage = (
@@ -145,17 +195,22 @@ export function installModalCommandSession(
     page: ProviderCommandOutput,
     maxOutputTokens?: number,
   ): string => {
+    const output = page.chunks.map((chunk) => chunk.text).join("");
+    // A command Modal could not start (its /bin/sh does not load) gets short
+    // copy instead of Modal's error, which repeats the whole wrapper script.
+    const startFailure = modalShellStartFailureNotice(output, page.exitCode);
     const result = [
       `Provider output receipt: ${randomUUID()}`,
       page.exitCode === null
         ? `Process running with session ID ${handle}`
         : `Process exited with code ${page.exitCode}`,
       "Output:",
-      truncateOutput(page.chunks.map((chunk) => chunk.text).join(""), maxOutputTokens).text,
+      startFailure ?? truncateOutput(output, maxOutputTokens).text,
     ].join("\n");
     if (page.exitCode === null || entries.get(handle)?.persistence) {
       receipts.set(result, { handle, page });
     } else {
+      retainSynchronousTerminalProviderPage(session, result, page);
       entries.delete(handle);
     }
     return result;
@@ -176,19 +231,46 @@ export function installModalCommandSession(
       // unavailable. Terminal exposure below remains fenced by durable proof.
       await supervise(entry).catch(() => undefined);
     }
-    let page = await control.read(entry.command, yieldTimeMs, signal);
-    if (entry.persistence && page.command.kind === "modal-router-v1") {
-      // A stale concurrent observer must reread from the committed cursor before
-      // exposing a terminal receipt; its uncommitted tail is not settlement proof.
-      let captured = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (await captureRouterPage(entry, page)) {
-          captured = true;
-          break;
+    // One provider read waits at most MODAL_ROUTER_READ_MAX_WAIT_MS. Honor a
+    // longer requested wait (a large upload, for example) with further reads
+    // while the command is still running and has produced nothing new.
+    const deadline = performance.now() + yieldTimeMs;
+    const readSlice = () =>
+      control.read(
+        entry.command,
+        Math.min(
+          MODAL_ROUTER_READ_MAX_WAIT_MS,
+          Math.max(0, Math.ceil(deadline - performance.now())),
+        ),
+        signal,
+      );
+    let page: ProviderCommandOutput;
+    while (true) {
+      page = await readSlice();
+      if (entry.persistence && page.command.kind === "modal-router-v1") {
+        // A stale concurrent observer must reread from the committed cursor before
+        // exposing a terminal receipt; its uncommitted tail is not settlement proof.
+        let captured = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (await captureRouterPage(entry, page)) {
+            captured = true;
+            break;
+          }
+          if (attempt < 2) page = await readSlice();
         }
-        if (attempt < 2) page = await control.read(entry.command, yieldTimeMs, signal);
+        if (!captured)
+          throw new Error("Modal command output cursor changed during bounded capture");
       }
-      if (!captured) throw new Error("Modal command output cursor changed during bounded capture");
+      if (
+        page.exitCode !== null ||
+        page.chunks.length > 0 ||
+        !unchangedCursor(page) ||
+        deadline - performance.now() <= SLICE_PAUSE_MS
+      )
+        break;
+      // A read normally blocks for its slice; avoid a hot loop if one returns
+      // early without output (for example EOF seen before exit evidence).
+      await new Promise((resolve) => setTimeout(resolve, SLICE_PAUSE_MS));
     }
     if (page.command.kind === "modal-router-v1" && page.command.supervision) {
       const receipt = await entry.persistence?.loadSupervisionReceipt?.();
@@ -304,17 +386,20 @@ export function installModalCommandSession(
     entries.set(handle, { command: structuredClone(command), persistence });
   };
   session.getProviderCommandOutput = (result) =>
-    typeof result === "string" ? (receipts.get(result)?.page ?? null) : null;
+    typeof result === "string"
+      ? (receipts.get(result)?.page ?? synchronousTerminalProviderPage(session, result))
+      : null;
   session.captureCommandOutput = async (result) => {
     const receipt = receipts.get(result);
-    if (!receipt || receipt.page.command.kind !== "modal-router-v1") return false;
+    if (!receipt) return false;
     if (
-      receipt.page.command.supervision &&
       !receipt.page.expected &&
       receipt.page.exitCode === null &&
       receipt.page.chunks.length === 0
     ) {
-      // Idle-launch receipt carries identity only; there are no bytes to ACK.
+      // Both a supervised idle launch and an unavailable first observation
+      // carry identity only. Retention already owns this command; there are
+      // no observed bytes or terminal evidence to ACK.
       receipts.delete(result);
       return true;
     }
@@ -328,11 +413,8 @@ export function installModalCommandSession(
     if (!(await captureRouterPage(entry, receipt.page))) {
       const target = receipt.page.command;
       const covered = () =>
-        entry.command.kind === "modal-router-v1" &&
         (["stdout", "stderr"] as const).every((stream) => {
           const current = entry.command.streams[stream];
-          // This narrowing stays inside the discriminator's synchronous scope.
-          if (!("byteOffset" in current)) return false;
           const wanted = target.streams[stream];
           return (
             current.byteOffset >= wanted.byteOffset &&
@@ -354,18 +436,6 @@ export function installModalCommandSession(
     receipts.delete(result);
     return true;
   };
-  session.acknowledgeCommandOutput = async (result) => {
-    const receipt = receipts.get(result);
-    if (!receipt) return;
-    const entry = entries.get(receipt.handle);
-    if (!entry?.persistence)
-      throw new Error("Modal output cannot advance before durable command retention");
-    const saved = await entry.persistence.acknowledge(receipt.page.command);
-    if (!sameExecution(entry.command, saved))
-      throw new Error("Modal output acknowledgment changed execution identity");
-    entry.command = saved;
-    receipts.delete(result);
-  };
   session.writeStdin = async (args) => {
     const sdkHandle = setupHandles.get(args.sessionId);
     if (sdkHandle !== undefined && originalWrite) {
@@ -382,8 +452,27 @@ export function installModalCommandSession(
       if (!retained || !sameExecution(entry.command, retained))
         throw new Error("Original Modal command identity is unavailable");
       const index = await entry.persistence.reserveInput(Buffer.byteLength(args.chars));
-      await control.write(retained, args.chars, index);
+      try {
+        await control.write(retained, args.chars, index);
+      } catch (error) {
+        // Native gRPC transport failure does not establish whether this reserved
+        // range reached stdin. Never resend it or recommend another input write.
+        if (
+          retained.kind === "modal-router-v1" &&
+          // Contain supported transport graphs, including mixed failures. This
+          // grants no read/write retry permission; the locator and byte range
+          // come only from the retained command and its one input reservation.
+          classifyProviderSandboxFailure("modal", error).kind === "transient_transport"
+        )
+          throw new ProviderCommandInputOutcomeUnknownError(
+            retained,
+            index,
+            Buffer.byteLength(args.chars),
+            error,
+          );
+        throw error;
+      }
     }
-    return read(args.sessionId, entry, args.yieldTimeMs ?? 250, args.maxOutputTokens);
+    return read(args.sessionId, entry, args.yieldTimeMs ?? 250, args.maxOutputTokens, args.signal);
   };
 }

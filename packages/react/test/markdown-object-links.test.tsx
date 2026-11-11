@@ -5,9 +5,13 @@ import { Markdown } from "../src/components/markdown";
 import {
   OpenGeniLinkProvider,
   sessionLinkResolver,
+  viewerLinkResolver,
   type OpenGeniLinkTarget,
 } from "../src/components/open-geni-links";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -21,7 +25,35 @@ const REPLY = [
   `[Download export](artifact:${FILE})`,
 ].join("\n\n");
 
-describe("OpenGeni object links inside an embedding host", () => {
+describe("Opengeni object links inside an embedding host", () => {
+  test("a short editable reference renders and opens through the existing viewer", async () => {
+    const opened: unknown[] = [];
+    const resolve = viewerLinkResolver({
+      workspaceId: WORKSPACE,
+      open: (target) => void opened.push(target),
+    });
+    const r = await renderComponent(
+      <OpenGeniLinkProvider resolveLink={resolve}>
+        <Markdown artifactHref={() => "/wrong-file-route"}>
+          {`[Weekly report](artifact:${EDITABLE})`}
+        </Markdown>
+      </OpenGeniLinkProvider>,
+    );
+    try {
+      expect(r.container.textContent).not.toContain("unavailable");
+      expect(r.container.innerHTML).not.toContain("/wrong-file-route");
+      const button = r.container.querySelector<HTMLButtonElement>("button");
+      expect(button?.textContent).toBe("Weekly report");
+      await actRun(() => button!.click());
+      expect(opened).toEqual([{ kind: "editable-artifact", artifactId: EDITABLE }]);
+      expect(
+        resolve({ kind: "editable-artifact", artifactId: EDITABLE, workspaceId: "other" }),
+      ).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("console paths never render as navigations when the host resolves nothing", () => {
     const html = renderToStaticMarkup(<Markdown>{REPLY}</Markdown>);
     expect(html).not.toContain(`href="/workspaces/`);
@@ -67,7 +99,7 @@ describe("OpenGeni object links inside an embedding host", () => {
   });
 
   test("disabled sandbox defaults leave path references unavailable but retain file downloads", () => {
-    const resolve = sessionLinkResolver({
+    const resolve = sessionLinkResolver(englishText, {
       client: {
         fsRead: (() => Promise.reject(new Error("must not read"))) as never,
         createFileDownloadUrl: (() => Promise.resolve({ url: "https://file.test" })) as never,
@@ -175,7 +207,7 @@ describe("OpenGeni object links inside an embedding host", () => {
 
   test("the session default downloads files and sandbox files through the client", async () => {
     const calls: unknown[] = [];
-    const resolve = sessionLinkResolver({
+    const resolve = sessionLinkResolver(englishText, {
       workspaceId: WORKSPACE,
       sessionId: "session-1",
       client: {
@@ -259,5 +291,46 @@ describe("OpenGeni object links inside an embedding host", () => {
     await flush();
     expect(button.getAttribute("aria-disabled")).toBeNull();
     await r.unmount();
+  });
+
+  test("a chat reference opens in place on a plain click and keeps its page for modified clicks", async () => {
+    const opened: string[] = [];
+    const r = await renderComponent(
+      <OpenGeniLinkProvider
+        resolveLink={(target) =>
+          target.kind === "session"
+            ? {
+                href: `/workspaces/${WORKSPACE}/sessions/${target.sessionId}`,
+                open: () => void opened.push(target.sessionId),
+              }
+            : null
+        }
+      >
+        <Markdown>{`See [Launch plan](session:${SITE}).`}</Markdown>
+      </OpenGeniLinkProvider>,
+    );
+    await flush();
+    const link = r.container.querySelector<HTMLAnchorElement>("a")!;
+    expect(link.getAttribute("href")).toBe(`/workspaces/${WORKSPACE}/sessions/${SITE}`);
+    expect(link.getAttribute("target")).toBeNull();
+    const click = (init: MouseEventInit) => {
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true, ...init });
+      link.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    await actRun(() => void expect(click({ button: 0 })).toBe(true));
+    for (const modifier of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }]) {
+      await actRun(() => void expect(click({ button: 0, ...modifier })).toBe(false));
+    }
+    expect(opened).toEqual([SITE]);
+    await r.unmount();
+  });
+
+  test("a chat reference no host opens shows just its title", () => {
+    const html = renderToStaticMarkup(<Markdown>{`See [Launch plan](session:${SITE}).`}</Markdown>);
+    expect(html).not.toContain("<a ");
+    expect(html).not.toContain("unavailable)");
+    expect(html).toContain('data-og-link-unavailable="session"');
+    expect(html).toContain("Launch plan");
   });
 });

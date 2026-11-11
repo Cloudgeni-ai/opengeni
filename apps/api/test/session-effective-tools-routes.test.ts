@@ -1,12 +1,10 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Session } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import * as opengeniDb from "@opengeni/db";
+import { bootstrapWorkspace, createDb, createSession, type DbClient } from "@opengeni/db";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 const secret = "session-effective-tools-route-test";
@@ -57,7 +55,6 @@ describe("effectiveTools on session responses (PostgreSQL)", () => {
         delegationSecret: secret,
         environmentsEncryptionKey: Buffer.alloc(32, 57).toString("base64"),
         sandboxBackend: "none",
-        agentConfigAdmissionEnabled: true,
         webSearchEnabled: false,
         lazyToolSearchEnabled: true,
       }),
@@ -75,25 +72,43 @@ describe("effectiveTools on session responses (PostgreSQL)", () => {
       },
     } as Parameters<typeof createApp>[0]);
     const path = `/v1/workspaces/${grant.workspaceId}/sessions`;
-    const create = async (agent?: { capabilities: "all" | "none" }): Promise<Session> => {
+    const create = async (
+      agent?: { capabilities: "all" | "none" },
+      bundledSkillIds: string[] | "omit" = [],
+    ): Promise<Session> => {
       const response = await app.request(path, {
         method: "POST",
         headers: { authorization, "content-type": "application/json" },
         body: JSON.stringify({
           initialMessage: "hello",
           resources: [],
-          bundledSkillIds: [],
+          ...(bundledSkillIds !== "omit" ? { bundledSkillIds } : {}),
           ...(agent ? { agent } : {}),
         }),
       });
       expect(response.status).toBe(202);
       return (await response.json()) as Session;
     };
-    const legacy = await create();
+    // A session created before agent configuration keeps a null config.
+    const legacy = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "hello",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: testSettings().openaiModel,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: grant.subjectId, label: "Test owner" },
+      createdByContext: {},
+    });
+    const omitted = await create();
     const all = await create({ capabilities: "all" });
     const none = await create({ capabilities: "none" });
-    expect(Object.hasOwn(legacy, "effectiveTools")).toBe(false);
-    for (const created of [all, none]) {
+    expect(omitted.agent).toMatchObject({ source: "deployment_default" });
+    for (const created of [omitted, all, none]) {
       const names = created.effectiveTools!.tools.map((tool) => tool.name);
       expect(names).not.toContain("web_search");
       expect(names).not.toContain("generate_image");
@@ -115,6 +130,92 @@ describe("effectiveTools on session responses (PostgreSQL)", () => {
       expect(rows.find((row) => row.id === created.id)?.effectiveTools).toEqual(
         created.effectiveTools,
       );
+    }
+
+    // The admin action forwards these exact query parameters. Compact scanning
+    // must avoid response enrichment, not merely strip tools after computing it.
+    const fullPageResponse = await app.request(`${path}?view=page&limit=50`, {
+      headers: { authorization },
+    });
+    expect(fullPageResponse.status).toBe(200);
+    const fullPageText = await fullPageResponse.text();
+    const fullPage = JSON.parse(fullPageText) as { pinned: Session[]; sessions: Session[] };
+    const workspaceReadsForSummary = spyOn(opengeniDb, "requireWorkspace");
+    try {
+      const compactResponse = await app.request(`${path}?view=page&projection=summary&limit=50`, {
+        headers: { authorization },
+      });
+      expect(compactResponse.status).toBe(200);
+      const compactText = await compactResponse.text();
+      const compact = JSON.parse(compactText) as {
+        projection: string;
+        pinned: Array<{ id: string; title: string }>;
+        sessions: Array<{ id: string; title: string }>;
+      };
+      expect(compact.projection).toBe("summary");
+      const identity = (row: { id: string; title: string }) => ({ id: row.id, title: row.title });
+      expect(compact.pinned.map(identity)).toEqual(fullPage.pinned.map(identity));
+      expect(compact.sessions.map(identity)).toEqual(fullPage.sessions.map(identity));
+      for (const row of [...compact.pinned, ...compact.sessions]) {
+        expect(Object.hasOwn(row, "effectiveTools")).toBe(false);
+        expect(Object.hasOwn(row, "agent")).toBe(false);
+      }
+      expect(workspaceReadsForSummary.mock.calls).toHaveLength(0);
+      expect(Buffer.byteLength(compactText)).toBeLessThan(Buffer.byteLength(fullPageText));
+      if (process.env.OPENGENI_BENCH_SESSION_SUMMARY === "1") {
+        console.log(
+          JSON.stringify({
+            fixtureSessions: compact.pinned.length + compact.sessions.length,
+            fullResponseBytes: Buffer.byteLength(fullPageText),
+            compactResponseBytes: Buffer.byteLength(compactText),
+          }),
+        );
+      }
+    } finally {
+      workspaceReadsForSummary.mockRestore();
+    }
+
+    // "none" freezes no bundled guides unless the request lists them; "all"
+    // keeps the omitted bundled defaults.
+    const noneOmitted = await create({ capabilities: "none" }, "omit");
+    expect(noneOmitted.bundledSkillIds).toEqual([]);
+    expect(noneOmitted.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("skill_read");
+    const noneExplicit = await create({ capabilities: "none" }, ["builtin:opengeni-help"]);
+    expect(noneExplicit.bundledSkillIds).toEqual(["builtin:opengeni-help"]);
+    expect(noneExplicit.effectiveTools!.tools.map((tool) => tool.name)).toContain("skill_read");
+    const allOmitted = await create({ capabilities: "all" }, "omit");
+    expect(allOmitted.bundledSkillIds).toBeUndefined();
+    expect(allOmitted.effectiveTools!.tools.map((tool) => tool.name)).toContain("skill_read");
+    const noneDetail = await app.request(`${path}/${noneOmitted.id}`, {
+      headers: { authorization },
+    });
+    expect(((await noneDetail.json()) as Session).bundledSkillIds).toEqual([]);
+
+    // No sandbox or Connected Machine: background-command tools are withheld.
+    for (const created of [all, none, noneOmitted]) {
+      const names = created.effectiveTools!.tools.map((tool) => tool.name);
+      expect(names).not.toContain("opengeni__command_read");
+      expect(names).not.toContain("opengeni__command_wait");
+    }
+
+    // The response projection hydrates the workspace once, shared by the tool
+    // policy and effective-tools contexts, on detail and on create.
+    const workspaceReads = spyOn(opengeniDb, "requireWorkspace");
+    try {
+      const reads = () =>
+        workspaceReads.mock.calls.filter(([, workspaceId]) => workspaceId === grant.workspaceId)
+          .length;
+      const detail = await app.request(`${path}/${all.id}`, { headers: { authorization } });
+      expect(detail.status).toBe(200);
+      expect(((await detail.json()) as Session).effectiveTools).toEqual(all.effectiveTools);
+      expect(reads()).toBe(1);
+      workspaceReads.mockClear();
+      const created = await create({ capabilities: "all" });
+      expect(created.effectiveTools).toEqual(all.effectiveTools);
+      // One read inside creation itself, one for the response projection.
+      expect(reads()).toBe(2);
+    } finally {
+      workspaceReads.mockRestore();
     }
   });
 });

@@ -34,6 +34,11 @@ export const WEBHOOK_EVENT_GROUPS: readonly WebhookEventGroup[] = [
         description: "Someone stopped a reply.",
       },
       {
+        type: "turn.superseded",
+        label: "Turn superseded",
+        description: "A new message took over a reply before it finished.",
+      },
+      {
         type: "session.status.changed",
         label: "Status changed",
         description: "A chat started, finished or began waiting.",
@@ -52,6 +57,32 @@ export const WEBHOOK_EVENT_GROUPS: readonly WebhookEventGroup[] = [
         type: "session.humanInput.requested",
         label: "Question for the user",
         description: "The agent asked a question and waits for the answer.",
+      },
+      {
+        type: "session.notification.posted",
+        label: "Notification posted",
+        description: "An agent posted or updated a notification for the user's inbox.",
+      },
+      {
+        type: "session.notification.withdrawn",
+        label: "Notification withdrawn",
+        description: "An agent took back a notification it had posted.",
+      },
+    ],
+  },
+  {
+    label: "Calls",
+    workspaceOnly: true,
+    events: [
+      {
+        type: "session.agentCall.ringing",
+        label: "Agent calling",
+        description: "An agent is ringing someone's phone, so your app can ring too.",
+      },
+      {
+        type: "session.agentCall.settled",
+        label: "Agent call ended",
+        description: "The call was answered, declined, missed or cancelled.",
       },
     ],
   },
@@ -73,6 +104,51 @@ export const WEBHOOK_EVENT_GROUPS: readonly WebhookEventGroup[] = [
         type: "usage.period_reset",
         label: "Usage period reset",
         description: "An allowance started a new period.",
+      },
+    ],
+  },
+  {
+    label: "Meetings",
+    events: [
+      {
+        type: "recording.started",
+        label: "Recording started",
+        description: "Someone started recording a meeting.",
+      },
+      {
+        type: "recording.finished",
+        label: "Recording finished",
+        description: "A recording stopped and all its audio was uploaded.",
+      },
+      {
+        type: "recording.transcript.ready",
+        label: "Transcript ready",
+        description: "A transcript finished, including re-runs on another model.",
+      },
+      {
+        type: "recording.transcript.failed",
+        label: "Transcript failed",
+        description: "A transcript could not be made.",
+      },
+      {
+        type: "recording.transcript.current_changed",
+        label: "Transcript version switched",
+        description: "Someone chose a different transcript version to show.",
+      },
+      {
+        type: "recording.speakers.updated",
+        label: "Speakers edited",
+        description: "Someone named, merged or moved speakers, or edited the text.",
+      },
+      {
+        type: "recording.notes.updated",
+        label: "Notes updated",
+        description: "Someone, or an agent, saved the meeting's written-up notes.",
+      },
+      {
+        type: "recording.deleted",
+        label: "Recording deleted",
+        description: "A recording and its audio and transcripts were deleted.",
       },
     ],
   },

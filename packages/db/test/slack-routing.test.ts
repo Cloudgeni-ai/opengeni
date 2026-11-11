@@ -5,7 +5,7 @@
 // owner) and `resolveSlackTargetAuthority` (the ONLY place a Slack request may
 // mint personal-workspace access, and it must refuse another subject's).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import {
   createDb,

@@ -1,10 +1,13 @@
+import type { LearningRefusal } from "@opengeni/sdk/learning-refusal";
 import type {
   AllowanceExhaustedRefusal,
   HumanInputQuestion,
   HumanInputResponse,
+  HumanInputSecretAnswerResult,
   MediaGenerationResult,
   ResourceRef,
   SessionStatus,
+  ChatSession as Session,
   TimelineAnnotation,
   TimelineAnnotationSource,
   ToolAuthNeededPayload,
@@ -20,6 +23,13 @@ import type {
    row component consume — the SINGLE SOURCE OF TRUTH used by both the live app
    and the component demo.
    -------------------------------------------------------------------------- */
+
+/** The person who sent a message: their subject and the label frozen with it. */
+export type MessageSender = {
+  subjectId: string;
+  /** What the deployment knew them as when the message was accepted, such as an email. */
+  label: string | null;
+};
 
 export type TimelineAnnotationSourceDescriptor = Omit<
   TimelineAnnotationSource,
@@ -50,6 +60,16 @@ export type UserMessageItem = {
   resources: ResourceRef[];
   /** Tools requested for the turn this message starts. */
   tools: ToolRef[];
+  /**
+   * The person who sent this message, as frozen when it was accepted. Absent
+   * for messages from agents, services and schedules, and for older messages.
+   */
+  sender?: MessageSender | undefined;
+  /**
+   * This message handed a sub-session's question to the agent ("Let the agent
+   * decide"). Hosts may show the decision instead of the plain text.
+   */
+  humanInputDelegation?: { sessionId: string; requestId: string } | undefined;
   occurredAt: string;
   /** Local-only delivery projection; absent for authoritative durable events. */
   delivery?:
@@ -57,6 +77,7 @@ export type UserMessageItem = {
         state: "sending" | "queued" | "failed";
         error?: string | undefined;
         onRetry?: (() => void) | undefined;
+        onEdit?: (() => void) | undefined;
         onRemove?: (() => void) | undefined;
       }
     | undefined;
@@ -67,12 +88,16 @@ export type HumanInputAnswerSummary = {
   label: string;
   prompt: string;
   values: string[];
+  /** A secret question's saved reference (never a value). */
+  secret?: HumanInputSecretAnswerResult | undefined;
 };
 
 /**
  * One resolved structured question in the conversation. The live pending form
  * is rendered at the timeline tip by the host; after settlement this item keeps
  * both the agent's question and the human's answer visible as chat history.
+ * A question an agent answered or skipped is agent work instead: readable turns
+ * fold it into that turn's work details (see `isAgentWorkHumanInput`).
  */
 export type HumanInputItem = {
   kind: "human-input";
@@ -82,6 +107,8 @@ export type HumanInputItem = {
   questions: HumanInputQuestion[];
   response: HumanInputResponse;
   answers: HumanInputAnswerSummary[];
+  /** An agent (such as the parent of a sub-session) gave this answer, not a person. */
+  answeredByAgent?: boolean;
   occurredAt: string;
 };
 
@@ -135,6 +162,22 @@ export type ToolCallTruncation = {
   };
 };
 
+/**
+ * A tool output a step read delivered as a bounded preview: long strings keep
+ * their head and tail (`structured`), or the output is the head and tail of
+ * its text (`text`). The exact output is retained; `load` reads it, and the
+ * row then re-renders with it.
+ */
+export type ToolOutputPreview = {
+  shape: "structured" | "text";
+  originalBytes: number;
+  previewBytes: number;
+  /** `preview` until `load` is called; `error` when the exact read failed. */
+  state: "preview" | "loading" | "error";
+  /** Read the exact output. Absent when the timeline has no reader for it. */
+  load?: (() => void) | undefined;
+};
+
 export type ToolCallItem = {
   kind: "tool-call";
   id: string;
@@ -145,6 +188,8 @@ export type ToolCallItem = {
   arguments: unknown;
   output: unknown;
   truncation?: ToolCallTruncation | null;
+  /** Set while `output` is a bounded preview of the exact output. */
+  outputPreview?: ToolOutputPreview | null | undefined;
   /**
    * The provider-native tool item (`agent.toolCall.created.payload.raw`). Carries
    * `type` (e.g. `apply_patch_call`, `computer_call`, `hosted_tool_call`) and the
@@ -154,6 +199,17 @@ export type ToolCallItem = {
    */
   raw: unknown;
   status: "running" | "complete" | "failed" | "cancelled";
+  /**
+   * Set while the call waits for a person's approval (`session.requiresAction`
+   * names it): it has not run yet, so rows say so instead of "Done". Cleared
+   * when the person decides, its output arrives or the turn ends.
+   */
+  awaitingApproval?: true | undefined;
+  /**
+   * This call's approval was rejected, so it never ran: by the person when
+   * asked, or automatically (Opengeni refused it, or the approval expired).
+   */
+  approvalRejected?: "person" | "automatic" | undefined;
   occurredAt: string;
   /** Canonical textual projection of the settled tool output. */
   annotationSource?: TimelineAnnotationSourceDescriptor | undefined;
@@ -172,6 +228,12 @@ export type WorkerItem = {
   action: "spawn" | "message";
   /** The worker's initial message / the message sent to it, when parseable. */
   prompt: string | null;
+  /**
+   * The title the manager gave a spawned worker (`session_create` `title`),
+   * when present. Hosts can supply a live title for any session id; this is
+   * the timeline's own fallback so a spawn names its agent even offline.
+   */
+  title?: string | null | undefined;
   /** The target/spawned worker session id, when parseable from args/output. */
   workerSessionId: string | null;
   /** Bounded structured failure retained from session_create/session_send_message. */
@@ -209,10 +271,19 @@ export type SandboxItem = {
 export type StartupPhase =
   | "queue"
   | "sandbox"
+  | "credential_resolution"
+  | "credential_mint"
+  | "credential_materialization"
+  | "client_publication"
+  | "client_readiness"
+  | "credential_seed"
+  | "credential_hooks"
+  | "artifact_runtime"
   | "rig"
   | "repository"
   | "files"
   | "tools"
+  | "history"
   | "model_preparation"
   | "provider_first_byte";
 
@@ -222,13 +293,26 @@ export type StartupPhaseItem = {
   id: string;
   turnId: string | null;
   phase: StartupPhase;
+  /** Live presentation only: accepted work waiting for its first worker claim. */
+  dispatchWait?: Session["dispatchWait"];
+  /** Renderer-only elapsed anchor when acceptance preceded recorded startup spans. */
+  loadingStartedAt?: string | undefined;
   status: "running" | "complete" | "failed" | "cancelled";
   startedAt: string;
   completedAt: string | null;
   durationMs: number | null;
   /** Sandbox origin and rig marker outcomes refine the settled label only. */
   outcome: "created" | "restored" | "resumed" | "skipped" | null;
-  blockedReason?: "rotation_in_progress" | undefined;
+  /** The Sandbox Environment a setup step sets up, by name, when its events say. */
+  subject?: string | undefined;
+  blockedReason?:
+    | "capture_in_progress"
+    | "rotation_in_progress"
+    | "provider_recovery_in_progress"
+    | "compaction_required"
+    | undefined;
+  /** A failed step's recorded error, shown behind Details rather than as its title. */
+  detail?: string | undefined;
   occurredAt: string;
 };
 
@@ -351,6 +435,16 @@ export type SessionStatusItem = {
   kind: "session-status";
   id: string;
   status: SessionStatus;
+  /**
+   * The runtime refused to start the next turn (an admission block). Nothing
+   * is asked of the person, so it reads as stuck, not "waiting on you".
+   */
+  blocked?: true;
+  /**
+   * The `cancelled` status archiving a chat recorded when it stopped the
+   * chat's work: it reads as archived, never as "cancelled".
+   */
+  archived?: true;
   /** Presentation-only evidence that this historical attention state resumed. */
   resolvedAt?: string;
   occurredAt: string;
@@ -377,10 +471,41 @@ export type NoticeItem = {
   id: string;
   tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
+  /** An approval wait (`session.requiresAction`), independent of its display text. */
+  approval?: true;
+  /**
+   * The actions an approval wait asks about, with the request's display title
+   * when it carried one, and the person's answer once `user.approvalDecision`
+   * recorded it. Presentation only.
+   */
+  approvalActions?: Array<{
+    id: string;
+    title: string | null;
+    /**
+     * Server-read facts about what it changes (the approval's `targetFacts`), in card
+     * order; history uses them only to tell two alike lines apart.
+     */
+    facts?: Array<{ label: string; value: string }>;
+    /** automatic_reject: Opengeni declined it, not the person. */
+    decision?: "approve" | "reject" | "automatic_reject";
+  }>;
   /** Presentation-only evidence that a historical approval wait resumed. */
   resolvedAt?: string;
+  /**
+   * A model-capacity wait (no subscription capacity for the turn). Live, the
+   * turn's work row carries it as `label` with `detail` as one quiet secondary
+   * line; once `resolvedAt` is set it leaves no row, and its span is excluded
+   * from the turn's worked duration.
+   */
+  capacityWait?: { turnId: string | null; label: string; detail: string };
   /** A preserved turn-end outcome, not a claim about current session state. */
   recordedOutcome?: true;
+  /**
+   * A failed attempt that a Retry reopened. The turn's final outcome carries
+   * the failure that still matters, so this attempt reads as one quiet step
+   * ("Attempt failed · retried") with its recorded text behind a disclosure.
+   */
+  retriedAttempt?: true;
   /**
    * Recorded agent wait only: delegated worker sessions that had not reported
    * back when the wait began. Best effort from the loaded history; absent when
@@ -398,7 +523,27 @@ export type NoticeItem = {
    * (customizable with `renderAllowanceExhausted` / `allowanceExhaustedLabels`).
    */
   allowance?: AllowanceExhaustedRefusal;
+  /**
+   * The task's own usage limit stopped further model requests: a calm,
+   * non-failure stop. Amounts are null when the marker carried none.
+   * `MessageTimeline` renders it as a "Usage limit reached" row.
+   */
+  sessionUsageLimit?: SessionUsageLimitStop;
+  /**
+   * A Skill, workspace instruction, or Knowledge change the agent tried to
+   * save was refused. `text` keeps the plain sentence for plain-text
+   * consumers; `MessageTimeline` renders it as a "Not saved" row with the
+   * place where the change can still be made.
+   */
+  learningRefusal?: LearningRefusal;
   occurredAt: string;
+};
+
+/** What a timeline row knows about a task usage-limit stop. */
+export type SessionUsageLimitStop = {
+  rootSessionId: string | null;
+  limitMicros: number | null;
+  usedMicros: number | null;
 };
 
 /**
@@ -416,10 +561,27 @@ export type ContextCompactionItem = {
   skipReason: string | null;
   /**
    * Present only for a `summarization_failed` skip where the provider
-   * definitively rejected the compaction request. Content-free identifiers.
+   * definitively rejected the compaction request, or a trimmed checkpoint
+   * (`implementation: "deterministic_trim"`) whose summary request was
+   * rejected that way. Content-free identifiers.
    */
   providerRejection: ContextCompactionProviderRejection | null;
-  /** Provider implementation id for debug disclosure only. */
+  /**
+   * The provider's own error message for a failed summary request, bounded,
+   * when it sent one: on a `summarization_failed` skip, or on a trimmed
+   * checkpoint. Diagnostics shown behind Details only.
+   */
+  providerMessage?: string;
+  /**
+   * The same turn's recorded failure text, when that turn failed because this
+   * compaction did. Diagnostics shown behind Details only.
+   */
+  failureDetail?: string;
+  /**
+   * Provider implementation id. `deterministic_trim` marks a checkpoint that
+   * trimmed older messages because the chat's model could not summarize them;
+   * other values are for debug disclosure only.
+   */
   implementation: string | null;
   occurredAt: string;
 };
@@ -443,15 +605,32 @@ export type MachineInputMember = {
     | "agent_steer_instruction"
     | "child_terminal_result"
     | "media_generation_result"
+    | "secret_use_approval_decided"
     | "child_requires_action"
     | "child_requires_action_resolved"
     | "child_paused"
     | "child_waiting_capacity"
-    | "child_progress";
+    | "child_progress"
+    | "capability_setup_completed";
   classification: "success" | "failure" | "action_required" | "info";
   sourceId: string;
   summary: string;
   result?: MediaGenerationResult | undefined;
+  /**
+   * An automation run's plain description: the automation's name and what
+   * the events that started it say happened. Never its instructions. Absent
+   * on runs delivered before Opengeni recorded it; the chat then says only
+   * that an automation ran.
+   */
+  automation?: AutomationRunPresentation | undefined;
+};
+
+export type AutomationRunPresentation = {
+  name: string;
+  /** What the first few events that started the run say, oldest first. */
+  eventSummaries: string[];
+  /** How many events started the run; 0 for a scheduled run. */
+  eventCount: number;
 };
 
 /**
@@ -493,7 +672,7 @@ export type AuthNeededItem = {
   providerDomain: string;
   /** The lapsed connection to reconnect, when the row survived. */
   connectionId: string | null;
-  /** Host-owned bindings must never be routed into OpenGeni's native reconnect flow. */
+  /** Host-owned bindings must never be routed into Opengeni's native reconnect flow. */
   authoritySource?: ToolAuthNeededPayload["authoritySource"] | null | undefined;
   reason: ToolAuthNeededPayload["reason"] | null;
   /** Scopes the provider now needs; may inform the copy, never shown as a raw label. */
@@ -508,6 +687,15 @@ export type AuthNeededItem = {
   capability?: NonNullable<ToolAuthNeededPayload["capability"]> | null | undefined;
   /** Human-reviewed custom integration proposal. Never treated as catalog authority. */
   setupRequest?: ToolAuthNeededPayload["setupRequest"] | null | undefined;
+  /** The Connected Machine the agent asked for, when the card names one. */
+  requestedSandboxId?: string | null | undefined;
+  /** `chrome`: the Connected Machine card is for the person's own Chrome. */
+  purpose?: "chrome" | undefined;
+  /**
+   * A later Connected Machine card in this chat asks for the same thing, so
+   * this one is shown as a short note instead of a second full card.
+   */
+  askedAgainLater?: boolean | undefined;
   occurredAt: string;
 };
 
@@ -519,10 +707,21 @@ export type TurnEndItem = {
   resumedAt?: string;
   /** Keep an existing answer visible when a recorded input wait ends without final output. */
   preserveWaitResponse?: true;
+  /** The turn handed over to a Steer at a safe boundary instead of finishing. */
+  handedOver?: true;
   id: string;
   turnId: string | null;
   outcome: TurnOutcome;
+  /** People-facing failure summary for a failed turn. */
   failureText: string | null;
+  /** The recorded diagnostic text `failureText` replaced, for a Details disclosure. */
+  failureDetail?: string;
+  /**
+   * The failure has its own row: its notice, a compaction landmark or a
+   * usage-limit row. That row stands for the attempt once a Retry replaces it,
+   * so no "retried" step repeats it.
+   */
+  ownRow?: "notice" | "landmark" | "usage-limit";
   occurredAt: string;
 };
 
@@ -546,9 +745,41 @@ export type TimelineItem = (
   | KnowledgeItem
   | FleetDecisionItem
   | TurnEndItem
+  | TurnStepsItem
 ) & {
   /** Durable identities, independent of renderer/reconciliation keys. */
   sourceEvents?: readonly { eventId: string; sequence: number }[] | undefined;
+};
+
+/**
+ * Load state of a turn's steps (tool calls, their outputs, streamed reasoning
+ * and command output). Conversation-first history reads only a turn's
+ * conversation; its steps load when a reader opens the turn.
+ * - `idle`: none loaded yet.
+ * - `partial`: the newest steps are loaded; earlier ones remain.
+ * - `complete`: every step is loaded.
+ */
+export type TurnStepsState = "idle" | "loading" | "partial" | "complete" | "error";
+
+/**
+ * Marks a turn whose steps are not all in the browser. It is not a step: the
+ * readable grouping attaches it to the turn's work row (`work.steps`), which
+ * keeps the row expandable and lets the opened row load the steps.
+ */
+export type TurnStepsItem = {
+  kind: "turn-steps";
+  id: string;
+  turnId: string;
+  /** The turn's start, so a turn whose work is all hidden keeps its duration. */
+  occurredAt: string;
+  state: TurnStepsState;
+  /** Load the newest steps, or the next earlier page once some are loaded. */
+  load: () => void;
+  /**
+   * Keep this turn's loaded steps while it is open: the browser never evicts
+   * steps a reader is looking at. Returns the release function.
+   */
+  retain: () => () => void;
 };
 
 /**
@@ -574,13 +805,54 @@ export type TimelineGroup =
       items: ActivityItem[];
       outcome?: TurnOutcome;
       failureText?: string;
+      /** The recorded diagnostic text `failureText` replaced, for a Details disclosure. */
+      failureDetail?: string;
       /** One turn's chronological work history, including progress prose after settlement. */
       work?: {
         startedAt: string;
         endedAt?: string;
         responseStartedAt?: string;
-        waiting?: { label: string; since: string };
+        /**
+         * A live wait. `untimed` marks a capacity wait, whose row shows no
+         * running clock: that span is not work and ends on a quota reset or
+         * a person's choice, not after a predictable time.
+         */
+        waiting?: {
+          label: string;
+          since: string;
+          detail?: string;
+          untimed?: true;
+          /** The wait needs the reader. */
+          waitingOn?: "you";
+        };
+        /**
+         * Settled time inside this work span in which the agent was not
+         * working: capacity waits, and the gap between a failed attempt and
+         * the Retry that reopened the turn, and settled pauses. The worked
+         * duration and the live working clock exclude it.
+         */
+        pausedMs?: number;
+        /**
+         * Set while a pause is in force over this still-open turn: when it
+         * began. Pause parks the turn for Resume, so it reads as paused with
+         * its clock stopped here, not as working.
+         */
+        pausedAt?: string;
         details: TimelineGroup[];
+        /**
+         * While the turn is live, its progress notes stay readable above the
+         * work row and are also listed in `details`. These are their item ids,
+         * so an expanded work disclosure can fold the outside copies away.
+         */
+        liveNoteIds?: string[];
+        /**
+         * Set when this row folds several quiet wake-work-wait cycles (routine
+         * input, work without a visible reply, a finished wait) into one row.
+         * `summary` is the latest wait reason, shown under the collapsed row.
+         */
+        cycles?: { count: number; summary?: string };
+        /** Steps of this turn that are not loaded yet (see TurnStepsItem). */
+        steps?: TurnStepsItem;
       };
     }
   | {
@@ -588,6 +860,8 @@ export type TimelineGroup =
       id: string;
       outcome: TurnOutcome;
       failureText?: string;
+      /** The recorded diagnostic text `failureText` replaced, for a Details disclosure. */
+      failureDetail?: string;
       startedAt: string;
       endedAt: string;
       groups: TimelineGroup[];

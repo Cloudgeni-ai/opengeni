@@ -11,16 +11,23 @@ import {
   resolveModelProvider,
 } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { createSessionForRequest, resolveCatalogSettings, type ApiRouteDeps } from "@opengeni/core";
+import {
+  createSessionForRequest,
+  resolveCatalogSettings,
+  resolveSessionAgentConfigForCreate,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   bootstrapWorkspace,
-  createAutomationSource,
   createConnection,
   createDb,
   createScheduledTask,
   createSession,
+  requireWorkspace,
   createOrganizationModelProviderCustomModel,
   upsertOrganizationModelProviderConnection,
+  getModelConnectionAccess,
+  updateModelConnectionAccess,
   getWorkspaceProviderApiKeyConnectionMetadata,
   loadWorkspaceProviderApiKey,
   MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS,
@@ -28,11 +35,8 @@ import {
   upsertWorkspaceModelPolicy,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import postgres from "postgres";
 
@@ -43,6 +47,9 @@ import {
 } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+
+// Claude accounts and access policies are served by the shared core.
+// Custom-model metadata remains separate from executable connection authority.
 
 const SECRET = "gateway-custom-models-test-secret-at-least-32-bytes";
 
@@ -59,39 +66,6 @@ const settings = testSettings({
   productAccessMode: "managed",
   delegationSecret: SECRET,
 });
-
-function automationSessionTemplate(model: string | null) {
-  return {
-    prompt: "Investigate the accepted event",
-    instructions: null,
-    resources: [],
-    skills: [],
-    tools: [],
-    firstPartyMcpTools: [],
-    firstPartyMcpPermissions: [],
-    model,
-    reasoningEffort: null,
-    sandboxBackend: null,
-    policyRole: null,
-    metadata: {},
-  };
-}
-
-async function createAutomationSourceFixture(name: string) {
-  if (!client || !grant) throw new Error("Gateway custom model fixture is unavailable");
-  return await createAutomationSource(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    createdBySubjectId: grant.subjectId,
-    webhookSecretEncrypted: "test-ciphertext",
-    request: {
-      name,
-      adapterId: "signed-json.v1",
-      webhookSecret: "never-stored-secret",
-      configuration: {},
-    },
-  });
-}
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
   const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
@@ -257,16 +231,18 @@ describe("workspace Gateway custom model API", () => {
   for (const providerKind of ["anthropic", "claude_subscription"] as const) {
     test(`workspace ${providerKind} models enforce admission, replay, access and retirement`, async () => {
       if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
-      await createConnection(client.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        subjectId: null,
-        providerDomain: "api.anthropic.com",
-        kind: "api_key",
-        credentialEncrypted: "metadata-only-fixture",
-        metadata: { credentialRole: providerKind },
-        createdBySubjectId: grant.subjectId,
-      });
+      const claude = providerKind === "claude_subscription";
+      if (providerKind === "anthropic")
+        await createConnection(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: null,
+          providerDomain: "api.anthropic.com",
+          kind: "api_key",
+          credentialEncrypted: "metadata-only-fixture",
+          metadata: { credentialRole: providerKind },
+          createdBySubjectId: grant.subjectId,
+        });
       const path = `/model-providers/${providerKind}/custom-models`;
       const upstreamModelId = "claude-workspace-fixture";
       const payload = { operationId: crypto.randomUUID(), upstreamModelId };
@@ -296,17 +272,20 @@ describe("workspace Gateway custom model API", () => {
       ).toBe(409);
       const productId = `workspace-${providerKind === "anthropic" ? "anthropic" : "claude-subscription"}/${upstreamModelId}`;
       const catalog = await (await request("/model-catalog", {}, publicApp)).json();
-      expect(
-        catalog.models.find((row: { id: string }) => row.id === productId)?.availability.selectable,
-      ).toBe(true);
-      const accessPath = `/model-connections/${providerKind}/current/access`;
+      const initialSelectable = catalog.models.find((row: { id: string }) => row.id === productId)
+        ?.availability.selectable;
+      const accessPath = `/model-connections/${providerKind}/${claude ? crypto.randomUUID() : "current"}/access`;
       const access = await request(accessPath, {}, publicApp);
-      expect(access.status).toBe(200);
-      const accessBody = await access.json();
-      expect(accessBody.models.some((row: { id: string }) => row.id === productId)).toBe(true);
-      expect(
-        accessBody.models.every((row: { id: string }) => row.id.startsWith("workspace-")),
-      ).toBe(true);
+      if (claude) {
+        expect(access.status).toBe(404);
+      } else {
+        expect(access.status).toBe(200);
+        const accessBody = await access.json();
+        expect(accessBody.models.some((row: { id: string }) => row.id === productId)).toBe(true);
+        expect(
+          accessBody.models.every((row: { id: string }) => row.id.startsWith("workspace-")),
+        ).toBe(true);
+      }
       const session = await request(
         "/sessions",
         {
@@ -321,8 +300,13 @@ describe("workspace Gateway custom model API", () => {
         },
         publicApp,
       );
-      expect(session.status).toBe(202);
-      expect((await session.json()).model).toBe(productId);
+      // Claude admission comes only from the shared core; this organization
+      // has no serving core connection, so the model is
+      // not selectable (core admission is covered in
+      // packages/db/test/organization-claude-model-admission.test.ts).
+      const admissible = providerKind === "anthropic";
+      expect(session.status).toBe(admissible ? 202 : 422);
+      if (admissible) expect((await session.json()).model).toBe(productId);
       const removal = { operationId: crypto.randomUUID(), expectedVersion: model.version };
       expect(
         (
@@ -356,9 +340,15 @@ describe("workspace Gateway custom model API", () => {
         publicApp,
       );
       expect(retired.status).toBe(422);
+      // Assert the original pre-admission catalog snapshot as well. Keeping
+      // this last lets the independent admission/retirement checks run when
+      // a readiness regression is present; it does not change the invariant.
+      expect(initialSelectable).toBe(admissible);
     });
   }
-  for (const providerKind of ["anthropic", "claude_subscription"] as const) {
+  // Anthropic retains legacy credential rotate/replay. Claude's replacement
+  // contract is exact-account/generation reconnect, exercised below.
+  for (const providerKind of ["anthropic"] as const) {
     test(`workspace ${providerKind} credential rotation, replay, stale writes and revocation`, async () => {
       if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
       if (
@@ -384,24 +374,25 @@ describe("workspace Gateway custom model API", () => {
         providerKind,
       );
       expect(current).not.toBeNull();
-      const credential =
-        providerKind === "anthropic"
-          ? "sk-ant-api03-local-fixture"
-          : JSON.stringify({
-              version: 1,
-              token: "sk-ant-oat01-local-fixture",
-              identity: {
-                accountUuid: "10000000-0000-4000-8000-000000000001",
-                deviceId: "a".repeat(64),
-              },
-            });
+      const credential = "sk-ant-api03-local-fixture";
       const path = `/connections/${current!.connectionId}`;
       const body = {
         credential: { apiKey: credential },
         expectedVersion: current!.version,
         operationId: crypto.randomUUID(),
       };
-      const permissions: Permission[] = ["connections:read", "connections:write"];
+      // A workspace provider key is integration administration, not a Member action.
+      const memberDenied = await request(
+        path,
+        { method: "PATCH", permissions: ["connections:read", "connections:write"], body },
+        publicApp,
+      );
+      expect(memberDenied.status).toBe(403);
+      const permissions: Permission[] = [
+        "connections:read",
+        "connections:write",
+        "capabilities:manage",
+      ];
       const rotated = await request(path, { method: "PATCH", permissions, body }, publicApp);
       expect(rotated.status).toBe(200);
       const publicBody = await rotated.json();
@@ -443,8 +434,58 @@ describe("workspace Gateway custom model API", () => {
       ).toBeNull();
     });
   }
+  test("Claude core access refuses missing connections", async () => {
+    if (!client || !grant || !publicApp || !shared)
+      throw new Error("Real database fixture required");
+    const connectionId = crypto.randomUUID();
+    const target = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      kind: "claude_subscription" as const,
+      connectionId,
+    };
+    expect(await getModelConnectionAccess(client.db, target)).toBeNull();
+    await expect(
+      updateModelConnectionAccess(client.db, target, {
+        allowedModels: [],
+        allowedWorkspaces: null,
+        allowPersonalWorkspaces: false,
+        version: 1,
+      }),
+    ).resolves.toBeNull();
+  });
+  test("an access path naming no connection kind or id is a 404, never a 500", async () => {
+    if (!publicApp) throw new Error("Real database fixture required");
+    for (const route of [
+      "/model-connections/elevenlabs/current/access",
+      "/model-connections/not-a-kind/current/access",
+      "/model-connections/codex/current/access",
+      "/model-connections/openrouter/not-a-connection/access",
+    ]) {
+      const response = await request(route, {}, publicApp);
+      expect({ route, status: response.status }).toEqual({ route, status: 404 });
+      expect(await response.json()).toMatchObject({
+        error: { code: "not_found", details: { code: "invalid_path_identifier" } },
+      });
+    }
+  });
   test("disabled subscription routes fail closed while Anthropic remains accessible", async () => {
     if (!publicApp) throw new Error("Real database fixture required");
+    for (const providerKind of ["anthropic", "claude_subscription"] as const) {
+      expect(
+        (
+          await request(
+            `/model-providers/${providerKind}/custom-models`,
+            {
+              method: "POST",
+              body: { operationId: crypto.randomUUID(), upstreamModelId: "catalog-flag-fixture" },
+            },
+            publicApp,
+          )
+        ).status,
+      ).toBe(201);
+    }
     settings.claudeSubscriptionEnabled = false;
     try {
       expect(
@@ -457,22 +498,36 @@ describe("workspace Gateway custom model API", () => {
       expect(
         (await request("/model-providers/anthropic/custom-models", {}, publicApp)).status,
       ).toBe(200);
+      const catalogResponse = await request("/model-catalog", {}, publicApp);
+      expect(catalogResponse.status).toBe(200);
+      const catalog = await catalogResponse.json();
+      expect(
+        catalog.models.some((model: { provider: string }) =>
+          model.provider.includes("claude-subscription"),
+        ),
+      ).toBe(false);
+      expect(
+        catalog.models.some((model: { provider: string }) => model.provider.includes("anthropic")),
+      ).toBe(true);
     } finally {
       settings.claudeSubscriptionEnabled = true;
     }
   });
 
   for (const providerKind of ["anthropic", "claude_subscription"] as const) {
-    test(`admits an organization ${providerKind} model through the public session boundary`, async () => {
+    test(`organization ${providerKind} model admission at the public session boundary`, async () => {
       if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
-      await upsertOrganizationModelProviderConnection(client.db, {
-        organizationId: grant.accountId,
-        actorSubjectId: grant.subjectId,
-        providerKind,
-        credentialEncrypted: "metadata-only-test-credential",
-        credentialDigest: "metadata-only-test-digest",
-        operationId: crypto.randomUUID(),
-      });
+      // Organization Claude admission comes only from the shared core, never
+      // from the retired organization credential row or legacy pool.
+      if (providerKind === "anthropic")
+        await upsertOrganizationModelProviderConnection(client.db, {
+          organizationId: grant.accountId,
+          actorSubjectId: grant.subjectId,
+          providerKind,
+          credentialEncrypted: "metadata-only-test-credential",
+          credentialDigest: "metadata-only-test-digest",
+          operationId: crypto.randomUUID(),
+        });
       await createOrganizationModelProviderCustomModel(client.db, {
         organizationId: grant.accountId,
         actorSubjectId: grant.subjectId,
@@ -496,7 +551,23 @@ describe("workspace Gateway custom model API", () => {
         publicApp,
       );
       const body = await response.json();
-      expect(response.status).toBe(202);
+      if (providerKind === "claude_subscription") {
+        // Without a serving shared core connection Claude is not admissible
+        // (fail closed); the core-route admission itself is covered in
+        // packages/db/test/organization-claude-model-admission.test.ts.
+        expect({ status: response.status, body }).toEqual({
+          status: 422,
+          body: {
+            code: "SESSION_CREATE_REJECTED",
+            message: `model is not selectable: ${model}`,
+            details: { code: "model_unavailable", modelId: model },
+          },
+        });
+        return;
+      }
+      expect({ status: response.status, ...(response.status === 202 ? {} : { body }) }).toEqual({
+        status: 202,
+      });
       expect(body.model).toBe(model);
     });
   }
@@ -615,6 +686,264 @@ describe("workspace Gateway custom model API", () => {
       body: { expectedVersion: gatewayModel.version, operationId: deleteOperationId },
     });
     expect(removedGateway.status).toBe(204);
+  });
+
+  test("Opper workspace rail: connect, curate custom ids, admit sessions and retire", async () => {
+    if (!app || !publicApp || !grant || !client) throw new Error("Real database fixture required");
+    const curatedProductId = "workspace-opper/aws/claude-opus-5-5";
+    const curatedCollision = await request("/opper-custom-models", {
+      method: "POST",
+      body: { operationId: crypto.randomUUID(), upstreamModelId: "aws/claude-opus-5-5" },
+    });
+    expect(curatedCollision.status).toBe(422);
+    expect(
+      (
+        await request("/opper-custom-models", {
+          method: "POST",
+          permissions: ["workspace:read"],
+          body: { operationId: crypto.randomUUID(), upstreamModelId: "gemini-3.8-flash" },
+        })
+      ).status,
+    ).toBe(403);
+
+    // Custom ids may be prepared while disconnected; they wait for the key.
+    const upstreamModelId = `mistral/mistral-large-eu-${crypto.randomUUID()}`;
+    const productId = `workspace-opper/${upstreamModelId}`;
+    const createBody = { operationId: crypto.randomUUID(), upstreamModelId, label: "Mistral EU" };
+    const created = await request("/opper-custom-models", { method: "POST", body: createBody });
+    expect(created.status).toBe(201);
+    const model = (await created.json()) as { id: string; version: number };
+    const replayed = await request("/opper-custom-models", { method: "POST", body: createBody });
+    expect((await replayed.json()).id).toBe(model.id);
+    const waiting = (await (await request("/model-catalog", {}, publicApp)).json()) as {
+      models: Array<Record<string, any>>;
+    };
+    expect(waiting.models.find((row) => row.id === productId)).toMatchObject({
+      provider: "workspace-opper",
+      providerLabel: "Your Opper",
+      availability: { selectable: false, reason: "needs_reauth" },
+    });
+
+    const permissions: Permission[] = [
+      "connections:read",
+      "connections:write",
+      // Workspace model-provider keys are integration administration.
+      "capabilities:manage",
+    ];
+    const connectBody = (apiKey: string) => ({
+      providerDomain: "api.opper.ai",
+      kind: "api_key",
+      subjectId: null,
+      credential: { apiKey },
+      grantedScopes: [],
+      metadata: { credentialRole: "opper", credentialLabel: "Opper" },
+      operationId: crypto.randomUUID(),
+    });
+    // Opper refuses management keys on inference routes; never store one.
+    const management = await request(
+      "/connections",
+      { method: "POST", permissions, body: connectBody("op-mak-local-fixture") },
+      publicApp,
+    );
+    expect(management.status).toBe(422);
+    expect(JSON.stringify(await management.json())).toContain("management key");
+    const connected = await request(
+      "/connections",
+      {
+        method: "POST",
+        permissions,
+        body: {
+          providerDomain: "api.opper.ai",
+          kind: "api_key",
+          subjectId: null,
+          credential: { apiKey: "op-workspace-local-fixture" },
+          grantedScopes: [],
+          metadata: { credentialRole: "opper", credentialLabel: "Opper" },
+          operationId: crypto.randomUUID(),
+        },
+      },
+      publicApp,
+    );
+    expect(connected.status).toBe(201);
+    const connectedBody = await connected.json();
+    expect(JSON.stringify(connectedBody)).not.toContain("op-workspace-local-fixture");
+    expect(JSON.stringify(connectedBody)).not.toContain("CredentialOperation");
+    try {
+      expect(
+        await loadWorkspaceProviderApiKey(client.db, settings, grant.workspaceId, "opper"),
+      ).toBe("op-workspace-local-fixture");
+      const catalog = (await (await request("/model-catalog", {}, publicApp)).json()) as {
+        models: Array<Record<string, any>>;
+      };
+      for (const id of [curatedProductId, productId])
+        expect(catalog.models.find((row) => row.id === id)).toMatchObject({
+          provider: "workspace-opper",
+          cost: "workspace",
+          billing: { upstreamPayer: "workspace", metering: "external" },
+          credentialReadiness: { status: "ready", basis: "connection" },
+          availability: { selectable: true },
+        });
+      const access = await request("/model-connections/opper/current/access", {}, publicApp);
+      expect(access.status).toBe(200);
+      const accessModels = ((await access.json()).models as Array<{ id: string }>).map(
+        (row) => row.id,
+      );
+      expect(accessModels).toContain(curatedProductId);
+      expect(accessModels).toContain(productId);
+      expect(accessModels.every((id) => id.startsWith("workspace-opper/"))).toBe(true);
+
+      const session = await request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Opper admission regression; no inference",
+            model: productId,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+        publicApp,
+      );
+      expect(session.status).toBe(202);
+      expect((await session.json()).model).toBe(productId);
+
+      const removal = { operationId: crypto.randomUUID(), expectedVersion: model.version };
+      expect(
+        (await request(`/opper-custom-models/${model.id}`, { method: "DELETE", body: removal }))
+          .status,
+      ).toBe(204);
+      expect(await (await request("/opper-custom-models")).json()).toEqual({ models: [] });
+      const retired = await request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Cannot admit a retired Opper model",
+            model: productId,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+        publicApp,
+      );
+      expect(retired.status).toBe(422);
+    } finally {
+      const live = await getWorkspaceProviderApiKeyConnectionMetadata(
+        client.db,
+        grant.workspaceId,
+        "opper",
+      );
+      if (live)
+        expect(
+          (
+            await request(
+              `/connections/${live.connectionId}?expectedVersion=${live.version}`,
+              { method: "DELETE", permissions },
+              publicApp,
+            )
+          ).status,
+        ).toBe(200);
+    }
+  });
+
+  test("admits an organization Opper model through the public session boundary", async () => {
+    if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
+    await upsertOrganizationModelProviderConnection(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "opper",
+      credentialEncrypted: "metadata-only-test-credential",
+      credentialDigest: "metadata-only-test-digest",
+      operationId: crypto.randomUUID(),
+    });
+    await createOrganizationModelProviderCustomModel(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "opper",
+      upstreamModelId: "aws/claude-sonnet-4-6-eu",
+      operationId: crypto.randomUUID(),
+    });
+    const model = "organization-opper/aws/claude-sonnet-4-6-eu";
+    const response = await request(
+      "/sessions",
+      {
+        method: "POST",
+        permissions: ["sessions:create"],
+        body: {
+          initialMessage: "Local admission regression; no inference",
+          model,
+          sandboxBackend: "none",
+          idempotencyKey: crypto.randomUUID(),
+        },
+      },
+      publicApp,
+    );
+    const body = await response.json();
+    expect({ status: response.status, ...(response.status === 202 ? {} : { body }) }).toEqual({
+      status: 202,
+    });
+    expect(body.model).toBe(model);
+  });
+
+  test("admits an organization Azure OpenAI deployment for people and services", async () => {
+    if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
+    await upsertOrganizationModelProviderConnection(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "azure_openai",
+      credentialEncrypted: "metadata-only-test-credential",
+      credentialDigest: "metadata-only-test-digest",
+      endpoint: "https://contoso.openai.azure.com/openai/v1",
+      operationId: crypto.randomUUID(),
+    });
+    await createOrganizationModelProviderCustomModel(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "azure_openai",
+      upstreamModelId: "gpt-6.1-sol",
+      operationId: crypto.randomUUID(),
+    });
+    const model = "organization-azure-openai/gpt-6.1-sol";
+    const catalog = await request("/model-catalog", {}, publicApp);
+    expect(catalog.status).toBe(200);
+    const listed = (
+      (await catalog.json()) as { models: Array<Record<string, unknown>> }
+    ).models.find((candidate) => candidate.id === model);
+    expect(listed).toMatchObject({
+      provider: "organization-azure-openai",
+      billing: { upstreamPayer: "organization", metering: "external" },
+    });
+    const service = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: "service:organization-azure-openai-test",
+      permissions: ["sessions:create"],
+      principalKind: "service",
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+    })}`;
+    for (const authorization of [await bearer(["sessions:create"]), service]) {
+      const response = await publicApp.request(
+        `http://x/v1/workspaces/${grant.workspaceId}/sessions`,
+        {
+          method: "POST",
+          headers: { authorization, "content-type": "application/json" },
+          body: JSON.stringify({
+            initialMessage: "Local admission regression; no inference",
+            model,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        },
+      );
+      const body = await response.json();
+      expect({ status: response.status, ...(response.status === 202 ? {} : { body }) }).toEqual({
+        status: 202,
+      });
+      expect(body.model).toBe(model);
+    }
   });
 
   test("creates one exact slug, exposes it only to the workspace catalog, and deletes it", async () => {
@@ -1037,6 +1366,18 @@ describe("workspace Gateway custom model API", () => {
       version: number;
     };
     const idempotencyKey = crypto.randomUUID();
+    // Freeze the configuration accepted by the same public create boundary;
+    // an uninitialized legacy-null shell is not equivalent to this request.
+    const acceptedAgent = resolveSessionAgentConfigForCreate({
+      settings,
+      creator: "api",
+      request: undefined,
+      instructions: undefined,
+      workspaceSettings: (await requireWorkspace(client!.db, grant.workspaceId)).settings,
+      parent: null,
+      goal: false,
+    }).config;
+    expect(acceptedAgent).not.toBeNull();
     const shell = await createSession(client!.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -1049,6 +1390,7 @@ describe("workspace Gateway custom model API", () => {
       reasoningEffort: "medium",
       latencyMode: "standard",
       sandboxBackend: "none",
+      agentConfig: acceptedAgent,
       createIdempotencyKey: idempotencyKey,
     });
     const removed = await request(`/gateway-custom-models/${customModel.id}`, {
@@ -1060,23 +1402,57 @@ describe("workspace Gateway custom model API", () => {
     });
     expect(removed.status).toBe(204);
 
+    const payload = {
+      initialMessage: "Repair this custom-model session shell",
+      resources: [],
+      model: productModelId,
+      sandboxBackend: "none",
+      idempotencyKey,
+    };
+    const [beforeConflict] = await shared.admin`
+      select metadata, agent_config, updated_at from sessions
+      where workspace_id = ${grant.workspaceId}::uuid and id = ${shell.id}::uuid`;
+    const conflict = await request(
+      "/sessions",
+      {
+        method: "POST",
+        permissions: ["sessions:create"],
+        body: { ...payload, agent: { capabilities: "none" } },
+      },
+      publicApp,
+    );
+    expect(conflict.status).toBe(409);
+    expect(await conflict.text()).toContain(
+      "Session create idempotency key was reused with a different request",
+    );
+    const [afterConflict] = await shared.admin`
+      select metadata, agent_config, updated_at from sessions
+      where workspace_id = ${grant.workspaceId}::uuid and id = ${shell.id}::uuid`;
+    expect(afterConflict).toEqual(beforeConflict);
+    const [uninitialized] = await shared.admin`
+      select
+        (select count(*)::int from session_events where session_id = ${shell.id}::uuid) as events,
+        (select count(*)::int from session_turns where session_id = ${shell.id}::uuid) as turns,
+        (select count(*)::int from session_workflow_wake_outbox where session_id = ${shell.id}::uuid) as wakes,
+        (select count(*)::int from usage_events where source_resource_id = ${shell.id}) as usage
+    `;
+    expect(uninitialized).toEqual({ events: 0, turns: 0, wakes: 0, usage: 0 });
+
     const repaired = await request(
       "/sessions",
       {
         method: "POST",
         permissions: ["sessions:create"],
-        body: {
-          initialMessage: "Repair this custom-model session shell",
-          resources: [],
-          model: productModelId,
-          sandboxBackend: "none",
-          idempotencyKey,
-        },
+        body: payload,
       },
       publicApp,
     );
     expect(repaired.status).toBe(202);
-    expect(await repaired.json()).toMatchObject({ id: shell.id, model: productModelId });
+    expect(await repaired.json()).toMatchObject({
+      id: shell.id,
+      model: productModelId,
+      agent: acceptedAgent,
+    });
     const [stored] = await shared.admin<Array<{ createdEvents: number; queuedTurns: number }>>`
       select
         (select count(*)::int
@@ -1090,6 +1466,10 @@ describe("workspace Gateway custom model API", () => {
             and session_id = ${shell.id}::uuid) as "queuedTurns"
     `;
     expect(stored).toEqual({ createdEvents: 1, queuedTurns: 1 });
+    const [turn] = await shared.admin`
+      select initiator_kind, initiator_subject_id from session_turns
+      where workspace_id = ${grant.workspaceId}::uuid and session_id = ${shell.id}::uuid`;
+    expect(turn).toEqual({ initiator_kind: "subject", initiator_subject_id: grant.subjectId });
   });
 
   test("admits deployment-curated workspace Gateway models without a custom row", async () => {
@@ -1174,29 +1554,6 @@ describe("workspace Gateway custom model API", () => {
     expect(scheduled.status).toBe(201);
     expect(await scheduled.json()).toMatchObject({
       agentConfig: { model: curatedModelId },
-    });
-
-    const source = await createAutomationSourceFixture("Curated Gateway automation source");
-    const trigger = await request(
-      "/automations/triggers",
-      {
-        method: "POST",
-        permissions: ["workspace:admin"],
-        body: {
-          sourceId: source.id,
-          name: "Curated Gateway automation trigger",
-          eventTypes: ["curated.gateway.event"],
-          configuration: {},
-          parameters: {},
-          sessionTemplate: automationSessionTemplate(curatedModelId),
-          status: "active",
-        },
-      },
-      publicApp,
-    );
-    expect(trigger.status).toBe(201);
-    expect(await trigger.json()).toMatchObject({
-      sessionTemplate: { model: curatedModelId },
     });
   });
 
@@ -1437,170 +1794,6 @@ describe("workspace Gateway custom model API", () => {
     expect(await renamed.json()).toMatchObject({
       name: "Retired custom-model task renamed",
       status: "paused",
-    });
-  });
-
-  test("rejects an automation trigger create when custom-model retirement wins before commit", async () => {
-    if (!shared || !publicApp || !grant) return;
-    const upstreamModelId = `race/automation-create-model-${crypto.randomUUID()}`;
-    const productModelId = `workspace-gateway/${upstreamModelId}`;
-    const createdModelResponse = await request("/gateway-custom-models", {
-      method: "POST",
-      body: { operationId: crypto.randomUUID(), upstreamModelId },
-    });
-    expect(createdModelResponse.status).toBe(201);
-    const customModel = (await createdModelResponse.json()) as { id: string };
-    const source = await createAutomationSourceFixture("Automation create race source");
-    const name = `Automation create retirement race ${crypto.randomUUID()}`;
-    let createPromise: Promise<Response> | null = null;
-
-    await shared.admin.begin(async (barrier) => {
-      const [backend] = await barrier<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
-      if (!backend) throw new Error("database barrier has no backend pid");
-      await barrier`
-        select pg_advisory_xact_lock(
-          hashtextextended(${"workspace-gateway-custom-models:" + grant.workspaceId}, 0)
-        )
-      `;
-      createPromise = request(
-        "/automations/triggers",
-        {
-          method: "POST",
-          permissions: ["workspace:admin"],
-          body: {
-            sourceId: source.id,
-            name,
-            eventTypes: ["automation.create.race"],
-            configuration: {},
-            parameters: {},
-            sessionTemplate: automationSessionTemplate(productModelId),
-            status: "active",
-          },
-        },
-        publicApp,
-      );
-      await waitForBlockedBackend(backend.pid, "automation trigger custom-model create");
-      await barrier`
-        update workspace_gateway_custom_models
-        set retired_at = clock_timestamp(), updated_at = clock_timestamp()
-        where id = ${customModel.id}::uuid
-      `;
-    });
-
-    if (!createPromise) throw new Error("automation trigger create was not started");
-    const response = await createPromise;
-    expect(response.status).toBe(422);
-    expect(await response.text()).toContain(`model is not available: ${productModelId}`);
-    const [stored] = await shared.admin<Array<{ count: number }>>`
-      select count(*)::int as count
-      from automation_triggers
-      where workspace_id = ${grant.workspaceId}::uuid
-        and name = ${name}
-    `;
-    expect(stored?.count).toBe(0);
-  });
-
-  test("rejects a material automation update after retirement but permits a name-only edit", async () => {
-    if (!shared || !publicApp || !grant) return;
-    const upstreamModelId = `race/automation-update-model-${crypto.randomUUID()}`;
-    const productModelId = `workspace-gateway/${upstreamModelId}`;
-    const createdModelResponse = await request("/gateway-custom-models", {
-      method: "POST",
-      body: { operationId: crypto.randomUUID(), upstreamModelId },
-    });
-    expect(createdModelResponse.status).toBe(201);
-    const customModel = (await createdModelResponse.json()) as { id: string };
-    const source = await createAutomationSourceFixture("Automation update race source");
-    const createdTriggerResponse = await request(
-      "/automations/triggers",
-      {
-        method: "POST",
-        permissions: ["workspace:admin"],
-        body: {
-          sourceId: source.id,
-          name: "Automation update retirement race",
-          eventTypes: ["automation.update.race"],
-          configuration: {},
-          parameters: {},
-          sessionTemplate: automationSessionTemplate(productModelId),
-          status: "active",
-        },
-      },
-      publicApp,
-    );
-    expect(createdTriggerResponse.status).toBe(201);
-    const trigger = (await createdTriggerResponse.json()) as {
-      id: string;
-      revision: number;
-    };
-    let updatePromise: Promise<Response> | null = null;
-
-    await shared.admin.begin(async (barrier) => {
-      const [backend] = await barrier<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
-      if (!backend) throw new Error("database barrier has no backend pid");
-      await barrier`
-        select pg_advisory_xact_lock(
-          hashtextextended(${"workspace-gateway-custom-models:" + grant.workspaceId}, 0)
-        )
-      `;
-      updatePromise = request(
-        `/automations/triggers/${trigger.id}`,
-        {
-          method: "PATCH",
-          permissions: ["workspace:admin"],
-          body: {
-            expectedRevision: trigger.revision,
-            configuration: { material: true },
-          },
-        },
-        publicApp,
-      );
-      await waitForBlockedBackend(backend.pid, "automation trigger custom-model update");
-      await barrier`
-        update workspace_gateway_custom_models
-        set retired_at = clock_timestamp(), updated_at = clock_timestamp()
-        where id = ${customModel.id}::uuid
-      `;
-    });
-
-    if (!updatePromise) throw new Error("automation trigger update was not started");
-    const response = await updatePromise;
-    expect(response.status).toBe(422);
-    expect(await response.text()).toContain(`model is not available: ${productModelId}`);
-    const [stored] = await shared.admin<
-      Array<{ currentRevision: number; configuration: Record<string, unknown> }>
-    >`
-      select
-        trigger.current_revision as "currentRevision",
-        revision.configuration
-      from automation_triggers trigger
-      join automation_trigger_revisions revision
-        on revision.trigger_id = trigger.id
-       and revision.revision = trigger.current_revision
-      where trigger.workspace_id = ${grant.workspaceId}::uuid
-        and trigger.id = ${trigger.id}::uuid
-    `;
-    expect(stored).toMatchObject({
-      currentRevision: trigger.revision,
-      configuration: {},
-    });
-
-    const renamed = await request(
-      `/automations/triggers/${trigger.id}`,
-      {
-        method: "PATCH",
-        permissions: ["workspace:admin"],
-        body: {
-          expectedRevision: trigger.revision,
-          name: "Retired custom-model automation renamed",
-        },
-      },
-      publicApp,
-    );
-    expect(renamed.status).toBe(200);
-    expect(await renamed.json()).toMatchObject({
-      name: "Retired custom-model automation renamed",
-      revision: trigger.revision + 1,
     });
   });
 

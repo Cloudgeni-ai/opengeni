@@ -1,31 +1,84 @@
+import * as primitives from "./primitives";
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
-export { parseSkillFrontmatter, readSkillMetadata } from "./skill-metadata";
+import { SKILL_MAX_FILES } from "./skill-files";
+export {
+  parseLenientSkillFrontmatter,
+  parseSkillFrontmatter,
+  readSkillMetadata,
+  SkillFrontmatterError,
+  type LenientSkillFrontmatter,
+} from "./skill-metadata";
 export * from "./skill-files";
 
 /** Files are UTF-8 text, relative to the Skill root. No executable authority. */
-export const SkillFile = z.object({ path: z.string().min(1).max(512), content: z.string() });
+export const SkillFile = /* @__PURE__ */ defineSchema(() =>
+  z.object({ path: z.string().min(1).max(512), content: primitives.string }),
+);
 export type SkillFile = z.infer<typeof SkillFile>;
-export const SkillActor = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("service"),
-    subjectId: z.string().min(1),
-    principalKind: z.enum(["service", "api_key", "configured_key"]),
-  }),
-  z.object({
-    kind: z.literal("human"),
-    subjectId: z.string().min(1),
-    principalKind: z.literal("human_session"),
-  }),
-  z.object({
-    kind: z.literal("agent"),
-    sessionId: z.uuid(),
-    turnId: z.uuid(),
-    attemptId: z.uuid(),
-    executionGeneration: z.number().int().positive(),
-  }),
-]);
+export const SkillActor = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("service"),
+      subjectId: primitives.nonEmptyString,
+      principalKind: z.enum(["service", "api_key", "configured_key"]),
+    }),
+    z.object({
+      kind: z.literal("human"),
+      subjectId: primitives.nonEmptyString,
+      principalKind: z.literal("human_session"),
+    }),
+    z.object({
+      kind: z.literal("agent"),
+      sessionId: z.uuid(),
+      turnId: z.uuid(),
+      attemptId: z.uuid(),
+      executionGeneration: primitives.positiveInteger,
+    }),
+  ]),
+);
 export type SkillActor = z.infer<typeof SkillActor>;
 export type SkillScope = "workspace" | "organization" | "user";
+
+/** Save a personal, workspace or organization Skill folder (`saveWorkspaceSkill`). */
+export const SaveWorkspaceSkillRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: z.uuid(),
+      skillId: z.uuid(),
+      expectedRevisionId: z.uuid().nullable(),
+      expectedScopeVersion: z.number().int().nonnegative(),
+      scope: z.enum(["workspace", "organization", "user"]).default("workspace"),
+      stableKey: z.string().min(1).max(96),
+      files: z.array(SkillFile).max(SKILL_MAX_FILES),
+      deletions: z.array(z.string().min(1).max(512)).max(SKILL_MAX_FILES).default([]),
+      reason: z.string().min(1).max(2000),
+    })
+    .strict(),
+);
+export type SaveWorkspaceSkillRequest = z.infer<typeof SaveWorkspaceSkillRequest>;
+
+/** Approve, reject or restore one Skill revision. */
+export const ApplyWorkspaceSkillRevisionRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      removalOperationId: z.uuid().optional(),
+      operationId: z.uuid(),
+      revisionId: z.uuid(),
+      expectedRevisionId: z.uuid().nullable(),
+      expectedScopeVersion: z.number().int().nonnegative(),
+      reason: z.string().min(1).max(2000),
+    })
+    .strict(),
+);
+export type ApplyWorkspaceSkillRevisionRequest = z.infer<typeof ApplyWorkspaceSkillRevisionRequest>;
+
+/** Permanently remove a Skill and all its saved revisions. */
+export const RemoveWorkspaceSkillRequest = /* @__PURE__ */ defineSchema(() =>
+  ApplyWorkspaceSkillRevisionRequest.omit({ revisionId: true, removalOperationId: true }),
+);
+export type RemoveWorkspaceSkillRequest = z.infer<typeof RemoveWorkspaceSkillRequest>;
+
 export type SkillWriteContext = { accountId: string; workspaceId: string; actor: SkillActor };
 export type SkillSaveInput = SkillWriteContext & {
   operationId: string;
@@ -58,14 +111,16 @@ export type SkillInstallInput = SkillWriteContext & {
   skillFacetId: string;
   reason: string;
 };
-export const SkillReviewReference = z.object({
-  removalOperationId: z.uuid().optional(),
-  sourceOperationId: z.uuid(),
-  skillId: z.uuid(),
-  revisionId: z.uuid(),
-  expectedRevisionId: z.uuid().nullable(),
-  expectedScopeVersion: z.number().int().positive(),
-});
+export const SkillReviewReference = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    removalOperationId: z.uuid().optional(),
+    sourceOperationId: z.uuid(),
+    skillId: z.uuid(),
+    revisionId: z.uuid(),
+    expectedRevisionId: z.uuid().nullable(),
+    expectedScopeVersion: primitives.positiveInteger,
+  }),
+);
 export type SkillReviewReference = z.infer<typeof SkillReviewReference>;
 export function skillReviewHumanInput(skillReview: SkillReviewReference) {
   const removing = Boolean(skillReview.removalOperationId);
@@ -92,31 +147,58 @@ export function skillReviewHumanInput(skillReview: SkillReviewReference) {
     ],
   };
 }
-export const SkillWriteReceipt = z.object({
-  removed: z.boolean().optional(),
-  operationId: z.uuid(),
-  skillId: z.uuid(),
-  revisionId: z.uuid(),
-  outcome: z.enum(["applied", "pending", "preserved"]),
-  decision: z.literal("rejected").optional(),
-  pendingReason: z.enum(["approval", "source_finalization"]).optional(),
-  skillReview: SkillReviewReference.optional(),
-  replayed: z.boolean(),
-});
+export const SkillWriteReceipt = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    removed: primitives.optionalBoolean,
+    operationId: z.uuid(),
+    skillId: z.uuid(),
+    revisionId: z.uuid(),
+    outcome: z.enum(["applied", "pending", "preserved"]),
+    decision: z.literal("rejected").optional(),
+    pendingReason: z.enum(["approval", "source_finalization"]).optional(),
+    skillReview: SkillReviewReference.optional(),
+    replayed: primitives.boolean,
+  }),
+);
 export type SkillWriteReceipt = z.infer<typeof SkillWriteReceipt>;
-export const SkillPublicationReceipt = SkillWriteReceipt.extend({
-  sourceOperationId: z.uuid(),
-  activationEventId: z.uuid().nullable(),
-});
+export const SkillPublicationReceipt = /* @__PURE__ */ defineSchema(() =>
+  SkillWriteReceipt.extend({
+    sourceOperationId: z.uuid(),
+    activationEventId: z.uuid().nullable(),
+  }),
+);
 export type SkillPublicationReceipt = z.infer<typeof SkillPublicationReceipt>;
-export const SkillSourceReleaseReceipt = z.object({
-  skillId: z.uuid(),
-  revisionId: z.uuid().nullable(),
-  disposition: z.enum(["deactivated", "preserved", "inactive"]),
-  eventId: z.uuid().nullable(),
-  warning: z.string().nullable(),
-});
+export const SkillSourceReleaseReceipt = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    skillId: z.uuid(),
+    revisionId: z.uuid().nullable(),
+    disposition: z.enum(["deactivated", "preserved", "inactive"]),
+    eventId: z.uuid().nullable(),
+    warning: primitives.nullableString,
+  }),
+);
 export type SkillSourceReleaseReceipt = z.infer<typeof SkillSourceReleaseReceipt>;
+/**
+ * Where an organization Skill works: every shared workspace of the
+ * organization (`allowedWorkspaceIds: null`, new ones too) or the listed ones,
+ * and members' Personal workspaces when `allowPersonalWorkspaces` is on.
+ */
+export const OrganizationSkillReach = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      allowedWorkspaceIds: z.array(primitives.uuid).max(500).nullable(),
+      allowPersonalWorkspaces: primitives.boolean,
+    })
+    .strict(),
+);
+export type OrganizationSkillReach = z.infer<typeof OrganizationSkillReach>;
+/** `PUT .../skills/content/:skillId/reach`: organization Skills only. */
+export const UpdateOrganizationSkillReachRequest = OrganizationSkillReach;
+export type UpdateOrganizationSkillReachRequest = OrganizationSkillReach;
+export const OrganizationSkillReachResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ reach: OrganizationSkillReach }).strict(),
+);
+export type OrganizationSkillReachResponse = z.infer<typeof OrganizationSkillReachResponse>;
 export type SkillRecord = {
   removalOperationId?: string | null;
   activationMode: "workspace_managed" | "session_selected";
@@ -133,4 +215,12 @@ export type SkillRecord = {
   contentHash: string | null;
   files: SkillFile[];
   source: { pluginId: string; facetKey: string; skillFacetId: string } | null;
+  /** Where an organization Skill works; null for workspace and personal Skills. */
+  reach?: OrganizationSkillReach | null;
+  /**
+   * Whether agents in the workspace that was asked use it. False only for an
+   * organization Skill that doesn't work there, which people's Skills pages
+   * still list so its managers can change that.
+   */
+  availableHere?: boolean;
 };

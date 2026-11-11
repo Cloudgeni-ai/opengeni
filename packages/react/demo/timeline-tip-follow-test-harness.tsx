@@ -124,7 +124,9 @@ function Harness() {
   ];
 
   const scroller = useCallback(() => {
-    const node = document.querySelector<HTMLElement>("[data-tip-follow] .og-root > div");
+    const node = document.querySelector<HTMLElement>(
+      "[data-tip-follow] [data-og-timeline-scroller]",
+    );
     if (!node) throw new Error("timeline scroller is unavailable");
     return node;
   }, []);

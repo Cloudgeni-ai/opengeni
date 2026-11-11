@@ -30,11 +30,61 @@ use crate::error::{PlatformError, PlatformResult};
 /// [`resize`]: PtyProcess::resize
 pub struct PtyProcess {
     master: Box<dyn portable_pty::MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    child: OwnedChild,
     /// The blocking reader over the PTY master (tty output). Taken once by the pump.
     reader: Option<Box<dyn Read + Send>>,
     /// The blocking writer into the PTY master (tty input). Taken once by the pump.
     writer: Option<Box<dyn Write + Send>>,
+}
+
+/// Installed immediately after spawn, before fallible IO setup or relay awaits.
+/// A cancelled opener still owns cleanup of its actual child, not just a waiter.
+struct OwnedChild {
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    reservation: Option<crate::WorkReservation>,
+    /// Counts the terminal's shell as a running command while it is owned.
+    _running_command: crate::command_activity::RunningCommand,
+}
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let reservation = self.reservation.take();
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("PTY child {:?}", child.process_id()),
+        );
+        // portable-pty kill only signals (and some platforms do not report its
+        // errors). Retain ownership through a positive wait, even with no Tokio
+        // runtime or after cancellation of the relay/registration task.
+        let cleanup = std::thread::Builder::new()
+            .name("pty-cleanup".into())
+            .spawn(move || {
+                crate::with_work_reservation_sync(reservation.clone(), || {
+                    let mut witness = witness;
+                    let _ = child.kill();
+                    loop {
+                        match child.wait() {
+                            Ok(_) => {
+                                witness.settle();
+                                break;
+                            }
+                            Err(error) => witness.failed(&error),
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                    drop(reservation);
+                });
+            });
+        if let Err(error) = cleanup {
+            tracing::warn!(%error, "could not start PTY cleanup thread");
+        }
+    }
 }
 
 impl std::fmt::Debug for PtyProcess {
@@ -87,6 +137,9 @@ impl PtyProcess {
     /// Returns [`PlatformError::Os`] if signalling the child fails.
     pub fn kill(&mut self) -> PlatformResult<()> {
         self.child
+            .child
+            .as_mut()
+            .ok_or_else(|| PlatformError::os("pty child cleanup already owns the process"))?
             .kill()
             .map_err(|e| PlatformError::os(format!("pty kill: {e}")))
     }
@@ -95,10 +148,44 @@ impl PtyProcess {
     /// exited; `None` while it still runs.
     #[must_use]
     pub fn try_exit_code(&mut self) -> Option<i32> {
-        match self.child.try_wait() {
+        match self.child.child.as_mut()?.try_wait() {
             Ok(Some(status)) => Some(i32::try_from(status.exit_code()).unwrap_or(-1)),
             _ => None,
         }
+    }
+}
+
+/// The program and arguments a terminal starts: the request's command, else
+/// the run-as user's login shell, else the default shell. A missing `/bin/sh`
+/// is replaced by a fallback shell, as for exec.
+fn pty_argv(
+    req: &v1::PtyOpenRequest,
+    identity: Option<&crate::run_as::RunAsIdentity>,
+    default_shell: &[String],
+) -> Vec<String> {
+    if let (true, Some(identity)) = (req.command.is_empty(), identity) {
+        // The account's login shell, or a fallback when it cannot start.
+        #[cfg(unix)]
+        let shell = crate::system_shell::usable_shell(&identity.shell);
+        #[cfg(not(unix))]
+        let shell = identity.shell.clone();
+        vec![shell.to_string_lossy().into_owned()]
+    } else if req.command.is_empty() {
+        default_shell.to_vec()
+    } else {
+        // An explicitly requested `/bin/sh` starts a fallback shell when it
+        // is gone, like exec does.
+        #[cfg(unix)]
+        if let Some(shell) = req
+            .command
+            .first()
+            .and_then(|program| crate::system_shell::substitute(std::ffi::OsStr::new(program)))
+        {
+            let mut argv = req.command.clone();
+            argv[0] = shell.to_string_lossy().into_owned();
+            return argv;
+        }
+        req.command.clone()
     }
 }
 
@@ -122,15 +209,12 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
         pixel_height: 0,
     };
 
+    let identity = crate::run_as::resolve(&req.run_as)?;
     let pair = NativePtySystem::default()
         .openpty(size)
         .map_err(|e| PlatformError::os(format!("openpty: {e}")))?;
 
-    let argv: Vec<String> = if req.command.is_empty() {
-        default_shell.to_vec()
-    } else {
-        req.command.clone()
-    };
+    let argv = pty_argv(req, identity.as_ref(), default_shell);
     if argv.is_empty() {
         return Err(PlatformError::os("pty: no command and no default shell"));
     }
@@ -139,9 +223,34 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
     cmd.args(&argv[1..]);
     if !req.cwd.is_empty() {
         cmd.cwd(&req.cwd);
+    } else if let Some(identity) = &identity {
+        // Without a cwd the terminal starts where a login would: the user's
+        // home, or `/` when the account has none (login(1) does the same).
+        // portable-pty would otherwise chdir into $HOME and fail.
+        if identity.home.is_dir() {
+            cmd.cwd(&identity.home);
+        } else {
+            cmd.cwd("/");
+        }
+    }
+    if let Some(identity) = &identity {
+        for (k, v) in identity.login_env() {
+            cmd.env(k, v);
+        }
+    }
+    #[cfg(unix)]
+    if let Some(shell) = crate::system_shell::fallback_in_use() {
+        cmd.env(crate::system_shell::SYSTEM_SHELL_ENV, shell);
     }
     for (k, v) in &req.env {
         cmd.env(k, v);
+    }
+    if let Some(email) = crate::default_git_email(req.env.keys()) {
+        cmd.env("EMAIL", email);
+    }
+    // The agent's own shell tools go last, so the machine's copies win.
+    if let Some(path) = crate::shell_tools::path_with_shell_tools(&req.env) {
+        cmd.env("PATH", path);
     }
     // Advertise a sensible TERM so curses apps render; the request may override.
     let term = if req.term.is_empty() {
@@ -151,13 +260,39 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
     };
     cmd.env("TERM", term);
 
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| PlatformError::os(format!("pty spawn {}: {e}", argv[0])))?;
-    // The slave handle is no longer needed once the child holds it; dropping it
-    // lets the master see EOF when the child exits.
-    drop(pair.slave);
+    let slave = pair.slave;
+    let spawn = move || {
+        let child = slave
+            .spawn_command(cmd)
+            .map_err(|e| PlatformError::os(format!("pty spawn {}: {e}", argv[0])));
+        // The slave handle is no longer needed once the child holds it; dropping
+        // it lets the master see EOF when the child exits.
+        drop(slave);
+        child
+    };
+    let child = match &identity {
+        None => spawn()?,
+        Some(identity) => {
+            give_terminal_to(pair.master.as_ref(), identity)?;
+            // Forked from a thread already running as the user, so the shell
+            // never holds the agent's credentials.
+            crate::run_as::on_identity_thread(identity, spawn)?
+        }
+    };
+    // A terminal's commands are work the supervisor runs, like an exec: give
+    // the shell (and whatever it starts) the same kernel OOM victim preference,
+    // so a memory-heavy command typed into a terminal is killed before the
+    // supervisor that carries the terminal. Best-effort and post-spawn: the
+    // shell is interactive, so its commands start after this write.
+    #[cfg(target_os = "linux")]
+    if let Some(pid) = child.process_id() {
+        crate::cgroup::raise_exec_oom_score_adj(pid, crate::cgroup::exec_oom_score_adj());
+    }
+    let child = OwnedChild {
+        child: Some(child),
+        reservation: crate::current_work_reservation(),
+        _running_command: crate::command_activity::RunningCommand::start(),
+    };
 
     let reader = pair
         .master
@@ -176,9 +311,106 @@ pub fn spawn_pty(req: &v1::PtyOpenRequest, default_shell: &[String]) -> Platform
     })
 }
 
+/// Makes the user own their terminal device, as a login would, so programs that
+/// reopen it by name (or check its owner) work.
+#[cfg(unix)]
+fn give_terminal_to(
+    master: &(dyn portable_pty::MasterPty + Send),
+    identity: &crate::run_as::RunAsIdentity,
+) -> PlatformResult<()> {
+    let Some(name) = master.tty_name() else {
+        return Ok(());
+    };
+    std::os::unix::fs::chown(&name, Some(identity.uid), Some(identity.gid))
+        .map_err(|e| PlatformError::from_io(&format!("chown {}", name.display()), &e))
+}
+
+#[cfg(not(unix))]
+fn give_terminal_to(
+    _master: &(dyn portable_pty::MasterPty + Send),
+    _identity: &crate::run_as::RunAsIdentity,
+) -> PlatformResult<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, Clone)]
+    struct RecoveringChild(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl portable_pty::ChildKiller for RecoveringChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl portable_pty::Child for RecoveringChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            if self.0.load(std::sync::atomic::Ordering::Acquire) {
+                Ok(portable_pty::ExitStatus::with_exit_code(0))
+            } else {
+                Err(std::io::Error::other(
+                    "synthetic transient PTY wait failure",
+                ))
+            }
+        }
+        fn process_id(&self) -> Option<u32> {
+            Some(123)
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_pty_wait_failure_recovers_only_after_actual_exit() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let drain = Arc::new(UpdateDrain::default());
+        let exited = Arc::new(AtomicBool::new(false));
+        drop(OwnedChild {
+            child: Some(Box::new(RecoveringChild(exited.clone()))),
+            reservation: drain.reserve_work(None),
+            _running_command: crate::command_activity::RunningCommand::start(),
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while drain.unavailable_reason().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(drain
+            .unavailable_reason()
+            .unwrap()
+            .contains("PTY child Some(123)"));
+        assert_eq!(
+            drain.reserve_update("update"),
+            UpdateReservation::Unavailable
+        );
+        exited.store(true, Ordering::Release);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while drain.snapshot().is_none_or(|state| state.routed != 0) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
+        assert!(drain.seal_update("update"));
+    }
 
     /// The platform default-shell argv for the test host.
     fn default_shell() -> Vec<String> {
@@ -311,5 +543,33 @@ mod tests {
         // Resize should not error on a freshly spawned pty.
         proc.resize(100, 40).expect("resize");
         let _ = proc.kill();
+    }
+
+    /// A terminal shell gets the same OOM victim preference as an exec child.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pty_shell_gets_the_command_oom_score_adj() {
+        let req = v1::PtyOpenRequest {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 30".to_string(),
+            ],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        };
+        let mut proc = spawn_pty_resilient(&req, &default_shell()).expect("spawn pty");
+        let pid = proc
+            .child
+            .child
+            .as_ref()
+            .and_then(|child| child.process_id())
+            .expect("pty child pid");
+        let observed = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+            .expect("read pty child OOM score");
+        let _ = proc.kill();
+        let expected = crate::cgroup::exec_oom_score_adj().expect("supervisor OOM score");
+        assert_eq!(observed.trim(), expected.to_string());
     }
 }

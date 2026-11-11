@@ -65,7 +65,7 @@ async function search(
     onStage: (stage, data) => events.push([stage, data]),
   });
   const stage = (name: string) => events.find(([s]) => s === name)?.[1] as any;
-  const jevStages = events.filter(([s]) => s === "jev").map(([, d]) => d);
+  const jevStages = events.filter(([s]) => s === "decision").map(([, d]) => d);
   return { r, events, stage, jevStages, workspace };
 }
 
@@ -110,12 +110,12 @@ describeWithRipgrep("must change together", () => {
     );
     expect(own).toBeDefined();
     // ... and verified in the symbol_windows Jev round, not in wave 2
-    const swJev = jevStages.filter((d) => d.jevStage === "symbol_windows");
+    const swJev = jevStages.filter((d) => d.decisionStage === "symbol_windows");
     expect(swJev.length).toBeGreaterThan(0);
     expect(swJev.some((d) => Object.keys(d.questions).includes(`rel::${own.id}`))).toBe(true);
     expect(
       jevStages
-        .filter((d) => d.jevStage === "wave2")
+        .filter((d) => d.decisionStage === "wave2")
         .some((d) => Object.keys(d.questions).includes(`rel::${own.id}`)),
     ).toBe(false);
 
@@ -187,7 +187,7 @@ describeWithRipgrep("adaptive pack round", () => {
     const pack = stage("pack");
     expect(pack.firstRating).toBe(0.3);
     expect(pack.adaptive.some((a: string) => a.includes("followed 1 more leads"))).toBe(true);
-    expect(jevStages.filter((d) => d.jevStage === "status").length).toBe(2);
+    expect(jevStages.filter((d) => d.decisionStage === "status").length).toBe(2);
     expect(r.text).toContain("(definition of helperAlpha)");
     expect(r.text).toContain("(definition of helperBeta)");
     expect(r.statusCheckError).toBeUndefined();
@@ -200,7 +200,7 @@ describeWithRipgrep("adaptive pack round", () => {
     });
     const pack = stage("pack");
     expect(pack.adaptive).toEqual(["rating 0.60: filled the budget with passages rel >= 0.1"]);
-    expect(jevStages.filter((d) => d.jevStage === "status").length).toBe(1);
+    expect(jevStages.filter((d) => d.decisionStage === "status").length).toBe(1);
     expect(r.text.split("\n")[0]).toContain(
       "evidence rating 0.60 for the passages above the bar; weaker passages fill the rest",
     );
@@ -231,7 +231,7 @@ describeWithRipgrep("adaptive pack round", () => {
   test("rating 0.85: no adaptive round", async () => {
     const { r, stage, jevStages } = await search(root, { ...base, jev: { good } });
     expect(stage("pack").adaptive).toEqual([]);
-    expect(jevStages.filter((d) => d.jevStage === "status").length).toBe(1);
+    expect(jevStages.filter((d) => d.decisionStage === "status").length).toBe(1);
     expect(r.text.split("\n")[0]).not.toContain("above the bar");
   });
 

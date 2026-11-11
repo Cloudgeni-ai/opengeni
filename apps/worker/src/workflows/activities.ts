@@ -3,12 +3,9 @@ import {
   ActivityFailure,
   ApplicationFailure,
   proxyActivities,
+  type ActivityOptions,
 } from "@temporalio/workflow";
 import type * as activities from "../activities";
-import {
-  KNOWLEDGE_SOURCE_SYNC_ACTIVITY_HEARTBEAT_TIMEOUT_MS,
-  KNOWLEDGE_SOURCE_SYNC_ACTIVITY_MAXIMUM_ATTEMPTS,
-} from "../knowledge-source-sync-activity-policy";
 
 type WorkflowControlActivities = Pick<
   typeof activities,
@@ -19,9 +16,9 @@ type WorkflowControlActivities = Pick<
   | "failSessionAttempt"
   | "getCodexCapacityWait"
   | "markSessionIdle"
-  | "peekSessionWork"
   | "persistSessionAttemptQuiescence"
   | "reconcileSessionAttemptQuiescence"
+  | "reconcileSettledSessionAttempt"
   | "reconcileCodexCapacityWait"
   | "recoverDispatch"
   | "recoverEscapedMcpTimeout"
@@ -47,6 +44,31 @@ export const activity = proxyActivities<WorkflowControlActivities>({
   },
 });
 
+/**
+ * The session peek is the advisory read every session run makes before it
+ * dispatches a turn, so a queued prompt waits on it. It normally completes in
+ * milliseconds. Temporal records an activity attempt as started when it hands
+ * the task to a poller; if that attempt is lost (or wedges without a result),
+ * only its start-to-close timeout schedules the retry. Under the two-minute
+ * control bound a single lost attempt held a fresh prompt for two minutes on
+ * the control queue, where no turn-queue backlog shows it. The peek is
+ * idempotent, so a short bound plus the same unbounded retry turns that loss
+ * into seconds. An attempt that outlives the bound is abandoned, not cancelled;
+ * its result is discarded and the retry observes current state.
+ */
+export const SESSION_PEEK_ACTIVITY_OPTIONS = {
+  startToCloseTimeout: 15_000,
+  retry: {
+    initialInterval: 1_000,
+    backoffCoefficient: 2,
+    maximumInterval: 30_000,
+  },
+} as const satisfies ActivityOptions;
+
+export const sessionPeekActivity = proxyActivities<Pick<typeof activities, "peekSessionWork">>(
+  SESSION_PEEK_ACTIVITY_OPTIONS,
+);
+
 /** One schedule occurrence is bounded. Transient control-plane failures get a
  * short retry window, but a revoked binding or other permanent task error must
  * not leave a Temporal activity retrying forever; the next scheduled occurrence
@@ -60,33 +82,6 @@ export const scheduledTaskActivity = proxyActivities<
     backoffCoefficient: 2,
     maximumInterval: "30 seconds",
     maximumAttempts: 5,
-  },
-});
-
-export const automationActivity = proxyActivities<Pick<typeof activities, "dispatchAutomationRun">>(
-  {
-    startToCloseTimeout: "2 minutes",
-    retry: {
-      initialInterval: "1 second",
-      backoffCoefficient: 2,
-      maximumInterval: "30 seconds",
-      maximumAttempts: 5,
-    },
-  },
-);
-
-/** Dispatch has a bounded retry window, but an accepted automation event must
- * not remain durably `dispatching` after that window closes. This compensating
- * database write is idempotent and retries without a cap until the run reaches
- * a terminal state (or is observed as already dispatched). */
-export const automationFailureActivity = proxyActivities<
-  Pick<typeof activities, "settleAutomationRunFailure">
->({
-  startToCloseTimeout: "2 minutes",
-  retry: {
-    initialInterval: "1 second",
-    backoffCoefficient: 2,
-    maximumInterval: "30 seconds",
   },
 });
 
@@ -108,7 +103,7 @@ export function turnTaskQueue(baseTaskQueue: string): string {
   return `${baseTaskQueue}-turns`;
 }
 
-export function turnActivityForTaskQueue(baseTaskQueue: string, receiptGatedCancellation = true) {
+export function turnActivityForTaskQueue(baseTaskQueue: string) {
   return proxyActivities<Pick<typeof activities, "runAgentTurn">>({
     taskQueue: turnTaskQueue(baseTaskQueue),
     // Agent segments legitimately run for days. A started turn heartbeats;
@@ -123,9 +118,7 @@ export function turnActivityForTaskQueue(baseTaskQueue: string, receiptGatedCanc
     // sandbox tools or processes are physically quiescent. The activity owns
     // that proof and writes an exact receipt after its hard tool fence; the
     // receipt transaction wakes the workflow to admit a replacement.
-    cancellationType: receiptGatedCancellation
-      ? ActivityCancellationType.TRY_CANCEL
-      : ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+    cancellationType: ActivityCancellationType.TRY_CANCEL,
     retry: { maximumAttempts: 1 },
   });
 }
@@ -148,29 +141,26 @@ export const documentActivity = proxyActivities<Pick<typeof activities, "indexDo
   retry: { maximumAttempts: 1 },
 });
 
-/** Connector inventory/download/index batches are provider-I/O activities. The
- * implementation heartbeats between bounded items and owns its resumable
- * checkpoint; Temporal retries therefore repeat only idempotent source/object
- * operations and never invoke the agent runtime. */
-export const knowledgeSourceSyncActivity = proxyActivities<
-  Pick<typeof activities, "runKnowledgeSourceSyncBatch">
->({
-  startToCloseTimeout: "1 hour",
-  heartbeatTimeout: KNOWLEDGE_SOURCE_SYNC_ACTIVITY_HEARTBEAT_TIMEOUT_MS,
-  retry: {
-    initialInterval: "2 seconds",
-    backoffCoefficient: 2,
-    maximumInterval: "1 minute",
-    maximumAttempts: KNOWLEDGE_SOURCE_SYNC_ACTIVITY_MAXIMUM_ATTEMPTS,
-  },
-});
+/**
+ * Turn failures whose fixed, secret-free message tells the person what is
+ * wrong. Any other cause stays behind the generic Temporal message, as it may
+ * carry provider or infrastructure detail.
+ */
+const DIAGNOSABLE_TURN_FAILURE_TYPES = new Set([
+  "TurnExecutionPolicyDefinitionMismatchError",
+  // The chat's model was retired or removed from the catalog after it was chosen.
+  "TurnExecutionPolicyModelUnavailableError",
+  // A fixed admission refusal: a connected subscription used for API work, no
+  // credits, no paid plan, or a monthly limit reached.
+  "TurnAdmissionRefusedError",
+]);
 
 export function workflowFailureMessage(error: unknown): string {
   if (
     error instanceof ActivityFailure &&
     error.activityType === "runAgentTurn" &&
     error.cause instanceof ApplicationFailure &&
-    error.cause.type === "TurnExecutionPolicyDefinitionMismatchError"
+    DIAGNOSABLE_TURN_FAILURE_TYPES.has(error.cause.type ?? "")
   ) {
     return error.cause.message;
   }

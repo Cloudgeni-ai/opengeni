@@ -3,14 +3,11 @@ import {
   acquireOwnerMigratedTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
-import { execFileSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
 import {
   applyCreditDebitAfterUse,
-  applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
   appendSessionEvents,
   bootstrapWorkspace,
@@ -32,6 +29,7 @@ import {
   maintainWorkspaceAllowances,
   migrate,
   provisionRoles,
+  recordModelCallFact,
   recordUsageEvent,
   nestedPostgresSqlState,
   setMemberAllowance,
@@ -169,47 +167,32 @@ describe("usage allowance DB lifecycle", () => {
     }
   });
 
-  test("old complete readiness and old role provisioning stay compatible with private allowance storage", async () => {
-    const repoRoot = new URL("../../..", import.meta.url).pathname;
-    // Exact integration-aware pre-allowance origin/main ancestor of PR3038. A moving merge-base
-    // would stop exercising the old binary as soon as the PR itself merges.
-    const oldRevision = "30414a09b";
-    const directory = `${repoRoot}/.allowance-old-runtime-${crypto.randomUUID()}`;
-    // Build immutable old source with the current dependency resolver, without
-    // copying/modifying source or substituting today's evaluator constants.
-    const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
-    const root = await mkdtemp(directory);
+  test("current complete readiness and provisioning keep private allowance storage inaccessible", async () => {
+    // 0598 is a maintenance cutover: pre-cutover binaries and provisioners do
+    // not run against its schema. Test the supported complete current posture,
+    // retaining the real private-table and column-only privilege counterexamples.
+    const owner = await acquireOwnerMigratedTestDatabase("allowance-current-readiness");
+    if (!owner) throw new Error("Owner-migrated PostgreSQL database unavailable");
+    let currentApp: ReturnType<typeof createDb> | undefined;
     try {
-      for (const name of ["runtime-posture.ts", "role-relationships.ts", "provision-roles.ts"]) {
-        await writeFile(
-          `${root}/${name}`,
-          execFileSync("git", ["show", `${oldRevision}:packages/db/src/${name}`], {
-            cwd: repoRoot,
-          }),
-        );
-      }
-      const old = await import(pathToFileURL(`${root}/runtime-posture.ts`).href);
-      const oldProvision = await import(pathToFileURL(`${root}/provision-roles.ts`).href);
+      await migrate(owner.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
       const options = {
         expectedRole: "opengeni_app",
         rlsStrategy: "force" as const,
         targetSchema: "public",
       };
-      await oldProvision.provisionRoles(shared.adminUrl, {
-        appRole: "opengeni_app",
-        appPassword: new URL(shared.appUrl).password,
-        rlsStrategy: "force",
-      });
-      const previous = await old.inspectRuntimeDatabasePosture(app.db, options);
-      expect(old.evaluateRuntimeDatabasePosture(previous, options)).toEqual([]);
       // Re-provisioning current roles must both restore new EXECUTE seams and
       // preserve all previously required exact privileges.
-      await provisionRoles(shared.adminUrl, {
+      await provisionRoles(owner.adminUrl, {
         appRole: "opengeni_app",
-        appPassword: new URL(shared.appUrl).password,
+        appPassword: owner.appPassword,
         rlsStrategy: "force",
       });
-      const current = await inspectRuntimeDatabasePosture(app.db, options);
+      const runtimeUrl = new URL(owner.adminUrl);
+      runtimeUrl.username = "opengeni_app";
+      runtimeUrl.password = owner.appPassword;
+      currentApp = createDb(runtimeUrl.toString());
+      const current = await inspectRuntimeDatabasePosture(currentApp.db, options);
       expect(evaluateRuntimeDatabasePosture(current, options)).toEqual([]);
       expect(
         current.tables.some((table) =>
@@ -223,18 +206,41 @@ describe("usage allowance DB lifecycle", () => {
         "usage allowance private table workspace_usage_allowances is missing or unsafe",
       );
       // Real catalog probe: table-level checks alone miss column-only DML.
-      await shared.admin`grant insert(config) on opengeni_private.workspace_usage_allowances to opengeni_app`;
-      const columnGrant = await inspectRuntimeDatabasePosture(app.db, options);
+      await owner.admin`grant insert(config) on opengeni_private.workspace_usage_allowances to opengeni_app`;
+      const columnGrant = await inspectRuntimeDatabasePosture(currentApp.db, options);
       expect(evaluateRuntimeDatabasePosture(columnGrant, options)).toContain(
         "usage allowance private table workspace_usage_allowances is missing or unsafe",
       );
-      await provisionRoles(shared.adminUrl, {
+      await owner.admin`grant select(due_at) on opengeni_private.usage_maintenance_due to opengeni_app`;
+      await owner.admin`grant update(revision) on opengeni_private.usage_allowance_membership_changes to opengeni_app`;
+      await owner.admin`grant execute on function opengeni_private.sync_usage_maintenance_due() to opengeni_app`;
+      const drift = evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(currentApp.db, options),
+        options,
+      );
+      expect(drift).toContain(
+        "usage maintenance index usage_maintenance_due has unsafe owner or direct runtime privileges",
+      );
+      expect(drift).toContain(
+        "usage maintenance index usage_allowance_membership_changes has unsafe owner or direct runtime privileges",
+      );
+      expect(drift).toContain(
+        "usage maintenance helper sync_usage_maintenance_due() has unsafe posture",
+      );
+      await provisionRoles(owner.adminUrl, {
         appRole: "opengeni_app",
-        appPassword: new URL(shared.appUrl).password,
+        appPassword: owner.appPassword,
         rlsStrategy: "force",
       });
+      expect(
+        evaluateRuntimeDatabasePosture(
+          await inspectRuntimeDatabasePosture(currentApp.db, options),
+          options,
+        ),
+      ).toEqual([]);
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await currentApp?.close();
+      await owner.release();
     }
   }, 180_000);
 
@@ -647,10 +653,12 @@ describe("usage allowance DB lifecycle", () => {
       amountMicros: 100,
       idempotencyKey: crypto.randomUUID(),
     });
-    await applyCreditDebitUpToBalance(app.db, {
+    await applyCreditDebitAfterUse(app.db, {
       ...scope,
       type: "model",
-      requestedAmountMicros: 20,
+      amountMicros: 20,
+      sourceType: "model_response",
+      sourceId: crypto.randomUUID(),
       idempotencyKey: crypto.randomUUID(),
     });
     await applyCreditLedgerEntry(app.db, {
@@ -710,7 +718,8 @@ describe("usage allowance DB lifecycle", () => {
       grantsRemaining: 90,
       limit: 200,
     });
-    expect(usage.members[0]!.limit).toBe(95);
+    // A share of the whole pool: spending a grant doesn't lower it.
+    expect(usage.members[0]!.limit).toBe(100);
     const grants =
       await shared.admin`select operation_id,remaining::integer from opengeni_private.workspace_allowance_grants
       where workspace_id=${scope.workspaceId} order by operation_id`;
@@ -724,6 +733,102 @@ describe("usage allowance DB lifecycle", () => {
       code: "allowance_exhausted",
       scope: "workspace",
     });
+  });
+
+  test("equal shares of grant credits stay steady as they are spent and grow on a top-up", async () => {
+    const scope = await fixture();
+    const workspaceScope = { accountId: scope.accountId, workspaceId: scope.workspaceId };
+    const other = `user:other:${crypto.randomUUID()}`;
+    await shared.admin`insert into workspace_memberships (account_id,workspace_id,subject_id)
+      values (${scope.accountId},${scope.workspaceId},${other})`;
+    const otherPersonal = crypto.randomUUID();
+    await shared.admin`insert into workspaces(id,account_id,name) values(${otherPersonal},${scope.accountId},'Other Personal')`;
+    await shared.admin`insert into organization_memberships(account_id,subject_id,role,status,personal_workspace_id)
+      values(${scope.accountId},${other},'member','active',${otherPersonal})`;
+    await setWorkspaceAllowance(app.db, {
+      ...scope,
+      includedCredits: 0,
+      period: "monthly",
+      memberDefault: "equal_share",
+      expectedVersion: 0,
+    });
+    await shared.admin`insert into workspace_webhooks (account_id,workspace_id,url,secret_encrypted,event_types)
+      values (${scope.accountId},${scope.workspaceId},'https://example.test/webhook','sealed',
+        array['usage.threshold_reached','usage.exhausted'])`;
+    await grantWorkspaceCredits(app.db, { ...scope, operationId: "bought", credits: 40_000 });
+    const limits = async () =>
+      Object.fromEntries(
+        (await getWorkspaceUsage(app.db, workspaceScope)).members.map((m) => [
+          m.subjectId,
+          m.limit,
+        ]),
+      );
+    expect(await limits()).toEqual({ [scope.subjectId]: 20_000, [other]: 20_000 });
+
+    // Spending from the grant leaves every share where it was.
+    await charge(scope, 2);
+    expect(await limits()).toEqual({ [scope.subjectId]: 20_000, [other]: 20_000 });
+    expect((await getWorkspaceUsage(app.db, workspaceScope)).workspace).toMatchObject({
+      limit: 40_000,
+      used: 2,
+      grantsRemaining: 39_998,
+    });
+
+    // One member spends 80% of their share: one threshold notice, with the
+    // same ceiling the usage read shows, and not yet exhausted.
+    const session = await createSession(app.db, {
+      ...scope,
+      initialMessage: "test",
+      resources: [],
+      metadata: {},
+      model: "scripted",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: scope.subjectId },
+      createdByContext: {},
+    });
+    await initializeSessionStartAtomically(app.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const [turn] =
+      await shared.admin`select id from session_turns where session_id=${session.id} order by created_at limit 1`;
+    const spend = async (micros: number) =>
+      await applyCreditDebitAfterUse(app.db, {
+        ...scope,
+        type: "model",
+        amountMicros: micros,
+        sourceType: "model_response",
+        sourceId: `${turn!.id}:response:${crypto.randomUUID()}`,
+        idempotencyKey: crypto.randomUUID(),
+      });
+    await spend(16_000);
+    await maintainWorkspaceAllowances(app.db, { limit: 100 });
+    const notices = await shared.admin`select threshold::text, payload->>'limit' as limit
+      from opengeni_private.workspace_allowance_notifications
+      where workspace_id=${scope.workspaceId} and subject_id=${scope.subjectId} order by threshold`;
+    expect([...notices]).toEqual([{ threshold: "0.8", limit: "20000" }]);
+    expect(await checkWorkspaceAllowance(app.db, scope)).toBeNull();
+
+    // The share is spent at exactly half of what was bought.
+    await spend(3_999);
+    expect(await checkWorkspaceAllowance(app.db, scope)).toBeNull();
+    await spend(1);
+    expect(await checkWorkspaceAllowance(app.db, scope)).toMatchObject({
+      scope: "member",
+      subjectId: scope.subjectId,
+    });
+    expect(await checkWorkspaceAllowance(app.db, { ...scope, subjectId: other })).toBeNull();
+    expect(await limits()).toEqual({ [scope.subjectId]: 20_000, [other]: 20_000 });
+
+    // Buying more raises every share.
+    await grantWorkspaceCredits(app.db, { ...scope, operationId: "more", credits: 1_000 });
+    expect(await limits()).toEqual({ [scope.subjectId]: 20_500, [other]: 20_500 });
+    expect(await checkWorkspaceAllowance(app.db, scope)).toBeNull();
   });
 
   test("frozen initiating human, not service or session creator, receives the debit", async () => {
@@ -919,6 +1024,179 @@ describe("usage allowance DB lifecycle", () => {
     const historical = await getWorkspaceUsage(app.db, { ...scope, period: "2000-01" });
     expect(historical.workspace.used).toBe(0);
     expect(historical.workspace.grantsRemaining).toBe(0);
+  });
+});
+
+describe("usage that spends no Opengeni credits", () => {
+  async function sessionTurn(scope: Awaited<ReturnType<typeof fixture>>) {
+    const session = await createSession(app.db, {
+      ...scope,
+      initialMessage: "test",
+      resources: [],
+      metadata: {},
+      model: "scripted",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: scope.subjectId },
+      createdByContext: {},
+    });
+    await initializeSessionStartAtomically(app.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const [turn] =
+      await shared.admin`select id from session_turns where session_id=${session.id} order by created_at limit 1`;
+    return { sessionId: session.id, turnId: String(turn!.id) };
+  }
+
+  async function unbilledCall(
+    scope: { accountId: string; workspaceId: string },
+    turn: { sessionId: string; turnId: string },
+    input: {
+      sourceKey?: string;
+      listMicros: number | null;
+      pricedCostMicros?: number;
+      billingPath?: "external" | "opengeni_credits";
+    },
+  ) {
+    return await recordModelCallFact(app.db, {
+      ...scope,
+      ...turn,
+      sourceKey: input.sourceKey ?? crypto.randomUUID(),
+      provider: "subscription-provider",
+      providerApi: "responses",
+      model: "listed-model",
+      billingPath: input.billingPath ?? "external",
+      pricedCostMicros: input.pricedCostMicros ?? 0,
+      estimatedProviderCostMicros: input.listMicros,
+      pricingSource: input.listMicros === null ? null : "configured_list_price",
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+    });
+  }
+
+  test("is ignored by default and never admits or refuses that work", async () => {
+    const scope = await fixture();
+    const turn = await sessionTurn(scope);
+    await setWorkspaceAllowance(app.db, {
+      ...scope,
+      includedCredits: 100,
+      period: "monthly",
+      expectedVersion: 0,
+    });
+    await unbilledCall(scope, turn, { listMicros: 500 });
+    expect((await getWorkspaceUsage(app.db, scope)).workspace.used).toBe(0);
+    await charge(scope, 100);
+    expect(await checkWorkspaceAllowance(app.db, scope)).toMatchObject({ scope: "workspace" });
+    expect(
+      await checkWorkspaceAllowance(app.db, { ...scope, fundedWithoutCredits: true }),
+    ).toBeNull();
+  });
+
+  test("list_price counts each unbilled call once, at list price, for the turn's human", async () => {
+    const scope = await fixture();
+    const turn = await sessionTurn(scope);
+    await setWorkspaceAllowance(app.db, {
+      ...scope,
+      includedCredits: 100,
+      period: "monthly",
+      memberDefault: "equal_share",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    expect((await getWorkspaceAllowance(app.db, scope))?.unbilledUsage).toBe("list_price");
+    await unbilledCall(scope, turn, { sourceKey: "first", listMicros: 40 });
+    // An exact replay of the same fact is idempotent and never recounts.
+    await unbilledCall(scope, turn, { sourceKey: "first", listMicros: 40 });
+    // A credit-funded call is counted from its ledger debit, never from the fact.
+    await unbilledCall(scope, turn, {
+      sourceKey: "credited",
+      listMicros: 30,
+      pricedCostMicros: 31,
+      billingPath: "opengeni_credits",
+    });
+    // A call without list pricing is not counted.
+    await unbilledCall(scope, turn, { sourceKey: "unpriced", listMicros: null });
+    let usage = await getWorkspaceUsage(app.db, scope);
+    expect(usage.workspace.used).toBe(40);
+    expect(usage.members.find((m) => m.subjectId === scope.subjectId)!.used).toBe(40);
+    expect(
+      await checkWorkspaceAllowance(app.db, {
+        ...scope,
+        subjectId: scope.subjectId,
+        fundedWithoutCredits: true,
+      }),
+    ).toBeNull();
+
+    await unbilledCall(scope, turn, { sourceKey: "second", listMicros: 70 });
+    usage = await getWorkspaceUsage(app.db, scope);
+    expect(usage.workspace.used).toBe(110);
+    expect(
+      await checkWorkspaceAllowance(app.db, {
+        ...scope,
+        subjectId: scope.subjectId,
+        fundedWithoutCredits: true,
+      }),
+    ).toMatchObject({ code: "allowance_exhausted", scope: "workspace" });
+  });
+
+  test("list_price spends persistent grants after the included pool", async () => {
+    const scope = await fixture();
+    const turn = await sessionTurn(scope);
+    await setWorkspaceAllowance(app.db, {
+      ...scope,
+      includedCredits: 50,
+      period: "monthly",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    await grantWorkspaceCredits(app.db, { ...scope, operationId: "topup", credits: 100 });
+    await unbilledCall(scope, turn, { listMicros: 80 });
+    const usage = await getWorkspaceUsage(app.db, scope);
+    expect(usage.workspace.used).toBe(80);
+    expect(usage.workspace.grantsRemaining).toBe(70);
+    expect(
+      await checkWorkspaceAllowance(app.db, { ...scope, fundedWithoutCredits: true }),
+    ).toBeNull();
+  });
+
+  test("a late list-price fill-in counts once", async () => {
+    const scope = await fixture();
+    const turn = await sessionTurn(scope);
+    await setWorkspaceAllowance(app.db, {
+      ...scope,
+      includedCredits: 1000,
+      period: "none",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    await unbilledCall(scope, turn, { sourceKey: "late", listMicros: null });
+    expect((await getWorkspaceUsage(app.db, scope)).workspace.used).toBe(0);
+    await unbilledCall(scope, turn, { sourceKey: "late", listMicros: 25 });
+    await unbilledCall(scope, turn, { sourceKey: "late", listMicros: 25 });
+    expect((await getWorkspaceUsage(app.db, scope)).workspace.used).toBe(25);
+  });
+
+  test("rejects an unknown unbilledUsage mode", async () => {
+    const scope = await fixture();
+    await expect(
+      setWorkspaceAllowance(app.db, {
+        ...scope,
+        includedCredits: 10,
+        period: "monthly",
+        unbilledUsage: "always" as "list_price",
+        expectedVersion: 0,
+      }),
+    ).rejects.toThrow("unbilledUsage");
+    const [valid] = await shared.admin`select
+      validate_usage_allowance_config('{"includedCredits":1,"period":"none","unbilledUsage":"always"}'::jsonb) as bad,
+      validate_usage_allowance_config('{"includedCredits":1,"period":"none","unbilledUsage":"list_price"}'::jsonb) as good`;
+    expect(valid).toEqual({ bad: false, good: true });
   });
 });
 

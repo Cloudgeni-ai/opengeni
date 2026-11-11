@@ -1,9 +1,11 @@
 import type {
   AccessGrant,
+  ComposerDraft,
   ResourceRef,
   SubmitComposerDraftRequest,
   SubmitComposerDraftResponse,
 } from "@opengeni/contracts";
+import { getSession } from "@opengeni/db";
 import type { AccessGrantAuthorization } from "../access";
 import type { AcceptSessionUserMessageDependencies } from "../dependencies";
 import { acceptSessionUserMessageWithOutcome } from "../domain/sessions";
@@ -12,10 +14,9 @@ export type SubmitComposerDraftForRequestOptions = {
   authorization?: AccessGrantAuthorization | undefined;
   /**
    * Trusted host-owned resources admitted with this command without writing
-   * them into the actor's browser-visible draft first. The saved draft remains
-   * the exact content fence for actor-owned text, annotations, resources, and
-   * execution policy; these resources participate in the accepted command's
-   * idempotency hash, validation, turn, and durable session resource set.
+   * them into the actor's browser-visible draft first. They participate in
+   * the accepted command's idempotency hash, validation, turn, and durable
+   * session resource set.
    */
   additionalResources?: ResourceRef[] | undefined;
 };
@@ -26,7 +27,7 @@ export type SubmitComposerDraftForRequestOptions = {
  * This is the application boundary shared by the stock HTTP adapter and an
  * in-process embedding host. A host may prepare its own durable business state
  * before calling this function and project the returned receipt afterward, but
- * OpenGeni remains the sole authority for draft validation/rotation, event
+ * Opengeni remains the sole authority for draft validation/rotation, event
  * append, turn creation, routing, and idempotent replay.
  */
 export async function submitComposerDraftForRequest(
@@ -42,11 +43,14 @@ export async function submitComposerDraftForRequest(
     text: input.text,
     annotations: input.annotations,
     modelContext: input.modelContext ?? null,
+    timeZone: input.timeZone ?? null,
     resources: [...input.resources, ...additionalResources],
     ...(additionalResources.length > 0 ? { composerDraftResources: input.resources } : {}),
-    model: input.model,
-    reasoningEffort: input.reasoningEffort,
-    latencyMode: input.latencyMode,
+    // A draft that follows the chat's settings is sent without them, so the
+    // turn runs on the chat's current settings.
+    ...(input.model !== undefined ? { model: input.model } : {}),
+    ...(input.reasoningEffort !== undefined ? { reasoningEffort: input.reasoningEffort } : {}),
+    ...(input.latencyMode !== undefined ? { latencyMode: input.latencyMode } : {}),
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     connectionAccounts: input.connectionAccounts,
 
@@ -61,17 +65,41 @@ export async function submitComposerDraftForRequest(
     ...(input.controlEtag ? { controlEtag: input.controlEtag } : {}),
   });
 
-  if (!result.draft) {
-    throw new Error("Accepted composer draft submission did not return its next draft");
-  }
+  // With no saved draft row there was nothing to clear: the person's draft
+  // is the empty one a read returns, in the fresh and the replayed response.
+  const draft = result.draft ?? (await emptyComposerDraft(deps, workspaceId, sessionId));
 
   return {
     accepted: result.accepted,
     turn: result.turn,
-    draft: result.draft,
+    draft,
     receipt: result.receipt,
     routing: result.routing,
     interruptionCount: result.interruptionCount,
+    waitsForMachineOwner: result.waitsForMachineOwner,
     replay: result.replay,
+  };
+}
+
+/** The draft a person has before saving one: empty, following the chat's settings. */
+async function emptyComposerDraft(
+  deps: AcceptSessionUserMessageDependencies,
+  workspaceId: string,
+  sessionId: string,
+): Promise<ComposerDraft> {
+  const session = await getSession(deps.db, workspaceId, sessionId);
+  if (!session) throw new Error(`Session not found: ${sessionId}`);
+  return {
+    revision: 0,
+    text: "",
+    annotations: [],
+    resources: [],
+    model: session.model,
+    reasoningEffort: session.reasoningEffort as ComposerDraft["reasoningEffort"],
+    latencyMode: session.latencyMode as ComposerDraft["latencyMode"],
+    policyFollowsSession: true,
+    sourceTurnId: null,
+    sourceTurnVersion: null,
+    updatedAt: null,
   };
 }

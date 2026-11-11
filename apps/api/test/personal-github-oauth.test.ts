@@ -26,11 +26,8 @@ import {
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { createSignedState, readSignedState } from "@opengeni/github";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 
 import { createApp } from "../src/app";
@@ -135,6 +132,9 @@ function githubFixture() {
   let githubUserId = 123456;
   let scopes = "repo";
   let repositoryUnauthorizedOnce = false;
+  let repositoryUnauthorizedAlways = false;
+  // github.com answers a refused refresh with HTTP 200 and an OAuth error.
+  let refreshError: string | null = null;
   const repository = {
     id: 987654321,
     full_name: "Cloudgeni-ai/opengeni",
@@ -154,6 +154,9 @@ function githubFixture() {
           ? init.body
           : new URLSearchParams(typeof init?.body === "string" ? init.body : "");
       tokenRequests.push(body);
+      if (refreshError && body.get("grant_type") === "refresh_token") {
+        return Response.json({ error: refreshError });
+      }
       return Response.json({
         access_token: `github-access-${tokenRequests.length}`,
         refresh_token: `github-refresh-${tokenRequests.length}`,
@@ -171,7 +174,7 @@ function githubFixture() {
     }
     if (url.origin === PERSONAL_GITHUB_API_ORIGIN && url.pathname === "/user/repos") {
       repositoryRequests.push({ url: url.toString(), redirect: init?.redirect });
-      if (repositoryUnauthorizedOnce) {
+      if (repositoryUnauthorizedAlways || repositoryUnauthorizedOnce) {
         repositoryUnauthorizedOnce = false;
         return Response.json({ message: "bad credentials" }, { status: 401 });
       }
@@ -206,6 +209,12 @@ function githubFixture() {
     },
     setRepositoryUnauthorizedOnce() {
       repositoryUnauthorizedOnce = true;
+    },
+    setRepositoryUnauthorizedAlways() {
+      repositoryUnauthorizedAlways = true;
+    },
+    setRefreshError(code: string) {
+      refreshError = code;
     },
   };
 }
@@ -278,6 +287,104 @@ describe("personal GitHub OAuth", () => {
     expect(fixture.repositoryRequests).toHaveLength(2);
     expect(fixture.tokenRequests).toHaveLength(2);
     expect(fixture.tokenRequests[1]!.get("grant_type")).toBe("refresh_token");
+  }, 60_000);
+
+  test("a grant GitHub keeps refusing asks to reconnect GitHub, not to sign in again", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = githubFixture();
+    const started = await start(fixture, workspace);
+    const state = new URL(started.authorizationUrl).searchParams.get("state")!;
+    expect((await callback(fixture, state)).status).toBe(302);
+    const [connection] = await listConnectionsMetadata(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    fixture.setRepositoryUnauthorizedAlways();
+    const response = await testApp(fixture).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${connection!.id}/github/repositories`,
+      {
+        headers: {
+          authorization: await bearer(workspace),
+          "x-opengeni-access-key": EDGE_ACCESS_KEY,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(JSON.stringify(await response.json())).toContain(
+      "Reconnect your GitHub account to keep working as you",
+    );
+  }, 60_000);
+
+  test("a refresh GitHub refuses moves the connection to reconnect", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = githubFixture();
+    const started = await start(fixture, workspace);
+    const state = new URL(started.authorizationUrl).searchParams.get("state")!;
+    expect((await callback(fixture, state)).status).toBe(302);
+    const [connection] = await listConnectionsMetadata(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    fixture.setRepositoryUnauthorizedAlways();
+    fixture.setRefreshError("bad_refresh_token");
+    const response = await testApp(fixture).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${connection!.id}/github/repositories`,
+      {
+        headers: {
+          authorization: await bearer(workspace),
+          "x-opengeni-access-key": EDGE_ACCESS_KEY,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(JSON.stringify(await response.json())).toContain(
+      "Reconnect your GitHub account to keep working as you",
+    );
+    const [after] = await listConnectionsMetadata(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    expect(after!.status).toBe("needs_reauth");
+  }, 60_000);
+
+  test("a refresh GitHub cannot serve right now is try again, not reconnect", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = githubFixture();
+    const started = await start(fixture, workspace);
+    const state = new URL(started.authorizationUrl).searchParams.get("state")!;
+    expect((await callback(fixture, state)).status).toBe(302);
+    const [connection] = await listConnectionsMetadata(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    fixture.setRepositoryUnauthorizedOnce();
+    fixture.setRefreshError("temporarily_unavailable");
+    const response = await testApp(fixture).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${connection!.id}/github/repositories`,
+      {
+        headers: {
+          authorization: await bearer(workspace),
+          "x-opengeni-access-key": EDGE_ACCESS_KEY,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(response.status).toBe(502);
+    const [after] = await listConnectionsMetadata(
+      client.db,
+      workspace.workspaceId,
+      workspace.subjectId,
+    );
+    expect(after!.status).toBe("active");
   }, 60_000);
 
   test("discovers and CAS-selects only serially verified owner repositories", async () => {
@@ -353,6 +460,26 @@ describe("personal GitHub OAuth", () => {
       selectionGeneration: 1,
       repositories: [{ repositoryId: "987654321", selectedAccess: "write" }],
     });
+
+    // All my repositories waits for the deployment to allow it.
+    const status = await app.request(`/v1/workspaces/${workspace.workspaceId}/connections/github`, {
+      headers,
+    });
+    expect(
+      ((await status.json()) as { allRepositoriesAvailable?: boolean }).allRepositoriesAvailable,
+    ).toBe(false);
+    const allRepositories = await app.request(basePath, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        expectedConnectionAuthorityGeneration: catalog.selection.connectionAuthorityGeneration,
+        expectedSelectionGeneration: selection.selectionGeneration,
+        idempotencyKey: "all-repositories-unavailable",
+        repositories: [],
+        allRepositoriesAccess: "write",
+      }),
+    });
+    expect(allRepositories.status).toBe(409);
 
     const replay = await app.request(basePath, {
       method: "PUT",

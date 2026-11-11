@@ -1,9 +1,9 @@
 //! The cross-platform native [`Platform`] implementation.
 //!
-//! exec/fs/git are portable, so a single struct serves every OS: exec via
-//! [`tokio::process`], the filesystem via [`tokio::fs`], git by shelling the
-//! system `git`. The per-OS specifics (OS/arch identity, the default shell)
-//! delegate to the cfg-gated `linux`/`macos`/`windows` modules.
+//! exec/fs are portable, so a single struct serves every OS: exec via
+//! [`tokio::process`] and the filesystem via [`tokio::fs`]. The per-OS specifics
+//! (OS/arch identity, the default shell) delegate to the cfg-gated
+//! `linux`/`macos`/`windows` modules.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,17 +12,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-#[cfg(windows)]
-use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use opengeni_agent_proto::v1;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::cgroup::{OpCgroupConfig, OpCgroups};
 use crate::desktop::{resolve_desktop, DesktopBackend};
 use crate::error::{PlatformError, PlatformResult};
+use crate::run_as::{RunAsChild, RunAsIdentity};
 use crate::{BrowserControlBackend, HostIdentity, Platform, StreamRegistry};
 
-/// The host-native platform: exec/fs/git against the machine the agent runs on,
+/// The host-native platform: exec/fs against the machine the agent runs on,
 /// plus the desktop backend (capture + computer-use input) and the optional relay
 /// stream registrar that powers the M8 pty/desktop streams.
 #[derive(Clone)]
@@ -46,8 +46,8 @@ pub struct NativePlatform {
     /// The per-op OOM cgroup manager, wired by the supervisor at startup on a
     /// delegated Linux cgroup v2 host (issue #345). `None` until then (and on every
     /// non-Linux / non-delegated host), in which case exec runs with no per-op
-    /// memory isolation — its children still receive the minimal relative
-    /// `oom_score_adj` preference derived from the live supervisor.
+    /// memory isolation — its children still receive the `oom_score_adj`
+    /// victim preference derived from the live supervisor.
     cgroups: Option<Arc<OpCgroups>>,
 }
 
@@ -56,11 +56,12 @@ impl std::fmt::Debug for NativePlatform {
         f.debug_struct("NativePlatform")
             .field("workspace_root", &self.workspace_root)
             .field("home_dir", &self.home_dir)
-            .field("has_display", &self.desktop.probe().is_some())
             .field("has_stream_registry", &self.stream_registry.is_some())
             .field("has_browser_control", &self.browser_control.is_some())
             .field("has_oom_isolation", &self.cgroups.is_some())
-            .finish()
+            // The desktop is left out: probing it opens displays and reads
+            // session state, which formatting must not do.
+            .finish_non_exhaustive()
     }
 }
 
@@ -71,15 +72,24 @@ impl Default for NativePlatform {
 }
 
 impl NativePlatform {
-    /// Builds a platform rooted at the process's current working directory, with the
-    /// host desktop backend resolved and no relay registrar yet (the supervisor
-    /// wires one via [`with_stream_registry`](Self::with_stream_registry)).
+    /// Builds a platform rooted at the process's current working directory (or the
+    /// user's home when that directory is a filesystem root, see
+    /// [`resolve_workspace_root`]), with the host desktop backend resolved and no
+    /// relay registrar yet (the supervisor wires one via
+    /// [`with_stream_registry`](Self::with_stream_registry)).
     #[must_use]
     pub fn new() -> Self {
-        let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        #[cfg(unix)]
+        crate::null_device::prime();
+        let home_dir = user_home_dir();
+        let workspace_root = resolve_workspace_root(
+            std::env::current_dir().ok(),
+            home_dir.as_deref(),
+            windows_system_dir().as_deref(),
+        );
         Self {
             workspace_root,
-            home_dir: user_home_dir(),
+            home_dir,
             desktop: Arc::from(resolve_desktop()),
             stream_registry: None,
             browser_control: None,
@@ -91,6 +101,8 @@ impl NativePlatform {
     /// the user overrides the workspace root).
     #[must_use]
     pub fn with_root(workspace_root: impl Into<PathBuf>) -> Self {
+        #[cfg(unix)]
+        crate::null_device::prime();
         Self {
             workspace_root: workspace_root.into(),
             home_dir: user_home_dir(),
@@ -138,11 +150,20 @@ impl NativePlatform {
     /// Resolves a request-supplied machine path. Empty falls back to the agent
     /// root, exact `~` / `~/...` expands against the agent user's home, ordinary
     /// relative paths join the root, and absolute paths pass through unchanged.
-    fn resolve_path(&self, path: &str) -> PlatformResult<PathBuf> {
+    /// For a request running as `identity`, `~` expands against that account's
+    /// home instead.
+    fn resolve_path(
+        &self,
+        path: &str,
+        identity: Option<&RunAsIdentity>,
+    ) -> PlatformResult<PathBuf> {
         if path.is_empty() {
             Ok(self.workspace_root.clone())
         } else if path == "~" || path.starts_with("~/") {
-            let home = self.home_dir.as_ref().ok_or_else(|| {
+            let home = identity
+                .map(|identity| &identity.home)
+                .or(self.home_dir.as_ref());
+            let home = home.ok_or_else(|| {
                 PlatformError::os(
                     "cannot resolve '~': the agent service has no HOME or USERPROFILE",
                 )
@@ -165,13 +186,55 @@ impl NativePlatform {
     /// Resolves and validates a process working directory before spawn. Tokio's
     /// spawn error otherwise reports `ENOENT` against the executable even when
     /// the missing object is actually `current_dir`, which is actively misleading.
-    fn resolve_process_cwd(&self, cwd: &str, operation: &str) -> PlatformResult<PathBuf> {
-        let path = self.resolve_path(cwd)?;
-        let metadata = std::fs::metadata(&path).map_err(|error| {
-            PlatformError::from_io(
-                &format!("{operation} working directory {}", path.display()),
-                &error,
-            )
+    ///
+    /// A missing workspace root or home directory (the agent's, or the
+    /// requested user's) is created again and the command runs: something on
+    /// the machine moved or deleted it, and every command that starts there
+    /// would otherwise fail. Any other missing directory stays a not-found
+    /// error.
+    fn resolve_process_cwd(
+        &self,
+        cwd: &str,
+        operation: &str,
+        identity: Option<&RunAsIdentity>,
+    ) -> PlatformResult<PathBuf> {
+        let path = self.resolve_path(cwd, identity)?;
+        let mut metadata = Self::cwd_metadata(&path, identity)?;
+        let missing = metadata
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        let mut recreate_failure = None;
+        if let Some(kind) = self.recreatable_cwd(&path, identity).filter(|_| missing) {
+            match recreate_directory(&path, kind) {
+                Ok(()) => tracing::warn!(
+                    path = %path.display(),
+                    "the working directory was missing; the agent created it again"
+                ),
+                // Another command (or setup) created it meanwhile.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "the working directory is missing and could not be created again"
+                    );
+                    recreate_failure = Some(error);
+                }
+            }
+            // Whatever happened, the directory as it is now decides.
+            metadata = Self::cwd_metadata(&path, identity)?;
+        }
+        let metadata = metadata.map_err(|error| {
+            // Name why the agent could not put it back, so the command's
+            // error says more than "not found".
+            let context = match &recreate_failure {
+                Some(failure) => format!(
+                    "{operation} working directory {} (it was missing and creating it again failed: {failure})",
+                    path.display()
+                ),
+                None => format!("{operation} working directory {}", path.display()),
+            };
+            PlatformError::from_io(&context, &error)
         })?;
         if !metadata.is_dir() {
             let mut detail = BTreeMap::new();
@@ -186,6 +249,220 @@ impl NativePlatform {
         }
         Ok(path)
     }
+
+    /// Reads `path`'s metadata, as the requested user when there is one, so a
+    /// directory only the agent can reach is reported the same way the user's
+    /// own chdir would fail. The outer error is a failed switch to that user.
+    fn cwd_metadata(
+        path: &Path,
+        identity: Option<&RunAsIdentity>,
+    ) -> PlatformResult<std::io::Result<std::fs::Metadata>> {
+        match identity {
+            Some(identity) => {
+                let checked = path.to_path_buf();
+                crate::run_as::on_identity_thread(identity, move || Ok(std::fs::metadata(&checked)))
+            }
+            None => Ok(std::fs::metadata(path)),
+        }
+    }
+
+    /// Which directory the agent puts back when `path` is missing: the
+    /// workspace root, the agent's home, or the requested user's home. A
+    /// placeholder home such as `/nonexistent` is never created.
+    fn recreatable_cwd<'a>(
+        &self,
+        path: &Path,
+        identity: Option<&'a RunAsIdentity>,
+    ) -> Option<RecreatedCwd<'a>> {
+        if path == self.workspace_root {
+            Some(RecreatedCwd::WorkspaceRoot)
+        } else if is_placeholder_home(path) {
+            None
+        } else if self.home_dir.as_deref() == Some(path) {
+            Some(RecreatedCwd::AgentHome)
+        } else {
+            identity
+                .filter(|identity| identity.home == path)
+                .map(RecreatedCwd::UserHome)
+        }
+    }
+}
+
+/// A missing working directory the agent creates again.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(unix), allow(dead_code))] // only Unix hands a home to its user
+enum RecreatedCwd<'a> {
+    /// The workspace root, created with any missing parent, mode 0755 and
+    /// owned by the agent so every user the agent runs commands as can enter
+    /// it.
+    WorkspaceRoot,
+    /// The agent's home: mode 0700, owned by the agent, parent must exist.
+    AgentHome,
+    /// The requested user's home: mode 0700, handed to that user, parent must
+    /// exist.
+    UserHome(&'a RunAsIdentity),
+}
+
+/// Home directories that exist only as a placeholder for system accounts
+/// (Debian's `nobody` uses `/nonexistent`, BSD and macOS daemons use
+/// `/var/empty`). They must stay absent or empty, so they are never created.
+fn is_placeholder_home(path: &Path) -> bool {
+    path.parent().is_none()
+        || ["/nonexistent", "/var/empty", "/dev/null"]
+            .iter()
+            .any(|placeholder| path == Path::new(placeholder))
+}
+
+/// Creates the missing working directory `path` as `kind` describes.
+///
+/// On Linux and macOS the directory is made under a private staging name in
+/// the same parent, given its owner and mode (set explicitly, so the agent's
+/// umask does not narrow it), and only then renamed into place without
+/// replacing anything. So `path` never appears half-made: a command that
+/// finds it (including one that lost a race to create it) starts in the
+/// finished directory. When the owner or mode cannot be set, the staged
+/// directory is removed and the error returned, and the command that needed
+/// it fails as not found.
+fn recreate_directory(path: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        recreate_directory_staged(path, kind)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        recreate_directory_in_place(path, kind)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn recreate_directory_staged(path: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+    if matches!(kind, RecreatedCwd::WorkspaceRoot) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let stage = create_stage(parent)?;
+    let published = prepare_stage(&stage, kind).and_then(|()| publish_stage(&stage, path));
+    if published.is_err() {
+        if let Err(error) = std::fs::remove_dir(&stage) {
+            tracing::warn!(
+                stage = %stage.display(),
+                %error,
+                "a staged working directory could not be removed"
+            );
+        }
+    }
+    published
+}
+
+/// Makes an empty staging directory in `parent`, under a short name so even
+/// a parent with a long name has room for it. A name left behind by an
+/// earlier agent process with the same process id is skipped. It starts
+/// private to the agent (0700), whatever the umask leaves, until
+/// [`prepare_stage`] sets its final mode.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn create_stage(parent: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static STAGES: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..16 {
+        let stage = parent.join(format!(
+            ".opengeni-cwd-{}-{}",
+            std::process::id(),
+            STAGES.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::DirBuilder::new().mode(0o700).create(&stage) {
+            Ok(()) => return Ok(stage),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    // Not `AlreadyExists`, which would read as "another command made it".
+    Err(std::io::Error::other(format!(
+        "no free staging name in {}",
+        parent.display()
+    )))
+}
+
+/// Gives the staging directory its owner and mode through a descriptor
+/// opened without following symlinks, so a staging name swapped for a link
+/// meanwhile changes nothing else.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn prepare_stage(stage: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
+    use rustix::fs::{fchmod, fchown, open, Gid, Mode, OFlags, Uid};
+
+    let directory = open(
+        stage,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    if let RecreatedCwd::UserHome(identity) = kind {
+        fchown(
+            &directory,
+            Some(Uid::from_raw(identity.uid)),
+            Some(Gid::from_raw(identity.gid)),
+        )?;
+    }
+    let mode = match kind {
+        RecreatedCwd::WorkspaceRoot => 0o755,
+        RecreatedCwd::AgentHome | RecreatedCwd::UserHome(_) => 0o700,
+    };
+    fchmod(&directory, Mode::from_raw_mode(mode))?;
+    Ok(())
+}
+
+/// Renames the prepared staging directory to `path` without replacing
+/// anything. Two commands that recreate the same directory at once: one
+/// publishes it, the other gets `AlreadyExists` and finds it finished.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn publish_stage(stage: &Path, path: &Path) -> std::io::Result<()> {
+    use rustix::fs::{renameat_with, RenameFlags, CWD};
+
+    /// Serializes the fallback's check and rename among the agent's own
+    /// commands, so one never replaces a directory another just published.
+    static FALLBACK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    match renameat_with(CWD, stage, CWD, path, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        Err(rustix::io::Errno::EXIST) => Err(std::io::ErrorKind::AlreadyExists.into()),
+        // A kernel or filesystem without no-replace renames: publish only
+        // while nothing is there.
+        Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOSYS | rustix::io::Errno::NOTSUP) => {
+            let _serialized = FALLBACK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if std::fs::symlink_metadata(path).is_ok() {
+                Err(std::io::ErrorKind::AlreadyExists.into())
+            } else {
+                std::fs::rename(stage, path)
+            }
+        }
+        Err(errno) => Err(errno.into()),
+    }
+}
+
+/// Creates the missing working directory `path` where no staged rename is
+/// available, then sets its mode.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn recreate_directory_in_place(path: &Path, kind: RecreatedCwd<'_>) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(matches!(kind, RecreatedCwd::WorkspaceRoot));
+    builder.create(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = match kind {
+            RecreatedCwd::WorkspaceRoot => 0o755,
+            RecreatedCwd::AgentHome | RecreatedCwd::UserHome(_) => 0o700,
+        };
+        if let RecreatedCwd::UserHome(identity) = kind {
+            std::os::unix::fs::chown(path, Some(identity.uid), Some(identity.gid))?;
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
 }
 
 fn user_home_dir() -> Option<PathBuf> {
@@ -193,6 +470,82 @@ fn user_home_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+/// Chooses the agent's workspace root from its working directory.
+///
+/// A filesystem root or the Windows system directory is never a usable
+/// workspace: service managers start a process there unless told otherwise
+/// (launchd does at `/` for a LaunchAgent without `WorkingDirectory`, as does a
+/// custom systemd unit; Windows starts services in `%SystemRoot%\System32`). It
+/// is read-only or protected, and every relative write would land in it. In
+/// that case (or when the working directory is unknown) the user's home
+/// directory is used. Any other working directory is kept exactly as the
+/// operator chose it.
+#[must_use]
+pub fn resolve_workspace_root(
+    current_dir: Option<PathBuf>,
+    home_dir: Option<&Path>,
+    system_dir: Option<&Path>,
+) -> PathBuf {
+    let unusable = |directory: &Path| {
+        directory.parent().is_none()
+            || system_dir.is_some_and(|system| path_within_ignoring_case(directory, system))
+    };
+    let usable_home = home_dir.filter(|home| home.is_absolute() && !unusable(home));
+    match (current_dir, usable_home) {
+        (Some(directory), _) if !unusable(&directory) => directory,
+        (_, Some(home)) => home.to_path_buf(),
+        (directory, None) => directory.unwrap_or_else(|| PathBuf::from("/")),
+    }
+}
+
+/// Whether `path` is `parent` or beneath it, comparing case-insensitively with
+/// either separator (Windows paths are case-insensitive, and the system
+/// directory is reported as both `C:\WINDOWS` and `C:\Windows`).
+fn path_within_ignoring_case(path: &Path, parent: &Path) -> bool {
+    let normalize = |value: &Path| {
+        value
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_lowercase()
+    };
+    let (path, parent) = (normalize(path), normalize(parent));
+    !parent.is_empty() && (path == parent || path.starts_with(&format!("{parent}/")))
+}
+
+/// The Windows system directory (`%SystemRoot%`); `None` on other platforms.
+fn windows_system_dir() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    std::env::var_os("SystemRoot")
+        .or_else(|| std::env::var_os("windir"))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Moves the process into its workspace root when it was started at a
+/// filesystem root or in the Windows system directory, so the reported workspace, relative paths and child
+/// processes all agree on the user's home directory. Returns the directory it
+/// moved to, or `None` when the working directory was already usable (or no
+/// usable home directory exists).
+///
+/// # Errors
+/// Returns the OS error when changing into the home directory fails.
+pub fn adopt_workspace_working_directory() -> std::io::Result<Option<PathBuf>> {
+    let current = std::env::current_dir().ok();
+    let target = resolve_workspace_root(
+        current.clone(),
+        user_home_dir().as_deref(),
+        windows_system_dir().as_deref(),
+    );
+    if current.as_ref() == Some(&target) || !target.is_dir() {
+        return Ok(None);
+    }
+    std::env::set_current_dir(&target)?;
+    Ok(Some(target))
 }
 
 fn requested_policy(
@@ -214,11 +567,13 @@ fn requested_policy(
 /// anchor's stdin writer open; a runner crash closes it in the kernel, causing
 /// the anchor to kill the operation cgroup when present or its own process group
 /// otherwise. Keeping this private child unreaped also fences numeric PGID reuse.
+/// Its stderr is already the agent's kept null device, so the script never
+/// names `/dev/null`: a removed one would otherwise skip every kill below.
 #[cfg(unix)]
 const UNIX_EXEC_ANCHOR: &str = "\
 while IFS= read -r _; do :; done; \
-if [ -n \"$1\" ] && printf '1' > \"$1\" 2>/dev/null; then exit 0; fi; \
-kill -KILL -- \"-$$\" 2>/dev/null || kill -KILL \"-$$\" 2>/dev/null || true";
+if [ -n \"$1\" ] && printf '1' > \"$1\"; then exit 0; fi; \
+kill -KILL -- \"-$$\" || kill -KILL \"-$$\" || true";
 
 struct ExecOutput {
     exit_code: i32,
@@ -234,15 +589,18 @@ struct ExecOutput {
 /// is issued. Tokio's direct-child waits are cancel-safe; Drop only signals while
 /// the still-unreaped anchor fences the numeric PGID against reuse.
 #[cfg(unix)]
+#[allow(clippy::struct_excessive_bools)] // Cleanup progress, cancellation intent and observed evidence are independent.
 struct ExecProcessGroup {
-    anchor: tokio::process::Child,
+    anchor: crate::exec_handover::UnixProc,
     /// The sole writer for the anchor's kernel-close death lease. Tokio creates
     /// child pipes close-on-exec, so user commands and descendants cannot inherit
     /// authority to keep the anchor alive after the runner process disappears.
-    runner_lease: Option<tokio::process::ChildStdin>,
-    child: tokio::process::Child,
+    /// Only an in-place agent update deliberately carries it across `exec`.
+    runner_lease: Option<std::os::fd::OwnedFd>,
+    child: crate::exec_handover::UnixProc,
     pgid: i32,
     running: bool,
+    reservation: Option<crate::WorkReservation>,
     /// Whether [`wait`](Self::wait)'s post-exit group kill already ran. The
     /// wait future may be dropped mid-sequence and re-created (the op-engine
     /// pump polls it inside a select that drops arm futures every iteration);
@@ -254,19 +612,33 @@ struct ExecProcessGroup {
     /// fork-race window (a descendant forked between a cancel's kill scan and
     /// the direct child's exit).
     wait_killed_group: bool,
+    /// Positive pre-cleanup evidence, retained across cancelled wait futures.
+    background_children_stopped: bool,
+    termination_requested: bool,
     /// The per-op resource-accounting leaf this exec's processes were placed in (issue #345),
     /// or `None` when isolation is unavailable. Torn down once the process tree is
     /// reaped. Always `None` off Linux (no manager is ever wired there).
     op_cgroup: Option<crate::cgroup::OpCgroupHandle>,
+    /// Counts this command as running until its process tree is cleaned up.
+    running_command: Option<crate::command_activity::RunningCommand>,
 }
 
 #[cfg(unix)]
 impl ExecProcessGroup {
+    #[allow(clippy::too_many_lines)] // one ordered containment sequence; each step's failure unwinds the previous ones
     fn spawn(
         mut command: tokio::process::Command,
         cgroups: Option<&OpCgroups>,
         requested_policy: OpCgroupConfig,
+        run_as: Option<&RunAsChild>,
     ) -> std::io::Result<Self> {
+        #[cfg(not(target_os = "linux"))]
+        if run_as.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "run_as requires Linux",
+            ));
+        }
         // Create and configure the operation leaf before either child is forked.
         // Their pre-exec hooks migrate them before user code can create a
         // session-detached or double-forked descendant.
@@ -277,7 +649,9 @@ impl ExecProcessGroup {
             None
         };
 
-        let mut anchor_command = tokio::process::Command::new("/bin/sh");
+        // `/bin/sh`, or dash or bash when it was moved away, so a machine
+        // without `/bin/sh` still starts programs.
+        let mut anchor_command = tokio::process::Command::new(crate::system_shell::system_shell());
         #[cfg(target_os = "linux")]
         let cgroup_kill_path = prepared_op
             .as_ref()
@@ -292,52 +666,69 @@ impl ExecProcessGroup {
             .process_group(0)
             .kill_on_drop(true)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // The retained null device, never `/dev/null` by path: a machine
+            // whose `/dev/null` was removed must still start programs.
+            .stdout(crate::null_device::null_stdio())
+            .stderr(crate::null_device::null_stdio());
         #[cfg(target_os = "linux")]
         let _ = crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut anchor_command);
         #[cfg(target_os = "linux")]
         if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
             cgroups.configure_process_cgroup_before_exec(prepared, &mut anchor_command)?;
         }
-        let mut anchor = anchor_command.spawn()?;
-        let Some(runner_lease) = anchor.stdin.take() else {
-            let _ = anchor.start_kill();
-            return Err(std::io::Error::other(
-                "exec anchor did not expose its runner-death lease",
-            ));
-        };
+        let anchor = anchor_command.spawn()?;
         let pgid = i32::try_from(anchor.id().expect("new anchor must have a pid"))
-            .map_err(|_| std::io::Error::other("exec anchor PID exceeds i32"))?;
+            .expect("a Unix PID fits pid_t");
+        // Own cleanup as soon as the first child exists, including every later
+        // setup/spawn error. Signaling a child is not an exit receipt.
+        let mut group = Self {
+            anchor: crate::exec_handover::UnixProc::Owned(anchor),
+            runner_lease: None,
+            child: crate::exec_handover::UnixProc::released(),
+            pgid,
+            running: true,
+            reservation: crate::current_work_reservation(),
+            wait_killed_group: false,
+            background_children_stopped: false,
+            termination_requested: false,
+            op_cgroup: None,
+            running_command: Some(crate::command_activity::RunningCommand::start()),
+        };
+        let crate::exec_handover::UnixProc::Owned(anchor) = &mut group.anchor else {
+            unreachable!("new anchor is owned");
+        };
+        group.runner_lease = Some(
+            anchor
+                .stdin
+                .take()
+                .ok_or_else(|| {
+                    std::io::Error::other("exec anchor did not expose its runner-death lease")
+                })?
+                .into_owned_fd()?,
+        );
 
         command.process_group(pgid);
         #[cfg(target_os = "linux")]
         let child_oom_score = crate::cgroup::configure_exec_oom_score_adj_before_exec(&mut command);
         #[cfg(target_os = "linux")]
         if let (Some(cgroups), Some(prepared)) = (cgroups, prepared_op.as_ref()) {
-            if let Err(error) = cgroups.configure_process_cgroup_before_exec(prepared, &mut command)
-            {
-                let _ = terminate_unix_process_group(pgid);
-                let _ = anchor.start_kill();
-                return Err(error);
-            }
+            cgroups.configure_process_cgroup_before_exec(prepared, &mut command)?;
         }
-        let child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                let _ = terminate_unix_process_group(pgid);
-                let _ = anchor.start_kill();
-                return Err(error);
-            }
-        };
+        // Registered last: the hooks above still need the agent's privileges.
+        // A failure here, like any later one, is cleaned up by `group`.
+        #[cfg(target_os = "linux")]
+        if let Some(run_as) = run_as {
+            crate::run_as::configure_child(run_as, &mut command)?;
+        }
+        group.child = crate::exec_handover::UnixProc::Owned(command.spawn()?);
 
-        // Give this child (and its inheriting descendants) the smallest higher
-        // global OOM victim bias when the kernel ABI can represent one. A
-        // supervisor already at 1000 remains equal. Always applied on Linux —
+        // Make this child (and its inheriting descendants) the kernel OOM
+        // killer's preferred victim over an unprotected supervisor (see
+        // `exec_oom_score_adj_for_supervisor`). Always applied on Linux —
         // independent of, and composing with, the per-op cgroup below (which
         // bounds systemd-oomd's scope).
         #[cfg(target_os = "linux")]
-        if let Some(child_pid) = child.id() {
+        if let Some(child_pid) = group.child.id() {
             crate::cgroup::raise_exec_oom_score_adj(child_pid, child_oom_score);
         }
 
@@ -347,48 +738,42 @@ impl ExecProcessGroup {
         // returns an error. This is a no-op when isolation is unavailable/off Linux.
         #[cfg(target_os = "linux")]
         let op_cgroup = if let (Some(cg), Some(prepared)) = (cgroups, prepared_op) {
-            let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
-            match cg.place_process_group(pgid, &pids, prepared) {
-                Ok(handle) => Some(handle),
-                Err(error) => {
-                    let _ = terminate_unix_process_group(pgid);
-                    let _ = anchor.start_kill();
-                    return Err(error);
-                }
-            }
+            let pids: Vec<u32> = [group.anchor.id(), group.child.id()]
+                .into_iter()
+                .flatten()
+                .collect();
+            Some(cg.place_process_group(pgid, &pids, prepared)?)
         } else {
             None
         };
         #[cfg(not(target_os = "linux"))]
         let op_cgroup = if let Some(cg) = cgroups {
-            let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
+            let pids: Vec<u32> = [group.anchor.id(), group.child.id()]
+                .into_iter()
+                .flatten()
+                .collect();
             cg.place_op(&pids, requested_policy)?
         } else {
             None
         };
 
-        Ok(Self {
-            anchor,
-            runner_lease: Some(runner_lease),
-            child,
-            pgid,
-            running: true,
-            wait_killed_group: false,
-            op_cgroup,
-        })
+        group.op_cgroup = op_cgroup;
+        Ok(group)
     }
 
     /// Removes the child's stdio handles for the streaming [`ContainedExec`]; after
     /// this the group only tracks lifecycle (wait/terminate), the caller owns I/O.
     fn take_pipes(&mut self) -> ContainedPipes {
-        (
-            self.child.stdin.take(),
-            self.child.stdout.take(),
-            self.child.stderr.take(),
-        )
+        match &mut self.child {
+            crate::exec_handover::UnixProc::Owned(child) => {
+                (child.stdin.take(), child.stdout.take(), child.stderr.take())
+            }
+            crate::exec_handover::UnixProc::Adopted(_) => (None, None, None),
+        }
     }
 
     fn terminate(&mut self) -> std::io::Result<()> {
+        self.termination_requested = true;
         let group_result = terminate_unix_process_group(self.pgid);
         let cgroup_result = self
             .op_cgroup
@@ -417,8 +802,29 @@ impl ExecProcessGroup {
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child.wait().await?;
         if !self.wait_killed_group {
+            let had_children = if self.termination_requested {
+                false
+            } else {
+                #[cfg(target_os = "linux")]
+                {
+                    self.op_cgroup.as_ref().map_or_else(
+                        || crate::process_cleanup::group_has_live_children(self.pgid),
+                        |group| group.has_live_children(self.pgid),
+                    )?
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    crate::process_cleanup::group_has_live_children(self.pgid)?
+                }
+            };
             self.terminate()?;
+            self.background_children_stopped = had_children;
             self.wait_killed_group = true;
+        }
+        // A successful signal (including macOS EPERM for a zombie) is not a
+        // completed tree. Keep the anchor unreaped while observing descendants.
+        while crate::process_cleanup::group_has_live_children(self.pgid)? {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         // Reap the fence only after the group kill. Tokio wait is cancel-safe; if
         // this future is dropped after reaping, anchor.id() is None and Drop will
@@ -439,7 +845,10 @@ impl ExecProcessGroup {
 #[cfg(unix)]
 impl Drop for ExecProcessGroup {
     fn drop(&mut self) {
-        if self.running && self.anchor.id().is_some() {
+        if !self.running {
+            return;
+        }
+        if self.anchor.id().is_some() {
             if let Err(error) = self.terminate() {
                 if error.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!(
@@ -450,13 +859,144 @@ impl Drop for ExecProcessGroup {
                 }
             }
         }
-        // A cancelled/timed-out/task-aborted exec drops here with its op leaf still
-        // present. Dropping the handle schedules event-driven removal after the
-        // group becomes unpopulated. On the normal path the handle was already
-        // taken and torn down in wait(), so this is a no-op there.
-        if let Some(handle) = self.op_cgroup.take() {
-            drop(handle);
+        let reservation = self.reservation.take();
+        let mut cleanup = Self {
+            anchor: std::mem::replace(&mut self.anchor, crate::exec_handover::UnixProc::released()),
+            child: std::mem::replace(&mut self.child, crate::exec_handover::UnixProc::released()),
+            runner_lease: self.runner_lease.take(),
+            pgid: self.pgid,
+            // This cleanup owner must not recursively schedule itself on drop.
+            running: false,
+            reservation: None,
+            wait_killed_group: self.wait_killed_group,
+            background_children_stopped: self.background_children_stopped,
+            termination_requested: true,
+            op_cgroup: self.op_cgroup.take(),
+            running_command: self.running_command.take(),
+        };
+        self.running = false;
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("exec process group {}", self.pgid),
+        );
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(crate::with_work_reservation(reservation, async move {
+                let mut witness = witness;
+                loop {
+                    match cleanup.wait().await {
+                        Ok(_) => {
+                            witness.settle();
+                            break;
+                        }
+                        Err(error) => witness.failed(&error),
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }));
         }
+    }
+}
+
+#[cfg(unix)]
+impl ExecProcessGroup {
+    /// Completes a handover prepared by [`ContainedExec::into_handover`]:
+    /// gives up ownership of every part without signaling anything.
+    /// Infallible, so nothing is half given up.
+    fn finish_handover(
+        mut self,
+        anchor: crate::exec_handover::ProcHandover,
+        child: crate::exec_handover::ProcHandover,
+        pipes: [Option<std::os::fd::OwnedFd>; 3],
+    ) -> crate::exec_handover::ExecHandover {
+        use crate::exec_handover::{release_fd, UnixProc};
+
+        std::mem::replace(&mut self.anchor, UnixProc::released()).release();
+        std::mem::replace(&mut self.child, UnixProc::released()).release();
+        // Drop must neither signal the group nor touch the leaf from here on.
+        let running = std::mem::replace(&mut self.running, false);
+        let op_cgroup = self
+            .op_cgroup
+            .take()
+            .and_then(crate::cgroup::OpCgroupHandle::into_handover);
+        let [stdin, stdout, stderr] = pipes;
+        crate::exec_handover::ExecHandover {
+            anchor,
+            child,
+            pgid: self.pgid,
+            running,
+            wait_killed_group: self.wait_killed_group,
+            background_children_stopped: self.background_children_stopped,
+            termination_requested: self.termination_requested,
+            lease_fd: self.runner_lease.take().map(release_fd),
+            stdin_fd: stdin.map(release_fd),
+            stdout_fd: stdout.map(release_fd),
+            stderr_fd: stderr.map(release_fd),
+            op_cgroup,
+        }
+    }
+
+    /// Takes over a contained exec a predecessor process image handed over.
+    /// Any failure drops what was already claimed; dropping the death lease
+    /// makes the anchor kill the operation, the same fail-closed outcome as a
+    /// crashed runner.
+    fn adopt(
+        handover: &crate::exec_handover::ExecHandover,
+        cgroups: Option<&OpCgroups>,
+    ) -> std::io::Result<(Self, ContainedPipes)> {
+        use crate::exec_handover::{claim, UnixProc};
+
+        let runner_lease = handover.lease_fd.map(claim).transpose()?;
+        let stdin = handover
+            .stdin_fd
+            .map(|fd| {
+                claim(fd).and_then(|fd| {
+                    tokio::process::ChildStdin::from_std(std::process::ChildStdin::from(fd))
+                })
+            })
+            .transpose()?;
+        let stdout = handover
+            .stdout_fd
+            .map(|fd| {
+                claim(fd).and_then(|fd| {
+                    tokio::process::ChildStdout::from_std(std::process::ChildStdout::from(fd))
+                })
+            })
+            .transpose()?;
+        let stderr = handover
+            .stderr_fd
+            .map(|fd| {
+                claim(fd).and_then(|fd| {
+                    tokio::process::ChildStderr::from_std(std::process::ChildStderr::from(fd))
+                })
+            })
+            .transpose()?;
+        let op_cgroup = match (&handover.op_cgroup, cgroups) {
+            (Some(leaf), Some(cgroups)) => Some(cgroups.adopt_op(leaf)?),
+            (Some(leaf), None) => {
+                tracing::warn!(
+                    dir = %leaf.dir.display(),
+                    "operation cgroups are unavailable after the update; the handed-over command keeps only process-group containment"
+                );
+                None
+            }
+            (None, _) => None,
+        };
+        Ok((
+            Self {
+                anchor: UnixProc::adopt(handover.anchor),
+                runner_lease,
+                child: UnixProc::adopt(handover.child),
+                pgid: handover.pgid,
+                running: handover.running,
+                reservation: crate::current_work_reservation(),
+                wait_killed_group: handover.wait_killed_group,
+                background_children_stopped: handover.background_children_stopped,
+                termination_requested: handover.termination_requested,
+                op_cgroup,
+                running_command: Some(crate::command_activity::RunningCommand::start()),
+            },
+            (stdin, stdout, stderr),
+        ))
     }
 }
 
@@ -477,6 +1017,9 @@ fn terminate_unix_process_group(pgid: i32) -> std::io::Result<()> {
         // all it can either way; failing the op over it turned a SUCCESSFUL
         // git commit into a typed error.
         Err(Errno::EPERM) => {
+            // A successful command result does not establish that every member
+            // exited. Keep ordinary exec behavior, but refuse an update whose
+            // process-tree cleanup could not be proved.
             tracing::debug!(
                 group_id = pgid,
                 "group kill reported EPERM (unsignalable member); owned members were signaled"
@@ -492,47 +1035,100 @@ fn terminate_unix_process_group(pgid: i32) -> std::io::Result<()> {
 /// can terminate the complete job even after its direct leader exits.
 #[cfg(windows)]
 struct ExecProcessGroup {
-    child: AsyncGroupChild,
+    child: tokio::process::Child,
+    job: opengeni_agent_windows_ffi::ProcessJob,
+    cleanup_wait: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     running: bool,
+    reservation: Option<crate::WorkReservation>,
+    background_children_stopped: bool,
+    termination_requested: bool,
+    /// Counts this command as running for as long as this owner lives.
+    _running_command: crate::command_activity::RunningCommand,
 }
 
 #[cfg(windows)]
 impl ExecProcessGroup {
     fn spawn(mut command: tokio::process::Command) -> std::io::Result<Self> {
-        // `command_group` wraps the spawn in a Job Object; kill-on-drop terminates
-        // the whole job (the direct child + every descendant) on cancel.
-        let child = command.group().kill_on_drop(true).spawn()?;
+        /// A console of its own, without a window: a command that sends a
+        /// console control event to "every process on my console"
+        /// (`GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)`, the Windows `kill 0`)
+        /// reaches only itself and its children, never the agent and other
+        /// commands sharing the agent's console. Nothing flashes on screen.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let job = opengeni_agent_windows_ffi::ProcessJob::new()?;
+        // As before, no user code runs until the suspended child joins its job.
+        let mut child = command
+            .creation_flags(opengeni_agent_windows_ffi::ProcessJob::SUSPENDED | CREATE_NO_WINDOW)
+            .kill_on_drop(true)
+            .spawn()?;
+        if let Err(error) = job.assign_and_resume(child.id().expect("new child has a pid")) {
+            let _ = child.start_kill();
+            let reservation = crate::current_work_reservation();
+            let witness = crate::work_scope::CleanupWitness::new(
+                reservation.clone(),
+                format!("Windows suspended child {:?}", child.id()),
+            );
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(crate::with_work_reservation(reservation, async move {
+                    let mut witness = witness;
+                    loop {
+                        match child.wait().await {
+                            Ok(_) => {
+                                witness.settle();
+                                break;
+                            }
+                            Err(error) => witness.failed(&error),
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }));
+            }
+            return Err(error);
+        }
         Ok(Self {
             child,
+            job,
+            cleanup_wait: None,
             running: true,
+            reservation: crate::current_work_reservation(),
+            background_children_stopped: false,
+            termination_requested: false,
+            _running_command: crate::command_activity::RunningCommand::start(),
         })
     }
 
     /// Removes the child's stdio handles for the streaming [`ContainedExec`].
     fn take_pipes(&mut self) -> ContainedPipes {
-        let child = self.child.inner();
+        let child = &mut self.child;
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     }
 
-    /// Terminates the whole Job Object (idempotent — a repeat kill, or a kill after
-    /// the job already exited, is InvalidInput/NotFound and treated as success).
+    /// Terminates the exact owned Job Object, including any remaining children.
     fn terminate(&mut self) -> std::io::Result<()> {
-        match self.child.start_kill() {
-            Ok(()) => Ok(()),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
-                ) =>
-            {
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
+        self.termination_requested = true;
+        self.job.terminate()
     }
 
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child.wait().await?;
+        if !self.running {
+            return Ok(status);
+        }
+        if self.cleanup_wait.is_none() {
+            let had_children = !self.termination_requested && self.job.active_processes()? > 0;
+            self.terminate()?;
+            self.background_children_stopped = had_children;
+            let job = self.job.clone();
+            self.cleanup_wait = Some(crate::spawn_blocking_reserved(move || job.wait_empty()));
+        }
+        // Keep one producer across cancel-safe select polls. Only the kernel's
+        // actual active-process count, not any job-port packet, proves cleanup.
+        self.cleanup_wait
+            .as_mut()
+            .expect("cleanup waiter")
+            .await
+            .map_err(std::io::Error::other)??;
+        self.cleanup_wait = None;
         self.running = false;
         Ok(status)
     }
@@ -545,7 +1141,7 @@ impl Drop for ExecProcessGroup {
             return;
         }
         let group_id = self.child.id();
-        if let Err(error) = self.child.start_kill() {
+        if let Err(error) = self.job.terminate() {
             if !matches!(
                 error.kind(),
                 std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
@@ -553,6 +1149,27 @@ impl Drop for ExecProcessGroup {
                 tracing::warn!(?group_id, %error, "failed to terminate cancelled exec process group");
             }
         }
+        let job = self.job.clone();
+        let reservation = self.reservation.take();
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("Windows exec job for {group_id:?}"),
+        );
+        let _ = std::thread::Builder::new()
+            .name("exec-job-cleanup".into())
+            .spawn(move || {
+                let mut witness = witness;
+                loop {
+                    match job.wait_empty() {
+                        Ok(()) => {
+                            witness.settle();
+                            break;
+                        }
+                        Err(error) => witness.failed(&error),
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            });
     }
 }
 
@@ -598,6 +1215,13 @@ pub struct ContainedExec {
 }
 
 impl ContainedExec {
+    /// Whether normal shell-exit teardown stopped observed remaining children.
+    /// Explicit cancellation/deadline and unknown cleanup never claim this.
+    #[must_use]
+    pub fn background_children_stopped(&self) -> bool {
+        !self.group.running && self.group.background_children_stopped
+    }
+
     /// Waits for the direct command to exit, then tears the contained group down
     /// (Unix: SIGKILL the process group, then reap the stopped anchor fence;
     /// Windows: the Job Object is reaped on drop). Returns the command's exit status.
@@ -623,6 +1247,75 @@ impl ContainedExec {
     pub fn terminate(&mut self) -> std::io::Result<()> {
         self.group.terminate()
     }
+
+    /// Gives this exec (running, or exited but not yet torn down) to a
+    /// successor process image, with whichever of its `stdin`/`stdout`/
+    /// `stderr` handles are still open. Nothing is signaled. Every carried
+    /// descriptor stays close-on-exec until [`crate::ExecHandover::prepare_exec`]
+    /// runs immediately before `exec`, so a command spawned meanwhile cannot
+    /// inherit the death lease or a pipe.
+    ///
+    /// # Errors
+    ///
+    /// The child's state could not be read or a pipe could not be duplicated.
+    /// The exec is returned untouched, still owned by this process.
+    #[cfg(unix)]
+    #[allow(clippy::result_large_err)] // a cold path; the caller must get the exec back unchanged
+    pub fn into_handover(mut self) -> Result<crate::ExecHandover, (Self, std::io::Error)> {
+        use std::os::fd::AsFd as _;
+
+        let prepared = (|| {
+            let anchor = self.group.anchor.carried()?;
+            let child = self.group.child.carried()?;
+            let stdin = self
+                .stdin
+                .as_ref()
+                .map(|pipe| pipe.as_fd().try_clone_to_owned())
+                .transpose()?;
+            let stdout = self
+                .stdout
+                .as_ref()
+                .map(|pipe| pipe.as_fd().try_clone_to_owned())
+                .transpose()?;
+            let stderr = self
+                .stderr
+                .as_ref()
+                .map(|pipe| pipe.as_fd().try_clone_to_owned())
+                .transpose()?;
+            std::io::Result::Ok((anchor, child, [stdin, stdout, stderr]))
+        })();
+        match prepared {
+            Err(error) => Err((self, error)),
+            Ok((anchor, child, pipes)) => {
+                // The duplicates keep every pipe open; these registrations go.
+                self.stdin = None;
+                self.stdout = None;
+                self.stderr = None;
+                Ok(self.group.finish_handover(anchor, child, pipes))
+            }
+        }
+    }
+
+    /// Takes over an exec a predecessor process image of this agent handed
+    /// over, with its pipe ends in `stdin`/`stdout`/`stderr`.
+    ///
+    /// # Errors
+    ///
+    /// A carried descriptor or the operation cgroup could not be claimed; the
+    /// operation has then been killed by its anchor.
+    #[cfg(unix)]
+    pub fn adopt(
+        handover: &crate::ExecHandover,
+        cgroups: Option<&OpCgroups>,
+    ) -> std::io::Result<Self> {
+        let (group, (stdin, stdout, stderr)) = ExecProcessGroup::adopt(handover, cgroups)?;
+        Ok(Self {
+            stdin,
+            stdout,
+            stderr,
+            group,
+        })
+    }
 }
 
 /// Spawns `command` inside a fresh containment group with piped stdio, returning a
@@ -646,7 +1339,7 @@ pub fn spawn_contained(
     command: tokio::process::Command,
     cgroups: Option<&OpCgroups>,
 ) -> std::io::Result<ContainedExec> {
-    spawn_contained_with_policy(command, cgroups, OpCgroupConfig::default())
+    spawn_contained_with_policy(command, cgroups, OpCgroupConfig::default(), None)
 }
 
 /// Policy-aware form of [`spawn_contained`]. `requested_policy` is one
@@ -656,6 +1349,7 @@ fn spawn_contained_with_policy(
     mut command: tokio::process::Command,
     cgroups: Option<&OpCgroups>,
     requested_policy: OpCgroupConfig,
+    run_as: Option<&RunAsChild>,
 ) -> std::io::Result<ContainedExec> {
     command
         .kill_on_drop(true)
@@ -663,9 +1357,15 @@ fn spawn_contained_with_policy(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     #[cfg(unix)]
-    let mut group = ExecProcessGroup::spawn(command, cgroups, requested_policy)?;
+    let mut group = ExecProcessGroup::spawn(command, cgroups, requested_policy, run_as)?;
     #[cfg(windows)]
     let mut group = {
+        if run_as.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "run_as requires Linux",
+            ));
+        }
         // Job Objects give the whole-tree kill; per-op cgroup leaves are Linux-only.
         let _ = (cgroups, requested_policy);
         ExecProcessGroup::spawn(command)?
@@ -677,6 +1377,31 @@ fn spawn_contained_with_policy(
         stderr,
         group,
     })
+}
+
+/// The longest program name a spawn error repeats.
+const PROGRAM_NAME_LIMIT: usize = 160;
+
+/// A program name for an error message: one line, bounded, so an error can
+/// never carry a whole script.
+fn describe_program(program: &std::ffi::OsStr) -> String {
+    let text = program.to_string_lossy();
+    let line: String = text
+        .chars()
+        .map(|c| match c {
+            c if c.is_control() => ' ',
+            // The message quotes the name, so it never holds a `"` itself.
+            '"' => '\'',
+            c => c,
+        })
+        .collect();
+    let line = line.trim();
+    if line.chars().count() > PROGRAM_NAME_LIMIT {
+        let head: String = line.chars().take(PROGRAM_NAME_LIMIT).collect();
+        format!("{head}…")
+    } else {
+        line.to_string()
+    }
 }
 
 #[async_trait]
@@ -691,6 +1416,10 @@ impl Platform for NativePlatform {
 
     fn operation_resource_policy_supported(&self) -> bool {
         self.cgroups.is_some()
+    }
+
+    fn run_as_supported(&self) -> bool {
+        crate::run_as::supported()
     }
 
     fn operation_cpu_quota_supported(&self) -> bool {
@@ -719,11 +1448,16 @@ impl Platform for NativePlatform {
         let registry = self.stream_registry.as_ref().ok_or_else(|| {
             PlatformError::Unsupported("pty_open: no relay stream registrar is wired".to_string())
         })?;
+        let identity = crate::run_as::resolve(&req.run_as)?;
         let mut resolved = req.clone();
-        resolved.cwd = self
-            .resolve_process_cwd(&req.cwd, "pty")?
-            .to_string_lossy()
-            .into_owned();
+        // A run-as terminal without a cwd starts where that user's login would
+        // (the PTY layer picks the user's home); every other cwd resolves here.
+        if !(req.cwd.is_empty() && identity.is_some()) {
+            resolved.cwd = self
+                .resolve_process_cwd(&req.cwd, "pty", identity.as_ref())?
+                .to_string_lossy()
+                .into_owned();
+        }
         registry.open_pty(&resolved, &self.default_shell()).await
     }
 
@@ -733,6 +1467,11 @@ impl Platform for NativePlatform {
     /// down after the anchor reap in `wait()`, and cancellation-safe in `Drop`.
     fn spawn_exec(&self, req: &v1::ExecRequest) -> PlatformResult<ContainedExec> {
         self.spawn_exec_with_policy(req, None)
+    }
+
+    #[cfg(unix)]
+    fn adopt_exec(&self, handover: &crate::ExecHandover) -> std::io::Result<ContainedExec> {
+        ContainedExec::adopt(handover, self.cgroups.as_deref())
     }
 
     fn spawn_exec_with_policy(
@@ -747,17 +1486,51 @@ impl Platform for NativePlatform {
             });
         }
 
+        let identity = crate::run_as::resolve(&req.run_as)?;
         let mut cmd = if req.shell {
             crate::shell_command(&req.command)
         } else {
-            let mut command = tokio::process::Command::new(&req.command[0]);
+            // An explicitly requested `/bin/sh` starts a fallback shell when
+            // it is gone, like the default shell does.
+            #[cfg(unix)]
+            let program = crate::system_shell::substitute(std::ffi::OsStr::new(&req.command[0]))
+                .map_or_else(
+                    || std::ffi::OsString::from(&req.command[0]),
+                    PathBuf::into_os_string,
+                );
+            #[cfg(not(unix))]
+            let program = std::ffi::OsString::from(&req.command[0]);
+            let mut command = tokio::process::Command::new(program);
             command.args(&req.command[1..]);
             command
         };
 
-        cmd.current_dir(self.resolve_process_cwd(&req.cwd, "exec")?);
+        let cwd = self.resolve_process_cwd(&req.cwd, "exec", identity.as_ref())?;
+        let run_as = identity.map(|identity| RunAsChild {
+            identity,
+            cwd: cwd.clone(),
+        });
+        if let Some(run_as) = &run_as {
+            // Entered as the user by the credential hook, never here as root.
+            cmd.envs(run_as.identity.login_env());
+        } else {
+            cmd.current_dir(cwd);
+        }
+        // Scripts that start `/bin/sh` by path (Opengeni's own command
+        // wrappers among them) read the fallback from here while it is gone.
+        #[cfg(unix)]
+        if let Some(shell) = crate::system_shell::fallback_in_use() {
+            cmd.env(crate::system_shell::SYSTEM_SHELL_ENV, shell);
+        }
         for (k, v) in &req.env {
             cmd.env(k, v);
+        }
+        if let Some(email) = crate::default_git_email(req.env.keys()) {
+            cmd.env("EMAIL", email);
+        }
+        // The agent's own shell tools go last, so the machine's copies win.
+        if let Some(path) = crate::shell_tools::path_with_shell_tools(&req.env) {
+            cmd.env("PATH", path);
         }
 
         let requested_policy = requested_policy(policy)?;
@@ -772,14 +1545,27 @@ impl Platform for NativePlatform {
                     .to_string(),
             ));
         }
-        spawn_contained_with_policy(cmd, self.cgroups.as_deref(), requested_policy).map_err(|e| {
-            PlatformError::from_io(
-                &format!(
-                    "spawn or apply execution containment for {}",
-                    req.command[0]
-                ),
-                &e,
-            )
+        // Name the program actually started (the shell in shell mode), never the
+        // command text: a shell command can be a whole script.
+        let program = describe_program(cmd.as_std().get_program());
+        spawn_contained_with_policy(
+            cmd,
+            self.cgroups.as_deref(),
+            requested_policy,
+            run_as.as_ref(),
+        )
+        .map_err(|e| {
+            // Quoted, so the runtime can tell a program name (which may hold
+            // spaces or backslashes) from an older agent's command text.
+            let context = format!("spawn or apply execution containment for program \"{program}\"");
+            #[cfg(unix)]
+            let context = match crate::null_device::spawn_failure_note(&e)
+                .or_else(|| crate::system_shell::spawn_failure_note(&e))
+            {
+                Some(note) => format!("{context} ({note})"),
+                None => context,
+            };
+            PlatformError::from_io(&context, &e)
         })
     }
 
@@ -832,6 +1618,7 @@ impl Platform for NativePlatform {
                         stderr: prost::bytes::Bytes::from_static(b"timed out"),
                         timed_out: true,
                         duration_ms: elapsed_millis(started),
+                        background_children_stopped: false,
                     });
                 }
             }
@@ -847,40 +1634,15 @@ impl Platform for NativePlatform {
             stderr: prost::bytes::Bytes::from(output.stderr),
             timed_out: false,
             duration_ms: elapsed_millis(started),
+            background_children_stopped: contained.background_children_stopped(),
         })
     }
 
     async fn fs_read(&self, req: &v1::FsReadRequest) -> PlatformResult<v1::FsReadResponse> {
-        let path = self.resolve_path(&req.path)?;
-        let offset = req.offset;
-        let length = req.length;
-        let (content, total_size) = tokio::task::spawn_blocking(move || {
-            use std::io::{copy, sink, Read};
-
-            let read = || -> std::io::Result<(Vec<u8>, u64)> {
-                let mut file = std::fs::File::open(&path)?;
-                // Drain unrequested bytes without retaining them. Metadata is
-                // not the byte count for procfs/sysfs and other virtual files;
-                // keep the existing actual-stream total_size contract.
-                let skipped = copy(&mut file.by_ref().take(offset), &mut sink())?;
-                let mut content = Vec::new();
-                let selected = if length == 0 {
-                    file.read_to_end(&mut content)?
-                } else {
-                    file.by_ref().take(length).read_to_end(&mut content)?
-                };
-                let remaining = copy(&mut file, &mut sink())?;
-                Ok((content, skipped + selected as u64 + remaining))
-            };
-            read().map_err(|e| PlatformError::from_io(&format!("read {}", path.display()), &e))
-        })
-        .await
-        .map_err(|e| PlatformError::os(format!("file read task failed: {e}")))??;
-
-        Ok(v1::FsReadResponse {
-            content: prost::bytes::Bytes::from(content),
-            total_size,
-        })
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let (offset, length) = (req.offset, req.length);
+        crate::run_as::run(identity, move || fs_read_at(path, offset, length)).await
     }
 
     fn transactional_fs_write_supported(&self) -> bool {
@@ -891,282 +1653,203 @@ impl Platform for NativePlatform {
         &self,
         req: &v1::FsWriteBegin,
     ) -> PlatformResult<Box<dyn crate::transactional_write::TransactionalWrite>> {
-        crate::transactional_write::begin(&self.resolve_path(&req.path)?, req)
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let Some(identity) = identity else {
+            return crate::transactional_write::begin(&path, req);
+        };
+        // The whole transaction runs as the user (their permissions, their
+        // ownership): staging, publication and the cleanup of an unpublished
+        // write, with the content unnamed until the verified inode is linked.
+        crate::run_as::begin_transactional_write(&identity, path, req.clone())
     }
 
     async fn fs_write(&self, req: &v1::FsWriteRequest) -> PlatformResult<v1::FsWriteResponse> {
-        let path = self.resolve_path(&req.path)?;
-        if req.create_parents {
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    PlatformError::from_io(&format!("mkdir -p {}", parent.display()), &e)
-                })?;
-            }
-        }
-
-        let mut opts = tokio::fs::OpenOptions::new();
-        opts.write(true).create(true);
-        if req.append {
-            opts.append(true);
-        } else {
-            opts.truncate(true);
-        }
-        apply_mode(&mut opts, req.mode);
-
-        let mut file = opts
-            .open(&path)
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("open {}", path.display()), &e))?;
-        file.write_all(&req.content)
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("write {}", path.display()), &e))?;
-        file.flush()
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("flush {}", path.display()), &e))?;
-
-        Ok(v1::FsWriteResponse {
-            bytes_written: req.content.len() as u64,
-        })
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let req = req.clone();
+        crate::run_as::run(identity, move || fs_write_at(path, req)).await
     }
 
     async fn fs_list(&self, req: &v1::FsListRequest) -> PlatformResult<v1::FsListResponse> {
-        let root = self.resolve_path(&req.path)?;
-        let mut entries = Vec::new();
-        list_dir(&root, &root, req.recursive, &mut entries).await?;
-        Ok(v1::FsListResponse { entries })
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let root = self.resolve_path(&req.path, identity.as_ref())?;
+        let recursive = req.recursive;
+        crate::run_as::run(identity, move || async move {
+            let mut entries = Vec::new();
+            list_dir(&root, &root, recursive, &mut entries).await?;
+            Ok(v1::FsListResponse { entries })
+        })
+        .await
     }
 
     async fn fs_mkdir(&self, req: &v1::FsMkdirRequest) -> PlatformResult<v1::FsMkdirResponse> {
-        let path = self.resolve_path(&req.path)?;
-        let result = if req.parents {
-            tokio::fs::create_dir_all(&path).await
-        } else {
-            tokio::fs::create_dir(&path).await
-        };
-        result.map_err(|e| PlatformError::from_io(&format!("mkdir {}", path.display()), &e))?;
-        set_mode(&path, req.mode).await?;
-        Ok(v1::FsMkdirResponse {})
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let (parents, mode) = (req.parents, req.mode);
+        crate::run_as::run(identity, move || fs_mkdir_at(path, parents, mode)).await
     }
 
     async fn fs_move(&self, req: &v1::FsMoveRequest) -> PlatformResult<v1::FsMoveResponse> {
-        let from = self.resolve_path(&req.from)?;
-        let to = self.resolve_path(&req.to)?;
-        if !req.overwrite && tokio::fs::try_exists(&to).await.unwrap_or(false) {
-            return Err(PlatformError::Os {
-                message: format!("move: destination exists: {}", to.display()),
-                detail: BTreeMap::new(),
-            });
-        }
-        tokio::fs::rename(&from, &to).await.map_err(|e| {
-            PlatformError::from_io(&format!("move {} -> {}", from.display(), to.display()), &e)
-        })?;
-        Ok(v1::FsMoveResponse {})
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let from = self.resolve_path(&req.from, identity.as_ref())?;
+        let to = self.resolve_path(&req.to, identity.as_ref())?;
+        let overwrite = req.overwrite;
+        crate::run_as::run(identity, move || fs_move_at(from, to, overwrite)).await
     }
 
     async fn fs_stat(&self, req: &v1::FsStatRequest) -> PlatformResult<v1::FsStatResponse> {
-        let path = self.resolve_path(&req.path)?;
-        match tokio::fs::symlink_metadata(&path).await {
-            Ok(meta) => {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                Ok(v1::FsStatResponse {
-                    exists: true,
-                    entry: Some(metadata_to_entry(&name, &req.path, &meta)),
-                })
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(v1::FsStatResponse {
-                exists: false,
-                entry: None,
-            }),
-            Err(e) => Err(PlatformError::from_io(
-                &format!("stat {}", path.display()),
-                &e,
-            )),
-        }
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let requested = req.path.clone();
+        crate::run_as::run(identity, move || fs_stat_at(path, requested)).await
     }
 
     async fn fs_remove(&self, req: &v1::FsRemoveRequest) -> PlatformResult<v1::FsRemoveResponse> {
-        let path = self.resolve_path(&req.path)?;
-        let meta = tokio::fs::symlink_metadata(&path)
-            .await
-            .map_err(|e| PlatformError::from_io(&format!("stat {}", path.display()), &e))?;
-        let result = if meta.is_dir() {
-            if req.recursive {
-                tokio::fs::remove_dir_all(&path).await
+        let identity = crate::run_as::resolve(&req.run_as)?;
+        let path = self.resolve_path(&req.path, identity.as_ref())?;
+        let recursive = req.recursive;
+        crate::run_as::run(identity, move || fs_remove_at(path, recursive)).await
+    }
+}
+
+async fn fs_read_at(path: PathBuf, offset: u64, length: u64) -> PlatformResult<v1::FsReadResponse> {
+    let (content, total_size) = crate::spawn_blocking_reserved(move || {
+        use std::io::{copy, sink, Read};
+
+        let read = || -> std::io::Result<(Vec<u8>, u64)> {
+            let mut file = std::fs::File::open(&path)?;
+            // Drain unrequested bytes without retaining them. Metadata is
+            // not the byte count for procfs/sysfs and other virtual files;
+            // keep the existing actual-stream total_size contract.
+            let skipped = copy(&mut file.by_ref().take(offset), &mut sink())?;
+            let mut content = Vec::new();
+            let selected = if length == 0 {
+                file.read_to_end(&mut content)?
             } else {
-                tokio::fs::remove_dir(&path).await
-            }
-        } else {
-            tokio::fs::remove_file(&path).await
+                file.by_ref().take(length).read_to_end(&mut content)?
+            };
+            let remaining = copy(&mut file, &mut sink())?;
+            Ok((content, skipped + selected as u64 + remaining))
         };
-        result.map_err(|e| PlatformError::from_io(&format!("remove {}", path.display()), &e))?;
-        Ok(v1::FsRemoveResponse {})
-    }
+        read().map_err(|e| PlatformError::from_io(&format!("read {}", path.display()), &e))
+    })
+    .await
+    .map_err(|e| PlatformError::os(format!("file read task failed: {e}")))??;
 
-    /// Builds the git argv (op-aware) and spawns it inside the shared
-    /// containment primitive — the engine-job path. Descendants are contained
-    /// (process group / Job Object) and, on a delegated Linux host, placed in
-    /// a per-op OOM cgroup leaf like any exec child.
-    fn spawn_git(&self, req: &v1::GitRequest) -> PlatformResult<ContainedExec> {
-        self.spawn_git_with_policy(req, None)
-    }
-
-    fn spawn_git_with_policy(
-        &self,
-        req: &v1::GitRequest,
-        policy: Option<&v1::OperationResourcePolicy>,
-    ) -> PlatformResult<ContainedExec> {
-        let mut cmd = tokio::process::Command::new("git");
-        cmd.args(git_args(req.op(), &req.args))
-            .current_dir(self.resolve_process_cwd(&req.cwd, "git")?);
-        let requested_policy = requested_policy(policy)?;
-        if requested_policy.has_limits()
-            && self
-                .cgroups
-                .as_ref()
-                .is_none_or(|cgroups| !cgroups.supports_policy(requested_policy))
-        {
-            return Err(PlatformError::Unsupported(
-                "operation resource policy requires the corresponding delegated Linux cgroup-v2 controller support on the runner"
-                    .to_string(),
-            ));
-        }
-        spawn_contained_with_policy(cmd, self.cgroups.as_deref(), requested_policy)
-            .map_err(|e| PlatformError::from_io("spawn git", &e))
-    }
-
-    async fn git(&self, req: &v1::GitRequest) -> PlatformResult<v1::GitResponse> {
-        // Spawn via the shared containment primitive (spawn_git): behaviorally
-        // the pre-engine plain spawn plus containment — a closed piped stdin
-        // reads EOF exactly like the old Stdio::null.
-        let mut contained = self.spawn_git(req)?;
-        drop(contained.stdin.take());
-        let stdout = contained.stdout.take();
-        let stderr = contained.stderr.take();
-        let (status, stdout, stderr) = tokio::try_join!(
-            contained.wait(),
-            read_optional_pipe(stdout),
-            read_optional_pipe(stderr),
-        )
-        .map_err(|e| PlatformError::from_io("git wait", &e))?;
-        Ok(assemble_git_response(
-            req.op(),
-            status.code().unwrap_or(-1),
-            stdout,
-            stderr,
-        ))
-    }
+    Ok(v1::FsReadResponse {
+        content: prost::bytes::Bytes::from(content),
+        total_size,
+    })
 }
 
-/// Assembles the wire `GitResponse` from a finished git invocation: the
-/// porcelain-v2 structured parse for a clean `GIT_OP_STATUS`, raw
-/// stdout/stderr otherwise. Shared by the one-shot [`Platform::git`] and the
-/// engine-job git adapter so the reply shape can never drift.
-#[must_use]
-pub fn assemble_git_response(
-    op: v1::GitOp,
-    exit_code: i32,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-) -> v1::GitResponse {
-    let status = if op == v1::GitOp::Status && exit_code == 0 {
-        Some(parse_porcelain_status(&stdout))
+async fn fs_write_at(
+    path: PathBuf,
+    req: v1::FsWriteRequest,
+) -> PlatformResult<v1::FsWriteResponse> {
+    if req.create_parents {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                PlatformError::from_io(&format!("mkdir -p {}", parent.display()), &e)
+            })?;
+        }
+    }
+
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create(true);
+    if req.append {
+        opts.append(true);
     } else {
-        None
+        opts.truncate(true);
+    }
+    apply_mode(&mut opts, req.mode);
+
+    let mut file = opts
+        .open(&path)
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("open {}", path.display()), &e))?;
+    file.write_all(&req.content)
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("write {}", path.display()), &e))?;
+    file.flush()
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("flush {}", path.display()), &e))?;
+
+    Ok(v1::FsWriteResponse {
+        bytes_written: req.content.len() as u64,
+    })
+}
+
+async fn fs_mkdir_at(
+    path: PathBuf,
+    parents: bool,
+    mode: u32,
+) -> PlatformResult<v1::FsMkdirResponse> {
+    let result = if parents {
+        tokio::fs::create_dir_all(&path).await
+    } else {
+        tokio::fs::create_dir(&path).await
     };
-    v1::GitResponse {
-        exit_code,
-        stdout: prost::bytes::Bytes::from(stdout),
-        stderr: prost::bytes::Bytes::from(stderr),
-        status,
-    }
+    result.map_err(|e| PlatformError::from_io(&format!("mkdir {}", path.display()), &e))?;
+    set_mode(&path, mode).await?;
+    Ok(v1::FsMkdirResponse {})
 }
 
-/// Builds the git argv for an op. For [`v1::GitOp::Status`] we always use the
-/// machine-readable porcelain-v2 + branch headers so [`parse_porcelain_status`]
-/// can produce structured output; other ops pass through their `args` verbatim.
-fn git_args(op: v1::GitOp, args: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    match op {
-        v1::GitOp::Status => {
-            out.push("status".to_string());
-            out.push("--porcelain=v2".to_string());
-            out.push("--branch".to_string());
-        }
-        v1::GitOp::Diff => out.push("diff".to_string()),
-        v1::GitOp::Log => out.push("log".to_string()),
-        v1::GitOp::Add => out.push("add".to_string()),
-        v1::GitOp::Commit => out.push("commit".to_string()),
-        v1::GitOp::Branch => out.push("branch".to_string()),
-        v1::GitOp::Checkout => out.push("checkout".to_string()),
-        v1::GitOp::Pull => out.push("pull".to_string()),
-        v1::GitOp::Push => out.push("push".to_string()),
-        // RAW and the unspecified default pass through whatever args were given.
-        v1::GitOp::Raw | v1::GitOp::Unspecified => {}
+async fn fs_move_at(
+    from: PathBuf,
+    to: PathBuf,
+    overwrite: bool,
+) -> PlatformResult<v1::FsMoveResponse> {
+    if !overwrite && tokio::fs::try_exists(&to).await.unwrap_or(false) {
+        return Err(PlatformError::Os {
+            message: format!("move: destination exists: {}", to.display()),
+            detail: BTreeMap::new(),
+        });
     }
-    out.extend(args.iter().cloned());
-    out
+    tokio::fs::rename(&from, &to).await.map_err(|e| {
+        PlatformError::from_io(&format!("move {} -> {}", from.display(), to.display()), &e)
+    })?;
+    Ok(v1::FsMoveResponse {})
 }
 
-/// Parses `git status --porcelain=v2 --branch` into the structured
-/// [`v1::GitStatus`]. Tolerant of fields it does not recognize.
-fn parse_porcelain_status(stdout: &[u8]) -> v1::GitStatus {
-    let text = String::from_utf8_lossy(stdout);
-    let mut status = v1::GitStatus {
-        clean: true,
-        ..Default::default()
-    };
-
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("# branch.head ") {
-            status.branch = rest.trim().to_string();
-        } else if let Some(rest) = line.strip_prefix("# branch.upstream ") {
-            status.upstream = rest.trim().to_string();
-        } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
-            // Format: "+<ahead> -<behind>".
-            let mut parts = rest.split_whitespace();
-            if let Some(a) = parts.next() {
-                status.ahead = a.trim_start_matches('+').parse().unwrap_or(0);
-            }
-            if let Some(b) = parts.next() {
-                status.behind = b.trim_start_matches('-').parse().unwrap_or(0);
-            }
-        } else if let Some(file) = parse_status_entry(line) {
-            status.clean = false;
-            status.files.push(file);
-        }
-    }
-    status
-}
-
-/// Parses one porcelain-v2 entry line (ordinary `1`, renamed `2`, or untracked
-/// `?`) into a [`v1::GitFileStatus`]. Returns `None` for header/unknown lines.
-fn parse_status_entry(line: &str) -> Option<v1::GitFileStatus> {
-    let mut parts = line.split_whitespace();
-    match parts.next()? {
-        "1" | "2" => {
-            // `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` — XY is the second field.
-            let xy = parts.next()?;
-            let path = line.split_whitespace().last()?.to_string();
-            let staged = xy.starts_with(|c| c != '.');
-            Some(v1::GitFileStatus {
-                path,
-                code: xy.to_string(),
-                staged,
+async fn fs_stat_at(path: PathBuf, requested: String) -> PlatformResult<v1::FsStatResponse> {
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(meta) => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Ok(v1::FsStatResponse {
+                exists: true,
+                entry: Some(metadata_to_entry(&name, &requested, &meta)),
             })
         }
-        "?" => {
-            let path = parts.next()?.to_string();
-            Some(v1::GitFileStatus {
-                path,
-                code: "??".to_string(),
-                staged: false,
-            })
-        }
-        _ => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(v1::FsStatResponse {
+            exists: false,
+            entry: None,
+        }),
+        Err(e) => Err(PlatformError::from_io(
+            &format!("stat {}", path.display()),
+            &e,
+        )),
     }
+}
+
+async fn fs_remove_at(path: PathBuf, recursive: bool) -> PlatformResult<v1::FsRemoveResponse> {
+    let meta = tokio::fs::symlink_metadata(&path)
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("stat {}", path.display()), &e))?;
+    let result = if meta.is_dir() {
+        if recursive {
+            tokio::fs::remove_dir_all(&path).await
+        } else {
+            tokio::fs::remove_dir(&path).await
+        }
+    } else {
+        tokio::fs::remove_file(&path).await
+    };
+    result.map_err(|e| PlatformError::from_io(&format!("remove {}", path.display()), &e))?;
+    Ok(v1::FsRemoveResponse {})
 }
 
 /// Recursively (or shallowly) lists a directory into `entries`, with each
@@ -1286,7 +1969,7 @@ mod tests {
     use super::*;
     use opengeni_agent_proto::v1::{
         ExecRequest, FsListRequest, FsMkdirRequest, FsMoveRequest, FsReadRequest, FsRemoveRequest,
-        FsStatRequest, FsWriteRequest, GitOp, GitRequest,
+        FsStatRequest, FsWriteRequest,
     };
 
     /// A platform rooted at a fresh temp dir, plus the dir guard (kept alive so it
@@ -1305,10 +1988,128 @@ mod tests {
         (platform, root, home)
     }
 
+    #[test]
+    fn workspace_root_keeps_a_chosen_directory_and_replaces_a_filesystem_root() {
+        // Host-native absolute paths: a Windows path needs its drive.
+        let (root, home, work) = if cfg!(windows) {
+            (r"C:\", r"C:\Users\me", r"C:\srv\work")
+        } else {
+            ("/", "/Users/me", "/srv/work")
+        };
+        let home = Path::new(home);
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(work)), Some(home), None),
+            PathBuf::from(work)
+        );
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(home), None),
+            home.to_path_buf()
+        );
+        assert_eq!(
+            resolve_workspace_root(None, Some(home), None),
+            home.to_path_buf()
+        );
+        // Without a usable home there is nothing better than the directory we have.
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(root)), None, None),
+            PathBuf::from(root)
+        );
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(Path::new(root)), None),
+            PathBuf::from(root)
+        );
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(root)), Some(Path::new("relative")), None),
+            PathBuf::from(root)
+        );
+    }
+
+    #[test]
+    fn workspace_root_replaces_the_windows_system_directory() {
+        // Host-native absolute paths; the comparison ignores case and separators.
+        let (system, launch, home, other) = if cfg!(windows) {
+            (
+                r"C:\Windows",
+                r"C:\WINDOWS\system32",
+                r"C:\Users\me",
+                r"C:\WindowsApps",
+            )
+        } else {
+            ("/Windows", "/WINDOWS/system32", "/Users/me", "/WindowsApps")
+        };
+        let (system, home) = (Path::new(system), Path::new(home));
+        // A service started in the system directory works from the user's home.
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(launch)), Some(home), Some(system)),
+            home.to_path_buf()
+        );
+        // A sibling that merely shares the prefix is kept.
+        assert_eq!(
+            resolve_workspace_root(Some(PathBuf::from(other)), Some(home), Some(system)),
+            PathBuf::from(other)
+        );
+        // A system account's profile lives under the system directory too, so it
+        // is no better: keep the launch directory.
+        let system_profile = system.join("system32").join("config").join("systemprofile");
+        assert_eq!(
+            resolve_workspace_root(
+                Some(PathBuf::from(launch)),
+                Some(&system_profile),
+                Some(system)
+            ),
+            PathBuf::from(launch)
+        );
+    }
+
+    /// A service manager that starts the agent at `/` (launchd without a
+    /// `WorkingDirectory`) must still give it a writable workspace: the process
+    /// moves into the user's home and reports that as its workspace root. Runs in
+    /// a child copy of this test binary because the working directory is
+    /// process-wide.
+    #[cfg(unix)]
+    #[test]
+    fn agent_started_at_the_filesystem_root_works_in_the_users_home() {
+        const CHILD: &str = "OPENGENI_TEST_FILESYSTEM_ROOT_CWD_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let moved = adopt_workspace_working_directory().expect("adopt home");
+            let platform = NativePlatform::new();
+            println!("moved={}", moved.is_some());
+            println!("cwd={}", std::env::current_dir().expect("cwd").display());
+            println!("root={}", platform.workspace_root());
+            return;
+        }
+        let home = tempfile::tempdir().expect("home tempdir");
+        let home_path = home.path().canonicalize().expect("canonical home");
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "native::tests::agent_started_at_the_filesystem_root_works_in_the_users_home",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .current_dir("/")
+            .env(CHILD, "1")
+            .env("HOME", &home_path)
+            .env_remove("USERPROFILE")
+            .output()
+            .expect("run child test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "child failed: {stdout}");
+        assert!(stdout.contains("moved=true"), "{stdout}");
+        assert!(
+            stdout.contains(&format!("cwd={}\n", home_path.display())),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("root={}\n", home_path.display())),
+            "{stdout}"
+        );
+    }
+
     /// TEST-ONLY NixOS-sandbox fork/exec transient-ENOENT mitigation.
     ///
     /// Under the default parallel `cargo test`, this NixOS sandbox intermittently
-    /// fails a `fork`/`exec` of a *known-present* binary (git, `/bin/sh`) with
+    /// fails a `fork`/`exec` of a *known-present* binary (`/bin/sh`) with
     /// `ENOENT` ("No such file or directory", os error 2) purely from concurrent
     /// subprocess churn — re-running the same test with `--test-threads=1` always
     /// passes. It is NOT a code bug (production agents on normal Linux never hit
@@ -1316,11 +2117,11 @@ mod tests {
     /// retries the spawn a few times when — and ONLY when — the failure is that
     /// transient spawn ENOENT for a binary the caller KNOWS is installed.
     ///
-    /// This is strictly a `#[cfg(test)]` helper: production exec/git paths are
+    /// This is strictly a `#[cfg(test)]` helper: production exec paths are
     /// untouched, so a user command that genuinely does not exist still returns
     /// `NotFound` immediately with no masking. Callers must only wrap spawns of
-    /// binaries they have already confirmed are present (the `git`/exec tests gate
-    /// on [`which_git`] / the platform shell); tests that deliberately assert
+    /// binaries they have already confirmed are present (the exec tests gate on
+    /// the platform shell); tests that deliberately assert
     /// `NotFound` for a missing target must NOT route through here.
     async fn retry_transient_spawn<T, F, Fut>(mut op: F) -> PlatformResult<T>
     where
@@ -1375,6 +2176,747 @@ mod tests {
     }
 
     const EXEC_DESCENDANT_PID_FILE_ENV: &str = "OPENGENI_TEST_EXEC_DESCENDANT_PID_FILE";
+
+    /// Names how the re-executed child hides `/dev` (`rw` or `ro` tmpfs).
+    #[cfg(target_os = "linux")]
+    const HIDDEN_NULL_DEVICE_MODE_ENV: &str = "OPENGENI_TEST_HIDDEN_NULL_DEVICE_MODE";
+    /// The parent's mount namespace, so the child can prove it is in another one
+    /// before it mounts anything over `/dev`.
+    #[cfg(target_os = "linux")]
+    const HIDDEN_NULL_DEVICE_PARENT_NS_ENV: &str = "OPENGENI_TEST_HIDDEN_NULL_DEVICE_PARENT_NS";
+
+    /// The `unshare` arguments that give a child a private mount namespace it
+    /// may mount in: a plain mount namespace when the tests run as root, else a
+    /// rootless user namespace. `None` where neither is permitted.
+    #[cfg(target_os = "linux")]
+    fn private_mount_namespace_args() -> Option<&'static [&'static str]> {
+        const ROOTLESS: &[&str] = &["--user", "--map-root-user", "--mount"];
+        const ROOT: &[&str] = &["--mount", "--propagation", "private"];
+        let works = |args: &[&str]| {
+            std::process::Command::new("unshare")
+                .args(args)
+                .arg("true")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        // Real root tries its own form first: in a rootless user namespace it
+        // would no longer be real root, so the repair would never be checked.
+        if nix::unistd::geteuid().is_root() && works(ROOT) {
+            Some(ROOT)
+        } else if works(ROOTLESS) {
+            Some(ROOTLESS)
+        } else {
+            None
+        }
+    }
+
+    /// Regression: a chat's command ran `rm -rf /dev/null` as root on a compute
+    /// box, and every later process start failed with "not found: spawn or apply
+    /// execution containment" until the box was rebooted. The agent must keep
+    /// starting programs once `/dev/null` is gone, whether or not it can put the
+    /// device back (`rw`: repair allowed as real root; `ro`: never repairable).
+    /// Skips where no private mount namespace is permitted, unless
+    /// `OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE` is set (Linux agent CI).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_starts_programs_after_dev_null_is_removed() {
+        let Some(namespace) = private_mount_namespace_args() else {
+            assert!(
+                std::env::var_os("OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE")
+                    .is_none_or(|value| value.is_empty()),
+                "OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE is set, but this machine permits no private mount namespace"
+            );
+            eprintln!("skipping: this machine permits no private mount namespace");
+            return;
+        };
+        let parent_ns = std::fs::read_link("/proc/self/ns/mnt").expect("own mount namespace");
+        for mode in ["rw", "ro"] {
+            let output = std::process::Command::new("unshare")
+                .args(namespace)
+                .arg(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "native::tests::hidden_null_device_child",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(HIDDEN_NULL_DEVICE_MODE_ENV, mode)
+                .env(HIDDEN_NULL_DEVICE_PARENT_NS_ENV, &parent_ns)
+                .output()
+                .expect("run the hidden /dev child");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "mode {mode}: the child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        }
+    }
+
+    /// Runs only when re-executed by
+    /// [`exec_starts_programs_after_dev_null_is_removed`]: hides `/dev` behind an
+    /// empty tmpfs in this private mount namespace, then starts a program.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "re-executed inside a private mount namespace by exec_starts_programs_after_dev_null_is_removed"]
+    async fn hidden_null_device_child() {
+        let Ok(mode) = std::env::var(HIDDEN_NULL_DEVICE_MODE_ENV) else {
+            return;
+        };
+        let parent_ns = std::env::var_os(HIDDEN_NULL_DEVICE_PARENT_NS_ENV)
+            .expect("the parent's mount namespace");
+        let own_ns = std::fs::read_link("/proc/self/ns/mnt").expect("own mount namespace");
+        assert_ne!(
+            own_ns.as_os_str(),
+            parent_ns.as_os_str(),
+            "refusing to hide /dev outside a private mount namespace"
+        );
+        // The agent is up (platform built) before the device disappears.
+        let (platform, _dir) = rooted();
+        let mounted = std::process::Command::new("mount")
+            .args(["-t", "tmpfs", "-o", &mode, "none", "/dev"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run mount");
+        assert!(mounted.success(), "mount an empty /dev");
+        assert!(!Path::new("/dev/null").exists(), "/dev/null must be gone");
+
+        // `Command::output` opens /dev/null by path for stdin. This changes
+        // nothing, so the exec below still meets the missing device.
+        let bare = std::process::Command::new("true").output();
+        assert!(
+            bare.as_ref()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "{bare:?}"
+        );
+
+        let response = platform
+            .exec(&echo_request("still-starts"))
+            .await
+            .expect("a program starts after /dev/null was removed");
+        assert!(
+            String::from_utf8_lossy(&response.stdout).contains("still-starts"),
+            "stdout: {:?}",
+            response.stdout
+        );
+        let state = crate::null_device::inspect(Path::new("/dev/null"));
+        if mode == "ro" {
+            assert_eq!(state, crate::null_device::NullDeviceState::Missing);
+        } else if nix::unistd::geteuid().is_root() && in_initial_user_namespace() {
+            // Real root may mknod, so the agent puts the device back.
+            assert_eq!(state, crate::null_device::NullDeviceState::Healthy);
+        }
+        eprintln!("mode {mode}: /dev/null afterwards: {state:?}");
+
+        // The agent's other program starts (self-update check, metrics,
+        // service probes, app launch) hand `Command::output` the retained
+        // device instead. Checked after exec, so exec's own repair is what the
+        // checks above saw; in `ro` the device is still missing here.
+        let probed = std::process::Command::new("true")
+            .stdin(crate::discarded_stdio())
+            .output()
+            .expect("a program starts with the retained null device");
+        assert!(probed.status.success());
+        if mode == "ro" {
+            assert_eq!(
+                crate::null_device::inspect(Path::new("/dev/null")),
+                crate::null_device::NullDeviceState::Missing
+            );
+        }
+    }
+
+    /// Whether this process's root is the machine's root, not a user
+    /// namespace's (which may not create device nodes).
+    #[cfg(target_os = "linux")]
+    fn in_initial_user_namespace() -> bool {
+        std::fs::read_to_string("/proc/self/uid_map")
+            .is_ok_and(|map| map.split_whitespace().collect::<Vec<_>>() == ["0", "0", "4294967295"])
+    }
+
+    /// Names how the re-executed child hides `/bin/sh`: `rw` (a fallback
+    /// shell remains and `/bin/sh` may be restored), `ro` (a fallback remains,
+    /// nothing may be restored) or `none` (no shell remains).
+    #[cfg(target_os = "linux")]
+    const HIDDEN_SHELL_MODE_ENV: &str = "OPENGENI_TEST_HIDDEN_SHELL_MODE";
+
+    /// Regression: a chat's command ran `mv /bin/sh …` as root on a compute
+    /// box, and every later command failed with "not found: spawn or apply
+    /// execution containment …" (the shell and the exec anchor are both
+    /// `/bin/sh`), across restarts, because the root disk keeps the damage.
+    /// The agent must keep running commands with dash or bash, put `/bin/sh`
+    /// back where it may, and name the missing shell when none is left.
+    /// Skips where no private mount namespace is permitted, unless
+    /// `OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE` is set (Linux agent CI).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_runs_commands_after_bin_sh_is_moved_away() {
+        let Some(namespace) = private_mount_namespace_args() else {
+            assert!(
+                std::env::var_os("OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE")
+                    .is_none_or(|value| value.is_empty()),
+                "OPENGENI_AGENT_REQUIRE_MOUNT_NAMESPACE is set, but this machine permits no private mount namespace"
+            );
+            eprintln!("skipping: this machine permits no private mount namespace");
+            return;
+        };
+        let parent_ns = std::fs::read_link("/proc/self/ns/mnt").expect("own mount namespace");
+        for mode in ["rw", "ro", "none"] {
+            let output = std::process::Command::new("unshare")
+                .args(namespace)
+                .arg(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "native::tests::hidden_shell_child",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(HIDDEN_SHELL_MODE_ENV, mode)
+                .env(HIDDEN_NULL_DEVICE_PARENT_NS_ENV, &parent_ns)
+                .output()
+                .expect("run the hidden /bin/sh child");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "mode {mode}: the child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        }
+    }
+
+    /// Runs only when re-executed by
+    /// [`exec_runs_commands_after_bin_sh_is_moved_away`]: in this private
+    /// mount namespace, hides the directory holding `/bin/sh` (and, on a
+    /// merged-`/usr` system, every shell in it) behind a tmpfs that holds at
+    /// most one fallback shell, then runs commands.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "re-executed inside a private mount namespace by exec_runs_commands_after_bin_sh_is_moved_away"]
+    #[allow(clippy::too_many_lines)] // one ordered scenario per mode
+    async fn hidden_shell_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Ok(mode) = std::env::var(HIDDEN_SHELL_MODE_ENV) else {
+            return;
+        };
+        let parent_ns = std::env::var_os(HIDDEN_NULL_DEVICE_PARENT_NS_ENV)
+            .expect("the parent's mount namespace");
+        let own_ns = std::fs::read_link("/proc/self/ns/mnt").expect("own mount namespace");
+        assert_ne!(
+            own_ns.as_os_str(),
+            parent_ns.as_os_str(),
+            "refusing to hide /bin outside a private mount namespace"
+        );
+        let system = Path::new("/bin/sh");
+        let bin = std::fs::canonicalize(system.parent().expect("/bin")).expect("canonical /bin");
+        // The first fallback that exists now, kept to be put back under the
+        // tmpfs at the same name.
+        let fallback = HIDDEN_SHELL_FALLBACKS
+            .iter()
+            .map(Path::new)
+            .find(|shell| executable_file(shell))
+            .expect("the test machine has dash or bash");
+        let fallback_bytes =
+            std::fs::read(std::fs::canonicalize(fallback).expect("fallback")).expect("read it");
+        let fallback_name = fallback.file_name().expect("a file name");
+        // Opengeni's command wrappers re-execute the shell through setsid.
+        let setsid_bytes = std::fs::read(std::fs::canonicalize(which("setsid")).expect("setsid"))
+            .expect("read setsid");
+        // `mount` itself is usually in the hidden directory: keep a copy.
+        let tools = tempfile::tempdir().expect("tempdir");
+        let mount = tools.path().join("mount");
+        std::fs::copy(
+            std::fs::canonicalize(which("mount")).expect("mount"),
+            &mount,
+        )
+        .expect("copy mount");
+
+        // The agent is up (platform built) before the shell disappears.
+        let (platform, _dir) = rooted();
+        let mounted = std::process::Command::new(&mount)
+            .args(["-t", "tmpfs", "-o", "rw", "none"])
+            .arg(&bin)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("run mount");
+        assert!(mounted.success(), "mount an empty {}", bin.display());
+        assert!(
+            std::fs::symlink_metadata(system).is_err(),
+            "/bin/sh must be gone"
+        );
+        if mode != "none" {
+            let kept = bin.join(fallback_name);
+            std::fs::write(&kept, &fallback_bytes).expect("put the fallback back");
+            std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            assert!(executable_file(fallback));
+            let setsid = bin.join("setsid");
+            std::fs::write(&setsid, &setsid_bytes).expect("put setsid back");
+            std::fs::set_permissions(&setsid, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        if mode == "ro" {
+            let remounted = std::process::Command::new(&mount)
+                // Only the mount's flags: a user namespace may not remount
+                // the tmpfs itself.
+                .args(["-o", "remount,ro,bind"])
+                .arg(&bin)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("run mount");
+            assert!(remounted.success(), "remount {} read-only", bin.display());
+        }
+        // The fallback the agent should now pick (on a merged-`/usr` system,
+        // the one just put back; elsewhere one outside the hidden directory).
+        let expected = HIDDEN_SHELL_FALLBACKS
+            .iter()
+            .map(Path::new)
+            .find(|shell| executable_file(shell));
+
+        let explicit = ExecRequest {
+            command: vec![
+                system.display().to_string(),
+                "-c".to_string(),
+                "echo explicit-sh".to_string(),
+            ],
+            ..Default::default()
+        };
+        if mode == "none" {
+            if let Some(left) = expected {
+                eprintln!(
+                    "skipping mode none: {} is outside the hidden directory",
+                    left.display()
+                );
+                return;
+            }
+            let error = platform
+                .exec(&echo_request("no-shell"))
+                .await
+                .expect_err("nothing can start without a shell");
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!(
+                    "spawn or apply execution containment for program \"{}\" ({})",
+                    system.display(),
+                    HIDDEN_SHELL_NOTE
+                )),
+                "{message}"
+            );
+            assert!(!message.contains("echo no-shell"), "{message}");
+            eprintln!("mode {mode}: {message}");
+            return;
+        }
+
+        let response = platform
+            .exec(&echo_request("still-runs"))
+            .await
+            .expect("a shell command runs after /bin/sh was moved away");
+        assert_eq!(
+            String::from_utf8_lossy(&response.stdout).trim(),
+            "still-runs"
+        );
+        let response = platform
+            .exec(&explicit)
+            .await
+            .expect("an explicit /bin/sh command runs after it was moved away");
+        assert_eq!(
+            String::from_utf8_lossy(&response.stdout).trim(),
+            "explicit-sh"
+        );
+        // A wrapper that starts the shell by path, as Opengeni's command
+        // wrappers do, gets the fallback from the agent while /bin/sh is gone.
+        let response = platform
+            .exec(&ExecRequest {
+                command: vec![
+                    r#"exec setsid "${OPENGENI_SYSTEM_SHELL:-/bin/sh}" -c 'echo via-setsid'"#
+                        .to_string(),
+                ],
+                shell: true,
+                ..Default::default()
+            })
+            .await
+            .expect("a setsid re-exec runs after /bin/sh was moved away");
+        assert_eq!(
+            String::from_utf8_lossy(&response.stdout).trim(),
+            "via-setsid",
+            "exit {:?}, stderr {}",
+            response.exit_code,
+            String::from_utf8_lossy(&response.stderr)
+        );
+
+        let link = std::fs::read_link(system).ok();
+        if mode == "ro" {
+            assert_eq!(link, None, "a read-only /bin is never changed");
+        } else if nix::unistd::geteuid().is_root() {
+            // Root restores /bin/sh as a link to the fallback it used.
+            assert_eq!(link.as_deref(), expected);
+            assert!(executable_file(system));
+        }
+        eprintln!("mode {mode}: /bin/sh afterwards: {link:?}");
+    }
+
+    /// Where the agent looks for a shell once `/bin/sh` is gone, in order.
+    #[cfg(target_os = "linux")]
+    const HIDDEN_SHELL_FALLBACKS: [&str; 4] =
+        ["/bin/dash", "/usr/bin/dash", "/bin/bash", "/usr/bin/bash"];
+    /// The note a start carries when no shell is left.
+    #[cfg(target_os = "linux")]
+    const HIDDEN_SHELL_NOTE: &str = "the shell /bin/sh is missing and no dash or bash was found";
+
+    /// Whether `path` is a file this process may execute.
+    #[cfg(target_os = "linux")]
+    fn executable_file(path: &Path) -> bool {
+        std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+            && nix::unistd::access(path, nix::unistd::AccessFlags::X_OK).is_ok()
+    }
+
+    /// The first `name` on `PATH`.
+    #[cfg(target_os = "linux")]
+    fn which(name: &str) -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| panic!("{name} is not on PATH"))
+    }
+
+    /// Regression: a chat moved `/workspace` away on a compute box, and every
+    /// command failed with "not found: exec working directory /workspace"
+    /// until a later turn's setup made it again. A missing workspace root or
+    /// home directory is created again and the command runs there.
+    #[tokio::test]
+    async fn exec_recreates_a_missing_workspace_root_or_home() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let root = parent.path().join("workspace");
+        let home = parent.path().join("agent-home");
+        let mut platform = NativePlatform::with_root(&root);
+        platform.home_dir = Some(home.clone());
+        let pwd = |cwd: &str| ExecRequest {
+            command: vec!["pwd".to_string()],
+            shell: true,
+            cwd: cwd.to_string(),
+            ..Default::default()
+        };
+        let reported = |response: &v1::ExecResponse| {
+            std::fs::canonicalize(String::from_utf8_lossy(&response.stdout).trim())
+                .expect("canonicalize the reported cwd")
+        };
+
+        // The default cwd (the root), then the root named explicitly.
+        for cwd in [String::new(), root.display().to_string()] {
+            if root.exists() {
+                std::fs::remove_dir(&root).expect("move the root away");
+            }
+            let request = pwd(&cwd);
+            let response = retry_transient_spawn(|| platform.exec(&request))
+                .await
+                .expect("a command runs in a missing workspace root");
+            assert_eq!(response.exit_code, 0);
+            assert!(root.is_dir(), "the workspace root is back");
+            assert_eq!(
+                reported(&response),
+                std::fs::canonicalize(&root).expect("root")
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&root).expect("root").permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "{mode:o}");
+        }
+
+        // The home directory, through `~`: private to its owner.
+        let request = pwd("~");
+        let response = retry_transient_spawn(|| platform.exec(&request))
+            .await
+            .expect("a command runs in a missing home directory");
+        assert!(home.is_dir(), "the home directory is back");
+        assert_eq!(
+            reported(&response),
+            std::fs::canonicalize(&home).expect("home")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&home).expect("home").permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+        }
+
+        // Commands that find it missing at the same time all run.
+        std::fs::remove_dir(&home).expect("move the home away again");
+        let (first, second, third, fourth) = tokio::join!(
+            platform.exec(&request),
+            platform.exec(&request),
+            platform.exec(&request),
+            platform.exec(&request)
+        );
+        for response in [first, second, third, fourth] {
+            let response = response.expect("every concurrent command runs");
+            assert_eq!(response.exit_code, 0);
+        }
+        // The home has its mode, and nothing but the root and the home is
+        // left in their parent. (This runtime is single-threaded, so these
+        // commands do not truly race; the test below races real threads.)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&home).expect("home").permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+        }
+        let mut entries: Vec<_> = std::fs::read_dir(parent.path())
+            .expect("read the parent")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, ["agent-home", "workspace"], "{entries:?}");
+
+        // A home is only created inside an existing parent.
+        let nested = parent.path().join("homes").join("agent");
+        platform.home_dir = Some(nested.clone());
+        let error = platform
+            .exec(&pwd("~"))
+            .await
+            .expect_err("a home whose parent is gone is not created");
+        assert!(matches!(error, PlatformError::NotFound(_)), "{error}");
+        assert!(!nested.exists());
+
+        // Any other missing directory is still not found, and not created.
+        let other = root.join("missing-project");
+        let error = platform
+            .exec(&pwd(&other.display().to_string()))
+            .await
+            .expect_err("another missing cwd still fails");
+        assert!(matches!(error, PlatformError::NotFound(_)), "{error}");
+        assert!(
+            error.to_string().contains("exec working directory"),
+            "{error}"
+        );
+        assert!(!other.exists());
+    }
+
+    /// A home the agent cannot hand to its user is not left behind: no
+    /// command may start in an agent-owned directory with the umask's mode
+    /// where the user's own home belongs.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_home_that_cannot_be_handed_to_its_user_is_not_left_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("open the parent to every user");
+        let home = parent.path().join("user-home");
+        // The home belongs to root, which this process may not hand it to:
+        // an unprivileged test runs as itself, a root one as `nobody`.
+        let target = RunAsIdentity {
+            name: "root".to_string(),
+            uid: 0,
+            gid: 0,
+            groups: vec![0],
+            home: home.clone(),
+            shell: PathBuf::from("/bin/sh"),
+        };
+        let attempt = {
+            let home = home.clone();
+            move || recreate_directory(&home, RecreatedCwd::UserHome(&target))
+        };
+        let result = if nix::unistd::geteuid().is_root() {
+            let nobody = crate::run_as::supported()
+                .then(|| crate::run_as::resolve("nobody").ok().flatten())
+                .flatten();
+            let Some(nobody) = nobody else {
+                eprintln!("skipped: a root test needs run-as and the nobody account");
+                return;
+            };
+            crate::run_as::on_identity_thread(&nobody, move || Ok(attempt()))
+                .expect("switch to nobody")
+        } else {
+            attempt()
+        };
+        let error = result.expect_err("the home cannot be handed to root");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{error}"
+        );
+        assert!(!home.exists(), "the half-made home is gone");
+        let left: Vec<_> = std::fs::read_dir(parent.path())
+            .expect("read the parent")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert!(left.is_empty(), "nothing is left behind: {left:?}");
+    }
+
+    /// Commands that find the home missing at the same moment, on real
+    /// threads: exactly one makes it, the others get `AlreadyExists`, and
+    /// every one of them then finds it finished (mode 0700), never with the
+    /// umask's mode it had before its mode was set.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn racing_recreations_only_ever_find_a_finished_home() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+        const RACERS: usize = 8;
+        let parent = tempfile::tempdir().expect("tempdir");
+        let home = parent.path().join("agent-home");
+        for round in 0..200 {
+            let barrier = Arc::new(Barrier::new(RACERS));
+            let racers: Vec<_> = (0..RACERS)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    let home = home.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        let result = recreate_directory(&home, RecreatedCwd::AgentHome)
+                            .map_err(|error| error.kind());
+                        let mode = std::fs::metadata(&home)
+                            .map(|metadata| metadata.permissions().mode() & 0o777)
+                            .ok();
+                        (result, mode)
+                    })
+                })
+                .collect();
+            let outcomes: Vec<_> = racers
+                .into_iter()
+                .map(|racer| racer.join().expect("racer"))
+                .collect();
+            let made = outcomes.iter().filter(|(result, _)| result.is_ok()).count();
+            assert_eq!(made, 1, "round {round}: {outcomes:?}");
+            for (result, mode) in &outcomes {
+                assert!(
+                    matches!(result, Ok(()) | Err(std::io::ErrorKind::AlreadyExists)),
+                    "round {round}: {outcomes:?}"
+                );
+                assert_eq!(
+                    *mode,
+                    Some(0o700),
+                    "round {round}: a command found a half-made home: {outcomes:?}"
+                );
+            }
+            std::fs::remove_dir(&home).expect("move the home away for the next round");
+        }
+        let left: Vec<_> = std::fs::read_dir(parent.path())
+            .expect("read the parent")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert!(left.is_empty(), "nothing is left behind: {left:?}");
+    }
+
+    /// A missing workspace root whose parents are gone too is created with
+    /// them, and the command runs there.
+    #[tokio::test]
+    async fn exec_recreates_a_workspace_root_and_its_missing_parents() {
+        let parent = tempfile::tempdir().expect("tempdir");
+        let root = parent.path().join("gone").join("too").join("workspace");
+        let platform = NativePlatform::with_root(&root);
+        let request = ExecRequest {
+            command: vec!["pwd".to_string()],
+            shell: true,
+            ..Default::default()
+        };
+        let response = retry_transient_spawn(|| platform.exec(&request))
+            .await
+            .expect("a command runs in a recreated root");
+        assert_eq!(response.exit_code, 0);
+        assert_eq!(
+            std::fs::canonicalize(String::from_utf8_lossy(&response.stdout).trim())
+                .expect("canonicalize the reported cwd"),
+            std::fs::canonicalize(&root).expect("root")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&root).expect("root").permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "{mode:o}");
+        }
+        let left: Vec<_> = std::fs::read_dir(root.parent().expect("parent"))
+            .expect("read the parent")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, ["workspace"], "{left:?}");
+    }
+
+    /// When the agent cannot make a missing home again, the command's
+    /// not-found error says why.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_home_that_cannot_be_made_again_names_why() {
+        use std::os::unix::fs::PermissionsExt;
+        if nix::unistd::geteuid().is_root() {
+            eprintln!("skipped: root may create the home in a read-only parent");
+            return;
+        }
+        let parent = tempfile::tempdir().expect("tempdir");
+        let locked = parent.path().join("locked");
+        std::fs::create_dir(&locked).expect("parent of the home");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))
+            .expect("make the parent read-only");
+        let mut platform = NativePlatform::with_root(parent.path());
+        platform.home_dir = Some(locked.join("home"));
+        let error = platform
+            .exec(&ExecRequest {
+                command: vec!["pwd".to_string()],
+                shell: true,
+                cwd: "~".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("the home cannot be made");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+            .expect("let the tempdir be removed");
+        assert!(matches!(error, PlatformError::NotFound(_)), "{error}");
+        let message = error.to_string();
+        assert!(
+            message.contains("creating it again failed") && message.contains("ermission denied"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn spawn_errors_name_a_bounded_single_line_program() {
+        let script = format!("node -e '\nconst raw = 1;\n{}'", "x".repeat(500));
+        let described = describe_program(std::ffi::OsStr::new(&script));
+        assert!(!described.contains('\n'), "{described}");
+        assert!(
+            described.chars().count() <= PROGRAM_NAME_LIMIT + 1,
+            "{described}"
+        );
+        assert_eq!(describe_program(std::ffi::OsStr::new("/bin/sh")), "/bin/sh");
+        assert_eq!(
+            describe_program(std::ffi::OsStr::new("/opt/a \"b\"/run")),
+            "/opt/a 'b'/run"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_names_the_program_not_its_arguments() {
+        let (platform, _dir) = rooted();
+        let error = platform
+            .exec(&ExecRequest {
+                command: vec![
+                    "/nonexistent/opengeni-missing-program".to_string(),
+                    "--secret-argument".to_string(),
+                ],
+                ..Default::default()
+            })
+            .await
+            .expect_err("a missing program cannot start");
+        let message = error.to_string();
+        assert!(
+            message.contains(
+                "spawn or apply execution containment for program \"/nonexistent/opengeni-missing-program\""
+            ),
+            "{message}"
+        );
+        assert!(!message.contains("--secret-argument"), "{message}");
+    }
 
     #[cfg(any(unix, windows))]
     fn descendant_command(parent_fixture: &str) -> Vec<String> {
@@ -1471,8 +3013,13 @@ mod tests {
     fn exec_descendant_fixture() {
         let pid_file = std::env::var_os(EXEC_DESCENDANT_PID_FILE_ENV)
             .expect("descendant fixture pid-file env");
-        std::fs::write(pid_file, std::process::id().to_string())
+        let pid_file = Path::new(&pid_file);
+        let pending_pid_file = pid_file.with_extension("pending");
+        std::fs::write(&pending_pid_file, std::process::id().to_string())
             .expect("write descendant fixture pid");
+        // Existence is the parent's exit signal. Publish a complete PID before
+        // it can exit and cause containment to terminate this child.
+        std::fs::rename(&pending_pid_file, pid_file).expect("publish descendant fixture pid");
         // Bound the fixture itself so a failing containment regression cannot leave
         // permanent test work behind. Production cleanup should terminate it well
         // before this fallback expires.
@@ -1584,6 +3131,171 @@ mod tests {
         assert_eq!(status.code(), Some(7));
     }
 
+    /// A command that signals its own process group, by number (`kill -TERM
+    /// -<pgid>`) or as `kill 0`, reaches only itself: never the agent that runs
+    /// it (this test process) and never a sibling command. A shared staging
+    /// machine went offline after a test run was stopped that way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_signalling_its_own_process_group_reaches_only_itself() {
+        use nix::sys::signal::Signal;
+        use nix::unistd::{getpgrp, Pid};
+
+        let (platform, _dir) = rooted();
+        let mut sibling_command = tokio::process::Command::new("/bin/sh");
+        sibling_command.arg("-c").arg("exec sleep 60");
+        let mut sibling = spawn_contained(sibling_command, None).expect("spawn the sibling");
+        drop(sibling.stdin.take());
+        let agent_group = getpgrp();
+        for (name, script) in [
+            (
+                "kill -TERM -<own pgid>",
+                "if [ -r /proc/$$/stat ]; then read -r _ _ _ _ pgid _ < /proc/$$/stat; \
+                 else pgid=$(ps -o pgid= -p $$ | tr -d ' '); fi; \
+                 [ -n \"$pgid\" ] || exit 90; \
+                 [ \"$pgid\" != \"$OPENGENI_TEST_AGENT_PGID\" ] || exit 91; \
+                 kill -TERM \"-$pgid\"; sleep 5; exit 92",
+            ),
+            ("kill 0", "kill -TERM 0; sleep 5; exit 92"),
+        ] {
+            let req = ExecRequest {
+                command: vec![script.to_string()],
+                shell: true,
+                env: [(
+                    "OPENGENI_TEST_AGENT_PGID".to_string(),
+                    agent_group.to_string(),
+                )]
+                .into(),
+                ..Default::default()
+            };
+            let resp = tokio::time::timeout(
+                Duration::from_secs(20),
+                retry_transient_spawn(|| platform.exec(&req)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: the exec must finish"))
+            .unwrap_or_else(|error| panic!("{name}: exec failed: {error}"));
+            assert!(
+                !matches!(resp.exit_code, 90..=92),
+                "{name}: the command was not stopped by its own group signal (exit {}, stderr {:?})",
+                resp.exit_code,
+                String::from_utf8_lossy(&resp.stderr)
+            );
+        }
+        // This process is the agent here: it is still running, and nothing
+        // signalled its group.
+        assert_eq!(nix::sys::signal::kill(Pid::this(), None::<Signal>), Ok(()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), sibling.wait())
+                .await
+                .is_err(),
+            "a sibling command must survive another command's group signal"
+        );
+        sibling.terminate().expect("stop the sibling");
+        let _ = sibling.wait().await;
+    }
+
+    /// Set in the helper [`a_command_does_not_share_the_agents_console`]
+    /// starts on a console of its own.
+    #[cfg(windows)]
+    const CONSOLE_HELPER: &str = "OPENGENI_TEST_CONSOLE_HELPER";
+
+    /// Only re-executed, on a new console, by
+    /// [`a_command_does_not_share_the_agents_console`]. Plays the agent:
+    /// reports the console window of a plain child (which shares this
+    /// process's console) and of a command it runs. Processes on one console
+    /// report the same window.
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "re-executed by a_command_does_not_share_the_agents_console"]
+    async fn agent_on_a_console() {
+        const CONSOLE_WINDOW: &str = "$k = Add-Type -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow();' -Name ConsoleWindow -Namespace OpengeniTest -PassThru\r\n\
+            'window ' + $k::GetConsoleWindow().ToInt64()\r\n";
+        if std::env::var_os(CONSOLE_HELPER).is_none() {
+            return;
+        }
+        let (platform, dir) = rooted();
+        let script = dir.path().join("console-window.ps1");
+        std::fs::write(&script, CONSOLE_WINDOW).expect("write the console probe");
+        let argv: Vec<String> = [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .chain([script.to_string_lossy().into_owned()])
+        .collect();
+        let inherited = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("run the console probe");
+        let req = ExecRequest {
+            command: argv,
+            ..Default::default()
+        };
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec the console probe");
+        println!(
+            "\nverdict child: {}",
+            String::from_utf8_lossy(&inherited.stdout).trim()
+        );
+        println!(
+            "\nverdict command: {} (exit {})",
+            String::from_utf8_lossy(&resp.stdout).trim(),
+            resp.exit_code
+        );
+    }
+
+    /// The Windows `kill 0`: a console control event sent to "every process on
+    /// my console" (`GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)`) reaches every
+    /// process sharing the sender's console. A command therefore runs on a
+    /// console of its own, never the agent's. The agent is this test binary
+    /// again, started on a console of its own as from a terminal, since a CI
+    /// runner gives this process none.
+    #[cfg(windows)]
+    #[test]
+    fn a_command_does_not_share_the_agents_console() {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--ignored",
+                "--exact",
+                "native::tests::agent_on_a_console",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CONSOLE_HELPER, "1")
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("start the agent on a console");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let window = |name: &str| {
+            text.lines()
+                .find_map(|line| line.split(&format!("verdict {name}: window ")).nth(1))
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|window| window.parse::<i64>().ok())
+        };
+        let agents = window("child");
+        assert!(
+            agents.is_some_and(|window| window != 0),
+            "the agent must have a console, or this test proves nothing: {text} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let commands = window("command");
+        assert!(commands.is_some(), "the command's probe failed: {text}");
+        assert_ne!(
+            commands, agents,
+            "a command shares the agent's console: {text}"
+        );
+    }
+
     #[tokio::test]
     async fn exec_captures_stdout_and_exit_code() {
         let (platform, _dir) = rooted();
@@ -1598,22 +3310,146 @@ mod tests {
         assert!(!resp.timed_out);
     }
 
+    /// A machine with no Git identity can still commit: with the default email
+    /// where Git cannot guess one (a fresh container), with Git's own guess
+    /// elsewhere. Any identity the repository or the request sets wins.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_commits_without_a_configured_git_identity() {
+        // Pin PATH in the request: a parallel test briefly points the process
+        // PATH at a missing directory, which would hide git from the shell.
+        let Some(git_dir) = ["/usr/bin", "/usr/local/bin", "/bin", "/opt/homebrew/bin"]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|dir| dir.join("git").is_file())
+        else {
+            eprintln!("skipped: git is not installed");
+            return;
+        };
+        let path = format!("{}:/usr/bin:/bin", git_dir.display());
+        // A developer's exported identity would mask the fallback under test.
+        if [
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+        ]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+        {
+            eprintln!("skipped: a GIT_* identity is exported");
+            return;
+        }
+        // The probe resolves git through the process PATH; retry past that race
+        // once, after which its answer is remembered for the exec below.
+        let mut guesses = None;
+        for _ in 0..50 {
+            guesses = crate::git_guesses_email();
+            if guesses.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let Some(guesses) = guesses else {
+            eprintln!("skipped: the git identity probe could not run");
+            return;
+        };
+        let (platform, dir) = rooted();
+        let home = tempfile::tempdir().expect("home tempdir");
+        // Only the agent's own environment decides the fallback; keep this
+        // test truthful on a developer machine that exports EMAIL.
+        let ambient = std::env::var("EMAIL").ok();
+        let isolated = |extra: &[(&str, &str)]| {
+            [
+                ("PATH", path.as_str()),
+                ("HOME", home.path().to_str().expect("utf-8 home")),
+                ("XDG_CONFIG_HOME", home.path().to_str().expect("utf-8 home")),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+            ]
+            .into_iter()
+            .chain(extra.iter().copied())
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<std::collections::HashMap<String, String>>()
+        };
+        let run = |script: &str, env: std::collections::HashMap<String, String>| ExecRequest {
+            command: vec![script.to_string()],
+            shell: true,
+            cwd: dir.path().to_string_lossy().into_owned(),
+            env,
+            ..Default::default()
+        };
+        let commit = "git init -q repo && cd repo && echo a > a && git add a && \
+                      git -c user.name=Agent commit -qm first && git log -1 --format=%ae";
+        let req = run(commit, isolated(&[]));
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        let stderr = String::from_utf8_lossy(&resp.stderr);
+        assert_eq!(resp.exit_code, 0, "stderr was {stderr:?}");
+        let email = String::from_utf8_lossy(&resp.stdout).trim().to_string();
+        match ambient {
+            Some(ambient) => assert_eq!(email, ambient),
+            None if !guesses => assert_eq!(email, crate::DEFAULT_GIT_EMAIL),
+            None => assert_ne!(email, crate::DEFAULT_GIT_EMAIL, "Git's own guess is kept"),
+        }
+
+        let repository = "cd repo && git config user.email repo@example.com && \
+                          echo b > b && git add b && git -c user.name=Agent commit -qm second && \
+                          git log -1 --format=%ae";
+        let req = run(repository, isolated(&[]));
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        assert_eq!(resp.exit_code, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&resp.stdout).trim(),
+            "repo@example.com"
+        );
+
+        let req = run(
+            "printf %s \"$EMAIL\"",
+            isolated(&[("EMAIL", "me@example.com")]),
+        );
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        assert_eq!(String::from_utf8_lossy(&resp.stdout), "me@example.com");
+    }
+
     #[test]
     fn path_resolution_expands_only_the_current_users_tilde() {
         let (platform, root, home) = rooted_with_home();
-        assert_eq!(platform.resolve_path("").expect("empty"), root.path());
-        assert_eq!(platform.resolve_path("~").expect("home"), home.path());
+        assert_eq!(platform.resolve_path("", None).expect("empty"), root.path());
+        assert_eq!(platform.resolve_path("~", None).expect("home"), home.path());
         assert_eq!(
-            platform.resolve_path("~/repo/src").expect("home child"),
+            platform
+                .resolve_path("~/repo/src", None)
+                .expect("home child"),
             home.path().join("repo/src")
         );
         assert_eq!(
-            platform.resolve_path("repo/src").expect("relative"),
+            platform.resolve_path("repo/src", None).expect("relative"),
             root.path().join("repo/src")
         );
         assert_eq!(
-            platform.resolve_path("~someone/repo").expect("named tilde"),
+            platform
+                .resolve_path("~someone/repo", None)
+                .expect("named tilde"),
             root.path().join("~someone/repo")
+        );
+        let identity = crate::run_as::RunAsIdentity {
+            name: "dev".into(),
+            uid: 1000,
+            gid: 1000,
+            groups: vec![1000],
+            home: root.path().join("dev-home"),
+            shell: "/bin/sh".into(),
+        };
+        assert_eq!(
+            platform
+                .resolve_path("~/repo", Some(&identity))
+                .expect("run-as tilde"),
+            root.path().join("dev-home/repo")
         );
     }
 
@@ -1713,6 +3549,72 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn failed_spawn_does_not_permanently_disable_updates() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        let drain = Arc::new(UpdateDrain::default());
+        let (platform, _dir) = rooted();
+        crate::with_work_reservation(Some(drain.reserve_work(None).unwrap()), async {
+            let error = platform
+                .exec(&ExecRequest {
+                    command: vec!["opengeni-command-that-does-not-exist".into()],
+                    shell: false,
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(error, PlatformError::NotFound(_)));
+        })
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if drain.snapshot().is_some_and(|state| state.routed == 0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("failed spawn cleanup must settle without restarting the agent");
+        assert_eq!(
+            drain.reserve_update("after-failed-spawn"),
+            UpdateReservation::Started
+        );
+        assert!(drain.seal_update("after-failed-spawn"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropped_exec_retains_cleanup_until_updates_can_safely_resume() {
+        use opengeni_agent_engine::update_drain::{UpdateDrain, UpdateReservation};
+        let drain = Arc::new(UpdateDrain::default());
+        let work = drain.reserve_work(None).unwrap();
+        work.mark_handover();
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 30"]);
+        let group = crate::with_work_reservation_sync(Some(work), || {
+            spawn_contained(command, None).unwrap()
+        });
+        drop(group);
+        assert_eq!(
+            drain.reserve_update("after-drop"),
+            UpdateReservation::Started
+        );
+        assert!(!drain.seal_update_with_handover("after-drop"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if drain.snapshot().is_some_and(|state| state.routed == 0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("owned cancellation cleanup must settle");
+        assert!(drain.seal_update_with_handover("after-drop"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn exec_missing_direct_command_is_not_found() {
         let (platform, _dir) = rooted();
         let err = platform
@@ -1793,6 +3695,10 @@ mod tests {
             resp.exit_code, resp.stdout, resp.stderr
         );
         assert_eq!(resp.exit_code, -1);
+        assert!(
+            !resp.background_children_stopped,
+            "explicit deadlines need no shell-exit notice"
+        );
         let descendant_pid = recorded_pid(&pid_file).await;
         assert_process_exits(descendant_pid, "timed-out exec").await;
     }
@@ -1816,7 +3722,39 @@ mod tests {
         assert!(!resp.timed_out, "early leader exit must complete normally");
         assert_eq!(resp.exit_code, 0);
         let descendant_pid = recorded_pid(&pid_file).await;
+        assert!(
+            resp.background_children_stopped,
+            "observed live descendants must be reported"
+        );
         assert_process_exits(descendant_pid, "early-exit exec").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_cleanup_reports_only_live_background_children() {
+        let (platform, _dir) = rooted();
+        for (shell, expected) in [
+            ("sleep 60 >/dev/null 2>&1 & printf done", true),
+            ("(sleep 60) >/dev/null 2>&1 & printf done", true),
+            ("nohup sleep 60 >/dev/null 2>&1 & printf done", true),
+            ("sleep 0.01 & wait; printf done", false),
+            ("printf done", false),
+        ] {
+            let request = ExecRequest {
+                command: vec![shell.into()],
+                shell: true,
+                ..Default::default()
+            };
+            let response = retry_transient_spawn(|| platform.exec(&request))
+                .await
+                .expect("shell fixture");
+            assert_eq!(response.background_children_stopped, expected, "{shell}");
+            assert_eq!(response.stdout.as_ref(), b"done");
+            assert!(
+                response.stderr.is_empty(),
+                "cleanup evidence must not contaminate stderr"
+            );
+        }
     }
 
     #[cfg(any(unix, windows))]
@@ -1878,10 +3816,11 @@ mod tests {
         assert_process_exits(descendant_pid, "runner-crash exec").await;
     }
 
-    /// Every exec child receives the smallest OOM-score adjustment above the live
-    /// supervisor when representable, or the same ABI ceiling. This needs no
-    /// cgroup delegation, so it runs on any Linux host. The direct child reports
-    /// its own PID and stays live for the authoritative `/proc` read.
+    /// Every exec child receives the OOM-score adjustment derived from the live
+    /// supervisor: neutral under a protected supervisor, the ABI maximum
+    /// otherwise. This needs no cgroup delegation, so it runs on any Linux host.
+    /// The direct child reports its own PID and stays live for the
+    /// authoritative `/proc` read.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn exec_child_gets_raised_oom_score_adj() {
@@ -1912,7 +3851,7 @@ mod tests {
             .trim()
             .parse::<i32>()
             .expect("numeric supervisor OOM score");
-        let expected = crate::cgroup::minimal_exec_oom_score_adj(supervisor).to_string();
+        let expected = crate::cgroup::exec_oom_score_adj_for_supervisor(supervisor).to_string();
         assert_eq!(observed, expected, "exec child {child_pid} OOM bias");
     }
 
@@ -1959,7 +3898,7 @@ mod tests {
             .trim()
             .parse::<i32>()
             .expect("numeric supervisor OOM score");
-        let expected = crate::cgroup::minimal_exec_oom_score_adj(supervisor).to_string();
+        let expected = crate::cgroup::exec_oom_score_adj_for_supervisor(supervisor).to_string();
         for pid in [parent, descendant] {
             let score = tokio::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
                 .await
@@ -2013,6 +3952,7 @@ mod tests {
             .expect("write");
         let read = platform
             .fs_read(&FsReadRequest {
+                run_as: String::new(),
                 path: "f".to_string(),
                 offset: 3,
                 length: 4,
@@ -2050,6 +3990,7 @@ mod tests {
         ] {
             let response = platform
                 .fs_read(&FsReadRequest {
+                    run_as: String::new(),
                     path: "ranges".to_string(),
                     offset,
                     length,
@@ -2071,6 +4012,7 @@ mod tests {
         assert!(expected.len() > 4);
         let response = platform
             .fs_read(&FsReadRequest {
+                run_as: String::new(),
                 path: path.to_string(),
                 offset: 1,
                 length: 3,
@@ -2117,6 +4059,7 @@ mod tests {
         // Stat the directory exists.
         let stat = platform
             .fs_stat(&FsStatRequest {
+                run_as: String::new(),
                 path: "a/b/c".to_string(),
             })
             .await
@@ -2135,6 +4078,7 @@ mod tests {
             .expect("write");
         let listing = platform
             .fs_list(&FsListRequest {
+                run_as: String::new(),
                 path: "a".to_string(),
                 recursive: false,
             })
@@ -2147,6 +4091,7 @@ mod tests {
         // Recursive list reaches the nested dir.
         let deep = platform
             .fs_list(&FsListRequest {
+                run_as: String::new(),
                 path: "a".to_string(),
                 recursive: true,
             })
@@ -2157,6 +4102,7 @@ mod tests {
         // Remove recursively.
         platform
             .fs_remove(&FsRemoveRequest {
+                run_as: String::new(),
                 path: "a".to_string(),
                 recursive: true,
             })
@@ -2164,6 +4110,7 @@ mod tests {
             .expect("remove");
         let gone = platform
             .fs_stat(&FsStatRequest {
+                run_as: String::new(),
                 path: "a".to_string(),
             })
             .await
@@ -2185,6 +4132,7 @@ mod tests {
         // Without overwrite, the move is refused.
         let err = platform
             .fs_move(&FsMoveRequest {
+                run_as: String::new(),
                 from: "from".to_string(),
                 to: "to".to_string(),
                 overwrite: false,
@@ -2196,6 +4144,7 @@ mod tests {
         // With overwrite it succeeds and the destination now holds the source.
         platform
             .fs_move(&FsMoveRequest {
+                run_as: String::new(),
                 from: "from".to_string(),
                 to: "to".to_string(),
                 overwrite: true,
@@ -2217,136 +4166,13 @@ mod tests {
         let (platform, _dir) = rooted();
         let stat = platform
             .fs_stat(&FsStatRequest {
+                run_as: String::new(),
                 path: "ghost".to_string(),
             })
             .await
             .expect("stat must succeed for an absent path");
         assert!(!stat.exists);
         assert!(stat.entry.is_none());
-    }
-
-    /// Initializes a git repo in the platform root, returning the platform.
-    async fn git_init(platform: &NativePlatform) {
-        // Configure identity locally so commits work in CI with no global config.
-        for args in [
-            vec!["init", "-q"],
-            vec!["config", "user.email", "agent@opengeni.test"],
-            vec!["config", "user.name", "OpenGeni Agent"],
-        ] {
-            // git is gated as known-present by the callers' `which_git()` check, so
-            // a spawn `NotFound` here is the transient NixOS fork/exec ENOENT — retry
-            // it rather than fail the gate non-deterministically.
-            let req = GitRequest {
-                op: GitOp::Raw as i32,
-                args: args.iter().map(ToString::to_string).collect(),
-                ..Default::default()
-            };
-            let resp = retry_transient_spawn(|| platform.git(&req))
-                .await
-                .expect("git setup");
-            assert_eq!(resp.exit_code, 0, "git {args:?} failed");
-        }
-    }
-
-    #[tokio::test]
-    async fn git_status_reports_structured_state() {
-        let (platform, _dir) = rooted();
-        if which_git().is_none() {
-            return; // git absent on this host; the dispatch path is still covered.
-        }
-        git_init(&platform).await;
-
-        // git is known-present here (guarded by `which_git` above), so each spawn
-        // is retried against the transient NixOS fork/exec ENOENT.
-        let status_req = GitRequest {
-            op: GitOp::Status as i32,
-            ..Default::default()
-        };
-        // Clean repo: status is clean.
-        let clean = retry_transient_spawn(|| platform.git(&status_req))
-            .await
-            .expect("status");
-        assert_eq!(clean.exit_code, 0);
-        let st = clean.status.expect("structured status");
-        assert!(st.clean, "fresh repo should be clean: {st:?}");
-
-        // Add an untracked file → status reports it, not clean.
-        platform
-            .fs_write(&FsWriteRequest {
-                path: "tracked.txt".to_string(),
-                content: prost::bytes::Bytes::from_static(b"data"),
-                ..Default::default()
-            })
-            .await
-            .expect("write");
-        let dirty = retry_transient_spawn(|| platform.git(&status_req))
-            .await
-            .expect("status");
-        let st = dirty.status.expect("structured status");
-        assert!(!st.clean);
-        assert!(st.files.iter().any(|f| f.code == "??"));
-    }
-
-    #[tokio::test]
-    async fn git_add_commit_then_status_clean() {
-        let (platform, _dir) = rooted();
-        if which_git().is_none() {
-            return;
-        }
-        git_init(&platform).await;
-        platform
-            .fs_write(&FsWriteRequest {
-                path: "a.txt".to_string(),
-                content: prost::bytes::Bytes::from_static(b"hi"),
-                ..Default::default()
-            })
-            .await
-            .expect("write");
-        // git is known-present here (guarded by `which_git` above), so each spawn
-        // is retried against the transient NixOS fork/exec ENOENT.
-        let add_req = GitRequest {
-            op: GitOp::Add as i32,
-            args: vec!["a.txt".to_string()],
-            ..Default::default()
-        };
-        let add = retry_transient_spawn(|| platform.git(&add_req))
-            .await
-            .expect("add");
-        assert_eq!(add.exit_code, 0);
-        let commit_req = GitRequest {
-            op: GitOp::Commit as i32,
-            args: vec!["-m".to_string(), "init".to_string()],
-            ..Default::default()
-        };
-        let commit = retry_transient_spawn(|| platform.git(&commit_req))
-            .await
-            .expect("commit");
-        assert_eq!(
-            commit.exit_code,
-            0,
-            "commit stderr: {}",
-            String::from_utf8_lossy(&commit.stderr)
-        );
-        let status_req = GitRequest {
-            op: GitOp::Status as i32,
-            ..Default::default()
-        };
-        let status = retry_transient_spawn(|| platform.git(&status_req))
-            .await
-            .expect("status");
-        assert!(status.status.expect("status").clean);
-    }
-
-    /// Returns `Some(())` if a `git` binary is resolvable on the host.
-    fn which_git() -> Option<()> {
-        std::process::Command::new("git")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .ok()
-            .filter(std::process::ExitStatus::success)
-            .map(|_| ())
     }
 
     #[tokio::test]

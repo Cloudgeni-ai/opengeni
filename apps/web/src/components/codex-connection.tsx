@@ -1,4 +1,5 @@
-import { trackModelConnection } from "@/lib/analytics-observer";
+import { trackModelConnection } from "@opengeni/react/app/lib/analytics-observer";
+import type { ChatClient } from "@opengeni/sdk";
 
 // Codex (ChatGPT) subscriptions for Settings > Models: the data and every
 // mutation (useCodexSubscriptions), the usage-limit reset list, the device-code
@@ -15,24 +16,46 @@ import type {
   CodexResetRedemptionRecovery,
   CodexUsageMap,
   CodexUsageWindow,
-  WorkspaceCodexSubscriptionMode,
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import {
+  codexAccountsQueryKey,
+  codexLiveUsageQueryKey,
+  recordCodexLiveUsage,
+  type CodexLiveUsageSnapshot,
+} from "@opengeni/react/app/lib/codex-usage-query";
+import {
+  invalidateSharedQueries,
+  MODEL_SETTINGS_STALE_TIME_MS,
+  sharedQueryWriter,
+  useSharedQuery,
+  useSharedQueryValue,
+} from "@opengeni/react/app/lib/shared-query";
 import { pollDeviceAuthorization } from "@opengeni/connect";
+import { codexOverviewUsage } from "@/components/models/codex-overview-usage";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { planLabel, showCodexConnected } from "@/lib/codex-connect-result";
 
-import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { formatAbsoluteTime } from "@/components/ui/relative-time";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import type { UsageWindowReading } from "@/components/ui/usage-meter";
-import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { formatAbsoluteTime } from "@opengeni/react/ui/relative-time";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import type { UsageWindowReading } from "@opengeni/react/ui/usage-meter";
+import {
+  codexWindowInputs,
+  subscriptionWindows,
+  type SubscriptionWindow,
+} from "@opengeni/react/app/lib/subscription-accounts";
+import { subscriptionUsageReadings } from "@opengeni/react/app/components/models/subscription-usage";
+import { apiErrorAdvice, userErrorText } from "@opengeni/react/ui/api-error";
 import {
   ApiError,
   prepareCodexResetRedemption,
+  prepareOrganizationCodexResetRedemption,
   redeemCodexResetCredit,
+  redeemOrganizationCodexResetCredit,
   type CodexResetRedemptionPreparation,
 } from "@/api";
 
@@ -224,30 +247,40 @@ function resetDate(window: CodexUsageWindow, now: number): Date | null {
   return null;
 }
 
-/** One provider window as a meter reading: percent LEFT, and when it resets. */
-export function codexUsageReading(
-  label: string,
-  window: CodexUsageWindow | null | undefined,
+type CodexWindows = {
+  fiveHour: CodexUsageWindow | null;
+  weekly: CodexUsageWindow | null;
+};
+
+/**
+ * Only the windows ChatGPT reported for the account, labelled "5h" and
+ * "Week": a Pro plan reports no 5-hour window, so it shows none.
+ */
+export function codexUsageWindows(
+  usage: CodexWindows | null | undefined,
   now: number,
-): UsageWindowReading {
-  if (!window) return { label, percent: null };
-  const reset = resetDate(window, now);
-  return {
-    label,
-    percent: Math.round(Math.min(100, Math.max(0, window.remaining))),
-    ...(reset ? { resetsLabel: formatAbsoluteTime(reset, { now }) } : {}),
-  };
+): SubscriptionWindow[] {
+  const reading = (window: CodexUsageWindow | null | undefined) =>
+    window
+      ? {
+          percent: window.percent,
+          remaining: window.remaining,
+          resetAt: resetDate(window, now)?.toISOString() ?? null,
+        }
+      : null;
+  return subscriptionWindows(
+    "codex",
+    codexWindowInputs({ fiveHour: reading(usage?.fiveHour), weekly: reading(usage?.weekly) }),
+    now,
+  );
 }
 
-/** Weekly first (the limit people run out of), then the 5-hour window. */
+/** The reported windows as the account page's meters. */
 export function codexUsageReadings(
-  usage: { fiveHour: CodexUsageWindow | null; weekly: CodexUsageWindow | null } | null | undefined,
+  usage: CodexWindows | null | undefined,
   now: number,
 ): UsageWindowReading[] {
-  return [
-    codexUsageReading("Weekly", usage?.weekly, now),
-    codexUsageReading("5-hour", usage?.fiveHour, now),
-  ];
+  return subscriptionUsageReadings(codexUsageWindows(usage, now), now);
 }
 
 /* ----------------------------------------------------------------------------
@@ -255,7 +288,13 @@ export function codexUsageReadings(
    -------------------------------------------------------------------------- */
 
 /** One muted line: who can redeem, or why the list is view only. */
-export function resetAuthorityNote(overview: CodexAccountOverview): string | null {
+export function resetAuthorityNote(
+  overview: CodexAccountOverview,
+  options: {
+    /** On the organization's page, where its owners and admins redeem them. */
+    organization?: boolean;
+  } = {},
+): string | null {
   const reset = overview.resetCredits;
   const count = reset.availableCount ?? 0;
   const detail: Record<typeof reset.detailState, string | null> = {
@@ -268,6 +307,11 @@ export function resetAuthorityNote(overview: CodexAccountOverview): string | nul
   };
   if (detail[reset.detailState]) return detail[reset.detailState];
   if (count === 0) return null;
+  if (options.organization) {
+    return overview.canRedeem
+      ? "Each gives this account a fresh usage limit. Owners and admins of the organization can redeem them here."
+      : "Only the organization's owners and admins can redeem these resets, signed in to Opengeni in their own browser.";
+  }
   if (overview.canRedeem) {
     return "Each gives this account a fresh usage limit. Only you can redeem them, as the person who connected it.";
   }
@@ -299,6 +343,22 @@ export function hasResetInventory(
 }
 
 /**
+ * True once the overview says this plan doesn't report usage limit resets and
+ * nothing is left to show. Such an account has no reset section: "no resets
+ * available" would claim a count the provider never gave.
+ */
+export function planReportsNoResets(
+  overview: CodexAccountOverview | undefined,
+  recoveryAttempts: readonly RedemptionAttemptView[],
+): boolean {
+  return (
+    overview !== undefined &&
+    overview.resetCredits.detailState === "unsupported" &&
+    !hasResetInventory(overview, recoveryAttempts)
+  );
+}
+
+/**
  * Flat list of usage limit resets: one row per reset with its expiry, and a
  * Redeem button only when it can actually be redeemed by this person.
  */
@@ -308,6 +368,7 @@ export function ResetCreditInventory({
   recoveryAttempts,
   onRedeem,
   onReconnectSameAccount,
+  organization = false,
 }: {
   overview: CodexAccountOverview | undefined;
   /** Kept for callers that tick a clock; expiry labels use the absolute time. */
@@ -316,10 +377,12 @@ export function ResetCreditInventory({
   recoveryAttempts: RedemptionAttemptView[];
   onRedeem: (credit: CodexResetCredit, recovery?: RedemptionAttemptView) => void;
   onReconnectSameAccount: () => void;
+  /** An organization account, redeemed by the organization's owners and admins. */
+  organization?: boolean;
 }) {
   if (!overview) return null;
   const reset = overview.resetCredits;
-  const note = resetAuthorityNote(overview);
+  const note = resetAuthorityNote(overview, { organization });
   const visibleCreditIds = new Set(reset.credits.map((credit) => credit.id));
   const hiddenRecoveries = overview.canResumeRedemption
     ? recoveryAttempts.filter((attempt) => !visibleCreditIds.has(attempt.creditId))
@@ -465,11 +528,7 @@ export function codexAccountName(account: CodexAccount): string {
   return account.label ?? account.email ?? account.plan ?? "Codex account";
 }
 
-/** Plans come back lowercase ("pro"); show them as the plan name. */
-export function planLabel(plan: string | null | undefined, provider: string): string {
-  if (!plan) return `${provider} plan`;
-  return `${provider} ${plan.charAt(0).toLocaleUpperCase()}${plan.slice(1)}`;
-}
+export { planLabel };
 
 type ClipboardModule = {
   copyTextToClipboard: (text: string) => Promise<boolean>;
@@ -515,10 +574,153 @@ export type CodexRedemption = {
   uncertain: boolean;
 };
 
+/**
+ * Redeeming usage limit resets, from a workspace's account page or the
+ * organization's. Both use the same browser-only, single-use flow: a stored
+ * attempt id survives a lost response or reload, and an ambiguous outcome is
+ * retried only as that same attempt.
+ */
+export function useCodexResetRedemption(
+  scope: "workspace" | "organization",
+  scopeId: string,
+  refreshUsage: () => Promise<void>,
+) {
+  const [preparingReset, setPreparingReset] = useState<string | null>(null);
+  const [redemption, setRedemption] = useState<CodexRedemption | null>(null);
+  // Workspace attempts keep their original key; organization ones get their own namespace.
+  const storageScope = scope === "workspace" ? scopeId : `organization:${scopeId}`;
+  const prepare =
+    scope === "workspace" ? prepareCodexResetRedemption : prepareOrganizationCodexResetRedemption;
+  const redeem =
+    scope === "workspace" ? redeemCodexResetCredit : redeemOrganizationCodexResetCredit;
+
+  const beginRedemption = useCallback(
+    async (accountId: string, credit: CodexResetCredit, recovery?: RedemptionAttemptView) => {
+      setPreparingReset(credit.id);
+      let createdLocalAttempt = false;
+      try {
+        const startsFreshAfterNonConsumingCompletion = Boolean(
+          recovery?.status === "completed" &&
+          (recovery.outcome === "nothingToReset" || recovery.outcome === "noCredit"),
+        );
+        // A lost HTTP response may leave the old completed UUID in
+        // sessionStorage. nothingToReset/noCredit did not consume the provider
+        // credit, so a newly provider-authorized click must mint a fresh
+        // logical/upstream key rather than replay that completed attempt.
+        if (startsFreshAfterNonConsumingCompletion) {
+          removeStoredRedemptionAttempt(storageScope, accountId, credit.id);
+        }
+        const resumableRecovery = startsFreshAfterNonConsumingCompletion ? undefined : recovery;
+        const stored = startsFreshAfterNonConsumingCompletion
+          ? null
+          : storedRedemptionAttempt(storageScope, accountId, credit.id);
+        const attempt: StoredRedemptionAttempt = resumableRecovery ??
+          stored ?? {
+            attemptId: crypto.randomUUID(),
+            creditId: credit.id,
+            title: credit.title,
+            expiresAt: credit.expiresAt,
+          };
+        createdLocalAttempt = resumableRecovery == null && stored == null;
+        // Session storage is only a convenience checkpoint. Durable server
+        // discovery restores provider_started/completed attempts if storage is
+        // unavailable or the owning human opens a new browser session.
+        storeRedemptionAttempt(storageScope, accountId, attempt);
+        const preparation = await prepare(scopeId, accountId, {
+          attemptId: attempt.attemptId,
+          creditId: credit.id,
+        });
+        if (resumableRecovery && !preparation.resumable) {
+          removeStoredRedemptionAttempt(storageScope, accountId, credit.id);
+          toast.error("This reset was not sent to ChatGPT and can't be redeemed any more.");
+          await refreshUsage();
+          return;
+        }
+        setRedemption({ accountId, credit, preparation, uncertain: false });
+      } catch (error) {
+        // Preparation itself never calls or claims the provider. If this was a
+        // fresh local UUID, do not leave a false "uncertain/resume" affordance.
+        // A pre-existing attempt is preserved because it may already be
+        // provider_started or completed in durable server state.
+        if (createdLocalAttempt) {
+          removeStoredRedemptionAttempt(storageScope, accountId, credit.id);
+        }
+        toast.error("Couldn't prepare the reset", { description: userErrorText(error) });
+      } finally {
+        setPreparingReset(null);
+      }
+    },
+    [storageScope, scopeId, prepare, refreshUsage],
+  );
+
+  const confirmRedemption = useCallback(async (): Promise<boolean> => {
+    if (!redemption) return false;
+    try {
+      const result = await redeem(scopeId, redemption.accountId, {
+        attemptId: redemption.preparation.attemptId,
+        creditId: redemption.credit.id,
+        confirmationToken: redemption.preparation.confirmationToken,
+        confirmation: "REDEEM_USAGE_LIMIT_RESET",
+      });
+      removeStoredRedemptionAttempt(storageScope, redemption.accountId, redemption.credit.id);
+      toast.success(redemptionOutcomeCopy(result.outcome));
+      setRedemption(null);
+      await refreshUsage();
+      return true;
+    } catch (error) {
+      const status = managedRedemptionErrorStatus(error);
+      const definitePreProviderFailure =
+        redemption.preparation.recoveryStatus == null &&
+        ((error instanceof ApiError && (error.status === 400 || error.status === 403)) ||
+          status === "not_actionable" ||
+          status === "preflight_unavailable" ||
+          status === "provider_unavailable" ||
+          status === "confirmation_expired");
+      if (definitePreProviderFailure) {
+        removeStoredRedemptionAttempt(storageScope, redemption.accountId, redemption.credit.id);
+        setRedemption(null);
+        await refreshUsage();
+        toast.error("The reset was not sent", { description: userErrorText(error) });
+        return false;
+      }
+      // Preserve only genuinely ambiguous provider work under the same logical
+      // id. The overview is the durable discovery authority after tab loss.
+      setRedemption((current) => (current ? { ...current, uncertain: true } : current));
+      toast.error("The outcome is uncertain", { description: "Retry this same attempt." });
+      return false;
+    }
+  }, [redemption, storageScope, scopeId, redeem, refreshUsage]);
+
+  const closeRedemption = useCallback(() => {
+    setRedemption((current) => {
+      if (!current) return current;
+      // Cancel before the first POST has no durable/provider side effect,
+      // so clear the local UUID instead of presenting it as uncertain.
+      // Once a prior attempt is resumable or a POST failed, preserve the
+      // exact logical id for ambiguity-safe retry after close/reload.
+      if (!current.preparation.resumable && !current.uncertain) {
+        removeStoredRedemptionAttempt(storageScope, current.accountId, current.credit.id);
+      }
+      return null;
+    });
+  }, [storageScope]);
+
+  return {
+    preparingReset,
+    redemption,
+    beginRedemption,
+    confirmRedemption,
+    closeRedemption,
+    redemptionAttempts: (accountId: string, overview: CodexAccountOverview | undefined) =>
+      redemptionAttemptViews(storageScope, accountId, overview),
+  };
+}
+
 export type CodexWorking =
   | "source"
   | "rotation"
   | `allocator:${string}`
+  | `extra-credits:${string}`
   | `apps:${string}`
   | `activate:${string}`
   | `rename:${string}`
@@ -526,38 +728,81 @@ export type CodexWorking =
 
 export type CodexSubscriptions = ReturnType<typeof useCodexSubscriptions>;
 
+const EMPTY_CODEX_USAGE: CodexUsageMap = {};
+
 export function useCodexSubscriptions({
   client,
   workspaceId,
   canManage,
+  enabled: readsAccounts = true,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   canManage: boolean;
+  /** False reads nothing. */
+  enabled?: boolean;
 }) {
-  const [data, setData] = useState<CodexAccountsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // The account list is the same shared entry the session account switcher
+  // reads: a revisit renders the retained rows at once and re-reads quietly.
+  const accountsQuery = useSharedQuery<CodexAccountsResponse>(
+    client,
+    codexAccountsQueryKey(workspaceId),
+    () => client.listCodexAccounts(workspaceId),
+    { enabled: readsAccounts, staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS },
+  );
+  const data = accountsQuery.error ? null : accountsQuery.data;
+  const loading = accountsQuery.loading;
+  // Shown under "Couldn't load ..." as what to do; never the raw API message.
+  const loadError = accountsQuery.error ? apiErrorAdvice(accountsQuery.error) : null;
+  // The latest LIVE usage per account (carries the explicit ok/limit/error/no-data
+  // status the cached columns can't). Never merged with cached account windows.
+  // Shared with the session switcher; only live provider reads ever write it.
+  const liveUsageQuery = useSharedQueryValue<CodexLiveUsageSnapshot>(
+    client,
+    codexLiveUsageQueryKey(workspaceId),
+  );
+  const retainedUsage = liveUsageQuery.data?.usage ?? EMPTY_CODEX_USAGE;
   const [busy, setBusy] = useState(false);
   const [working, setWorking] = useState<CodexWorking | null>(null);
   const [pending, setPending] = useState<{
     userCode: string;
     verificationUri: string;
   } | null>(null);
-  // True while a LIVE batched usage refresh is in flight (drives the meter skeleton).
-  const [refreshingUsage, setRefreshingUsage] = useState(true);
-  // The latest LIVE usage per account (carries the explicit ok/limit/error/no-data
-  // status the cached columns can't). Never merge it with cached account windows.
-  const [usageMap, setUsageMap] = useState<CodexUsageMap>({});
-  const [overviewMap, setOverviewMap] = useState<CodexOverviewResponse["accounts"]>({});
-  // The last live overview read failed as a whole (not one account's usage).
-  const [usageError, setUsageError] = useState(false);
+  // Retain the independently-settled usage and reset inventory together.
+  // A revisit only checks the provider after five minutes (or explicit Refresh).
+  const overviewQuery = useSharedQuery<CodexOverviewResponse>(
+    client,
+    ["model-settings", "codex-overview", workspaceId],
+    async (signal) => {
+      const write = sharedQueryWriter(client);
+      const result = await client.codexOverview(workspaceId);
+      if (!signal.aborted)
+        recordCodexLiveUsage(
+          write,
+          client,
+          workspaceId,
+          Object.fromEntries(
+            Object.entries(result.accounts).map(([id, overview]) => {
+              const { status, usage } = codexOverviewUsage(overview.usage);
+              return [id, { status, usage }];
+            }),
+          ) as CodexUsageMap,
+          "replace",
+        );
+      return result;
+    },
+    {
+      enabled: readsAccounts && Boolean(data?.accounts.length),
+      staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS,
+    },
+  );
+  const overviewMap = overviewQuery.data?.accounts ?? {};
+  const refreshingUsage = overviewQuery.loading;
+  const usageError = Boolean(overviewQuery.error);
+  const usageMap = usageError ? EMPTY_CODEX_USAGE : retainedUsage;
   // The account whose single-account live refresh is in flight (per-page spinner).
   const [refreshingRow, setRefreshingRow] = useState<string | null>(null);
-  const [preparingReset, setPreparingReset] = useState<string | null>(null);
-  const [redemption, setRedemption] = useState<CodexRedemption | null>(null);
   const cancelled = useRef(false);
-  const usageRefreshedRef = useRef(false);
   // A clock for reset times and usage labels - one timer, never a backend re-hit.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -565,49 +810,25 @@ export function useCodexSubscriptions({
     return () => clearInterval(timer);
   }, []);
 
-  const refreshAccounts = useCallback(async () => {
-    try {
-      setData(await client.listCodexAccounts(workspaceId));
-      setLoadError(null);
-    } catch (error) {
-      setData(null);
-      // Shown under "Couldn't load ..." as what to do; never the raw API message.
-      setLoadError(apiErrorAdvice(error));
-    } finally {
-      setLoading(false);
-    }
-  }, [client, workspaceId]);
+  // After an account change: every retained Codex list for this workspace,
+  // including session account choices, may now be wrong.
+  const refreshAccounts = useCallback(
+    () =>
+      Promise.all([
+        invalidateSharedQueries(client, codexAccountsQueryKey(workspaceId)),
+        invalidateSharedQueries(client, ["model-settings"]),
+      ]).then(() => undefined),
+    [client, workspaceId],
+  );
 
   // LIVE batched overview refresh: usage + reset-credit details settle
   // independently per account under the server's max-four provider-call cap.
   const refreshUsage = useCallback(async () => {
-    setRefreshingUsage(true);
-    try {
-      const result = await client.codexOverview(workspaceId);
-      if (!cancelled.current) {
-        setOverviewMap(result.accounts);
-        setUsageMap(
-          Object.fromEntries(
-            Object.entries(result.accounts).map(([id, overview]) => [
-              id,
-              {
-                status: overview.usage.value?.status ?? "no-data",
-                usage: overview.usage.value ?? null,
-              },
-            ]),
-          ) as CodexUsageMap,
-        );
-        setNow(Date.now());
-        setUsageError(false);
-      }
-    } catch {
-      // Per-account errors are each account's own "usage unavailable" state.
-      if (!cancelled.current) setUsageError(true);
-    } finally {
-      await refreshAccounts();
-      if (!cancelled.current) setRefreshingUsage(false);
-    }
-  }, [client, workspaceId, refreshAccounts]);
+    // Also used after redemption: a completion after navigation must evict
+    // retained inventory, not silently skip a refresh with no mounted readers.
+    await invalidateSharedQueries(client, ["model-settings", "codex-overview", workspaceId]);
+    await invalidateSharedQueries(client, codexAccountsQueryKey(workspaceId));
+  }, [client, workspaceId]);
 
   // Explicit retry still uses the independently-settled batch so reset detail
   // authority and usage can never drift.
@@ -615,56 +836,32 @@ export function useCodexSubscriptions({
     async (accountId: string) => {
       setRefreshingRow(accountId);
       try {
-        const result = await client.codexOverview(workspaceId);
-        if (!cancelled.current) {
-          setOverviewMap(result.accounts);
-          const usage = result.accounts[accountId]?.usage.value;
-          setUsageMap((prev) => ({
-            ...prev,
-            [accountId]: { status: usage?.status ?? "no-data", usage: usage ?? null },
-          }));
-          setNow(Date.now());
-        }
+        await refreshUsage();
       } catch {
         /* surfaced as the account's "usage unavailable" state */
       } finally {
-        await refreshAccounts();
         if (!cancelled.current) setRefreshingRow(null);
       }
     },
-    [client, workspaceId, refreshAccounts],
+    [refreshUsage],
   );
 
   useEffect(() => {
     cancelled.current = false;
-    setLoading(true);
-    void refreshAccounts();
     return () => {
       cancelled.current = true;
     };
-  }, [refreshAccounts]);
+  }, []);
 
-  // Detailed reset rows are deliberately never cached as redemption authority, so
-  // every mount performs exactly ONE independently-settled live overview read. The
-  // account identity renders immediately, but usage waits for this read rather
-  // than flashing cached limits. Navigation/explicit refresh only, never an interval.
-  useEffect(() => {
-    if (loading || !data || usageRefreshedRef.current) return;
-    if (data.accounts.length > 0) {
-      usageRefreshedRef.current = true;
-      void refreshUsage();
-    } else {
-      setRefreshingUsage(false);
-    }
-  }, [loading, data, refreshUsage]);
+  // The retained overview is display data only. Redemption still prepares a
+  // fresh, server-authorized attempt before the irreversible confirmation.
 
   const setSourceMode = useCallback(
-    async (mode: WorkspaceCodexSubscriptionMode, success?: string): Promise<boolean> => {
+    async (mode: "automatic" | "disabled", success?: string): Promise<boolean> => {
       setBusy(true);
       setWorking("source");
       try {
         await client.requestJson("PATCH", `/v1/workspaces/${workspaceId}/codex/source`, { mode });
-        usageRefreshedRef.current = false;
         await refreshAccounts();
         if (success) toast.success(success);
         return true;
@@ -680,25 +877,21 @@ export function useCodexSubscriptions({
   );
 
   /**
-   * Start a device-code sign-in. `useFor` answers "use this account instead of
-   * the organization's subscriptions?" when the organization pool is in use:
-   * "organization" pins the source first so connecting doesn't switch it;
-   * "workspace" switches to this workspace's accounts once the account exists.
+   * Start a device-code sign-in. `scope: "user"` connects the person's own
+   * account from here; it is kept in their Personal workspace.
    */
   const connect = useCallback(
     async (options?: {
-      useFor?: "workspace" | "organization";
       onConnected?: (accountId: string | null) => void;
+      scope?: "user" | undefined;
     }) => {
       const recordOutcome = trackModelConnection("codex", workspaceId);
-      const mode = data?.source?.mode;
-      if (options?.useFor === "organization" && mode === "automatic") {
-        const kept = await setSourceMode("organization");
-        if (!kept) return;
-      }
+      const own = options?.scope === "user";
       setBusy(true);
       try {
-        const start = await client.codexConnectStart(workspaceId);
+        const start = own
+          ? await client.codexConnectStart(workspaceId, { scope: "user" })
+          : await client.codexConnectStart(workspaceId);
         setPending({
           userCode: start.userCode,
           verificationUri: start.verificationUri,
@@ -718,24 +911,15 @@ export function useCodexSubscriptions({
             if (!result) return;
             if (result.status === "connected") {
               recordOutcome("connected");
-              if (options?.useFor === "workspace" && mode === "organization") {
-                await client
-                  .requestJson("PATCH", `/v1/workspaces/${workspaceId}/codex/source`, {
-                    mode: "workspace",
-                  })
-                  .catch((error: unknown) =>
-                    toast.error("Connected, but couldn't switch to this workspace's accounts", {
-                      description: userErrorText(error),
-                    }),
-                  );
-                usageRefreshedRef.current = false;
-              }
+              // The sign-in may finish after Settings is gone: every retained
+              // Codex list for this workspace, session choices included, re-reads
+              // now (mounted) or on its next mount, whether or not this page is.
+              await refreshAccounts();
+              // Your own account lists in your Personal workspace too.
+              if (own) await invalidateSharedQueries(client, ["codex-accounts"]);
               if (!cancelled.current) {
                 setPending(null);
-                toast.success(
-                  `Codex connected${result.plan ? ` (${planLabel(result.plan, "ChatGPT")})` : ""}`,
-                );
-                await refreshUsage();
+                showCodexConnected("Codex connected", result);
                 options?.onConnected?.(
                   "accountId" in result && typeof result.accountId === "string"
                     ? result.accountId
@@ -770,7 +954,7 @@ export function useCodexSubscriptions({
         setBusy(false);
       }
     },
-    [client, workspaceId, refreshUsage, data?.source?.mode, setSourceMode],
+    [client, workspaceId, refreshAccounts],
   );
 
   const activate = useCallback(
@@ -791,7 +975,7 @@ export function useCodexSubscriptions({
     [client, workspaceId, refreshAccounts],
   );
 
-  // Spread work across accounts (rotation on) or use the primary only (off).
+  // Spread work across accounts (rotation on) or start on the primary first (off).
   const setRotation = useCallback(
     async (patch: { rotationEnabled: boolean }) => {
       setBusy(true);
@@ -828,9 +1012,35 @@ export function useCodexSubscriptions({
         await refreshAccounts();
         toast.success(
           enabled
-            ? `${codexAccountName(account)} is used for new work again`
-            : `${codexAccountName(account)} won't be used for new work`,
+            ? `${codexAccountName(account)} enabled`
+            : `${codexAccountName(account)} disabled`,
         );
+      } catch (error) {
+        await refreshAccounts();
+        toast.error("Couldn't change this account", { description: userErrorText(error) });
+      } finally {
+        setBusy(false);
+        setWorking(null);
+      }
+    },
+    [client, workspaceId, refreshAccounts],
+  );
+
+  const setExtraCredits = useCallback(
+    async (account: CodexAccount, enabled: boolean) => {
+      setBusy(true);
+      setWorking(`extra-credits:${account.id}`);
+      try {
+        await client.requestJson(
+          "PATCH",
+          `/v1/workspaces/${workspaceId}/codex/accounts/${account.id}/extra-credits`,
+          {
+            enabled,
+            expectedVersion: account.extraCreditsVersion ?? 1,
+          },
+        );
+        await refreshAccounts();
+        toast.success(enabled ? "Extra credit spending on" : "Extra credit spending off");
       } catch (error) {
         await refreshAccounts();
         toast.error("Couldn't change this account", { description: userErrorText(error) });
@@ -867,116 +1077,7 @@ export function useCodexSubscriptions({
     [client, data, workspaceId, refreshAccounts],
   );
 
-  const beginRedemption = useCallback(
-    async (accountId: string, credit: CodexResetCredit, recovery?: RedemptionAttemptView) => {
-      setPreparingReset(credit.id);
-      let createdLocalAttempt = false;
-      try {
-        const startsFreshAfterNonConsumingCompletion = Boolean(
-          recovery?.status === "completed" &&
-          (recovery.outcome === "nothingToReset" || recovery.outcome === "noCredit"),
-        );
-        // A lost HTTP response may leave the old completed UUID in
-        // sessionStorage. nothingToReset/noCredit did not consume the provider
-        // credit, so a newly provider-authorized click must mint a fresh
-        // logical/upstream key rather than replay that completed attempt.
-        if (startsFreshAfterNonConsumingCompletion) {
-          removeStoredRedemptionAttempt(workspaceId, accountId, credit.id);
-        }
-        const resumableRecovery = startsFreshAfterNonConsumingCompletion ? undefined : recovery;
-        const stored = startsFreshAfterNonConsumingCompletion
-          ? null
-          : storedRedemptionAttempt(workspaceId, accountId, credit.id);
-        const attempt: StoredRedemptionAttempt = resumableRecovery ??
-          stored ?? {
-            attemptId: crypto.randomUUID(),
-            creditId: credit.id,
-            title: credit.title,
-            expiresAt: credit.expiresAt,
-          };
-        createdLocalAttempt = resumableRecovery == null && stored == null;
-        // Session storage is only a convenience checkpoint. Durable server
-        // discovery restores provider_started/completed attempts if storage is
-        // unavailable or the owning human opens a new browser session.
-        storeRedemptionAttempt(workspaceId, accountId, attempt);
-        const preparation = await prepareCodexResetRedemption(workspaceId, accountId, {
-          attemptId: attempt.attemptId,
-          creditId: credit.id,
-        });
-        if (resumableRecovery && !preparation.resumable) {
-          removeStoredRedemptionAttempt(workspaceId, accountId, credit.id);
-          toast.error("This reset was not sent to ChatGPT and can't be redeemed any more.");
-          await refreshUsage();
-          return;
-        }
-        setRedemption({ accountId, credit, preparation, uncertain: false });
-      } catch (error) {
-        // Preparation itself never calls or claims the provider. If this was a
-        // fresh local UUID, do not leave a false "uncertain/resume" affordance.
-        // A pre-existing attempt is preserved because it may already be
-        // provider_started or completed in durable server state.
-        if (createdLocalAttempt) {
-          removeStoredRedemptionAttempt(workspaceId, accountId, credit.id);
-        }
-        toast.error("Couldn't prepare the reset", { description: userErrorText(error) });
-      } finally {
-        setPreparingReset(null);
-      }
-    },
-    [workspaceId, refreshUsage],
-  );
-
-  const confirmRedemption = useCallback(async (): Promise<boolean> => {
-    if (!redemption) return false;
-    try {
-      const result = await redeemCodexResetCredit(workspaceId, redemption.accountId, {
-        attemptId: redemption.preparation.attemptId,
-        creditId: redemption.credit.id,
-        confirmationToken: redemption.preparation.confirmationToken,
-        confirmation: "REDEEM_USAGE_LIMIT_RESET",
-      });
-      removeStoredRedemptionAttempt(workspaceId, redemption.accountId, redemption.credit.id);
-      toast.success(redemptionOutcomeCopy(result.outcome));
-      setRedemption(null);
-      await refreshUsage();
-      return true;
-    } catch (error) {
-      const status = managedRedemptionErrorStatus(error);
-      const definitePreProviderFailure =
-        redemption.preparation.recoveryStatus == null &&
-        ((error instanceof ApiError && (error.status === 400 || error.status === 403)) ||
-          status === "not_actionable" ||
-          status === "preflight_unavailable" ||
-          status === "provider_unavailable" ||
-          status === "confirmation_expired");
-      if (definitePreProviderFailure) {
-        removeStoredRedemptionAttempt(workspaceId, redemption.accountId, redemption.credit.id);
-        setRedemption(null);
-        await refreshUsage();
-        toast.error("The reset was not sent", { description: userErrorText(error) });
-        return false;
-      }
-      // Preserve only genuinely ambiguous provider work under the same logical
-      // id. The overview is the durable discovery authority after tab loss.
-      setRedemption((current) => (current ? { ...current, uncertain: true } : current));
-      toast.error("The outcome is uncertain", { description: "Retry this same attempt." });
-      return false;
-    }
-  }, [redemption, workspaceId, refreshUsage]);
-
-  const closeRedemption = useCallback(() => {
-    setRedemption((current) => {
-      if (!current) return current;
-      // Cancel before the first POST has no durable/provider side effect,
-      // so clear the local UUID instead of presenting it as uncertain.
-      // Once a prior attempt is resumable or a POST failed, preserve the
-      // exact logical id for ambiguity-safe retry after close/reload.
-      if (!current.preparation.resumable && !current.uncertain) {
-        removeStoredRedemptionAttempt(workspaceId, current.accountId, current.credit.id);
-      }
-      return null;
-    });
-  }, [workspaceId]);
+  const resets = useCodexResetRedemption("workspace", workspaceId, refreshUsage);
 
   /** Throws so the confirm dialog can say what to do (API facts go in Technical details). */
   const disconnect = useCallback(
@@ -1050,29 +1151,36 @@ export function useCodexSubscriptions({
     usageMap,
     overviewMap,
     refreshingRow,
-    preparingReset,
-    redemption,
+    preparingReset: resets.preparingReset,
+    redemption: resets.redemption,
     now,
     refreshAccounts,
+    updatedAt: overviewQuery.updatedAt ?? accountsQuery.updatedAt,
+    refreshUsage,
     refreshAccountUsage,
     setSourceMode,
     connect,
     activate,
     setRotation,
     setAllocator,
+    setExtraCredits,
     setAppsCredential,
-    beginRedemption,
-    confirmRedemption,
-    closeRedemption,
+    beginRedemption: resets.beginRedemption,
+    confirmRedemption: resets.confirmRedemption,
+    closeRedemption: resets.closeRedemption,
     disconnect,
     rename,
     redemptionAttempts: (accountId: string) =>
-      redemptionAttemptViews(workspaceId, accountId, overviewMap[accountId]),
+      resets.redemptionAttempts(accountId, overviewMap[accountId]),
   };
 }
 
 /** The irreversible "redeem a reset" confirm. Mount once per page. */
-export function CodexRedemptionDialog({ codex }: { codex: CodexSubscriptions }) {
+export function CodexRedemptionDialog({
+  codex,
+}: {
+  codex: Pick<CodexSubscriptions, "redemption" | "now" | "closeRedemption" | "confirmRedemption">;
+}) {
   const { redemption, now } = codex;
   return (
     <ConfirmDialog
@@ -1081,7 +1189,7 @@ export function CodexRedemptionDialog({ codex }: { codex: CodexSubscriptions }) 
         if (!open) codex.closeRedemption();
       }}
       title="Redeem this usage limit reset?"
-      description="This uses one usage limit reset from ChatGPT. It can reset this account's 5-hour and weekly limits, and can't be undone."
+      description="This uses one usage limit reset from ChatGPT. It resets this account's current usage limits and can't be undone."
       confirmLabel="Redeem reset"
       cancelLabel="Cancel"
       cancelAutoFocus

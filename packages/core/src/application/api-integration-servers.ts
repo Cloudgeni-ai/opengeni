@@ -1,5 +1,6 @@
 import {
   createGraphqlMcpServer,
+  isIntegrationDefinitionEnabled,
   createOpenApiMcpServer,
   createPinnedIntegrationTransport,
   directIntegrationTransport,
@@ -8,13 +9,14 @@ import {
   type IntegrationInvocationAuthority,
   type IntegrationTransport,
 } from "@opengeni/capabilities";
-import type { Settings } from "@opengeni/config";
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import type { ToolAuthNeededPayload } from "@opengeni/contracts";
 import type {
   ApiIntegrationRuntime,
   ResolveConnectionCredentialInput,
   ResolveConnectionCredentialResult,
 } from "@opengeni/db";
+import { apiIntegrationToolEffect, decryptEnvironmentValue } from "@opengeni/db";
 import type { FetchLike } from "@opengeni/network";
 import type { LocalMcpServerRegistration } from "@opengeni/runtime";
 
@@ -41,75 +43,94 @@ export function buildApiIntegrationMcpServers(
     network: input.settings,
     ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
   });
-  return input.integrations.map((integration) => {
-    const authority: IntegrationInvocationAuthority = {
-      ...input.authority,
-      ...(integration.connectionRef?.connectionId
-        ? { connectionRef: integration.connectionRef.connectionId }
-        : {}),
-    };
-    const credentialResolver = integration.connectionRef
-      ? integrationCredentialResolver(input, integration, "execution")
-      : undefined;
-    const buildServer = (
-      serverTransport: IntegrationTransport,
-      serverCredentialResolver = credentialResolver,
-    ) =>
-      integration.revision.protocol === "openapi"
-        ? createOpenApiMcpServer({
-            revision: integration.revision,
-            transport: serverTransport,
-            authority,
-            ...(serverCredentialResolver ? { credentialResolver: serverCredentialResolver } : {}),
-          })
-        : createGraphqlMcpServer({
-            revision: integration.revision,
-            endpoint: integration.baseUrl,
-            transport: serverTransport,
-            authority,
-            ...(serverCredentialResolver ? { credentialResolver: serverCredentialResolver } : {}),
-          });
-    const server = buildServer(transport);
-    const preflightCredentialResolver = integration.connectionRef
-      ? integrationCredentialResolver(input, integration, "preflight")
-      : undefined;
-    const preflightServer = preflightCredentialResolver
-      ? buildServer(providerBlockingPreflightTransport, preflightCredentialResolver)
-      : null;
-    return {
-      id: integration.serverId,
-      server,
-      approvalAuthority: {
-        kind: "api_integration",
-        capabilityId: integration.capabilityId,
-        pluginKey: integration.pluginKey,
-        pluginInstallationId: integration.pluginInstallationId,
-        installationVersion: integration.installationVersion,
-        instanceId: integration.instanceId,
-        instanceKey: integration.instanceKey,
-        instanceVersion: integration.instanceVersion,
-        definitionId: integration.definitionId,
-        definitionProvenance: integration.definitionProvenance,
-        revisionId: integration.revision.id,
-        baseUrl: integration.baseUrl,
-        providerDomain: integration.providerDomain,
-        connectionRef: integration.connectionRef,
-        connectionAuthorityGeneration: integration.connectionAuthorityGeneration,
-      },
-      ...(integration.connectionRef?.connectionId
-        ? { resolvedConnectionId: integration.connectionRef.connectionId }
-        : {}),
-      ...(credentialResolver
-        ? {
-            preflightCall: async (
-              toolName: string,
-              args: Record<string, unknown>,
-              options?: { signal?: AbortSignal },
-            ) => await preflightApiIntegrationCall(preflightServer!, toolName, args, options),
-          }
-        : {}),
-    };
-  });
+  return input.integrations
+    .filter((integration) => integrationRolloutEnabled(input, integration))
+    .map((integration) => {
+      // An organization key has no connection of its own; its reference
+      // names the organization's setup, so the protocol adapters ask the
+      // resolver below for it.
+      const authority: IntegrationInvocationAuthority = {
+        ...input.authority,
+        ...(integration.connectionRef?.connectionId
+          ? { connectionRef: integration.connectionRef.connectionId }
+          : integration.organizationCredential && integration.organizationConnector
+            ? { connectionRef: `organization:${integration.organizationConnector.id}` }
+            : {}),
+      };
+      const credentialResolver = integration.connectionRef
+        ? integrationCredentialResolver(input, integration, "execution")
+        : integration.organizationCredential
+          ? organizationKeyCredentialResolver(input, integration)
+          : undefined;
+      const buildServer = (
+        serverTransport: IntegrationTransport,
+        serverCredentialResolver = credentialResolver,
+      ) =>
+        integration.revision.protocol === "openapi"
+          ? createOpenApiMcpServer({
+              revision: integration.revision,
+              transport: serverTransport,
+              authority,
+              ...(serverCredentialResolver ? { credentialResolver: serverCredentialResolver } : {}),
+            })
+          : createGraphqlMcpServer({
+              revision: integration.revision,
+              endpoint: integration.baseUrl,
+              transport: serverTransport,
+              authority,
+              ...(serverCredentialResolver ? { credentialResolver: serverCredentialResolver } : {}),
+            });
+      const server = buildServer(transport);
+      const preflightCredentialResolver = integration.connectionRef
+        ? integrationCredentialResolver(input, integration, "preflight")
+        : integration.organizationCredential
+          ? organizationKeyCredentialResolver(input, integration)
+          : undefined;
+      const preflightServer = preflightCredentialResolver
+        ? buildServer(providerBlockingPreflightTransport, preflightCredentialResolver)
+        : null;
+      return {
+        id: integration.serverId,
+        server,
+        effectAuthority: (toolName) => ({
+          kind: "api_integration",
+          instanceId: integration.instanceId,
+          baseUrl: integration.baseUrl,
+          connectionRef: integration.connectionRef,
+          connectionAuthorityGeneration: integration.connectionAuthorityGeneration,
+          effect: apiIntegrationToolEffect(integration.revision, toolName),
+        }),
+        approvalAuthority: {
+          kind: "api_integration",
+          capabilityId: integration.capabilityId,
+          pluginKey: integration.pluginKey,
+          pluginInstallationId: integration.pluginInstallationId,
+          installationVersion: integration.installationVersion,
+          instanceId: integration.instanceId,
+          instanceKey: integration.instanceKey,
+          instanceVersion: integration.instanceVersion,
+          definitionId: integration.definitionId,
+          definitionProvenance: integration.definitionProvenance,
+          revisionId: integration.revision.id,
+          baseUrl: integration.baseUrl,
+          providerDomain: integration.providerDomain,
+          connectionRef: integration.connectionRef,
+          connectionAuthorityGeneration: integration.connectionAuthorityGeneration,
+        },
+        ...(integration.connectionRef?.connectionId
+          ? { resolvedConnectionId: integration.connectionRef.connectionId }
+          : {}),
+        ...(credentialResolver
+          ? {
+              preflightCall: async (
+                toolName: string,
+                args: Record<string, unknown>,
+                options?: { signal?: AbortSignal },
+              ) => await preflightApiIntegrationCall(preflightServer!, toolName, args, options),
+            }
+          : {}),
+      };
+    });
 }
 
 const providerBlockingPreflightTransport = directIntegrationTransport(async () => {
@@ -144,6 +165,14 @@ function integrationCredentialResolver(
   }
   return {
     resolve: async (request) => {
+      if (!integrationRolloutEnabled(input, integration)) {
+        throw new IntegrationInvocationError(
+          "integration_disabled",
+          "This integration is not enabled for this workspace",
+          "not_started",
+          false,
+        );
+      }
       const result = await input.resolveCredential({
         workspaceId: input.authority.workspaceId,
         serverId: integration.serverId,
@@ -175,11 +204,62 @@ function integrationCredentialResolver(
             name,
             value,
           })),
-        ...(result.authorizeProviderRequest
-          ? { authorizeProviderRequest: result.authorizeProviderRequest }
-          : {}),
+        authorizeProviderRequest: async () => {
+          if (!integrationRolloutEnabled(input, integration)) return false;
+          const authorized = result.authorizeProviderRequest
+            ? await result.authorizeProviderRequest()
+            : true;
+          return authorized && integrationRolloutEnabled(input, integration);
+        },
         ...(result.expiresAt ? { expiresAt: result.expiresAt.toISOString() } : {}),
         ...(connectionRef.scopes ? { scope: [...connectionRef.scopes] } : {}),
+      };
+    },
+  };
+}
+
+/**
+ * An organization key on an organization API integration: the placements the
+ * organization admin stored, decrypted only here, for each request, and sent
+ * only to the request's own destination. There is no person's connection to
+ * refresh or reconnect: a key the provider rejects is not retried (null on a
+ * refresh), and the call fails as unauthorized.
+ */
+function organizationKeyCredentialResolver(
+  input: BuildApiIntegrationServersInput,
+  integration: ApiIntegrationRuntime,
+): IntegrationCredentialResolver {
+  const placements = integration.organizationCredential?.placements ?? [];
+  return {
+    resolve: async (request) => {
+      if (request.forceRefresh) return null;
+      if (!integrationRolloutEnabled(input, integration)) {
+        throw new IntegrationInvocationError(
+          "integration_disabled",
+          "This integration is not enabled for this workspace",
+          "not_started",
+          false,
+        );
+      }
+      const key = environmentsEncryptionKeyBytes(input.settings);
+      if (!key) {
+        throw new IntegrationInvocationError(
+          "credential_unavailable",
+          "This integration's organization key can't be read on this deployment",
+          "not_started",
+          false,
+        );
+      }
+      const destination = new URL(request.destinationUrl);
+      return {
+        audience: { origin: destination.origin, pathPrefix: "/" },
+        placements: placements.map((placement) => ({
+          carrier: placement.carrier,
+          name: placement.name,
+          value: decryptEnvironmentValue(key, placement.valueEncrypted),
+          ...(placement.prefix ? { prefix: placement.prefix } : {}),
+        })),
+        authorizeProviderRequest: async () => integrationRolloutEnabled(input, integration),
       };
     },
   };
@@ -212,4 +292,15 @@ async function publishAuthNeeded(
     // Authentication notices are advisory UI/audit signals. The local tool
     // still returns the fixed connection-required result when publication fails.
   }
+}
+
+function integrationRolloutEnabled(
+  input: BuildApiIntegrationServersInput,
+  integration: ApiIntegrationRuntime,
+): boolean {
+  return isIntegrationDefinitionEnabled(integration.definitionId, {
+    teamsEnabled: input.settings.microsoftTeamsToolsEnabled,
+    teamsAllowedWorkspaceIds: input.settings.microsoftTeamsAllowedWorkspaceIds,
+    workspaceId: input.authority.workspaceId,
+  });
 }

@@ -1,0 +1,210 @@
+import {
+  CreateScheduledTaskRequest,
+  EVENT_TRIGGERS_PER_AUTOMATION_MAX,
+  EventTriggerInput,
+  ScheduledTaskEventsInput,
+  ScheduledTaskAgentConfigInput,
+  ScheduledTaskOverlapPolicy,
+  ScheduledTaskRunMode,
+  ScheduledTaskScheduleSpec,
+} from "@opengeni/contracts";
+import { z } from "zod/v4";
+
+const SCHEDULE_TIME_ZONE_DESCRIPTION =
+  "IANA time zone the schedule's clock times are in, for example Europe/Oslo. Omit it to use the time zone of the message that asked for the schedule (an edited schedule keeps its current zone); UTC when there is none.";
+
+const OVERLAP_POLICY_DESCRIPTION =
+  "What a run does when the chat it continues is still busy. Runs in a new chat never wait, so this only matters for runs into a chat. steer (the default): when the busy turn is this automation's own earlier run, the new run reaches it at its next step, so the agent sees the new run together with the work so far; a turn anyone else started finishes first, then the run starts. buffer_one (allow_concurrent is the same in a chat): the run always waits and starts after the current turn. skip: the run is dropped.";
+
+/** The overlap choice for agent tools, explained so its values can't be misread. */
+export function scheduledTaskOverlapPolicyToolInput() {
+  return ScheduledTaskOverlapPolicy.optional().describe(OVERLAP_POLICY_DESCRIPTION);
+}
+
+/**
+ * The contract's schedule shapes for agent tools. The contract defaults an
+ * omitted zone to UTC; for an agent the server fills it from the message that
+ * asked for the schedule instead, so the tool schema describes that default.
+ */
+export function scheduledTaskScheduleToolInput() {
+  const [manual, once, interval, calendar] = ScheduledTaskScheduleSpec.options;
+  const timeZone = z.string().min(1).optional().describe(SCHEDULE_TIME_ZONE_DESCRIPTION);
+  return z.discriminatedUnion("type", [
+    manual,
+    once.extend({ timeZone }),
+    interval,
+    calendar.extend({ timeZone }),
+  ]);
+}
+
+/** An automation with event triggers and no schedule runs on events (and by hand) only. */
+function hasEventTriggers(input: Record<string, unknown>): boolean {
+  const events = input.events;
+  return (
+    typeof events === "object" &&
+    events !== null &&
+    Array.isArray((events as { triggers?: unknown }).triggers) &&
+    (events as { triggers: unknown[] }).triggers.length > 0
+  );
+}
+
+/** The calling session is supplied by the signed grant, never by model text. */
+export function resolveScheduledTaskCreateInput(
+  input: Record<string, unknown>,
+  sessionId: string | null,
+) {
+  const runMode =
+    input.runMode ?? (input.targetSessionId || sessionId ? "existing_session" : undefined);
+  const targetSessionId =
+    input.targetSessionId ?? (runMode === "existing_session" ? sessionId : undefined);
+  if (!runMode)
+    throw new Error(
+      "Choose an existing chat or explicitly select reusable_session or new_session_per_run for a separate agent",
+    );
+  if (runMode === "existing_session" && !targetSessionId)
+    throw new Error("Choose the chat that should receive scheduled messages");
+  if (input.schedule === undefined && !hasEventTriggers(input))
+    throw new Error("Add a schedule, or event triggers for an automation that runs on events");
+  return CreateScheduledTaskRequest.parse({
+    ...input,
+    schedule: input.schedule ?? { type: "manual" },
+    runMode,
+    ...(targetSessionId ? { targetSessionId } : {}),
+  });
+}
+
+/**
+ * The `events` field of the create and update tools: the contract's own
+ * schema, described for the model. Present only where event triggers run.
+ */
+export function scheduledTaskEventsToolInput() {
+  const trigger = z
+    .object({
+      ...EventTriggerInput.shape,
+      sourceId: EventTriggerInput.shape.sourceId.describe(
+        "An event source's id, or a readyToAdd id, from event_sources_list.",
+      ),
+      eventTypes: EventTriggerInput.shape.eventTypes.describe(
+        "Event types the source offers (event_sources_list with its sourceId). An MCP source takes exactly one.",
+      ),
+      conditions: EventTriggerInput.shape.conditions.describe(
+        "Optional filters; every one must hold. field is type, subject, summary, url, actor.kind, actor.name or data.<path>. contains ignores case.",
+      ),
+      includeOwnEvents: EventTriggerInput.shape.includeOwnEvents.describe(
+        "Also fire on events this deployment's own bots made. Off by default, which prevents loops.",
+      ),
+      arguments: EventTriggerInput.shape.arguments.describe(
+        "MCP sources: subscription arguments that match the event type's argumentsSchema.",
+      ),
+    })
+    .strict();
+  return z
+    .object({
+      ...ScheduledTaskEventsInput.shape,
+      triggers: z
+        .array(trigger)
+        .max(EVENT_TRIGGERS_PER_AUTOMATION_MAX)
+        .describe(
+          "Run when any trigger matches an event. On update, the list replaces all triggers.",
+        ),
+      once: ScheduledTaskEventsInput.shape.once.describe(
+        "Finish after the first run, whichever trigger fires first. Use it for “wake me when…”.",
+      ),
+      maxRunsPerHour: ScheduledTaskEventsInput.shape.maxRunsPerHour.describe(
+        "Event runs allowed in a rolling hour (default 30). Further events wait and arrive together in the next run.",
+      ),
+    })
+    .strict()
+    .optional()
+    .describe(
+      "Run when something happens in another app. Each run receives the events that caused it.",
+    );
+}
+
+/**
+ * Agent-config fields agents never set through the schedule tools: a person
+ * chooses Slack posting and connector policy, and chat settings for an
+ * automation (attached servers, memory, reach, inline Skills) are set by a
+ * person or the app that manages it. An agent's schedule always keeps its own
+ * chat's Opengeni tools and permissions.
+ */
+export const SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG = {
+  slackBotChannelId: true,
+  toolPolicy: true,
+  mcpServers: true,
+  memoryScope: true,
+  agentAccess: true,
+  skills: true,
+  firstPartyMcpTools: true,
+  firstPartyMcpPermissions: true,
+} as const;
+
+export function scheduledTaskCreateToolInput(options: { events: boolean } = { events: false }) {
+  return (
+    z
+      .object({
+        ...CreateScheduledTaskRequest.options[1].out.shape,
+        runMode: ScheduledTaskRunMode.optional().describe(
+          "Omit to schedule a message in this chat. Choose reusable_session or new_session_per_run only when the user requests a separate agent.",
+        ),
+        overlapPolicy: scheduledTaskOverlapPolicyToolInput(),
+        targetSessionId: z
+          .string()
+          .uuid()
+          .optional()
+          .describe(
+            "Destination chat. Omitted existing-session destinations use the calling chat.",
+          ),
+        prompt: ScheduledTaskAgentConfigInput.shape.prompt
+          .optional()
+          .describe(
+            "Message to send to an existing chat at each occurrence. The chat supplies its model, tools and machine.",
+          ),
+        agentConfig: z
+          .object(ScheduledTaskAgentConfigInput.shape)
+          .omit(SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG)
+          .strict()
+          .optional()
+          .describe(
+            "Creation settings for a separate scheduled agent. For an existing chat, supply prompt instead.",
+          ),
+        ...(options.events
+          ? {
+              schedule: scheduledTaskScheduleToolInput()
+                .optional()
+                .describe("When it runs on a clock. Omit when it runs only on events."),
+              events: scheduledTaskEventsToolInput(),
+            }
+          : { schedule: scheduledTaskScheduleToolInput() }),
+      })
+      // Only a person pins connector accounts; agents never do.
+      .omit({
+        agentLearning: true,
+        connectionAuthorities: true,
+        // Agents can't lock a schedule to themselves.
+        creatorLocked: true,
+        pinnedAccounts: true,
+        pinnedAccountsRequired: true,
+        ...(options.events ? {} : { events: true as const }),
+      })
+      .strict()
+  );
+}
+
+// Validate the original call, before projection defaults can add fields from
+// the separate-agent branch to the existing-chat message branch.
+export function scheduledTaskCreateToolValidation(sessionId: string | null) {
+  return z.record(z.string(), z.unknown()).superRefine((input, context) => {
+    try {
+      resolveScheduledTaskCreateInput(input, sessionId);
+    } catch (error) {
+      if (error instanceof z.ZodError)
+        for (const issue of error.issues) context.addIssue({ ...issue });
+      else
+        context.addIssue({
+          code: "custom",
+          message: error instanceof Error ? error.message : "Invalid schedule destination",
+        });
+    }
+  });
+}

@@ -8,6 +8,7 @@
  * looks lives here.
  */
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   lazy,
   Suspense,
@@ -20,7 +21,7 @@ import {
   type RefObject,
 } from "react";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { skillReleaseMessage, skillInstallationMessage } from "./skill-release-message";
 import { pluginRemovalMessage } from "./plugin-removal-result";
 
@@ -39,7 +40,7 @@ import type {
   PluginInstallationSummary,
   PluginUninstallPreview,
   SkillUninstallPreview,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 export type SourceRemoveTarget =
   | {
@@ -85,15 +86,19 @@ export function useSourcePackages({
   workspaceId,
   connections,
   canManage,
+  canManagePlugins = canManage,
   onChanged,
   restoreFocusRef,
   restoreFocusFallbackRef,
   onManageSkills,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
+  /** Skill authority: install, update and remove imported Skills (documents:manage). */
   canManage: boolean;
+  /** Plugin authority: plugins add connections and MCP servers, which members may add (connections:write). */
+  canManagePlugins?: boolean;
   onChanged: () => void | Promise<void>;
   restoreFocusRef?: RefObject<HTMLElement | null>;
   restoreFocusFallbackRef?: RefObject<HTMLElement | null>;
@@ -393,7 +398,7 @@ export function useSourcePackages({
       <SourcePackageDialogs
         sourceImport={sourceImport}
         connections={connections}
-        canManage={canManage}
+        canManage={sourceImport.kind === "plugin" ? canManagePlugins : canManage}
         removeTarget={removeTarget}
         removeNotice={removeNotice}
         restoreFocusRef={restoreFocusRef}

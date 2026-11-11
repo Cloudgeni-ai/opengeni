@@ -5,6 +5,7 @@ import {
   AgentConfigError,
   AgentConfigRequest,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  CUA_DESKTOP_TOOLS,
   FIRST_PARTY_MCP_TOOL_CAPABILITIES,
   FIRST_PARTY_MCP_TOOL_NAMES,
   ResolvedAgentConfig,
@@ -15,6 +16,7 @@ import {
   allAgentCapabilities,
   legacyEffectiveAgentCapabilities,
   noneAgentCapabilities,
+  agentCapabilityEnabled,
   projectAgentEffectiveTools,
   resolveAgentConfig,
   resolveAgentToolFamilies,
@@ -28,8 +30,6 @@ import {
 
 const deployment = {
   unavailable: {},
-  admissionEnabled: true,
-  defaultForNewSessions: false,
 } satisfies ResolveAgentConfigInput["deployment"];
 const workspace = { defaults: null, humanInputEnabled: true };
 
@@ -54,6 +54,17 @@ function errorCode(fn: () => unknown): string | null {
 }
 
 describe("agent config schemas", () => {
+  test("native CUA names obey the existing browser/computer family ceiling", () => {
+    const off = resolveAgentToolFamilies(resolve({ request: { capabilities: "none" } }).config);
+    const on = resolveAgentToolFamilies(resolve({ request: { capabilities: "all" } }).config);
+    const unavailable = resolveAgentToolFamilies(null, { unavailable: ["browser"] });
+    for (const tool of CUA_DESKTOP_TOOLS) {
+      expect(off.allowsFunctionTool("interaction__cua_" + tool.name)).toBe(false);
+      expect(on.allowsFunctionTool("interaction__cua_" + tool.name)).toBe(true);
+      // Legacy configuration still respects runtime unavailability.
+      expect(unavailable.allowsFunctionTool("interaction__cua_" + tool.name)).toBe(false);
+    }
+  });
   test("capability shapes", () => {
     expect(AgentCapabilities.parse("all")).toBe("all");
     expect(AgentCapabilities.parse({ from: "none", goals: true, skills: "manage" })).toEqual({
@@ -70,22 +81,9 @@ describe("agent config schemas", () => {
 });
 
 describe("resolveAgentConfig", () => {
-  test("omitted agent with switches off stays legacy (null)", () => {
-    expect(resolve()).toEqual({ config: null, instructions: undefined });
-    expect(resolve({ instructions: "be brief" })).toEqual({
-      config: null,
-      instructions: "be brief",
-    });
-    expect(resolve({ creator: "scheduled" }).config).toBeNull();
-    expect(resolve({ creator: "slack" }).config).toBeNull();
-  });
-
-  test("admission switch off rejects any agent input", () => {
-    expect(
-      errorCode(() =>
-        resolve({ request: {}, deployment: { ...deployment, admissionEnabled: false } }),
-      ),
-    ).toBe("agent_config_not_enabled");
+  test("omitted agent on a top-level session resolves all", () => {
+    expect(resolve().config).toMatchObject({ source: "deployment_default", from: "all" });
+    expect(resolve({ instructions: "be brief" }).instructions).toBe("be brief");
   });
 
   test("all and none starting points", () => {
@@ -154,7 +152,7 @@ describe("resolveAgentConfig", () => {
   });
 
   test("renderer defaults per creator", () => {
-    expect(resolve({ request: {}, creator: "api" }).config).toBeNull();
+    expect(resolve({ request: {}, creator: "api" }).config!.source).toBe("deployment_default");
     expect(resolve({ request: { capabilities: "all" }, creator: "slack" }).config!.renderer).toBe(
       "markdown",
     );
@@ -166,30 +164,16 @@ describe("resolveAgentConfig", () => {
     );
   });
 
-  test("workspace defaults and the default-for-new-sessions switch", () => {
+  test("workspace defaults and the deployment default", () => {
     const defaults = { capabilities: { from: "none" as const, goals: true }, identity: "Acme bot" };
     const fromWorkspace = resolve({ workspace: { defaults, humanInputEnabled: true } }).config!;
     expect(fromWorkspace).toMatchObject({ source: "workspace_default", identity: "Acme bot" });
     expect(fromWorkspace.capabilities.goals).toBe(true);
     expect(fromWorkspace.capabilities.knowledge).toBe(false);
-    // Admission off: an old stored default is ignored and the session stays legacy.
-    expect(
-      resolve({
-        workspace: { defaults, humanInputEnabled: true },
-        deployment: { ...deployment, admissionEnabled: false },
-      }).config,
-    ).toBeNull();
-    const deploymentDefault = resolve({
-      deployment: { ...deployment, defaultForNewSessions: true },
-    }).config!;
+    const deploymentDefault = resolve().config!;
     expect(deploymentDefault).toMatchObject({ source: "deployment_default", from: "all" });
     // Site-auth maintenance always stays legacy.
-    expect(
-      resolve({
-        creator: "site_auth_maintenance",
-        deployment: { ...deployment, defaultForNewSessions: true },
-      }).config,
-    ).toBeNull();
+    expect(resolve({ creator: "site_auth_maintenance" }).config).toBeNull();
     // Request capabilities override the workspace default entirely; identity falls back.
     const request = resolve({
       workspace: { defaults, humanInputEnabled: true },
@@ -208,6 +192,58 @@ describe("resolveAgentConfig", () => {
       resolve({ workspace: off, request: { capabilities: { from: "all", humanInput: true } } })
         .config!.capabilities.humanInput,
     ).toBe(true);
+    // Notifications come back with it, as before they were split out.
+    expect(
+      resolve({ workspace: off, request: { capabilities: { from: "all", humanInput: true } } })
+        .config!.capabilities.notifications,
+    ).toBe(true);
+  });
+
+  test('saved requests keep their meaning: "none" with notifications and privacy facts', () => {
+    const created = resolve({ request: { capabilities: "none" } }).config!.capabilities;
+    expect(created.notifications).toBe(false);
+    expect(created.privacyFacts).toBe(false);
+    // A workspace default, explicit or behind an explicit agent without capabilities.
+    const defaults = { defaults: { capabilities: "none" as const }, humanInputEnabled: true };
+    for (const config of [
+      resolve({ workspace: defaults }).config!,
+      resolve({ workspace: defaults, request: { renderer: "markdown" } }).config!,
+    ]) {
+      expect(config.capabilities.notifications).toBe(true);
+      expect(config.capabilities.privacyFacts).toBe(true);
+    }
+    // A schedule's stored request.
+    const scheduled = resolve({ creator: "scheduled", request: { capabilities: "none" } }).config!;
+    expect(scheduled.capabilities.notifications).toBe(true);
+    expect(scheduled.capabilities.privacyFacts).toBe(true);
+    // Its toggles still apply, and human input off still takes notifications with it.
+    const quiet = resolve({
+      creator: "scheduled",
+      request: { capabilities: { from: "none", humanInput: false, privacyFacts: false } },
+    }).config!.capabilities;
+    expect(quiet.notifications).toBe(false);
+    expect(quiet.privacyFacts).toBe(false);
+    // A workspace that switched human input off keeps notifications off too.
+    const off = resolve({
+      creator: "scheduled",
+      workspace: { defaults: null, humanInputEnabled: false },
+      request: { capabilities: "none" },
+    }).config!.capabilities;
+    expect(off.notifications).toBe(false);
+    // Turning human input back on there brings notifications with it, as before.
+    const askAgain = resolve({
+      creator: "scheduled",
+      workspace: { defaults: null, humanInputEnabled: false },
+      request: { capabilities: { from: "none", humanInput: true } },
+    }).config!.capabilities;
+    expect(askAgain.humanInput).toBe(true);
+    expect(askAgain.notifications).toBe(true);
+    // A create request under "none" does not.
+    const createdAsking = resolve({
+      workspace: { defaults: null, humanInputEnabled: false },
+      request: { capabilities: { from: "none", humanInput: true } },
+    }).config!.capabilities;
+    expect(createdAsking.notifications).toBe(false);
   });
 
   test("children inherit and may only narrow", () => {
@@ -253,10 +289,7 @@ describe("resolveAgentConfig", () => {
       kind: "legacy" as const,
       ceiling: { ...allAgentCapabilities(), schedules: false },
     };
-    expect(
-      resolve({ parent: legacy, deployment: { ...deployment, defaultForNewSessions: true } })
-        .config,
-    ).toBeNull();
+    expect(resolve({ parent: legacy }).config).toBeNull();
     const child = resolve({
       parent: legacy,
       request: { capabilities: { from: "all", media: false } },
@@ -303,7 +336,9 @@ describe("write-through", () => {
     ).toEqual({ tools, toolPolicy: policy });
   });
 
-  test('"none" keeps only runtime mechanics', () => {
+  test('"none" keeps runtime mechanics; notifications are their own capability', () => {
+    // "none" still lets the agent ask the person (request_human_input), but
+    // phone notifications, calls and inbox tidying are switched on separately.
     expect(
       agentConfigFirstPartyMcpTools(none, DEFAULT_FIRST_PARTY_MCP_TOOLS).sort() as string[],
     ).toEqual(["command_read", "command_wait", "set_session_title", "wait_for_input"].sort());
@@ -316,7 +351,11 @@ describe("write-through", () => {
       const kept = agentConfigFirstPartyMcpTools(config, FIRST_PARTY_MCP_TOOL_NAMES);
       for (const tool of FIRST_PARTY_MCP_TOOL_NAMES) {
         const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
-        const expected = owner === "runtime" || owner === id;
+        const expected =
+          owner === "runtime" ||
+          owner === "sandbox" ||
+          owner === id ||
+          agentCapabilityEnabled(noneAgentCapabilities(), owner);
         expect({ tool, kept: kept.includes(tool) }).toEqual({ tool, kept: expected });
       }
     }
@@ -337,7 +376,8 @@ describe("write-through", () => {
         (tool) =>
           !tool.startsWith("browser_") &&
           !tool.startsWith("computer_") &&
-          !tool.startsWith("interaction_"),
+          !tool.startsWith("interaction_") &&
+          !tool.startsWith("excel_"),
       ),
     );
     expect(Object.keys(limits.unavailable)).toEqual(["browser"]);
@@ -503,18 +543,6 @@ describe("mid-session update", () => {
       renderer: "markdown",
       capabilities: current.capabilities,
     });
-    expect(
-      errorCode(() =>
-        resolveAgentConfigUpdate({
-          current,
-          legacyCeiling,
-          request: {},
-          deployment: { ...deployment, admissionEnabled: false },
-          onlyNarrow: false,
-          goal: false,
-        }),
-      ),
-    ).toBe("agent_config_not_enabled");
   });
 });
 
@@ -603,6 +631,71 @@ describe("effective tools projection", () => {
       "command_read",
       "command_wait",
     ]);
+  });
+  test("background-command tools follow attached compute for every session", () => {
+    const none = resolve({ request: { capabilities: "none" } }).config!;
+    const all = resolve({ request: { capabilities: "all" } }).config!;
+    const selection = ["wait_for_input", "command_read", "command_wait", "goal_set"] as const;
+    for (const config of [none, all, null]) {
+      const detached = resolveAgentToolFamilies(config, { sandboxAttached: false });
+      const attached = resolveAgentToolFamilies(config, { sandboxAttached: true });
+      expect(detached.firstPartyTools(selection)).not.toContain("command_read");
+      expect(detached.firstPartyTools(selection)).not.toContain("command_wait");
+      // Without compute, a "none" agent has nothing that could resume a wait.
+      expect(detached.firstPartyTools(selection).includes("wait_for_input")).toBe(config !== none);
+      expect(detached.allowsFirstPartyTool("command_wait")).toBe(false);
+      expect(detached.allowsFirstPartyTool("wait_for_input")).toBe(config !== none);
+      expect(attached.firstPartyTools(selection)).toContain("command_read");
+      expect(attached.firstPartyTools(selection)).toContain("command_wait");
+      expect(attached.allowsFirstPartyTool("command_read")).toBe(true);
+    }
+    // A "none" agent still gets them as mechanics once compute is attached.
+    expect(resolveAgentToolFamilies(none, { sandboxAttached: true }).firstPartyTools([])).toEqual([
+      "wait_for_input",
+      "command_read",
+      "command_wait",
+    ]);
+    expect(resolveAgentToolFamilies(none, { sandboxAttached: false }).firstPartyTools([])).toEqual(
+      [],
+    );
+    const projection = projectAgentEffectiveTools({
+      config: none,
+      firstPartyMcpTools: ["wait_for_input", "command_read", "command_wait"],
+      mcpServerIds: ["opengeni"],
+      productServerIds: new Set(),
+      environment: { sandboxAttached: false },
+    });
+    expect(projection.tools.map((tool) => tool.name)).toEqual([]);
+    const withSandbox = projectAgentEffectiveTools({
+      config: none,
+      firstPartyMcpTools: ["wait_for_input", "command_read"],
+      mcpServerIds: ["opengeni"],
+      productServerIds: new Set(),
+      environment: { sandboxAttached: true },
+    });
+    expect(withSandbox.tools.find((tool) => tool.name === "opengeni__command_read")).toMatchObject({
+      capability: "sandbox",
+      source: "first_party",
+    });
+  });
+  test("goal_resume is offered once the session has a goal, in any state", () => {
+    const all = resolve({ request: { capabilities: "all" } }).config!;
+    const selection = ["goal_set", "goal_update", "goal_resume", "goal_pause"] as const;
+    const goalTools = (environment: { sessionGoal?: boolean }) =>
+      resolveAgentToolFamilies(all, environment)
+        .firstPartyTools(selection)
+        .filter((name) => name.startsWith("goal_"));
+    const without = resolveAgentToolFamilies(all, { sessionGoal: false });
+    expect(goalTools({ sessionGoal: false })).toEqual(["goal_set", "goal_update", "goal_pause"]);
+    expect(without.allowsFirstPartyTool("goal_resume")).toBe(false);
+    // A goal in any state, or a goal that is not known, keeps it.
+    for (const environment of [{ sessionGoal: true }, {}]) {
+      expect(goalTools(environment)).toEqual([...selection]);
+    }
+    // Legacy sessions without an agent config are unchanged.
+    expect(
+      resolveAgentToolFamilies(null, { sessionGoal: false }).allowsFirstPartyTool("goal_resume"),
+    ).toBe(true);
   });
   test("lists capability tools and classifies servers", () => {
     const config = resolve({ request: { capabilities: { from: "none", media: true } } }).config!;

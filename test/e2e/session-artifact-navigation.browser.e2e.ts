@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { chromium, type Browser } from "playwright";
 
 const workspaceId = "5d929faa-c755-4146-9d60-e55f42251f0d";
@@ -263,7 +264,57 @@ test("unknown editable modality is not intercepted and opens the full-page edito
   }
 }, 60_000);
 
+for (const width of [1440, 390]) {
+  for (const kind of ["Site", "file"] as const) {
+    test(`short UUID ${kind} link resolves and opens its existing dock at ${width}px`, async () => {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      try {
+        await page.goto(`${baseUrl}/test/session-artifact-navigation.html`);
+        const link = page.getByRole("link", { name: `Open short ${kind}`, exact: true });
+        await link.waitFor();
+        expect(await link.getAttribute("href")).toBe(
+          kind === "Site"
+            ? `/workspaces/${workspaceId}/artifacts/${siteId}`
+            : `/workspaces/${workspaceId}/artifacts/files/${fileId}`,
+        );
+        await link.click();
+        await page
+          .getByRole("heading", {
+            name: kind === "Site" ? "Project overview" : "Retained file preview",
+            exact: true,
+          })
+          .waitFor();
+        expect(page.url()).toContain(sessionPath);
+      } finally {
+        await page.close();
+      }
+    }, 30_000);
+  }
+}
+
 for (const modality of ["document", "spreadsheet", "presentation"] as const) {
+  for (const width of [1440, 390]) {
+    test(`short ${modality} link opens the existing dock editor at ${width}px`, async () => {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      try {
+        await page.goto(`${baseUrl}/test/session-artifact-navigation.html`);
+        const link = page.getByRole("link", { name: `Open short ${modality}`, exact: true });
+        await link.waitFor();
+        expect(await link.getAttribute("href")).toBe(
+          `/workspaces/${workspaceId}/artifacts/editable/${nativeIds[modality]}`,
+        );
+        expect(await page.getByText("(link unavailable)", { exact: false }).count()).toBe(0);
+        await link.click();
+        await page
+          .getByRole("heading", { name: `Native ${modality} editor`, exact: true })
+          .waitFor();
+        expect(page.url()).toContain(sessionPath);
+      } finally {
+        await page.close();
+      }
+    }, 30_000);
+  }
+
   test(`known session ${modality} opens the dock editor instead of leaving the session`, async () => {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     try {

@@ -1,0 +1,1182 @@
+import { afterEach, beforeAll, expect, mock, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { act, useMemo, useState, type ReactNode } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { FailedSessionActions } from "./failed-session-actions";
+import { FailureRecoveryBoundary } from "./failure-recovery-boundary";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
+import {
+  createFailedSessionRetry,
+  type FailedSessionRetryInput,
+} from "../../lib/failed-session-retry";
+
+mock.module("../../lib/navigation", () => ({
+  Link: ({ children }: { children: ReactNode }) => <a href="#fixture">{children}</a>,
+}));
+const { FailedSessionBanner } = await import("./failed-session-banner");
+beforeAll(() => {
+  try {
+    GlobalRegistrator.register();
+  } catch {
+    /* shared DOM */
+  }
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean | undefined }).IS_REACT_ACT_ENVIRONMENT =
+    true;
+});
+let root: Root | undefined;
+afterEach(async () => {
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+});
+async function render(children: ReactNode) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => root!.render(children));
+  return container;
+}
+const failure = {
+  reason: "Connection interrupted.",
+  failedAt: null,
+  consecutiveRecoveryCount: null,
+};
+const actions = { onRetry: async () => true, retryBlocker: null };
+
+test("an incompatible accepted Knowledge scope offers a new message, never Retry", async () => {
+  const reason =
+    "This turn's Knowledge scope no longer matches this chat. Send a new message to continue with the current settings.";
+  const scopedFailure = { ...failure, failureCode: "knowledge_learning_scope_changed", reason };
+  const container = await render(<FailedSessionBanner failure={scopedFailure} actions={actions} />);
+  expect(container.textContent).toContain(reason);
+  expect(container.querySelector("button")).toBeNull();
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={scopedFailure} actions={actions} modelChanged canChooseModel />,
+    ),
+  );
+  expect(container.textContent).toContain(reason);
+  expect(container.querySelector("button")).toBeNull();
+});
+
+test("compact row offers one ghost Retry without duplicate controls or guidance", async () => {
+  const container = await render(<FailedSessionBanner failure={failure} actions={actions} />);
+  expect(container.querySelectorAll("button")).toHaveLength(1);
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+  expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
+  expect(container.querySelector("svg")).not.toBeNull();
+  const details = container.querySelector("details")!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("p")!.textContent).toBe("Connection interrupted.");
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "The session stopped unexpectedly.",
+  );
+  expect(container.textContent).not.toMatch(/Choose another model|composer|preserved|Try again/);
+  expect(container.querySelector('[data-testid="failed-session-banner"]')!.className).not.toMatch(
+    /bg-|border|rounded/,
+  );
+});
+
+test("uncategorized preclaim details never grant Retry or bypass its blocker", async () => {
+  const detail = "getaddrinfo ENOTFOUND database.example.test\nsynthetic diagnostic";
+  const preclaim = {
+    ...failure,
+    reason: detail,
+    recordedDetail: detail,
+    failureCode: "pre_claim_failure",
+  };
+  let retries = 0;
+  const container = await render(<FailedSessionBanner failure={preclaim} />);
+  expect(container.querySelector("button")).toBeNull();
+  const details = container.querySelector("details")!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("p")!.textContent).toBe(detail);
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "The session stopped unexpectedly.",
+  );
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={preclaim}
+        actions={{
+          onRetry: async () => {
+            retries += 1;
+            return true;
+          },
+          retryBlocker: "permission",
+        }}
+      />,
+    ),
+  );
+  expect(container.querySelector("button")).toBeNull();
+  await act(async () => {
+    details.open = true;
+    details.dispatchEvent(new Event("toggle"));
+  });
+  expect(retries).toBe(0);
+});
+
+test("credential failures hide Retry until another model is chosen and keep raw detail folded", async () => {
+  const raw =
+    "401 Incorrect API key provided: sk-proj-****abcd. You can find your API key at https://platform.openai.com/account/api-keys.";
+  const credentialFailure = {
+    ...failure,
+    reason:
+      "The model provider rejected this deployment's engine credentials. Sending messages won't help until the deployment's engine configuration is fixed.",
+    recordedDetail: raw,
+  };
+  const container = await render(
+    <FailedSessionBanner failure={credentialFailure} actions={actions} canChooseModel />,
+  );
+  const banner = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(banner.querySelector("button")).toBeNull();
+  const details = banner.querySelector("details")!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("summary")!.textContent).toBe("Details");
+  expect(details.querySelector("p")!.textContent).toBe(raw);
+  expect(banner.textContent?.replace(details.textContent ?? "", "")).toBe(
+    "The model provider rejected the credentials for this model. Choose another model below.",
+  );
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={credentialFailure} actions={actions} modelChanged />,
+    ),
+  );
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+});
+
+test("billing and daily-limit failures keep Retry on the same model", async () => {
+  const banner = (raw: string) => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason: raw, recordedDetail: raw }}
+      actions={actions}
+      canChooseModel
+    />
+  );
+  const container = await render(banner("402 Payment Required"));
+  for (const raw of [
+    "402 This request requires more credits. To increase, visit https://openrouter.ai/settings/credits and upgrade to a paid account",
+    "429 Rate limit exceeded: free-models-per-day. Add 10 credits to unlock more.",
+  ]) {
+    await act(async () => root!.render(banner(raw)));
+    const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+    expect(row.textContent).toContain("Choose another model below.");
+    expect(row.querySelectorAll("button")).toHaveLength(1);
+    expect(row.querySelector("button")!.textContent).toBe("Retry");
+  }
+});
+
+test("the free model's daily limit names it and offers credits, a subscription and Retry", async () => {
+  const detail =
+    "This model's daily limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets.\n429 Rate limit exceeded: free-models-per-day.";
+  const daily = {
+    ...failure,
+    reason: detail.replace("\n", " "),
+    recordedDetail: detail,
+    failureCode: "provider_quota_exhausted",
+    quotaScope: "daily",
+  };
+  const banner = (props: {
+    freeModel?: boolean | undefined;
+    modelChanged?: boolean | undefined;
+    subscriptions?: { codex: boolean; supergrok: boolean } | undefined;
+    canChooseModel?: boolean | undefined;
+    hasModelPicker?: boolean | undefined;
+  }) => (
+    <FailedSessionBanner
+      failure={daily}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits
+      canConnectModel
+      canChooseModel
+      subscriptions={{ codex: true, supergrok: true }}
+      {...props}
+    />
+  );
+  const container = await render(banner({ freeModel: true }));
+  const row = () => container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  const headline = () => row().querySelector("span")!.textContent;
+  const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
+  expect(headline()).toBe(
+    "The free model has reached its daily limit. Buy Opengeni credits, connect ChatGPT or SuperGrok, or pick another model to keep going.",
+  );
+  expect(labels()).toEqual(["Add credits", "Connect a subscription", "Retry"]);
+  expect(row().querySelector("details p")!.textContent).toBe(detail);
+
+  // A deployment without subscriptions never names them or links to them.
+  await act(async () =>
+    root!.render(banner({ freeModel: true, subscriptions: { codex: false, supergrok: false } })),
+  );
+  expect(headline()).toBe(
+    "The free model has reached its daily limit. Buy Opengeni credits, connect a model provider, or pick another model to keep going.",
+  );
+  expect(labels()).toEqual(["Add credits", "Connect a model", "Retry"]);
+  await act(async () =>
+    root!.render(banner({ freeModel: true, subscriptions: { codex: true, supergrok: false } })),
+  );
+  expect(headline()).toContain("connect ChatGPT, or pick another model");
+  expect(labels()).toEqual(["Add credits", "Connect ChatGPT", "Retry"]);
+
+  // Sending or a pending Retry locks the picker briefly; the remedies hold steady.
+  await act(async () =>
+    root!.render(banner({ freeModel: true, canChooseModel: false, hasModelPicker: true })),
+  );
+  expect(headline()).toContain("or pick another model to keep going.");
+
+  // Once another model is picked, Retry runs on it and the remedies step aside.
+  await act(async () => root!.render(banner({ freeModel: true, modelChanged: true })));
+  expect(headline()).toBe("The free model has reached its daily limit.");
+  expect(labels()).toEqual(["Retry"]);
+
+  // Any other model keeps the generic daily-limit wording and actions.
+  await act(async () => root!.render(banner({ freeModel: false })));
+  expect(headline()).toBe("This model's daily limit has been reached. Choose another model below.");
+  expect(labels()).toEqual(["Retry"]);
+});
+
+test("own-key and API credit stops offer their one fix, never another model", async () => {
+  const banner = (reason: string) => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason }}
+      creditExhausted
+      freeCreditGap={{
+        modelLabel: "Claude Opus 5.5",
+        covered: [{ id: "free-model", label: "Free model" }],
+        selectionUsable: false,
+      }}
+      onChooseModel={() => undefined}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits
+      canChooseModel
+    />
+  );
+  const container = await render(
+    banner("Activity task failed: Upgrade to Pro to use your own key."),
+  );
+  const row = () => container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
+  expect(row().textContent).toContain("Upgrade to Pro to use your own key.");
+  expect(labels()).toEqual(["Upgrade to Pro"]);
+  await act(async () =>
+    root!.render(banner("Activity task failed: Add credits to use your own key.")),
+  );
+  expect(row().textContent).toContain("Add credits to use your own key.");
+  expect(row().textContent).not.toContain("out of Opengeni credits");
+  expect(labels()).toEqual(["Add credits"]);
+  await act(async () => root!.render(banner("API usage uses credits, not your plan credit.")));
+  expect(labels()).toEqual(["Add credits"]);
+});
+
+test("a stop between model calls names its refusal from the turn end, not the failure text", async () => {
+  // A budget-exhausted completed turn: the failure summary carries no refusal text.
+  const banner = (
+    creditRefusal:
+      | "byok_paid_credit_required"
+      | "byok_upgrade_required"
+      | "subscription_upgrade_required"
+      | null,
+  ) => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason: null }}
+      creditExhausted
+      creditRefusal={creditRefusal}
+      freeCreditGap={{
+        modelLabel: "My key model",
+        covered: [{ id: "free-model", label: "Free model" }],
+        selectionUsable: false,
+      }}
+      onChooseModel={() => undefined}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits
+      canChooseModel
+    />
+  );
+  const container = await render(banner("byok_paid_credit_required"));
+  const row = () => container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
+  expect(row().textContent).toContain("Add credits to use your own key.");
+  expect(row().textContent).not.toContain("Free model");
+  expect(labels()).toEqual(["Add credits"]);
+  await act(async () => root!.render(banner("byok_upgrade_required")));
+  expect(row().textContent).toContain("Upgrade to Pro to use your own key.");
+  expect(labels()).toEqual(["Upgrade to Pro"]);
+  await act(async () => root!.render(banner("subscription_upgrade_required")));
+  expect(row().textContent).toContain("Upgrade to Pro to use your own subscription.");
+  expect(row().textContent).not.toContain("Free model");
+  expect(labels()).toEqual(["Upgrade to Pro"]);
+});
+
+test("a member who can't fix a refusal is told to ask an owner, with no action", async () => {
+  const banner = (creditRefusal: "byok_upgrade_required" | "api_credits_required") => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason: null }}
+      creditExhausted
+      creditRefusal={creditRefusal}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits={false}
+      canChooseModel
+    />
+  );
+  const container = await render(banner("byok_upgrade_required"));
+  const row = () => container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  const labels = () => [...row().querySelectorAll("a, button")].map((node) => node.textContent);
+  expect(row().textContent).toContain(
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  );
+  expect(row().textContent).not.toContain("Upgrade to Pro to use your own key.");
+  expect(labels()).toEqual([]);
+  await act(async () => root!.render(banner("api_credits_required")));
+  expect(row().textContent).toContain(
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+  );
+  expect(labels()).toEqual([]);
+});
+
+test("the free model keeps ordinary wording for failures other than its daily limit", async () => {
+  const container = await render(
+    <FailedSessionBanner
+      failure={{
+        ...failure,
+        reason: "429 Too Many Requests",
+        failureCode: "provider_rate_limited",
+      }}
+      actions={actions}
+      workspaceId="workspace-1"
+      canBuyCredits
+      canConnectModel
+      canChooseModel
+      freeModel
+    />,
+  );
+  const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(row.querySelector("span")!.textContent).toBe(
+    "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
+  );
+  expect([...row.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual(["Retry"]);
+});
+
+test("throttling points at the chat bar's model picker and keeps only Retry", async () => {
+  const banner = (modelChanged: boolean) => (
+    <FailedSessionBanner
+      failure={{
+        ...failure,
+        reason: "429 Too Many Requests",
+        failureCode: "provider_rate_limited",
+      }}
+      actions={actions}
+      canChooseModel
+      modelChanged={modelChanged}
+    />
+  );
+  const container = await render(banner(false));
+  const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(row.querySelector("span")!.textContent).toBe(
+    "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
+  );
+  expect([...row.querySelectorAll("button")].map((node) => node.textContent)).toEqual(["Retry"]);
+
+  await act(async () => root!.render(banner(true)));
+  const changedRow = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(changedRow.querySelector("span")!.textContent).toBe(
+    "This model is throttled due to high demand. Try again in a few minutes.",
+  );
+  expect([...changedRow.querySelectorAll("button")].map((node) => node.textContent)).toEqual([
+    "Retry",
+  ]);
+});
+
+test("double clicks and accepted submissions never duplicate recovery", async () => {
+  let settle!: (value: boolean) => void;
+  let sends = 0;
+  const container = await render(
+    <FailedSessionActions
+      {...actions}
+      onRetry={() => {
+        sends++;
+        return new Promise((resolve) => {
+          settle = resolve;
+        });
+      }}
+    />,
+  );
+  const button = container.querySelector("button")!;
+  await act(async () => {
+    button.click();
+    button.click();
+  });
+  expect(sends).toBe(1);
+  expect(button.textContent).toBe("Retrying…");
+  await act(async () => settle(true));
+  expect(container.querySelector("button")).toBeNull();
+  expect(container.querySelector('[role="status"]')!.textContent).toBe("Retry requested.");
+});
+
+test("typed structural sandbox failure never exposes retry or model-switch remedies", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={{
+          reason: "Checkpoint is older than workspace",
+          failedAt: null,
+          consecutiveRecoveryCount: null,
+          structuralSandboxFailure: true,
+        }}
+        actions={{
+          onRetry: async () => true,
+          retryBlocker: null,
+        }}
+      />,
+    ),
+  );
+  expect(container.textContent).not.toContain("Retry");
+  expect(container.textContent).not.toContain("Choose another model");
+  expect(container.textContent).toBe("Checkpoint is older than workspace");
+  expect(container.querySelectorAll("button")).toHaveLength(0);
+});
+test("all draft, delivery, work, permission and deliberate pause guards hide Retry", async () => {
+  let sends = 0;
+  const container = await render(null);
+  for (const retryBlocker of [
+    "draft",
+    "unsent",
+    "delivery",
+    "queued",
+    "loading",
+    "permission",
+    "paused",
+  ] as const) {
+    await act(async () =>
+      root!.render(
+        <FailedSessionActions
+          retryBlocker={retryBlocker}
+          onRetry={async () => {
+            sends++;
+            return true;
+          }}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.textContent).toBe("");
+  }
+  for (const composerBlocker of [
+    "upload",
+    "repository",
+    "policy",
+    "personal_decision",
+    "personal_loading",
+    // The open chat's connected accounts failed to load, were denied, or are reconnecting.
+    "accounts",
+    "accounts_denied",
+    "updating",
+  ] as const) {
+    await act(async () =>
+      root!.render(<FailedSessionActions {...actions} composerBlocker={composerBlocker} />),
+    );
+    expect(container.querySelector("button")).toBeNull();
+  }
+  expect(sends).toBe(0);
+});
+
+test("sandbox projection gates compact Retry and structural failures override billing", async () => {
+  const sandboxRecovery = {
+    workspaceId: "workspace-a",
+    sessionId: "session-a",
+    canControl: true,
+    client: {
+      getSandboxRecovery: async () => ({
+        version: 1 as const,
+        status: "unsupported" as const,
+        reason: null,
+        operationId: null,
+        checkpoint: null,
+      }),
+      recoverSandbox: async () => {
+        throw new Error("Rendering must not submit consent");
+      },
+    },
+  };
+  const container = await render(
+    <FailedSessionBanner failure={failure} actions={actions} sandboxRecovery={sandboxRecovery} />,
+  );
+  expect(container.querySelectorAll("button")).toHaveLength(1);
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={{
+          ...failure,
+          reason: "Checkpoint is older than workspace",
+          structuralSandboxFailure: true,
+        }}
+        actions={actions}
+        sandboxRecovery={sandboxRecovery}
+        creditExhausted
+        workspaceId="workspace-a"
+        canBuyCredits
+        canConnectModel
+        canChooseModel
+      />,
+    ),
+  );
+  expect(container.querySelectorAll('[data-testid="failed-session-banner"]')).toHaveLength(1);
+  expect(container.querySelectorAll("a")).toHaveLength(0);
+  expect(container.textContent).toContain("Checkpoint is older than workspace");
+  expect(container.textContent).not.toMatch(/Retry|Choose another|credits/);
+  expect(container.querySelector("button")!.textContent).toBe("Check recovery status");
+});
+
+test("a viewer who cannot use checkpoint recovery keeps Retry and sees no failed check", async () => {
+  const sandboxRecovery = {
+    workspaceId: "workspace-a",
+    sessionId: "session-a",
+    canControl: true,
+    client: {
+      getSandboxRecovery: async () => {
+        throw new OpenGeniApiError(
+          403,
+          JSON.stringify({ error: { code: "forbidden", message: "Managed human required." } }),
+        );
+      },
+      recoverSandbox: async () => {
+        throw new Error("Rendering must not submit consent");
+      },
+    },
+  };
+  const container = await render(
+    <FailedSessionBanner failure={failure} actions={actions} sandboxRecovery={sandboxRecovery} />,
+  );
+  expect(container.textContent).not.toContain("checkpoint recovery");
+  expect(container.querySelectorAll("button")).toHaveLength(1);
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={{ ...failure, structuralSandboxFailure: true }}
+        actions={actions}
+        sandboxRecovery={sandboxRecovery}
+      />,
+    ),
+  );
+  expect(container.textContent).toBe("Connection interrupted.");
+  expect(container.querySelector("button")).toBeNull();
+});
+
+test.each(["restored", "connected_machine", "automatic", "fresh_workspace"] as const)(
+  "%s projection exposes only explicit compact Retry through the structural banner",
+  async (route) => {
+    let retries = 0;
+    const sandboxRecovery = {
+      workspaceId: "workspace-a",
+      sessionId: "session-a",
+      canControl: true,
+      client: {
+        getSandboxRecovery: async () => ({
+          version: 1 as const,
+          status:
+            route === "restored"
+              ? ("restored" as const)
+              : route === "automatic" || route === "fresh_workspace"
+                ? ("eligible" as const)
+                : ("unsupported" as const),
+          reason: route === "connected_machine" ? "connected_machine_selected" : null,
+          operationId: route === "restored" ? "durable-operation" : null,
+          automaticAvailable: route === "automatic" || route === "fresh_workspace",
+          ...(route === "automatic"
+            ? { automaticLane: "checkpoint" as const }
+            : route === "fresh_workspace"
+              ? { automaticLane: "fresh_workspace" as const }
+              : {}),
+          checkpoint:
+            route === "automatic"
+              ? {
+                  version: 1 as const,
+                  sessionId: "session-a",
+                  sandboxGroupId: "group-a",
+                  leaseId: "lease-a",
+                  routeEpoch: 0,
+                  authorityEpoch: 1,
+                  leaseEpoch: 2,
+                  workspaceGeneration: 12,
+                  archiveGeneration: 7,
+                  artifactId: "artifact-a",
+                  revision: "revision-a",
+                  capturedAt: "2026-09-20T08:00:00.000Z",
+                }
+              : null,
+        }),
+        recoverSandbox: async () => {
+          throw new Error("Current route must not submit consent");
+        },
+      },
+    };
+    const failureProps = { ...failure, structuralSandboxFailure: true };
+    const retryProps = {
+      ...actions,
+      onRetry: async () => {
+        retries++;
+        return true;
+      },
+    };
+    const container = await render(
+      <FailedSessionBanner
+        failure={failureProps}
+        actions={retryProps}
+        sandboxRecovery={sandboxRecovery}
+      />,
+    );
+    expect(retries).toBe(0);
+    expect(container.querySelectorAll("button")).toHaveLength(1);
+    expect(container.querySelector("button")!.textContent).toBe("Retry");
+    if (route === "automatic") {
+      expect(container.textContent).toContain("Retry will use the latest verified checkpoint from");
+      expect(container.textContent).toContain("Newer files are unavailable.");
+    }
+    if (route === "fresh_workspace")
+      expect(container.textContent).toContain(
+        "Retry will continue with an empty workspace. Opengeni cannot restore the previous sandbox files automatically.",
+      );
+    expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
+    expect(container.textContent).not.toContain("Choose another model");
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={failureProps}
+          actions={{ ...retryProps, retryBlocker: "paused" }}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={{ ...failureProps, safetyRefusal: true }}
+          actions={retryProps}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={{ ...failureProps, reason: "The model is unavailable" }}
+          actions={retryProps}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={failureProps}
+          actions={retryProps}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(retries).toBe(0);
+    await act(async () => container.querySelector("button")!.click());
+    expect(retries).toBe(1);
+    expect(container.querySelector("button")).toBeNull();
+  },
+);
+
+test("local non-submission remains retryable", async () => {
+  const container = await render(<FailedSessionActions {...actions} onRetry={async () => false} />);
+  await act(async () => container.querySelector("button")!.click());
+  expect(container.querySelector('[role="alert"]')!.textContent).toContain("Could not retry");
+  expect(container.querySelector("button")!.disabled).toBe(false);
+});
+
+test("history hydration retains guards; a distinct failure resets them", async () => {
+  let settle!: (value: boolean) => void;
+  const props = {
+    ...actions,
+    onRetry: () =>
+      new Promise<boolean>((resolve) => {
+        settle = resolve;
+      }),
+  };
+  const container = await render(<FailedSessionActions {...props} />);
+  await act(async () => container.querySelector("button")!.click());
+  await act(async () => root!.render(<FailedSessionActions {...props} failureId="first" />));
+  expect(container.querySelector("button")!.textContent).toBe("Retrying…");
+  await act(async () => root!.render(<FailedSessionActions {...props} failureId="second" />));
+  await act(async () => settle(true));
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+});
+
+test("unknown outcome checks the identical frozen operation instead of a new retry", async () => {
+  const inputs: FailedSessionRetryInput[] = [];
+  function Recovery() {
+    const [retryInput, setRetryInput] = useState<FailedSessionRetryInput | null>(null);
+    const retry = useMemo(
+      () =>
+        createFailedSessionRetry(async (input) => {
+          inputs.push(input);
+          if (inputs.length === 1) throw new Error("Response lost");
+        }, setRetryInput),
+      [],
+    );
+    return (
+      <FailedSessionActions
+        {...actions}
+        retryInput={retryInput}
+        onRetry={() =>
+          retry("failure-a", {
+            model: "selected-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+          })
+        }
+      />
+    );
+  }
+  const container = await render(<Recovery />);
+  await act(async () => container.querySelector("button")!.click());
+  expect(container.querySelectorAll("button")).toHaveLength(1);
+  expect(container.querySelector("button")!.textContent).toBe("Check retry");
+  expect(container.textContent).not.toContain("Choose");
+  await act(async () => container.querySelector("button")!.click());
+  expect(inputs).toHaveLength(2);
+  expect(inputs[1]).toBe(inputs[0]);
+  expect(container.querySelector("button")).toBeNull();
+});
+
+test("definitive unsafe retry rejection removes the action", async () => {
+  const container = await render(
+    <FailedSessionActions
+      {...actions}
+      onRetry={async () => {
+        throw new OpenGeniApiError(409, "Unsupported failure", {
+          code: "RETRY_UNSUPPORTED_FAILURE",
+        });
+      }}
+    />,
+  );
+  await act(async () => container.querySelector("button")!.click());
+  expect(container.querySelector("button")).toBeNull();
+  expect(container.querySelector('[role="alert"]')!.textContent).toContain(
+    "cannot be retried safely",
+  );
+});
+
+test("a permanently unknown tool outcome says what to do instead of still settling", async () => {
+  let sends = 0;
+  const container = await render(
+    <FailedSessionActions
+      {...actions}
+      onRetry={async () => {
+        sends += 1;
+        throw new OpenGeniApiError(409, "Unknown tool outcome", {
+          code: "RETRY_TOOL_OUTCOME_UNKNOWN",
+        });
+      }}
+    />,
+  );
+  await act(async () => container.querySelector("button")!.click());
+  expect(sends).toBe(1);
+  // Permanent: the action is removed rather than inviting a retry that can
+  // never succeed, and the copy names the person's next step.
+  expect(container.querySelector("button")).toBeNull();
+  const alert = container.querySelector('[role="alert"]')!.textContent!;
+  expect(alert).not.toContain("settling");
+  expect(alert).toBe(
+    "A tool may already have run, so Retry could repeat it. Check its result, then send a message to continue.",
+  );
+});
+
+for (const code of ["RETRY_PAUSED", "RETRY_EXECUTION_UNRESOLVED"] as const) {
+  test(`${code} allows explicit retry after the same failure's transient blocker clears`, async () => {
+    let sends = 0;
+    const onRetry = async () => {
+      if (++sends === 1) throw new OpenGeniApiError(409, "Blocked", { code });
+      return true;
+    };
+    const container = await render(
+      <FailedSessionActions failureId="same-failure" retryBlocker={null} onRetry={onRetry} />,
+    );
+    await act(async () => container.querySelector("button")!.click());
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe(
+      code === "RETRY_PAUSED"
+        ? "This session is paused."
+        : "Earlier work is still settling. Try again in a moment.",
+    );
+    await act(async () =>
+      root!.render(
+        <FailedSessionActions
+          failureId="same-failure"
+          retryBlocker={code === "RETRY_PAUSED" ? "paused" : "queued"}
+          onRetry={onRetry}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionActions failureId="same-failure" retryBlocker={null} onRetry={onRetry} />,
+      ),
+    );
+    expect(sends).toBe(1);
+    await act(async () => container.querySelector("button")!.click());
+    expect(sends).toBe(2);
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+}
+
+test("unsupported model directs to existing picker; a changed model permits recovery", async () => {
+  const unavailable = {
+    ...failure,
+    reason: "The model `example` is not supported with this account.",
+  };
+  const container = await render(
+    <FailedSessionBanner failure={unavailable} actions={actions} canChooseModel />,
+  );
+  // The headline replaced the recorded text, which stays behind Details.
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "This model isn’t available. Choose another below.",
+  );
+  expect(container.querySelector("details")!.textContent).toBe(`Details${unavailable.reason}`);
+  expect(container.querySelector("button")).toBeNull();
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={unavailable} actions={actions} canChooseModel={false} />,
+    ),
+  );
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "This model isn’t available.",
+  );
+  expect(container.querySelector("button")).toBeNull();
+  await act(async () =>
+    root!.render(<FailedSessionBanner failure={unavailable} actions={actions} modelChanged />),
+  );
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+});
+
+test("safety refusal preserves draft and has no recovery action", async () => {
+  const container = await render(
+    <>
+      <FailedSessionBanner failure={{ ...failure, safetyRefusal: true }} actions={actions} />
+      <textarea defaultValue="My draft" />
+    </>,
+  );
+  expect(container.querySelector("button")).toBeNull();
+  expect(container.querySelector("textarea")!.value).toBe("My draft");
+});
+
+test("billing offers at most one authorized action and never Retry", async () => {
+  const container = await render(null);
+  for (const [canBuyCredits, canConnectModel, expected] of [
+    [true, true, "Add credits"],
+    [false, true, "Use your own provider account"],
+    [false, false, null],
+  ] as const) {
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={failure}
+          creditExhausted
+          workspaceId="workspace-a"
+          canBuyCredits={canBuyCredits}
+          canConnectModel={canConnectModel}
+          actions={actions}
+        />,
+      ),
+    );
+    expect(container.querySelectorAll("a")).toHaveLength(expected ? 1 : 0);
+    expect(container.querySelector("a")?.textContent ?? null).toBe(expected);
+    expect(container.querySelector("button")).toBeNull();
+  }
+});
+
+test("free credit for other models offers a covered model before buying credits", async () => {
+  const chosen: string[] = [];
+  const gap = {
+    modelLabel: "Claude Opus 5.5",
+    covered: [
+      { id: "azure-sol/gpt-6.1-sol", label: "GPT-6.1 Sol" },
+      { id: "gpt-6-luna", label: "GPT-6 Luna" },
+    ],
+    selectionUsable: false,
+  };
+  const banner = (props: {
+    modelChanged?: boolean | undefined;
+    selectionUsable?: boolean | undefined;
+    canBuyCredits?: boolean | undefined;
+  }) => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason: "insufficient Opengeni credits" }}
+      creditExhausted
+      freeCreditGap={{ ...gap, selectionUsable: props.selectionUsable ?? false }}
+      onChooseModel={(model) => chosen.push(model)}
+      workspaceId="workspace-a"
+      canBuyCredits={props.canBuyCredits ?? true}
+      canChooseModel
+      modelChanged={props.modelChanged}
+      actions={actions}
+    />
+  );
+  const container = await render(banner({}));
+  const headline = container.querySelector('[data-testid="failed-session-banner"] span')!;
+  expect(headline.textContent).toBe(
+    "Your free credits don't cover Claude Opus 5.5. Switch to a model they cover, such as GPT-6.1 Sol or GPT-6 Luna, or add credits.",
+  );
+  expect(container.textContent).not.toMatch(/out of Opengeni credits/i);
+  const switchButton = container.querySelector("button")!;
+  expect(switchButton.textContent).toBe("Use GPT-6.1 Sol");
+  expect(container.querySelector("a")!.textContent).toBe("Add credits");
+  await act(async () => switchButton.click());
+  expect(chosen).toEqual(["azure-sol/gpt-6.1-sol"]);
+
+  await act(async () => root!.render(banner({ canBuyCredits: false })));
+  expect(container.querySelector("button")!.textContent).toBe("Use GPT-6.1 Sol");
+  expect(container.querySelector("a")).toBeNull();
+
+  // Another uncovered model selected: the switch stays on offer.
+  await act(async () => root!.render(banner({ modelChanged: true })));
+  expect(container.querySelector("button")!.textContent).toBe("Use GPT-6.1 Sol");
+  expect(container.textContent).toContain("Switch to a model they cover");
+
+  // A usable model selected: the copy says how to continue and no switch is offered.
+  await act(async () => root!.render(banner({ modelChanged: true, selectionUsable: true })));
+  expect(container.textContent).toContain(
+    "Your free credits don't cover Claude Opus 5.5. Send a message to continue with the selected model.",
+  );
+  expect(container.querySelector("button")).toBeNull();
+});
+
+test("unknown provider evidence never invents expiry, reset or connection classification", async () => {
+  const container = await render(
+    <FailedSessionBanner
+      failure={{ ...failure, reason: "Connection failed." }}
+      actions={actions}
+    />,
+  );
+  const row = container.querySelector('[data-testid="failed-session-banner"]')!;
+  expect(row.querySelector("span")!.textContent).toBe("The session stopped unexpectedly.");
+  expect(row.querySelector("details p")!.textContent).toBe("Connection failed.");
+  expect(row.querySelector("details")!.open).toBe(false);
+  expect(row.querySelector("button")!.textContent).toBe("Retry");
+  expect(container.textContent).not.toMatch(/Codex|expired|reset|reconnect/i);
+});
+
+test("unavailable recovery chunk preserves error and composer draft", async () => {
+  function Unavailable(): never {
+    throw new Error("fixture unavailable");
+  }
+  const container = await render(
+    <>
+      <FailureRecoveryBoundary fallback={<p role="alert">Connection failed.</p>}>
+        <Unavailable />
+      </FailureRecoveryBoundary>
+      <textarea defaultValue="My draft" />
+    </>,
+  );
+  expect(container.querySelector('[role="alert"]')!.textContent).toBe("Connection failed.");
+  expect(container.querySelector("textarea")!.value).toBe("My draft");
+});
+
+test("a compaction failure the timeline already shows keeps only its recovery action", async () => {
+  const recorded =
+    "compaction summarization failed: 400 Missing required parameter: 'input[116].status'.";
+  const compaction = {
+    ...failure,
+    reason: recorded,
+    recordedDetail: recorded,
+    failureCode: "context_compaction_failed",
+  };
+  const shown = await render(
+    <FailedSessionBanner failure={compaction} actions={actions} shownInTimeline />,
+  );
+  // No second headline or Details: the timeline landmark owns both.
+  expect(shown.querySelector('[data-testid="failed-session-banner"]')).toBeNull();
+  expect(shown.querySelector("details")).toBeNull();
+  expect(shown.textContent).not.toContain("Couldn’t compact");
+  expect(shown.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  // Nothing to offer: nothing renders.
+  const empty = await render(<FailedSessionBanner failure={compaction} shownInTimeline />);
+  expect(empty.innerHTML).toBe("");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  // Absent from the visible timeline (e.g. a cleared view), the banner keeps it.
+  const absent = await render(<FailedSessionBanner failure={compaction} actions={actions} />);
+  expect(absent.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "Couldn’t compact conversation history. If the next message fails too, start a new session.",
+  );
+  expect(absent.querySelector("details p")!.textContent).toBe(recorded);
+});
+
+test("the timeline flag never hides a failure the timeline cannot own", async () => {
+  // A usage-limit row in the timeline owns its failure: the banner keeps only Retry.
+  const limited = await render(
+    <FailedSessionBanner
+      failure={{ ...failure, failureCode: "allowance_exhausted" }}
+      actions={actions}
+      shownInTimeline
+    />,
+  );
+  expect(limited.querySelector('[data-testid="failed-session-banner"]')).toBeNull();
+  expect(limited.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+  // Another failure kind keeps its banner even if the caller claims ownership.
+  const container = await render(
+    <FailedSessionBanner failure={failure} actions={actions} shownInTimeline />,
+  );
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "The session stopped unexpectedly.",
+  );
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+  // A compaction failure on an exhausted quota keeps its limit headline.
+  const quota = await render(
+    <FailedSessionBanner
+      failure={{
+        ...failure,
+        reason: "compaction summarization failed: 429",
+        failureCode: "context_compaction_failed",
+        quotaScope: "daily",
+      }}
+      shownInTimeline
+    />,
+  );
+  expect(quota.querySelector('[data-testid="failed-session-banner"]')).not.toBeNull();
+  expect(quota.textContent).toContain("daily limit");
+});
+
+test("a Codex usage limit shows when it resets and a Continue at reset switch in place of Retry", async () => {
+  const changes: boolean[] = [];
+  const limited = {
+    ...failure,
+    failureCode: "codex_usage_limit_reached",
+    reason:
+      "Your ChatGPT/Codex subscription usage limit has been reached. Access resets in about 72h.",
+  };
+  const codexUsage = {
+    resetText: "Resets Sat 14:05.",
+    continueAtReset: false,
+    onContinueAtResetChange: (next: boolean) => changes.push(next),
+  };
+  const container = await render(
+    <FailedSessionBanner failure={limited} actions={actions} codexUsage={codexUsage} />,
+  );
+  const banner = container.querySelector('[data-testid="failed-session-banner"]');
+  expect(banner?.textContent).toContain("Codex usage limit reached. Resets Sat 14:05.");
+  // The headline replaced the recorded sentence, which stays behind Details.
+  expect(banner?.querySelector("details")?.textContent).toBe(`Details${limited.reason}`);
+  expect(banner?.textContent).not.toContain("Retry");
+  expect(banner?.textContent).not.toContain("Continue with");
+  const toggle = container.querySelector<HTMLButtonElement>(
+    '[data-testid="codex-usage-continue-at-reset"]',
+  );
+  expect(toggle?.getAttribute("role")).toBe("switch");
+  expect(toggle?.getAttribute("aria-checked")).toBe("false");
+  expect(container.querySelector(`label[for="${toggle?.id}"]`)?.textContent).toBe(
+    "Continue at reset",
+  );
+  await act(async () => toggle!.click());
+  expect(changes).toEqual([true]);
+  // Other failures keep Retry, and so does a banner without the switch.
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={failure} actions={actions} codexUsage={codexUsage} />,
+    ),
+  );
+  expect(container.querySelector('[data-testid="codex-usage-continue-at-reset"]')).toBeNull();
+  expect(container.textContent).toContain("Retry");
+  await act(async () => root!.render(<FailedSessionBanner failure={limited} actions={actions} />));
+  expect(container.querySelector('[data-testid="codex-usage-continue-at-reset"]')).toBeNull();
+});
+
+test("the Codex usage notice is one line with when it resets and the Continue at reset switch", async () => {
+  const { CodexUsageNotice } = await import("./codex-usage-notice");
+  const changes: boolean[] = [];
+  const choice = {
+    resetText: "Reset time unknown.",
+    continueAtReset: true,
+    onContinueAtResetChange: (next: boolean) => changes.push(next),
+  };
+  const container = await render(<CodexUsageNotice choice={choice} />);
+  const notice = container.querySelector('[data-testid="codex-usage-notice"]');
+  expect(notice?.querySelector("p")?.textContent).toBe(
+    "Codex usage limit reached. Reset time unknown.",
+  );
+  // One switch and no buttons: another model is picked in the composer.
+  expect(notice?.querySelectorAll("button:not([role=switch])")).toHaveLength(0);
+  const toggle = container.querySelector<HTMLButtonElement>(
+    '[data-testid="codex-usage-continue-at-reset"]',
+  );
+  // A waiting chat continues at the reset unless the person switches it off.
+  expect(toggle?.getAttribute("aria-checked")).toBe("true");
+  await act(async () => toggle!.click());
+  expect(changes).toEqual([false]);
+  // While a change is saving it ignores clicks, and its error shows plainly.
+  await act(async () =>
+    root!.render(<CodexUsageNotice choice={{ ...choice, pending: true, error: "Try again." }} />),
+  );
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[data-testid="codex-usage-continue-at-reset"]')!
+      .click(),
+  );
+  expect(changes).toEqual([false]);
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe("Try again.");
+});
+
+test("a chat its owner's machine isn't allowed for offers Allow in place of Retry", async () => {
+  const machineFailure = {
+    ...failure,
+    failureCode: "machine_access_required",
+    reason: "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now.",
+  };
+  // Someone who can't allow it reads the reason and keeps Retry for once it is.
+  const viewer = await render(<FailedSessionBanner failure={machineFailure} actions={actions} />);
+  expect(viewer.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    machineFailure.reason,
+  );
+  expect(viewer.textContent).not.toContain("database");
+  expect(viewer.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  let resolveAllow: (error: string | null) => void = () => {};
+  const onAllow = mock(() => new Promise<string | null>((resolve) => (resolveAllow = resolve)));
+  const owner = await render(
+    <FailedSessionBanner
+      failure={machineFailure}
+      actions={actions}
+      allowMachine={{ machineName: "Studio Mac", onAllow }}
+    />,
+  );
+  expect(owner.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now.",
+  );
+  const buttons = () => [...owner.querySelectorAll("button")];
+  expect(buttons().map((button) => button.textContent)).toEqual(["Allow for this chat"]);
+  await act(async () => {
+    buttons()[0]!.click();
+    buttons()[0]!.click();
+  });
+  expect(onAllow).toHaveBeenCalledTimes(1);
+  expect(buttons()[0]!.textContent).toBe("Allowing…");
+  expect(buttons()[0]!.disabled).toBe(true);
+  await act(async () => resolveAllow("This chat has ended. Start a new chat to use a repository."));
+  expect(owner.querySelector('[role="alert"]')!.textContent).toBe(
+    "This chat has ended. Start a new chat to use a repository.",
+  );
+  expect(buttons()[0]!.textContent).toBe("Allow for this chat");
+});

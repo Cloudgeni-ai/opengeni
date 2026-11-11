@@ -28,12 +28,15 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
   "test/e2e/editable-artifacts.browser.e2e.ts",
 ] as const;
 const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts";
+/** The only root browser e2e that drives the real browserd (BR-7). */
+const SECRETS_FAKE_LOGIN_E2E = "test/e2e/secrets-fake-login.browser.e2e.ts";
 const CLAUDE_SUBSCRIPTION_E2E = "test/e2e/claude-subscription.browser.e2e.ts";
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 const FAILED_SESSION_RECOVERY_E2E = "test/e2e/failed-session-recovery.browser.e2e.ts";
 const SESSION_LOADING_STARTUP_E2E = "test/e2e/session-loading-startup.browser.e2e.ts";
 const COMPOSER_MENUS_E2E = "test/e2e/composer-menus.browser.e2e.ts";
 const COMPOSER_KEYBOARD_E2E = "test/e2e/composer-keyboard.browser.e2e.ts";
+const COMPOSER_FOCUS_HANDOFF_E2E = "test/e2e/composer-focus-handoff.browser.e2e.ts";
 const CONNECTOR_ACCOUNTS_E2E = "test/e2e/connector-accounts.browser.e2e.ts";
 const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts";
@@ -45,6 +48,7 @@ const PERSONAL_GITHUB_IDENTITY_E2E = "test/e2e/personal-github-identity.browser.
 const CRYPTO_RANDOM_UUID_E2E = "test/e2e/crypto-random-uuid.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
+const SESSION_RELAY_HEADERS_E2E = "test/e2e/session-relay-headers.browser.e2e.ts";
 const SESSION_SIDEBAR_E2E = "test/e2e/session-sidebar.browser.e2e.ts";
 const SESSION_SKILL_REVIEW_E2E = "test/e2e/session-skill-review.browser.e2e.ts";
 const SITE_CONVERSATIONS_E2E = "test/e2e/site-conversations.browser.e2e.ts";
@@ -53,17 +57,34 @@ const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
 const TIMELINE_TIP_FOLLOW_BROWSER_E2E = "test/e2e/timeline-tip-follow.browser.e2e.ts";
 const TIMELINE_EXCHANGE_FOLD_BROWSER_E2E = "test/e2e/timeline-exchange-fold.browser.e2e.ts";
 const RESTORED_ATTACHMENT_PREVIEW_E2E = "test/e2e/restored-attachment-preview.browser.e2e.ts";
+const ARTIFACT_DESKTOP_E2E = "test/e2e/artifact-desktop.browser.e2e.ts";
 const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
+  test("relay header browser coverage follows SDK and header contracts without widening browserd plans", () => {
+    for (const path of [
+      "packages/sdk/src/client.ts",
+      "packages/contracts/src/browser-response-headers.ts",
+      SESSION_RELAY_HEADERS_E2E,
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.e2eTests, path).toContain(SESSION_RELAY_HEADERS_E2E);
+      expect(plan.unitTests, path).not.toContain(SESSION_RELAY_HEADERS_E2E);
+      expect(plan.integrationTests, path).not.toContain(SESSION_RELAY_HEADERS_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
+      SESSION_RELAY_HEADERS_E2E,
+    );
+    expect(usesBrowserRunner(SESSION_RELAY_HEADERS_E2E)).toBe(true);
+  });
   test("loading/startup is CI-discovered for its web, React, SDK and test-helper dependencies", () => {
     expect(discoverTestFiles().e2e).toContain(SESSION_LOADING_STARTUP_E2E);
     expect(usesBrowserRunner(SESSION_LOADING_STARTUP_E2E)).toBe(true);
     for (const path of [
       SESSION_LOADING_STARTUP_E2E,
       "apps/web/src/context.tsx",
-      "apps/web/src/lib/session-startup.ts",
+      "packages/react/src/lib/session-startup.tsx",
       "packages/react/src/components/session-status.tsx",
       "packages/sdk/src/client.ts",
       "packages/testing/src/process.ts",
@@ -80,7 +101,7 @@ describe("fail-closed change impact", () => {
   test("session Skill review follows its web and shared dependencies without widening leaf plans", () => {
     for (const path of [
       SESSION_SKILL_REVIEW_E2E,
-      "apps/web/src/components/session/session-skill-reviews.tsx",
+      "packages/react/src/app/components/session/session-skill-reviews.tsx",
       "apps/web/test/fixtures/session-skill-review/main.tsx",
       "packages/react/src/components/MessageTimeline.tsx",
       "packages/sdk/src/client.ts",
@@ -137,28 +158,34 @@ describe("fail-closed change impact", () => {
     );
   });
 
-  test("native report delivery belongs to the required prepared package lane, never unit shards", () => {
-    const suite = "apps/api/test/native-report-delivery.test.ts";
-    expect(OPT_IN_TESTS[suite]).toContain("required package-contracts gate");
+  test("native artifact suites belong to the required prepared package lane, never unit shards", () => {
     const tests = discoverTestFiles();
-    expect([...tests.unit, ...tests.integration, ...tests.e2e]).not.toContain(suite);
-    for (const changed of [
-      suite,
-      "apps/api/src/editable-artifact-production.ts",
-      "apps/api/src/mcp/server.ts",
-      "packages/core/src/domain/editable-artifacts/agent-application.ts",
-      "packages/db/src/session-goal-reports.ts",
-      "packages/db/drizzle/0474_goal_report_requirements.sql",
-      "packages/contracts/src/session-goal-reports.ts",
-      "packages/testing/src/shared-pg.ts",
-      "packages/storage/src/index.ts",
-      "packages/artifact-tool/src/runtime-development.ts",
-      "scripts/prepare-development-artifact-runtime.ts",
-      ".github/workflows/ci.yml",
+    for (const suite of [
+      "apps/api/test/native-report-delivery.test.ts",
+      "apps/api/test/native-spreadsheet-transaction-order.test.ts",
     ]) {
-      const plan = createImpactPlan([changed]);
-      expect(plan.unitTests, changed).not.toContain(suite);
-      expect(plan.buildPackages, changed).toContain("@opengeni/api-router");
+      expect(OPT_IN_TESTS[suite]).toContain("required package-contracts gate");
+      expect([...tests.unit, ...tests.integration, ...tests.e2e]).not.toContain(suite);
+      for (const changed of [
+        suite,
+        "apps/api/src/editable-artifact-production.ts",
+        "apps/api/src/mcp/server.ts",
+        "packages/core/src/domain/editable-artifacts/agent-application.ts",
+        "packages/db/src/editable-artifacts.ts",
+        "packages/db/src/session-goal-reports.ts",
+        "packages/db/drizzle/0474_goal_report_requirements.sql",
+        "packages/db/drizzle/0785_editable_spreadsheet_ordered_operation_ids.sql",
+        "packages/contracts/src/session-goal-reports.ts",
+        "packages/testing/src/shared-pg.ts",
+        "packages/storage/src/index.ts",
+        "packages/artifact-tool/src/runtime-development.ts",
+        "scripts/prepare-development-artifact-runtime.ts",
+        ".github/workflows/ci.yml",
+      ]) {
+        const plan = createImpactPlan([changed]);
+        expect(plan.unitTests, changed).not.toContain(suite);
+        expect(plan.buildPackages, changed).toContain("@opengeni/api-router");
+      }
     }
   }, 30_000);
 
@@ -221,12 +248,20 @@ describe("fail-closed change impact", () => {
     expect(plan.browserAcceptanceLanes).toEqual([]);
     expect(plan.artifactRuntimeRequired).toBe(false);
     expect(plan.buildPackages).toEqual([]);
-    expect(plan.guards).toEqual(["format", "docs-refs", "generated-fonts", "public-hygiene"]);
+    expect(plan.guards).toEqual([
+      "format",
+      "docs-refs",
+      "doc-snippets",
+      "generated-fonts",
+      "public-hygiene",
+      "subscription-contract",
+    ]);
   });
 
   test.each([
     "bun.lock",
     ".bun-version",
+    ".changeset/config.json",
     ".github/workflows/ci.yml",
     ".dockerignore",
     "scripts/ci/workspace.ts",
@@ -242,11 +277,27 @@ describe("fail-closed change impact", () => {
     expect(plan.typecheckProjects).toEqual(typecheckProjects());
     expect(plan.guards).toContain("public-hygiene");
     expect(plan.guards).toContain("migration-ordinals");
-    expect(plan.guards).toContain("migration-schema-contract");
+    expect(plan.guards).toContain("migration-deployment-mode");
+    expect(plan.guards).toContain("migration-online-safety");
+    expect(plan.guards).toContain("migration-immutability");
+    expect(plan.guards).toContain("migration-previous-release");
     expect(plan.guards).toContain("migration-test-budgets");
+    expect(plan.guards).toContain("subscription-contract");
     expect(plan.guards).toContain("public-api");
-    expect(plan.guards).toContain("sdk-compat");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
+  });
+
+  test("docs and changeset notes alongside code select only the code's tests", () => {
+    const code = createImpactPlan(["apps/web/src/main.tsx"]);
+    const mixed = createImpactPlan([
+      "apps/web/src/main.tsx",
+      "docs/artifact-engine.md",
+      ".changeset/quiet-web.md",
+    ]);
+    expect(mixed.mode).toBe("focused");
+    expect(mixed.unitTests).toEqual(code.unitTests);
+    expect(mixed.typecheckProjects).toEqual(code.typecheckProjects);
+    expect(createImpactPlan([".changeset/quiet-web.md"]).mode).toBe("docs");
   });
 
   test("public API surface guards follow the API, contracts, SDK, and React graph", () => {
@@ -259,11 +310,49 @@ describe("fail-closed change impact", () => {
       const plan = createImpactPlan([path]);
       expect(plan.mode).toBe("focused");
       expect(plan.guards).toContain("public-api");
-      expect(plan.guards).toContain("sdk-compat");
     }
     const web = createImpactPlan(["apps/web/src/main.tsx"]);
     expect(web.guards).not.toContain("public-api");
-    expect(web.guards).not.toContain("sdk-compat");
+  });
+
+  test("published SDK compatibility runs in the service tier for every relevant producer and fixture", () => {
+    const suite = "test/integration/sdk-compatibility.integration.ts";
+    for (const path of [
+      "apps/api/src/app.ts",
+      "packages/sdk/src/client.ts",
+      "packages/contracts/src/index.ts",
+      "packages/core/src/domain/sessions.ts",
+      "packages/db/src/index.ts",
+      "packages/events/src/index.ts",
+      "packages/runtime/src/index.ts",
+      "apps/worker/src/activities.ts",
+      "packages/react/src/index.ts",
+      "packages/storage/src/index.ts",
+      "packages/testing/src/settings.ts",
+      "test/integration/sdk-compatibility/consumer.ts",
+      "test/integration/sdk-compatibility/versions.json",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.integrationTests, path).toContain(suite);
+      expect(plan.unitTests, path).not.toContain(suite);
+    }
+    expect(createImpactPlan(["test/integration/sdk-compatibility/versions.json"]).guards).toContain(
+      "public-api",
+    );
+  });
+
+  test("the subscription contract guard runs on docs-only and focused plans", () => {
+    const contract = createImpactPlan(["docs/subscription-accounts.md"]);
+    expect(contract.mode).toBe("docs");
+    expect(contract.guards).toContain("subscription-contract");
+    for (const path of [
+      "packages/testing/src/subscription-reference-model.ts",
+      "apps/web/src/main.tsx",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.guards, path).toContain("subscription-contract");
+    }
   });
 
   test("empty and invalid change sets fail closed", () => {
@@ -282,15 +371,21 @@ describe("fail-closed change impact", () => {
     expect(sdk.unitTests).toContain("packages/sdk/test/client.test.ts");
     expect(sdk.e2eTests).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
+      "test/e2e/agents.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
+      "test/e2e/annotation-scroll.browser.e2e.ts",
       "test/e2e/appearance.browser.e2e.ts",
+      "test/e2e/archived-chat-status.browser.e2e.ts",
+      "test/e2e/artifact-desktop.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
       "test/e2e/capability-details.browser.e2e.ts",
       "test/e2e/chat-media-entry.browser.e2e.ts",
       CLAUDE_SUBSCRIPTION_E2E,
       "test/e2e/code-editor.browser.e2e.ts",
+      "test/e2e/codex-account.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
+      COMPOSER_FOCUS_HANDOFF_E2E,
       COMPOSER_KEYBOARD_E2E,
       COMPOSER_MENUS_E2E,
       "test/e2e/composer-pane.browser.e2e.ts",
@@ -298,12 +393,19 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/desktop-corner.browser.e2e.ts",
+      "test/e2e/desktop-rail.browser.e2e.ts",
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+      "test/e2e/error-branding.browser.e2e.ts",
+      "test/e2e/external-vaults.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
+      "test/e2e/machine-card.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
       "test/e2e/member-connection-access.browser.e2e.ts",
+      "test/e2e/new-conversation.browser.e2e.ts",
+      "test/e2e/onepassword-catalog.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
       PERSONAL_GITHUB_IDENTITY_E2E,
@@ -312,23 +414,31 @@ describe("fail-closed change impact", () => {
       "test/e2e/plugin-discovery.browser.e2e.ts",
       "test/e2e/plugin-removal.browser.e2e.ts",
       PREVIEW_LOADING_E2E,
+      "test/e2e/project-profile.browser.e2e.ts",
       "test/e2e/project-rename.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
+      "test/e2e/secrets-fake-login-suite.browser.e2e.ts",
+      "test/e2e/secrets-fake-login.browser.e2e.ts",
       "test/e2e/session-artifact-navigation.browser.e2e.ts",
       "test/e2e/session-capability-cards.browser.e2e.ts",
+      "test/e2e/session-conversation-controller.browser.e2e.ts",
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_RELAY_HEADERS_E2E,
       SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
+      "test/e2e/session-usage-limit.browser.e2e.ts",
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
       SITE_CONVERSATIONS_E2E,
+      "test/e2e/site-navigation.browser.e2e.ts",
       "test/e2e/skill-review.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/teams-approval.browser.e2e.ts",
       "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
@@ -421,19 +531,17 @@ describe("fail-closed change impact", () => {
     });
 
     const skill = createImpactPlan([
-      "packages/runtime/src/bundled_artifact_skills/opengeni-documents/SKILL.md",
+      "packages/runtime/src/bundled_artifact_skills/documents/SKILL.md",
     ]);
     expect(skill.mode).toBe("focused");
     expect(skill.affectedPackages).toContain("@opengeni/runtime");
     expect(skill.unitTests).toContain("scripts/bundled-artifact-skills.test.ts");
     expect(skill.reasons).toContainEqual({
-      path: "packages/runtime/src/bundled_artifact_skills/opengeni-documents/SKILL.md",
+      path: "packages/runtime/src/bundled_artifact_skills/documents/SKILL.md",
       reason: "bundled artifact skill source boundary",
     });
 
-    const siteSkill = createImpactPlan([
-      "packages/runtime/src/bundled_site_skills/opengeni-sites/SKILL.md",
-    ]);
+    const siteSkill = createImpactPlan(["packages/runtime/src/bundled_site_skills/sites/SKILL.md"]);
     expect(siteSkill.mode).toBe("focused");
     expect(siteSkill.affectedPackages).toContain("@opengeni/runtime");
     expect(siteSkill.unitTests).toContain("scripts/bundled-artifact-skills.test.ts");
@@ -470,7 +578,7 @@ describe("fail-closed change impact", () => {
   test("session artifact navigation selects impacted E2E coverage", () => {
     const regression = "test/e2e/session-artifact-navigation.browser.e2e.ts";
     for (const path of [
-      "apps/web/src/components/session/artifact-session-page.tsx",
+      "packages/react/src/app/components/session/artifact-session-page.tsx",
       "packages/react/src/components/sandbox-workspace.tsx",
       regression,
     ]) {
@@ -481,7 +589,7 @@ describe("fail-closed change impact", () => {
 
   test("artifact library sources and harness select the ordinary browser E2E lane", () => {
     for (const path of [
-      "apps/web/src/components/artifacts/artifact-library.tsx",
+      "packages/react/src/app/components/artifacts/artifact-library.tsx",
       "apps/web/test/artifact-library-browser.ts",
       "apps/web/test/artifact-library.vite.config.ts",
       "packages/contracts/src/artifact-catalog.ts",
@@ -558,19 +666,58 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("desktop artifact coverage follows its real fixture without widening leaf plans", () => {
+    expect(discoverTestFiles().e2e).toContain(ARTIFACT_DESKTOP_E2E);
+    expect(usesBrowserRunner(ARTIFACT_DESKTOP_E2E)).toBe(true);
+    expect(readFileSync("scripts/run-browser-e2e.ts", "utf8")).toContain(
+      `"./${ARTIFACT_DESKTOP_E2E}"`,
+    );
+    for (const path of [
+      ARTIFACT_DESKTOP_E2E,
+      "apps/web/test/artifact-desktop.html",
+      "apps/web/test/artifact-desktop-fixture.tsx",
+      "apps/web/src/styles.css",
+      "packages/react/src/components/artifacts/artifact-sandbox.tsx",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(ARTIFACT_DESKTOP_E2E);
+      expect(plan.unitTests, path).not.toContain(ARTIFACT_DESKTOP_E2E);
+      expect(plan.integrationTests, path).not.toContain(ARTIFACT_DESKTOP_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
+      ARTIFACT_DESKTOP_E2E,
+    );
+  });
+
   test("artifact browser dependency rules do not widen unrelated leaf package plans", () => {
     const plan = createImpactPlan(["packages/browserd/src/index.ts"]);
     expect(plan.mode).toBe("focused");
     for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
-    expect(plan.e2eTests).toEqual([]);
+    expect(plan.e2eTests).toEqual([SECRETS_FAKE_LOGIN_E2E]);
     expect(plan.browserAcceptanceLanes).toEqual([]);
     expect(plan.artifactRuntimeRequired).toBe(false);
+  });
+
+  test("error presentation coverage follows its fixture and shared client dependencies", () => {
+    const fixture = "test/e2e/error-branding.browser.e2e.ts";
+    for (const path of [
+      fixture,
+      "packages/react/demo/error-branding-test-harness.tsx",
+      "packages/react/src/lib/error-message.ts",
+      "packages/sdk/src/errors.ts",
+    ]) {
+      expect(createImpactPlan([path]).e2eTests, path).toContain(fixture);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(fixture);
   });
 
   test("compact session view follows its web fixture dependencies without widening leaf plans", () => {
     for (const path of [
       COMPACT_SESSION_VIEW_E2E,
-      "apps/web/src/components/rail/session-list.tsx",
+      "packages/react/src/app/components/rail/session-list.tsx",
       "packages/sdk/src/client.ts",
       "packages/testing/src/index.ts",
     ]) {
@@ -585,8 +732,8 @@ describe("fail-closed change impact", () => {
 
   test("session sidebar coverage follows web fixtures and shared dependencies without widening browserd plans", () => {
     for (const path of [
-      "apps/web/src/components/rail/session-list.tsx",
-      "apps/web/src/lib/session-group-window.ts",
+      "packages/react/src/app/components/rail/session-list.tsx",
+      "packages/react/src/app/lib/session-group-window.tsx",
       "apps/web/test/session-sidebar-context.ts",
       "apps/web/test/session-sidebar-fixture.tsx",
       "apps/web/test/session-sidebar-preview.html",
@@ -616,8 +763,8 @@ describe("fail-closed change impact", () => {
   test("failed-session recovery follows its real route and shared dependencies without widening leaf plans", () => {
     for (const path of [
       FAILED_SESSION_RECOVERY_E2E,
-      "apps/web/src/routes/session.tsx",
-      "apps/web/src/components/session/failed-session-actions.tsx",
+      "packages/react/src/app/routes/session.tsx",
+      "packages/react/src/app/components/session/failed-session-actions.tsx",
       "packages/react/src/components/message-timeline.tsx",
       "packages/sdk/src/client.ts",
       "packages/testing/src/process.ts",
@@ -638,12 +785,12 @@ describe("fail-closed change impact", () => {
       COMPOSER_MENUS_E2E,
       "apps/web/test/composer-menus.html",
       "apps/web/test/composer-menus-fixture.tsx",
-      "apps/web/src/components/composer-mobile-plus.tsx",
+      "packages/react/src/app/components/composer-mobile-plus.tsx",
       "apps/web/src/components/ui/composer-menu.tsx",
-      "apps/web/src/components/repository-picker.tsx",
-      "apps/web/src/components/follow-up-repository-menu-body.tsx",
+      "packages/react/src/app/components/repository-picker.tsx",
+      "packages/react/src/app/components/follow-up-repository-menu-body.tsx",
       "apps/web/src/components/session/new-session-variable-set-picker.tsx",
-      "apps/web/src/components/pickers.tsx",
+      "packages/react/src/app/components/pickers.tsx",
       "packages/react/src/index.ts",
       "packages/sdk/src/client.ts",
       "packages/testing/src/process.ts",
@@ -657,7 +804,7 @@ describe("fail-closed change impact", () => {
     for (const path of ["packages/browserd/src/index.ts"]) {
       const plan = createImpactPlan([path]);
       expect(plan.mode, path).toBe("focused");
-      expect(plan.e2eTests, path).toEqual([]);
+      expect(plan.e2eTests, path).toEqual([SECRETS_FAKE_LOGIN_E2E]);
     }
   });
 
@@ -673,11 +820,11 @@ describe("fail-closed change impact", () => {
       "apps/web/test/composer-keyboard-fixture.tsx",
       "apps/web/test/composer-keyboard-context.ts",
       "apps/web/test/composer-keyboard.vite.config.ts",
-      "apps/web/src/components/composer-mobile-plus.tsx",
-      "apps/web/src/components/composer-mobile-plus-panel.tsx",
-      "apps/web/src/components/session/composer-menu-radio.tsx",
-      "apps/web/src/components/session/new-session-settings-menu.tsx",
-      "apps/web/src/components/session/sandbox-switcher.tsx",
+      "packages/react/src/app/components/composer-mobile-plus.tsx",
+      "packages/react/src/app/components/composer-mobile-plus-panel.tsx",
+      "packages/react/src/app/components/session/composer-menu-radio.tsx",
+      "packages/react/src/app/components/session/new-session-settings-menu.tsx",
+      "packages/react/src/app/components/session/sandbox-switcher.tsx",
       "packages/react/src/components/chat-composer.tsx",
       "packages/sdk/src/client.ts",
       "packages/testing/src/process.ts",
@@ -693,13 +840,43 @@ describe("fail-closed change impact", () => {
     );
   });
 
+  test("composer focus handoff follows its real keyboard fixture without widening leaf plans", () => {
+    expect(discoverTestFiles().e2e).toContain(COMPOSER_FOCUS_HANDOFF_E2E);
+    expect(usesBrowserRunner(COMPOSER_FOCUS_HANDOFF_E2E)).toBe(true);
+    expect(readFileSync("scripts/run-browser-e2e.ts", "utf8")).toContain(
+      `"./${COMPOSER_FOCUS_HANDOFF_E2E}"`,
+    );
+    for (const path of [
+      COMPOSER_FOCUS_HANDOFF_E2E,
+      "apps/web/test/composer-keyboard.html",
+      "apps/web/test/composer-keyboard-fixture.tsx",
+      "apps/web/test/composer-keyboard-context.ts",
+      "apps/web/test/composer-keyboard.vite.config.ts",
+      "packages/react/src/app/components/composer-mobile-plus.tsx",
+      "packages/react/src/app/components/composer-mobile-plus-panel.tsx",
+      "packages/react/src/app/components/session/new-session-settings-menu.tsx",
+      "packages/react/src/index.ts",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(COMPOSER_FOCUS_HANDOFF_E2E);
+      expect(plan.unitTests, path).not.toContain(COMPOSER_FOCUS_HANDOFF_E2E);
+      expect(plan.integrationTests, path).not.toContain(COMPOSER_FOCUS_HANDOFF_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).toEqual([
+      SECRETS_FAKE_LOGIN_E2E,
+    ]);
+  });
+
   test("connector account controls follow web dependencies without widening leaf plans", () => {
     for (const path of [
       CONNECTOR_ACCOUNTS_E2E,
       "apps/web/test/connector-menu.html",
       "apps/web/test/connector-menu-fixture.tsx",
-      "apps/web/src/components/session-connectors-menu-body.tsx",
-      "apps/web/src/components/capabilities/connection-account-picker.tsx",
+      "packages/react/src/app/components/session-connectors-menu-body.tsx",
+      "packages/react/src/app/components/capabilities/connection-account-picker.tsx",
       "packages/react/src/index.ts",
       "packages/testing/src/process.ts",
     ]) {
@@ -734,9 +911,22 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("the desktop window bar helper selects every browser test that uses it", () => {
+    const plan = createImpactPlan(["test/e2e/desktop-window-bar.ts"]);
+    expect(plan.mode).toBe("focused");
+    for (const path of [
+      "test/e2e/artifact-desktop.browser.e2e.ts",
+      "test/e2e/desktop-corner.browser.e2e.ts",
+      "test/e2e/desktop-rail.browser.e2e.ts",
+      "test/e2e/session-sidebar.browser.e2e.ts",
+      "test/e2e/signed-out-page.browser.e2e.ts",
+    ]) {
+      expect(plan.e2eTests).toContain(path);
+    }
+  });
+
   test("Personal workspace accessibility coverage follows only its web dependency", () => {
     for (const path of [
-      "apps/web/src/components/personal-workspace-badge.tsx",
       "apps/web/src/components/rail/switcher-block.tsx",
       "apps/web/src/components/rail/workspace-scope-nav.tsx",
       "apps/web/src/lib/workspace-scope-context.ts",
@@ -778,7 +968,7 @@ describe("fail-closed change impact", () => {
   test("capability details browser coverage follows web and catalog dependencies", () => {
     const browserTest = "test/e2e/capability-details.browser.e2e.ts";
     for (const path of [
-      "apps/web/src/components/capabilities/detail-dialog.tsx",
+      "packages/react/src/app/components/capabilities/detail-dialog.tsx",
       "apps/web/test/capability-details-fixture.tsx",
       "packages/react/src/connection-catalog.tsx",
       browserTest,
@@ -797,15 +987,21 @@ describe("fail-closed change impact", () => {
     expect(tests.integration.length).toBeGreaterThan(0);
     expect(tests.e2e).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
+      "test/e2e/agents.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
+      "test/e2e/annotation-scroll.browser.e2e.ts",
       "test/e2e/appearance.browser.e2e.ts",
+      "test/e2e/archived-chat-status.browser.e2e.ts",
+      "test/e2e/artifact-desktop.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
       "test/e2e/capability-details.browser.e2e.ts",
       "test/e2e/chat-media-entry.browser.e2e.ts",
       CLAUDE_SUBSCRIPTION_E2E,
       "test/e2e/code-editor.browser.e2e.ts",
+      "test/e2e/codex-account.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
+      COMPOSER_FOCUS_HANDOFF_E2E,
       COMPOSER_KEYBOARD_E2E,
       COMPOSER_MENUS_E2E,
       "test/e2e/composer-pane.browser.e2e.ts",
@@ -813,12 +1009,19 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/desktop-corner.browser.e2e.ts",
+      "test/e2e/desktop-rail.browser.e2e.ts",
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+      "test/e2e/error-branding.browser.e2e.ts",
+      "test/e2e/external-vaults.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
+      "test/e2e/machine-card.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
       "test/e2e/member-connection-access.browser.e2e.ts",
+      "test/e2e/new-conversation.browser.e2e.ts",
+      "test/e2e/onepassword-catalog.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
       PERSONAL_GITHUB_IDENTITY_E2E,
@@ -827,23 +1030,31 @@ describe("fail-closed change impact", () => {
       "test/e2e/plugin-discovery.browser.e2e.ts",
       "test/e2e/plugin-removal.browser.e2e.ts",
       PREVIEW_LOADING_E2E,
+      "test/e2e/project-profile.browser.e2e.ts",
       "test/e2e/project-rename.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
+      "test/e2e/secrets-fake-login-suite.browser.e2e.ts",
+      "test/e2e/secrets-fake-login.browser.e2e.ts",
       "test/e2e/session-artifact-navigation.browser.e2e.ts",
       "test/e2e/session-capability-cards.browser.e2e.ts",
+      "test/e2e/session-conversation-controller.browser.e2e.ts",
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_RELAY_HEADERS_E2E,
       SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
+      "test/e2e/session-usage-limit.browser.e2e.ts",
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/signed-out-page.browser.e2e.ts",
       SITE_CONVERSATIONS_E2E,
+      "test/e2e/site-navigation.browser.e2e.ts",
       "test/e2e/skill-review.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/teams-approval.browser.e2e.ts",
       "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
@@ -961,7 +1172,7 @@ describe("deterministic bounded execution", () => {
     expect(usesBrowserRunner("test/e2e/sandbox.e2e.ts")).toBe(false);
   });
 
-  test("test environments scrub ambient OpenGeni state and preserve only fail-closed DB intent", () => {
+  test("test environments scrub ambient Opengeni state and preserve only fail-closed DB intent", () => {
     expect(
       sanitizedTestEnvironment({
         PATH: "/bin",
@@ -1013,6 +1224,8 @@ function requiredResult(
     artifactRuntime: boolean;
     build: number;
     bakeImages?: boolean;
+    preImage?: boolean;
+    attested?: boolean | undefined;
   },
 ): boolean {
   const result = spawnSync(
@@ -1049,6 +1262,13 @@ function requiredResult(
       "--argjson",
       "build",
       String(options.build),
+      "--argjson",
+      "preImage",
+      String(options.preImage ?? false),
+      // Omitted for old callers: the filter defaults to the unattested rules.
+      ...(options.attested === undefined
+        ? []
+        : ["--argjson", "attested", String(options.attested)]),
       "-f",
       "scripts/ci/required-results.jq",
     ],
@@ -1207,6 +1427,146 @@ describe("workflow fail-closed contracts", () => {
     expect(requiredResult(results, { ...options, mode: "focused" })).toBe(false);
   });
 
+  test("a Batch-attested main push requires skipped test lanes and real artifacts", () => {
+    const lanes = [
+      "source-contracts",
+      "unit-shards",
+      "integration-shards",
+      "e2e-shards",
+      "test-suite",
+      "browser-acceptance",
+      "browserd-real-e2e",
+      "package-contracts",
+    ];
+    const results: Record<string, { result: string }> = {
+      plan: { result: "success" },
+      "artifact-runtime": { result: "success" },
+      deployment: { result: "success" },
+      images: { result: "success" },
+      ...Object.fromEntries(lanes.map((name) => [name, { result: "skipped" }])),
+    };
+    const options: Parameters<typeof requiredResult>[1] = {
+      event: "push",
+      mode: "full",
+      unit: 900,
+      integration: 20,
+      e2e: 10,
+      browser: 4,
+      artifactRuntime: true,
+      build: 30,
+      attested: true,
+    };
+    expect(requiredResult(results, options)).toBe(true);
+    // The same skipped lanes are a failure for an ordinary or omitted-attestation run.
+    expect(requiredResult(results, { ...options, attested: false })).toBe(false);
+    expect(requiredResult(results, { ...options, attested: undefined })).toBe(false);
+    // A lane that ran (even green) means the run was not uniformly attested.
+    for (const name of lanes)
+      for (const result of ["success", "failure", "cancelled"])
+        expect(requiredResult({ ...results, [name]: { result } }, options)).toBe(false);
+    for (const name of ["plan", "artifact-runtime", "deployment", "images"])
+      for (const result of ["failure", "cancelled", "skipped"])
+        expect(requiredResult({ ...results, [name]: { result } }, options)).toBe(false);
+    for (const extra of [
+      { event: "pull_request" as const },
+      { event: "schedule" as const },
+      { event: "workflow_dispatch" as const },
+      { mode: "focused" as const },
+      { bakeImages: false },
+    ])
+      expect(requiredResult(results, { ...options, ...extra })).toBe(false);
+    const { images: _images, ...preImage } = results;
+    expect(requiredResult(preImage, { ...options, preImage: true })).toBe(true);
+    expect(requiredResult(results, { ...options, preImage: true })).toBe(false);
+  });
+
+  test("pre-image validation requires every non-image lane exactly and never sees images", () => {
+    const lanes = [
+      "plan",
+      "source-contracts",
+      "unit-shards",
+      "integration-shards",
+      "e2e-shards",
+      "artifact-runtime",
+      "test-suite",
+      "browser-acceptance",
+      "browserd-real-e2e",
+      "package-contracts",
+      "deployment",
+    ];
+    const full = Object.fromEntries(lanes.map((name) => [name, { result: "success" }]));
+    const options: Parameters<typeof requiredResult>[1] = {
+      event: "push",
+      mode: "full",
+      unit: 1,
+      integration: 1,
+      e2e: 1,
+      browser: 1,
+      artifactRuntime: true,
+      build: 1,
+      bakeImages: true,
+      preImage: true,
+    };
+    expect(requiredResult(full, options)).toBe(true);
+    // Every lane a full main push selects must have succeeded: a failure, a
+    // cancellation or a skip of a selected lane stops the release image.
+    for (const name of lanes) {
+      for (const result of ["failure", "cancelled", "skipped"]) {
+        expect(requiredResult({ ...full, [name]: { result } }, options), `${name}/${result}`).toBe(
+          false,
+        );
+      }
+    }
+    // A missing lane result is never treated as success.
+    for (const name of lanes) {
+      const { [name]: _omitted, ...missing } = full;
+      expect(requiredResult(missing, options), `${name}/missing`).toBe(false);
+    }
+    // The gate runs before any image job; an image result in its input means
+    // the topology changed and fails closed.
+    expect(requiredResult({ ...full, images: { result: "success" } }, options)).toBe(false);
+    // The final aggregate is unchanged: without preImage, images stay required.
+    expect(requiredResult(full, { ...options, preImage: false })).toBe(false);
+    expect(
+      requiredResult({ ...full, images: { result: "success" } }, { ...options, preImage: false }),
+    ).toBe(true);
+
+    // A docs main push still bakes images; unselected test lanes must be skipped.
+    const docsOptions = {
+      ...options,
+      mode: "docs" as const,
+      unit: 0,
+      integration: 0,
+      e2e: 0,
+      browser: 0,
+      build: 0,
+    };
+    const docs = { ...full };
+    for (const name of [
+      "unit-shards",
+      "integration-shards",
+      "e2e-shards",
+      "test-suite",
+      "browser-acceptance",
+      "browserd-real-e2e",
+      "package-contracts",
+    ]) {
+      docs[name] = { result: "skipped" };
+    }
+    expect(requiredResult(docs, { ...docsOptions, browserdRealE2e: false })).toBe(true);
+    for (const name of ["source-contracts", "artifact-runtime", "deployment"]) {
+      for (const result of ["failure", "cancelled", "skipped"]) {
+        expect(
+          requiredResult(
+            { ...docs, [name]: { result } },
+            { ...docsOptions, browserdRealE2e: false },
+          ),
+          `docs/${name}/${result}`,
+        ).toBe(false);
+      }
+    }
+  });
+
   test("CI preserves trusted admission while planning candidate jobs from the exact head", () => {
     const ci = readFileSync(".github/workflows/ci.yml", "utf8");
     const admission = ci.slice(ci.indexOf("  automation-admission:"), ci.indexOf("  plan:"));
@@ -1232,6 +1592,17 @@ describe("workflow fail-closed contracts", () => {
     expect(sourceContracts).toContain("path: ${{ runner.temp }}/ci-impact-plan");
     expect(sourceContracts).toContain("--plan ${{ runner.temp }}/ci-impact-plan/impact-plan.json");
     expect(sourceContracts).not.toContain("--plan impact-plan.json");
+    const freshness = sourceContracts.indexOf(
+      "run: bun scripts/generate-site-browser-runtime.ts --check",
+    );
+    expect(freshness).toBeGreaterThan(sourceContracts.indexOf("bun install --frozen-lockfile"));
+    expect(freshness).toBeLessThan(
+      sourceContracts.indexOf("- name: Validate changeset release plan"),
+    );
+    expect(freshness).toBeLessThan(sourceContracts.indexOf("- name: Profile impacted TypeScript"));
+    expect(freshness).toBeLessThan(
+      sourceContracts.indexOf("- name: Run exactly the explained source guards"),
+    );
   });
 
   test("CI runs the compact session-search header regression with real database evidence", () => {
@@ -1243,7 +1614,7 @@ describe("workflow fail-closed contracts", () => {
     expect(step).toContain("matrix.lane == 'interaction'");
     expect(step).toContain('OPENGENI_REQUIRE_REAL_DB: "1"');
     expect(step).toContain(
-      "--test-name-pattern 'desktop expanded header keeps icon-only search inline'",
+      "--test-name-pattern 'desktop expanded header keeps icon-only search inline|restores.*focus|mobile result navigation'",
     );
     expect(step).toContain("./test/e2e/session-search.browser.e2e.ts");
     expect(ci).toContain("name: session-search-header-evidence");

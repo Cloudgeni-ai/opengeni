@@ -5,7 +5,7 @@ import {
   FOCUS_CREATE_COMPOSER_EVENT,
   requestCreateComposerFocus,
   type CreateComposerFocusIntent,
-} from "./create-composer-focus";
+} from "@opengeni/react/app/lib/create-composer-focus";
 
 registerDom();
 
@@ -17,9 +17,9 @@ describe("create composer focus intent", () => {
     };
     window.addEventListener(FOCUS_CREATE_COMPOSER_EVENT, captureChannelId);
 
-    requestCreateComposerFocus();
-    requestCreateComposerFocus(null);
-    requestCreateComposerFocus(null);
+    requestCreateComposerFocus(window);
+    requestCreateComposerFocus(window, null);
+    requestCreateComposerFocus(window, null);
     window.removeEventListener(FOCUS_CREATE_COMPOSER_EVENT, captureChannelId);
 
     expect(channelIds).toEqual([undefined, null, null]);

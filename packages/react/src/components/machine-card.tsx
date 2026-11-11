@@ -2,21 +2,28 @@ import {
   AlertTriangleIcon,
   ArrowRightIcon,
   CpuIcon,
-  CircleCheckIcon,
-  DownloadIcon,
   LaptopIcon,
   MonitorIcon,
   MonitorOffIcon,
-  LoaderCircleIcon,
   ServerIcon,
   UsersIcon,
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
+import {
+  machinePlatformLabel,
+  machineScopeLabel,
+  machineScreenLabel,
+  machineSystemDetail,
+} from "../sandbox-label-model";
 import type { MachineView, MetricSample } from "../types/machines";
+import { connectionStatusForState } from "../types/machines";
 import { MachineHealthPill } from "./machine-health-pill";
 import { MachineMetrics } from "./machine-metrics";
+import { AgentStatusIcon } from "./machines/agent-status-icon";
+import { describeAgentRuntime, runnerConflict, STATUS_TONE_TEXT } from "./machines/machine-status";
 import { MetricSparkline } from "./machines/metric-sparkline";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type MachineCardProps = {
   machine: MachineView;
@@ -45,7 +52,8 @@ function KindIcon({ machine }: { machine: MachineView }) {
 }
 
 /**
- * One machine in the Machines dashboard: name + kind + OS/arch, the fused HEALTH
+ * One machine in the Machines dashboard: name, who can use it, what kind of
+ * computer it is and whether agents can use its screen, the fused HEALTH
  * verdict, latest resource meters, a CPU trend that previews the history, live
  * freshness, and attach/swap. The whole card opens the telemetry detail when
  * `onOpenDetail` is wired. The session's active sandbox carries an accent edge.
@@ -61,53 +69,28 @@ export function MachineCard({
   now,
   className,
 }: MachineCardProps) {
+  const msg = useOpenGeniText();
   const offline = machine.state === "offline";
   const attachable = !machine.active && !offline && Boolean(onAttach);
   const shared = machine.sharedSessionCount > 1;
   const clockNow = now ?? Date.now();
   const sampledAgo = machine.metrics
-    ? formatRelativeTime(machine.metrics.sampledAt, new Date(clockNow))
+    ? formatRelativeTime(msg, machine.metrics.sampledAt, new Date(clockNow))
     : null;
   const cpuPts = (series ?? []).map((s) => ({ t: new Date(s.sampledAt).getTime(), v: s.cpuPct }));
   const openable = Boolean(onOpenDetail);
   const runtime = machine.runtime;
-  const updateRunning = runtime?.versionState === "updating";
-  const dispatchConfirmationStalled =
-    runtime?.update?.status === "requested" &&
-    clockNow - new Date(runtime.update.updatedAt).getTime() >= 30_000;
-  const canUpdate =
-    Boolean(machine.enrollmentId && onUpdateAgent) &&
-    !offline &&
-    !runtime?.updateBlockedReason &&
-    (runtime?.versionState === "outdated" ||
-      runtime?.versionState === "update_failed" ||
-      dispatchConfirmationStalled);
-  const updateLabel = (() => {
-    const update = runtime?.update;
-    if (!update) return null;
-    switch (update.status) {
-      case "requested":
-        return dispatchConfirmationStalled ? "Agent confirmation delayed" : "Confirming with agent";
-      case "accepted":
-        return "Update accepted";
-      case "waiting_for_idle":
-        return "Waiting for current work";
-      case "downloading":
-      case "verifying":
-      case "applying":
-        return `${update.status}…`;
-      case "restarting":
-        return "Restarting agent";
-      case "succeeded":
-        return `Updated · v${update.targetVersion}`;
-      case "failed": {
-        const detail = update.errorCode?.replaceAll("_", " ");
-        return update.rolledBack
-          ? `Update rolled back safely${detail ? ` · ${detail}` : ""}`
-          : `Update failed${detail ? ` · ${detail}` : ""}`;
-      }
-    }
-  })();
+  const agent = runtime
+    ? describeAgentRuntime(
+        msg,
+        runtime,
+        clockNow,
+        connectionStatusForState(machine.state) === "online",
+      )
+    : null;
+  const updateAction =
+    agent?.action && machine.enrollmentId && onUpdateAgent && !offline ? agent.action : null;
+  const conflict = runnerConflict(machine.connectionAuthority, clockNow);
 
   return (
     <div
@@ -152,28 +135,29 @@ export function MachineCard({
                   data-active-marker
                   className="shrink-0 rounded-full border border-og-accent/30 bg-og-accent-soft px-1.5 py-px text-og-xs font-medium text-og-accent"
                 >
-                  Active
+                  {msg("machineCard.active")}
                 </span>
               ) : null}
             </div>
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-og-xs text-og-fg-subtle">
-              <span data-machine-scope={machine.scope} className="capitalize">
-                {machine.scope === "user" ? "personal" : machine.scope}
+            {/* Who and what on one line, the screen sentence on its own line, so no
+                separator is left dangling when the card is narrow. */}
+            <div className="mt-0.5 flex flex-col gap-0.5 text-og-xs text-og-fg-subtle">
+              <span className="flex flex-wrap items-center gap-x-2">
+                <span data-machine-scope={machine.scope}>
+                  {machineScopeLabel(msg, machine.scope)}
+                </span>
+                <span aria-hidden>·</span>
+                <span data-machine-platform title={machineSystemDetail(machine)}>
+                  {machinePlatformLabel(msg, machine.os)}
+                </span>
               </span>
-              <span aria-hidden>·</span>
-              <span className="capitalize">{machine.kind}</span>
-              <span aria-hidden>·</span>
-              <span className="font-og-mono">
-                {machine.os}/{machine.arch}
-              </span>
-              <span aria-hidden>·</span>
-              <span className="inline-flex items-center gap-1">
-                {machine.hasDisplay ? (
+              <span data-machine-screen className="inline-flex items-center gap-1">
+                {machine.hasDisplay && machine.allowScreenControl ? (
                   <MonitorIcon className="size-3" aria-hidden />
                 ) : (
                   <MonitorOffIcon className="size-3" aria-hidden />
                 )}
-                {machine.hasDisplay ? "display" : "headless"}
+                {machineScreenLabel(msg, machine)}
               </span>
             </div>
           </div>
@@ -193,55 +177,48 @@ export function MachineCard({
           className="flex items-center gap-1.5 rounded-og-md border border-og-accent/25 bg-og-accent-soft px-2.5 py-1.5 text-og-xs text-og-fg-muted"
         >
           <UsersIcon className="size-3.5 shrink-0 text-og-accent" aria-hidden />
-          Shared — {machine.sharedSessionCount} sessions are on this machine.
+          {msg("machineCard.sharedSharedsessioncountSessionsAreOn", {
+            sharedSessionCount: machine.sharedSessionCount,
+          })}
         </p>
       ) : null}
 
-      {machine.connectionAuthority.duplicateRunnerDeniedCount > 0 ? (
+      {conflict?.active ? (
         <p
           data-runner-conflict
-          className="flex items-center gap-1.5 rounded-og-md border border-og-status-failed/30 bg-og-status-failed/5 px-2.5 py-1.5 text-og-xs text-og-status-failed"
+          className="flex items-start gap-1.5 rounded-og-md border border-og-status-waiting/30 bg-og-status-waiting/5 px-2.5 py-1.5 text-og-xs text-og-fg-muted"
         >
-          <AlertTriangleIcon className="size-3.5 shrink-0" aria-hidden />
-          Competing agent process blocked. Open diagnostics for details.
+          <AlertTriangleIcon
+            className="mt-px size-3.5 shrink-0 text-og-status-waiting"
+            aria-hidden
+          />
+          <span>{msg("machineCard.aSecondCopyOfThe")}</span>
         </p>
       ) : null}
 
-      {runtime ? (
+      {agent ? (
         <div
           data-agent-runtime
           className="flex items-center justify-between gap-3 rounded-og-md border border-og-border/70 bg-og-surface-2/35 px-2.5 py-2 text-og-xs"
         >
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 text-og-fg-muted">
-              {runtime.versionState === "current" ? (
-                <CircleCheckIcon className="size-3.5 text-og-status-idle" aria-hidden />
-              ) : updateRunning ? (
-                <LoaderCircleIcon className="size-3.5 animate-og-spin text-og-accent" aria-hidden />
-              ) : (
-                <DownloadIcon className="size-3.5" aria-hidden />
-              )}
-              <span className="truncate">
-                Agent{" "}
-                {runtime.installedVersion ? `v${runtime.installedVersion}` : "version unknown"}
-              </span>
+              <AgentStatusIcon tone={agent.tone} />
+              <span className="truncate">{agent.title}</span>
             </div>
-            <p className="mt-0.5 truncate text-og-fg-subtle">
-              {updateLabel ??
-                (runtime.versionState === "current"
-                  ? `Current · ${runtime.updateChannel ?? "channel unknown"}`
-                  : runtime.desiredVersion
-                    ? `Promoted v${runtime.desiredVersion}`
-                    : "No promoted version configured")}
+            <p
+              data-agent-status={agent.tone}
+              className={cn("mt-0.5", STATUS_TONE_TEXT[agent.tone])}
+            >
+              {agent.status}
             </p>
-            {runtime.updateBlockedReason ? (
-              <p className="mt-1 text-og-fg-muted">{runtime.updateBlockedReason}</p>
-            ) : null}
+            {agent.note ? <p className="mt-1 text-og-fg-muted">{agent.note}</p> : null}
           </div>
-          {canUpdate ? (
+          {updateAction ? (
             <button
               type="button"
               data-update-agent
+              data-update-action={updateAction.kind}
               disabled={updatingAgent}
               onClick={(event) => {
                 event.stopPropagation();
@@ -249,13 +226,7 @@ export function MachineCard({
               }}
               className="shrink-0 rounded-og-sm border border-og-border px-2 py-1 font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
             >
-              {updatingAgent
-                ? "Starting…"
-                : dispatchConfirmationStalled
-                  ? "Retry delivery"
-                  : runtime.versionState === "update_failed"
-                    ? "Retry"
-                    : "Update"}
+              {updatingAgent ? msg("machineCard.starting") : updateAction.label}
             </button>
           ) : null}
         </div>
@@ -267,10 +238,10 @@ export function MachineCard({
       {cpuPts.length > 1 ? (
         <div className="flex flex-col gap-1 rounded-og-md bg-og-surface-2/40 p-2.5">
           <div className="flex items-center justify-between text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">
-            <span>CPU · last 15m</span>
+            <span>{msg("machineCard.cpuLast15m")}</span>
             {openable ? (
               <span className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                Telemetry <ArrowRightIcon className="size-2.5" aria-hidden />
+                {msg("machineCard.telemetry")} <ArrowRightIcon className="size-2.5" aria-hidden />
               </span>
             ) : null}
           </div>
@@ -289,16 +260,21 @@ export function MachineCard({
                 )}
                 aria-hidden
               />
-              {sampledAgo === "now" ? "Live" : `Updated ${sampledAgo} ago`}
+              {sampledAgo === "now"
+                ? msg("machineCard.live")
+                : msg("machineCard.updatedSampledagoAgo", { sampledAgo })}
             </>
           ) : machine.lastSeenAt ? (
-            <>Last seen {formatRelativeTime(machine.lastSeenAt, new Date(clockNow))}</>
+            <>
+              {msg("machineCard.lastSeen")}{" "}
+              {formatRelativeTime(msg, machine.lastSeenAt, new Date(clockNow))}
+            </>
           ) : (
-            "Never connected"
+            msg("machineCard.neverConnected")
           )}
         </span>
         {machine.active ? (
-          <span className="text-og-accent">Routing here</span>
+          <span className="text-og-accent">{msg("machineCard.routingHere")}</span>
         ) : attachable ? (
           <button
             type="button"
@@ -313,10 +289,12 @@ export function MachineCard({
               "hover:border-og-border-strong hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50",
             )}
           >
-            {attaching ? "Switching…" : "Attach"}
+            {attaching ? msg("machineCard.switching") : msg("machineCard.attach")}
           </button>
         ) : (
-          <span className="text-og-fg-subtle/70">{offline ? "Unavailable" : "—"}</span>
+          <span className="text-og-fg-subtle/70">
+            {offline ? msg("machineCard.unavailable") : "—"}
+          </span>
         )}
       </div>
     </div>

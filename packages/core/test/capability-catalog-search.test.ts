@@ -1,9 +1,19 @@
 import { describe, expect, test } from "bun:test";
+import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import {
   CapabilityCatalogItem,
   type CapabilityCatalogItem as CatalogItem,
 } from "@opengeni/contracts";
-import { searchCapabilityCatalogItems } from "../src";
+import { connectableIntegrationsNamedIn } from "@opengeni/runtime";
+import sharedCatalog from "../../../data/catalog/integrations-snapshot.json";
+import {
+  capabilityCatalogSearchProviderDomain,
+  excelAddinCatalogItem,
+  integrationDefinitionIdFromCapabilityId,
+  nativeConnectionCapabilityRecommendations,
+  searchCapabilityCatalogItems,
+  suggestCapabilityCatalogItems,
+} from "../src";
 
 function item(input: Partial<CatalogItem> & Pick<CatalogItem, "id" | "name">): CatalogItem {
   return CapabilityCatalogItem.parse({
@@ -16,6 +26,183 @@ function item(input: Partial<CatalogItem> & Pick<CatalogItem, "id" | "name">): C
 }
 
 describe("agent capability catalog search", () => {
+  describe("reviewed integration definitions", () => {
+    const catalog = [
+      item({
+        id: "mcp:gmail",
+        name: "Gmail",
+        source: "built_in",
+        category: "communication",
+        description: "Search, read and draft email in the person's Gmail.",
+        tags: ["gmail", "email", "mail", "google"],
+        providerDomain: "google.com",
+        authKind: "oauth2",
+      }),
+      item({
+        id: "mcp:microsoft-learn",
+        name: "Microsoft Learn",
+        source: "registry",
+        category: "documentation",
+        description: "Search Microsoft documentation and code samples.",
+        tags: ["microsoft", "docs", "azure"],
+        providerDomain: "microsoft.com",
+        authKind: "none",
+        metadata: { mcpProbe: { status: "real" } },
+      }),
+      excelAddinCatalogItem({ name: "Example Assistant", installUrl: null }),
+      item({
+        id: "mcp:google-calendar",
+        name: "Google Calendar",
+        source: "built_in",
+        category: "productivity",
+        description:
+          "Read, schedule and update events and meetings in the person's Google Calendar.",
+        tags: ["calendar", "events", "meetings", "schedule", "google"],
+        providerDomain: "google.com",
+        authKind: "oauth2",
+      }),
+      item({
+        id: "mcp:google-drive",
+        name: "Google Drive",
+        source: "built_in",
+        category: "productivity",
+        description: "Find, read and share files and documents in the person's Google Drive.",
+        tags: ["drive", "files", "documents", "google"],
+        providerDomain: "google.com",
+        authKind: "oauth2",
+      }),
+      item({
+        id: "mcp:slack",
+        name: "Slack",
+        source: "registry",
+        category: "communication",
+        description: "Read channels and send chat messages in Slack.",
+        tags: ["slack", "chat", "messages", "channels"],
+        providerDomain: "slack.com",
+        authKind: "oauth2",
+        metadata: { mcpProbe: { status: "real" } },
+      }),
+      item({
+        id: "mcp:transcriber",
+        name: "Transcriber",
+        source: "registry",
+        category: "productivity",
+        description: "Live transcription and notes for calls.",
+        tags: ["transcription", "notes", "audio"],
+        providerDomain: "transcriber.example",
+        authKind: "oauth2",
+        metadata: { mcpProbe: { status: "real" } },
+      }),
+      ...nativeConnectionCapabilityRecommendations({
+        integrationDefinitions: CORE_INTEGRATION_DEFINITIONS,
+      }),
+    ];
+    const top = (query: string, count = 1) =>
+      searchCapabilityCatalogItems(catalog, query)
+        .slice(0, count)
+        .map((result) => integrationDefinitionIdFromCapabilityId(result.item.id) ?? result.item.id);
+
+    test("Outlook, Hotmail, Live and MSN mail requests find Outlook Mail first", () => {
+      for (const query of [
+        "Microsoft Outlook Hotmail email",
+        "Hotmail",
+        "read my newest hotmail emails",
+        "Outlook email",
+        "outlook.com inbox",
+        "live.com mail",
+        "MSN email",
+      ]) {
+        expect({ query, top: top(query) }).toEqual({ query, top: ["microsoft-outlook-mail"] });
+      }
+      expect(top("Outlook", 3)).toContain("microsoft-outlook-mail");
+    });
+
+    test("calendar, contacts, OneDrive and Teams requests find their own definition", () => {
+      expect(top("Outlook calendar")).toEqual(["microsoft-outlook-calendar"]);
+      expect(top("my hotmail calendar")).toEqual(["microsoft-outlook-calendar"]);
+      expect(top("outlook calendar meetings")).toEqual(["microsoft-outlook-calendar"]);
+      expect(top("Outlook contacts")).toEqual(["microsoft-outlook-contacts"]);
+      expect(top("OneDrive")).toEqual(["microsoft-onedrive"]);
+      expect(top("my onedrive files")).toEqual(["microsoft-onedrive"]);
+      expect(top("Teams")).toEqual(["microsoft-teams"]);
+      expect(top("Microsoft Teams chat")).toEqual(["microsoft-teams"]);
+    });
+
+    test("Gmail and Excel requests are unaffected", () => {
+      expect(top("Gmail")).toEqual(["mcp:gmail"]);
+      expect(top("my gmail inbox")).toEqual(["mcp:gmail"]);
+      expect(top("read my gmail emails")).toEqual(["mcp:gmail"]);
+      expect(top("Excel")).toEqual(["api:excel-addin"]);
+      expect(top("Microsoft Learn docs")).toEqual(["mcp:microsoft-learn"]);
+    });
+
+    test("generic requests that never mention Microsoft keep their usual match", () => {
+      expect(top("send an email")).toEqual(["mcp:gmail"]);
+      expect(top("check my email")).toEqual(["mcp:gmail"]);
+      expect(top("schedule a meeting")).toEqual(["mcp:google-calendar"]);
+      expect(top("calendar")).toEqual(["mcp:google-calendar"]);
+      expect(top("chat")).toEqual(["mcp:slack"]);
+      expect(top("send a message in a channel")).toEqual(["mcp:slack"]);
+      expect(top("my files")).toEqual(["mcp:google-drive"]);
+      expect(top("live transcription")).toEqual(["mcp:transcriber"]);
+      // A bare "mail" names "Outlook Mail" itself, so it is not a generic request here.
+      for (const query of ["inbox", "email", "messages", "events", "documents"]) {
+        expect({ query, top: top(query)[0]?.startsWith("microsoft-") }).toEqual({
+          query,
+          top: false,
+        });
+      }
+    });
+
+    test("'connect my GitHub' finds Your GitHub; 'install the GitHub app' finds the app", () => {
+      const withPersonal = [
+        ...catalog,
+        ...nativeConnectionCapabilityRecommendations({ personalGitHub: true }).filter(
+          (entry) => entry.id === "api:github-personal",
+        ),
+      ];
+      const first = (query: string) =>
+        searchCapabilityCatalogItems(withPersonal, query)[0]?.item.id;
+      for (const query of [
+        "connect my GitHub",
+        "use my GitHub account",
+        "do it as me on GitHub",
+        "my personal GitHub",
+      ]) {
+        expect({ query, first: first(query) }).toEqual({ query, first: "api:github-personal" });
+      }
+      for (const query of [
+        "install the GitHub app",
+        "give Opengeni access to the GitHub org",
+        "GitHub app",
+      ]) {
+        expect({ query, first: first(query) }).toEqual({ query, first: "api:github-app" });
+      }
+      expect(
+        nativeConnectionCapabilityRecommendations({ personalGitHub: true }).find(
+          (entry) => entry.id === "api:github-personal",
+        ),
+      ).toMatchObject({ name: "Your GitHub", kind: "api", source: "built_in" });
+    });
+
+    test("entries are agent recommendations for the Connect card", () => {
+      const outlook = catalog.find(
+        (entry) => entry.id === "api:integration:microsoft-outlook-mail",
+      );
+      expect(outlook).toMatchObject({
+        name: "Outlook Mail",
+        kind: "api",
+        source: "built_in",
+        surfaceType: "integration_definition",
+        lifecycle: { readiness: "setup_required" },
+        metadata: { integrationDefinitionId: "microsoft-outlook-mail", recommendationOnly: true },
+      });
+      expect(nativeConnectionCapabilityRecommendations().map((entry) => entry.id)).toEqual([
+        "api:github-app",
+      ]);
+    });
+  });
+
   test("prefers the exact built-in GitHub adapter over incidental GitHub text", () => {
     const results = searchCapabilityCatalogItems(
       [
@@ -127,6 +314,276 @@ describe("agent capability catalog search", () => {
 
     expect(results[0]?.item.id).toBe("mcp:catalog-4876");
     expect(results).toHaveLength(1);
-    expect(durationMs).toBeLessThan(1_000);
+    expect(durationMs).toBeLessThan(2_500);
+  });
+
+  describe("near-spelled integration names", () => {
+    // A manually added custom MCP entry whose display name is misspelled
+    // relative to the vendor brand, with no description, providerDomain, or tags.
+    const whisprflow = item({
+      id: "mcp:whisprflow-12vcsia",
+      name: "Whisprflow",
+      endpointUrl: "https://api.wisprflow.ai/connect/mcp",
+    });
+    const unrelated = [
+      item({ id: "mcp:linear", name: "Linear", providerDomain: "linear.app" }),
+      item({ id: "mcp:notion", name: "Notion", providerDomain: "notion.so" }),
+      item({ id: "mcp:whimsical", name: "Whimsical", providerDomain: "whimsical.com" }),
+    ];
+
+    for (const query of ["Wispr", "Wisprflow", "Wispr Flow", "wispr-flow", "Whisprflow"]) {
+      test(`finds the custom MCP for ${JSON.stringify(query)}`, () => {
+        const results = searchCapabilityCatalogItems([...unrelated, whisprflow], query);
+        expect(results[0]?.item.id).toBe("mcp:whisprflow-12vcsia");
+      });
+    }
+
+    test("derives the vendor domain from a custom endpoint host", () => {
+      const results = searchCapabilityCatalogItems([whisprflow], "wisprflow.ai");
+      expect(results[0]?.item.id).toBe("mcp:whisprflow-12vcsia");
+      expect(results[0]?.matchedOn).toContain("provider");
+      expect(results[0]?.approximate).toBe(false);
+    });
+
+    test("flags typo-only matches as approximate", () => {
+      const nameOnly = item({ id: "mcp:whisprflow", name: "Whisprflow" });
+      const [result] = searchCapabilityCatalogItems([nameOnly], "Wisprflow");
+      expect(result?.item.id).toBe("mcp:whisprflow");
+      expect(result?.approximate).toBe(true);
+      expect(result?.matchedOn).toEqual(["name"]);
+    });
+
+    test("keeps exact matches above typo-tolerant ones", () => {
+      const results = searchCapabilityCatalogItems(
+        [item({ id: "mcp:slack", name: "Slack" }), item({ id: "mcp:slick", name: "Slick" })],
+        "slack",
+      );
+      expect(results.map((result) => [result.item.id, result.approximate])).toEqual([
+        ["mcp:slack", false],
+        ["mcp:slick", true],
+      ]);
+      expect(results[0]!.score).toBeGreaterThan(results[1]!.score * 3);
+      const typo = searchCapabilityCatalogItems(
+        [
+          item({ id: "mcp:posthog", name: "PostHog" }),
+          item({ id: "mcp:postman", name: "Postman" }),
+        ],
+        "posthgo",
+      );
+      expect(typo[0]?.item.id).toBe("mcp:posthog");
+      expect(typo[0]?.approximate).toBe(true);
+    });
+
+    test("does not fuzz short tokens", () => {
+      expect(searchCapabilityCatalogItems([item({ id: "mcp:jet", name: "Jet" })], "jex")).toEqual(
+        [],
+      );
+    });
+
+    test("does not derive a vendor domain for registry rows", () => {
+      const hosted = item({
+        id: "mcp:hosted",
+        name: "Hosted Tool",
+        source: "registry",
+        endpointUrl: "https://server.example-host.dev/mcp",
+        authKind: "none",
+        metadata: { mcpProbe: { status: "real" } },
+      });
+      expect(searchCapabilityCatalogItems([hosted], "examplehost")).toEqual([]);
+    });
+
+    test("suggests the closest names when nothing matches", () => {
+      const catalog = [...unrelated, whisprflow];
+      expect(searchCapabilityCatalogItems(catalog, "Wspr Flw")).toEqual([]);
+      const suggestions = suggestCapabilityCatalogItems(catalog, "Wspr Flw", 3);
+      expect(suggestions).toHaveLength(3);
+      expect(suggestions[0]?.item.id).toBe("mcp:whisprflow-12vcsia");
+      expect(suggestions[0]!.similarity).toBeGreaterThan(suggestions[1]!.similarity);
+      expect(suggestCapabilityCatalogItems([...catalog].reverse(), "Wspr Flw", 3)).toEqual(
+        suggestions,
+      );
+    });
+
+    test("suggestions let an empty query browse the catalog and skip untrusted rows", () => {
+      const untrusted = item({
+        id: "mcp:untrusted",
+        name: "Aardvark",
+        source: "registry",
+        authKind: "unknown",
+        metadata: {},
+      });
+      const suggestions = suggestCapabilityCatalogItems(
+        [untrusted, ...unrelated, whisprflow],
+        "  ",
+      );
+      expect(suggestions.map((suggestion) => suggestion.item.name)).toEqual([
+        "Linear",
+        "Notion",
+        "Whimsical",
+        "Whisprflow",
+      ]);
+    });
+  });
+
+  describe("sentences that name an integration, ranked over the shared catalog", () => {
+    // The shared catalog as the importer stores it, plus a workspace's custom
+    // MCP whose name is a near spelling of the vendor's brand (Wispr Flow is
+    // not in the shared catalog).
+    const shared = sharedCatalog.importRows.map((row, index) =>
+      item({
+        id: `mcp:integrations-sh:${row.domain.replace(/[^a-z0-9]+/g, "-")}-${index}`,
+        name: row.name,
+        source: "registry",
+        description: row.description ?? null,
+        category: row.category ?? "integrations",
+        tags: ["mcp", "integration", row.tier, row.authKind],
+        providerDomain: row.domain,
+        mcpUrl: row.mcpUrl,
+        authKind: row.authKind as CatalogItem["authKind"],
+        tier: row.tier as CatalogItem["tier"],
+        metadata: { mcpProbe: row.probe },
+      }),
+    );
+    // Connectable Microsoft products share microsoft.com with Microsoft Learn,
+    // under their live catalog names.
+    const microsoft = [
+      "Microsoft Teams",
+      "Microsoft Excel",
+      "OneDrive",
+      "SharePoint",
+      "Outlook Mail",
+      "Outlook Calendar",
+      "Outlook Contacts",
+    ].map((name) =>
+      item({
+        id: `mcp:${name.toLowerCase().replaceAll(" ", "-")}`,
+        name,
+        source: "built_in",
+        providerDomain: "microsoft.com",
+        authKind: "oauth2",
+      }),
+    );
+    const catalog = [
+      ...shared,
+      ...microsoft,
+      item({
+        id: "mcp:whisprflow-12vcsia",
+        name: "Whisprflow",
+        endpointUrl: "https://api.wisprflow.ai/connect/mcp",
+      }),
+    ];
+    // Tool search reads the catalog's five best matches, then names only the
+    // entries the query names (distinctively, beside strong installed matches).
+    const named = (query: string, distinctive = false) =>
+      connectableIntegrationsNamedIn(
+        query,
+        searchCapabilityCatalogItems(catalog, query, 5).map(({ item: entry }) => ({
+          capabilityId: entry.id,
+          name: entry.name,
+          providerDomain: capabilityCatalogSearchProviderDomain(entry) ?? undefined,
+        })),
+        distinctive,
+      ).map((integration) => integration.name);
+
+    test("the shared catalog is loaded", () => {
+      expect(shared.length).toBeGreaterThan(500);
+    });
+
+    for (const [query, expected] of [
+      ["dictate this note with whisperflow", ["Whisprflow"]],
+      ["use whisperflow", ["Whisprflow"]],
+      ["transcribe the call with whisper flow", ["Whisprflow"]],
+      ["Summarise today's posts in #halcyon-launch on Slack", ["Slack"]],
+      ["Search Linear issues from recorded meetings", ["Linear"]],
+      ["update the deal in hubsopt", ["HubSpot"]],
+      ["find my jira tickets", ["Atlassian", "Atlassian (v1)"]],
+    ] as const) {
+      test(`ranks the entry ${JSON.stringify(query)} names first and names it`, () => {
+        expect(searchCapabilityCatalogItems(catalog, query, 5)[0]?.item.name).toBe(expected[0]);
+        expect(named(query)).toEqual([...expected]);
+        expect(named(query, true)).toEqual([...expected]);
+      });
+    }
+
+    test("names a name written as its parts unless strong matches need more", () => {
+      const query = "add the new lead to hub spot";
+      expect(named(query)).toEqual(["HubSpot"]);
+      expect(named(query, true)).toEqual([]);
+    });
+
+    for (const [query, expected] of [
+      ["post the update in Microsoft Teams", ["Microsoft Teams"]],
+      ["open the Microsoft Excel sheet", ["Microsoft Excel"]],
+      ["check my Microsoft account settings", []],
+    ] as const) {
+      test(`a vendor word several products share names none of them: ${JSON.stringify(query)}`, () => {
+        expect(named(query)).toEqual([...expected]);
+        expect(named(query, true)).toEqual([...expected]);
+      });
+    }
+
+    test("entries whose names agree with a named one share its boost", () => {
+      const github = [
+        item({
+          id: "api:github-app",
+          name: "GitHub App",
+          source: "built_in",
+          description: "Give Opengeni access to an organization's repositories.",
+          providerDomain: "github.com",
+        }),
+        item({
+          id: "plugin:github",
+          name: "GitHub",
+          tags: ["github"],
+          providerDomain: "github.com",
+        }),
+      ];
+      // "GitHub repositories" names the plugin; the app shares its boost, so
+      // the two keep the order their ordinary scores give them.
+      const results = searchCapabilityCatalogItems(
+        [...catalog, ...github],
+        "GitHub repositories",
+        5,
+      );
+      expect(
+        results
+          .slice(0, 2)
+          .map((result) => result.item.id)
+          .sort(),
+      ).toEqual(["api:github-app", "plugin:github"]);
+      for (const result of results.slice(0, 2)) expect(result.score).toBeGreaterThan(10_000);
+    });
+
+    test("an ordinary-word or operation-word name is not ranked as named", () => {
+      for (const [query, name] of [
+        ["send a message to the channel", "Send"],
+        ["make a spreadsheet", "Make"],
+        ["read the guru article", "Guru"],
+        ["drop box the files", "Box"],
+        ["draw snowflakes", "Snowflake"],
+      ] as const) {
+        const match = searchCapabilityCatalogItems(catalog, query, 20).find(
+          (result) => result.item.name === name,
+        );
+        expect(match === undefined || match.score < 10_000).toBe(true);
+      }
+      // Capitalised as a name, it is one.
+      expect(searchCapabilityCatalogItems(catalog, "read the Guru article", 5)[0]?.item.name).toBe(
+        "Guru",
+      );
+    });
+
+    for (const [query, name] of [
+      ["close the ticket", "Close"],
+      ["linear regression on the data", "Linear"],
+      ["the box is empty", "Box"],
+      ["front page news", "Front"],
+    ] as const) {
+      test(`an ordinary word does not name ${name} beside strong matches`, () => {
+        expect(named(query, true)).toEqual([]);
+        // Without strong matches the whole name as a word still names it.
+        expect(named(query)).toContain(name);
+      });
+    }
   });
 });

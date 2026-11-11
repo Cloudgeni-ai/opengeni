@@ -1,0 +1,453 @@
+//! Uploads the object store verifies before it stores anything.
+//!
+//! Chunks are named by their content and shared by every sandbox that holds
+//! the same bytes, so one chunk corrupted on its way to the store would
+//! poison all of them. Each upload therefore carries checksums of its bytes
+//! and the store rejects it if what arrived does not match:
+//!
+//! - Google Cloud Storage: the XML API's `x-goog-hash` header with CRC32C and
+//!   MD5, sent by [`Gcs`] because `object_store` cannot attach it.
+//! - S3: `object_store`'s own SHA-256 checksum, enabled when the store is
+//!   built (see `ChunkStore::from_url`).
+//! - Anything else: the bytes are read back and compared after the upload.
+//!
+//! When an object already exists under a content name, GCS reports the
+//! checksums it computed when the object was stored, so [`Gcs::stored`]
+//! compares them with ours without downloading the object.
+
+use std::fmt::{self, Write as _};
+use std::future::Future;
+use std::time::Duration;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use bytes::Bytes;
+use md5::Digest as _;
+use object_store::client::{HttpClient, HttpRequestBody};
+use object_store::gcp::GcpCredentialProvider;
+use object_store::path::Path;
+
+use crate::{Error, Result};
+
+/// Attempts per request: transient failures (a lost connection or answer,
+/// 408, 429, any 5xx) and in-transit corruption are retried; anything else
+/// fails at once. One chunk check failing fails a whole verify, and a host
+/// asks about thousands of chunks at once when many sandboxes sleep
+/// together, so the store slowing it down must not fail them.
+const ATTEMPTS: u32 = 6;
+/// The wait before the second attempt. Each later one is four times the
+/// one before, to 25.6 s before the last: about 34 s in all, the backoff
+/// Cloud Storage asks of clients while it scales up to their rate.
+const FIRST_WAIT: Duration = Duration::from_millis(100);
+
+/// What a create-only upload found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Created {
+    /// This upload created the object.
+    New,
+    /// An object was already stored under the name; nothing was written.
+    Exists,
+}
+
+/// What GCS keeps about a stored object.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Stored {
+    /// The checksums GCS computed when it stored the object, in
+    /// `x-goog-hash` form; empty for composite objects, which have no MD5.
+    pub(crate) checksums: String,
+}
+
+/// Checksummed uploads to one Google Cloud Storage bucket: create-only, or
+/// replacing an object only to repair it.
+#[derive(Clone)]
+pub(crate) struct Gcs {
+    client: HttpClient,
+    credentials: GcpCredentialProvider,
+    bucket_url: String,
+}
+
+impl fmt::Debug for Gcs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Gcs")
+            .field("bucket_url", &self.bucket_url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Gcs {
+    pub(crate) fn new(
+        client: HttpClient,
+        credentials: GcpCredentialProvider,
+        base_url: &str,
+        bucket: &str,
+    ) -> Self {
+        Self {
+            client,
+            credentials,
+            bucket_url: format!("{}/{}", base_url.trim_end_matches('/'), encode(bucket)),
+        }
+    }
+
+    /// Stores `bytes` at `path` unless something is already there. The store
+    /// checks the CRC32C and MD5 sent with the bytes and refuses the upload
+    /// if either differs, so bytes corrupted in transit are never stored.
+    pub(crate) async fn create(&self, path: &Path, bytes: &Bytes) -> Result<Created> {
+        self.send(path, bytes, true).await
+    }
+
+    /// Stores `bytes` at `path`, replacing whatever is there, checked in
+    /// transit as [`Self::create`] is.
+    pub(crate) async fn replace(&self, path: &Path, bytes: &Bytes) -> Result<()> {
+        self.send(path, bytes, false).await.map(drop)
+    }
+
+    async fn send(&self, path: &Path, bytes: &Bytes, create_only: bool) -> Result<Created> {
+        let hashes = checksums(bytes);
+        retried(
+            || format!("PUT {path}"),
+            || self.put(path, bytes, &hashes, create_only),
+        )
+        .await
+    }
+
+    /// What GCS keeps about the object at `path`, or `None` when there is
+    /// no object.
+    pub(crate) async fn stored(&self, path: &Path) -> Result<Option<Stored>> {
+        retried(|| format!("HEAD {path}"), || self.head(path)).await
+    }
+
+    async fn head(&self, path: &Path) -> Result<Attempt<Option<Stored>>> {
+        let request = self
+            .request(http::Method::HEAD, path)
+            .await?
+            .body(HttpRequestBody::empty())
+            .map_err(|error| Error::Transfer(error.to_string()))?;
+        let response = match self.client.execute(request).await {
+            Ok(response) => response,
+            Err(error) => return Ok(Attempt::Retry(error.to_string())),
+        };
+        let status = response.status();
+        if status == http::StatusCode::NOT_FOUND {
+            return Ok(Attempt::Done(None));
+        }
+        if transient(status) {
+            return Ok(Attempt::Retry(format!("status {status}")));
+        }
+        if !status.is_success() {
+            return Ok(Attempt::Fail(format!("status {status}")));
+        }
+        let headers = response.headers();
+        // GCS sends one `x-goog-hash` header per algorithm.
+        let mut crc = None;
+        let mut md5 = None;
+        for value in headers.get_all("x-goog-hash") {
+            let value = value.to_str().unwrap_or_default();
+            for part in value.split(',').map(str::trim) {
+                if part.starts_with("crc32c=") {
+                    crc = Some(part.to_owned());
+                } else if part.starts_with("md5=") {
+                    md5 = Some(part.to_owned());
+                }
+            }
+        }
+        let checksums = match (crc, md5) {
+            (Some(crc), Some(md5)) => format!("{crc},{md5}"),
+            // Composite objects have no MD5; never match them.
+            _ => String::new(),
+        };
+        Ok(Attempt::Done(Some(Stored { checksums })))
+    }
+
+    async fn request(&self, method: http::Method, path: &Path) -> Result<http::request::Builder> {
+        let token = self.credentials.get_credential().await?;
+        Ok(http::Request::builder()
+            .method(method)
+            .uri(self.url(path))
+            .header(
+                http::header::AUTHORIZATION,
+                format!("Bearer {}", token.bearer),
+            ))
+    }
+
+    fn url(&self, path: &Path) -> String {
+        format!("{}/{}", self.bucket_url, encode(path.as_ref()))
+    }
+
+    async fn put(
+        &self,
+        path: &Path,
+        bytes: &Bytes,
+        hashes: &str,
+        create_only: bool,
+    ) -> Result<Attempt<Created>> {
+        let mut request = self
+            .request(http::Method::PUT, path)
+            .await?
+            .header(http::header::CONTENT_LENGTH, bytes.len())
+            .header("x-goog-hash", hashes);
+        if create_only {
+            // Create only: generation 0 means "no live object".
+            request = request.header("x-goog-if-generation-match", "0");
+        }
+        let request = request
+            .body(HttpRequestBody::from(bytes.clone()))
+            .map_err(|error| Error::Transfer(error.to_string()))?;
+        let response = match self.client.execute(request).await {
+            Ok(response) => response,
+            Err(error) => return Ok(Attempt::Retry(error.to_string())),
+        };
+        let status = response.status();
+        if status.is_success() {
+            return Ok(Attempt::Done(Created::New));
+        }
+        if status == http::StatusCode::PRECONDITION_FAILED {
+            return Ok(Attempt::Done(Created::Exists));
+        }
+        let body = response.into_body().bytes().await.unwrap_or_default();
+        let body = String::from_utf8_lossy(&body[..body.len().min(512)]).into_owned();
+        let corrupted = body.contains("BadDigest") || body.contains("InvalidDigest");
+        let reason = format!("status {status}: {body}");
+        Ok(if corrupted || transient(status) {
+            Attempt::Retry(reason)
+        } else {
+            Attempt::Fail(reason)
+        })
+    }
+}
+
+/// How one attempt of a request went.
+enum Attempt<T> {
+    Done(T),
+    /// Transient, or the bytes were corrupted on the way: send them again.
+    Retry(String),
+    Fail(String),
+}
+
+/// Runs `attempt` until it is done or fails, or [`ATTEMPTS`] times while
+/// it asks to be retried, waiting longer before each try; `what` names the
+/// request in the error.
+async fn retried<T, F>(what: impl Fn() -> String, mut attempt: impl FnMut() -> F) -> Result<T>
+where
+    F: Future<Output = Result<Attempt<T>>>,
+{
+    let mut wait = FIRST_WAIT;
+    let mut tried = 1;
+    loop {
+        let reason = match attempt().await? {
+            Attempt::Done(value) => return Ok(value),
+            Attempt::Fail(reason) => return Err(Error::Transfer(format!("{}: {reason}", what()))),
+            // Retries are expected; only the final failure is reported.
+            Attempt::Retry(reason) => reason,
+        };
+        if tried >= ATTEMPTS {
+            return Err(Error::Transfer(format!("{}: {reason}", what())));
+        }
+        tokio::time::sleep(jittered(wait)).await;
+        wait *= 4;
+        tried += 1;
+    }
+}
+
+/// Between half of `wait` and all of it, at random: requests the store
+/// turned away together come back spread out, not together again.
+fn jittered(wait: Duration) -> Duration {
+    let half = wait / 2;
+    let random = getrandom::u32().unwrap_or(u32::MAX / 2);
+    let extra = (half.as_nanos() * u128::from(random)) >> 32;
+    half + Duration::from_nanos(u64::try_from(extra).unwrap_or(u64::MAX))
+}
+
+/// Whether a request answered with `status` may succeed if sent again:
+/// the store timed it out, is turning requests away to slow the client
+/// down, or failed on its side.
+fn transient(status: http::StatusCode) -> bool {
+    status == http::StatusCode::REQUEST_TIMEOUT
+        || status == http::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+/// The `x-goog-hash` value for `bytes`: big-endian CRC32C and MD5, base64.
+pub(crate) fn checksums(bytes: &[u8]) -> String {
+    let crc = crc32c::crc32c(bytes).to_be_bytes();
+    let md5 = md5::Md5::digest(bytes);
+    format!("crc32c={},md5={}", BASE64.encode(crc), BASE64.encode(md5))
+}
+
+/// The MD5 in `checksums`, as [`checksums`] writes them, in lowercase hex:
+/// what S3, and stores like it, give as the entity tag of an object stored
+/// by one plain write or copied from one.
+pub(crate) fn md5_hex(checksums: &str) -> Option<String> {
+    let md5 = checksums
+        .split(',')
+        .find_map(|part| part.strip_prefix("md5="))?;
+    let md5 = BASE64.decode(md5).ok()?;
+    (md5.len() == 16).then(|| {
+        md5.iter().fold(String::with_capacity(32), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+    })
+}
+
+/// Whether the entity tag `tag` is the MD5 `md5` (lowercase hex); `None`
+/// when it is no plain MD5 at all, such as a multipart upload's (`-N` at
+/// its end) or a store's own kind of tag.
+pub(crate) fn tag_is_md5(tag: &str, md5: &str) -> Option<bool> {
+    let tag = tag.trim().trim_matches('"');
+    (tag.len() == 32 && tag.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| tag.eq_ignore_ascii_case(md5))
+}
+
+/// Percent-encodes an object name for a URL path, keeping `/` separators.
+fn encode(name: &str) -> String {
+    let mut encoded = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            encoded.push(char::from(byte));
+        } else {
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use crate::fake::{Fake, gcs};
+
+    #[tokio::test(start_paused = true)]
+    async fn corrupted_uploads_are_refused_and_sent_again() {
+        let fake = Arc::new(Fake::default());
+        *fake.corrupt.lock().unwrap() = 2;
+        let store = gcs(&fake);
+        let path = Path::from("p/chunks/v1/a");
+        let bytes = Bytes::from_static(b"chunk bytes");
+        assert_eq!(store.create(&path, &bytes).await.unwrap(), Created::New);
+        assert_eq!(*fake.puts.lock().unwrap(), 3);
+        assert_eq!(fake.bytes("p/chunks/v1/a").unwrap(), bytes);
+        assert_eq!(store.create(&path, &bytes).await.unwrap(), Created::Exists);
+        let stored = store.stored(&path).await.unwrap().unwrap();
+        assert_eq!(stored.checksums, checksums(&bytes));
+        assert_eq!(store.stored(&Path::from("p/none")).await.unwrap(), None);
+        let other = Bytes::from_static(b"other bytes");
+        store.replace(&path, &other).await.unwrap();
+        assert_eq!(fake.bytes("p/chunks/v1/a").unwrap(), other);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn persistent_corruption_fails_without_storing_anything() {
+        let fake = Arc::new(Fake::default());
+        *fake.corrupt.lock().unwrap() = u32::MAX;
+        let store = gcs(&fake);
+        let error = store
+            .create(&Path::from("p/x"), &Bytes::from_static(b"x"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Transfer(_)), "{error}");
+        assert_eq!(*fake.puts.lock().unwrap(), ATTEMPTS);
+        assert_eq!(fake.names().len(), 0);
+    }
+
+    /// Every request waits out a store turning it away for a while: one
+    /// chunk check failing would fail a whole verify.
+    #[tokio::test(start_paused = true)]
+    async fn requests_wait_out_a_store_turning_them_away() {
+        let fake = Arc::new(Fake::default());
+        let store = gcs(&fake);
+        let path = Path::from("p/chunks/v1/c");
+        let bytes = Bytes::from_static(b"chunk bytes");
+        let refusals = ATTEMPTS - 1;
+        *fake.unavailable.lock().unwrap() = refusals;
+        assert_eq!(store.create(&path, &bytes).await.unwrap(), Created::New);
+        *fake.unavailable.lock().unwrap() = refusals;
+        let started = tokio::time::Instant::now();
+        let stored = store.stored(&path).await.unwrap().unwrap();
+        assert_eq!(stored.checksums, checksums(&bytes));
+        // Waited half or more of each wait, and no more than all of them.
+        let waited = started.elapsed();
+        let all: Duration = (0..refusals).map(|n| FIRST_WAIT * 4_u32.pow(n)).sum();
+        assert!(waited >= all / 2 && waited <= all, "waited {waited:?}");
+        *fake.unavailable.lock().unwrap() = refusals;
+        assert_eq!(store.stored(&Path::from("p/none")).await.unwrap(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_store_that_keeps_turning_requests_away_fails_them_in_the_end() {
+        let fake = Arc::new(Fake::default());
+        let store = gcs(&fake);
+        let path = Path::from("p/chunks/v1/d");
+        *fake.unavailable.lock().unwrap() = u32::MAX;
+        let error = store.stored(&path).await.unwrap_err();
+        assert!(
+            error.to_string().contains("HEAD p/chunks/v1/d: status 503"),
+            "{error}"
+        );
+        assert_eq!(u32::MAX - *fake.unavailable.lock().unwrap(), ATTEMPTS);
+        *fake.unavailable.lock().unwrap() = u32::MAX;
+        let error = store
+            .create(&path, &Bytes::from_static(b"x"))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("transfer failed: PUT p/chunks/v1/d: status 503"),
+            "{error}"
+        );
+        assert_eq!(fake.names().len(), 0);
+    }
+
+    #[test]
+    fn waits_are_spread_between_half_and_all_of_the_backoff() {
+        let wait = Duration::from_secs(1);
+        let waits: Vec<Duration> = (0..200).map(|_| jittered(wait)).collect();
+        assert!(
+            waits
+                .iter()
+                .all(|&jittered| jittered >= wait / 2 && jittered <= wait)
+        );
+        let spread = waits
+            .iter()
+            .max()
+            .unwrap()
+            .saturating_sub(*waits.iter().min().unwrap());
+        assert!(spread > wait / 4, "barely spread: {spread:?}");
+    }
+
+    #[test]
+    fn checksums_match_the_published_test_vectors() {
+        // CRC32C of "123456789" is 0xE3069283; MD5 of "" is d41d8cd9...
+        assert!(checksums(b"123456789").starts_with("crc32c=4waSgw==,"));
+        assert_eq!(
+            checksums(b""),
+            "crc32c=AAAAAA==,md5=1B2M2Y8AsgTpgAmY7PhCfg=="
+        );
+    }
+
+    #[test]
+    fn names_are_encoded_but_keep_their_separators() {
+        assert_eq!(encode("p/chunks/v1/a b+c"), "p/chunks/v1/a%20b%2Bc");
+    }
+
+    #[test]
+    fn an_entity_tag_is_matched_against_the_md5_of_the_checksums() {
+        let md5 = md5_hex(&checksums(b"")).unwrap();
+        assert_eq!(md5, "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(md5_hex("crc32c=AAAAAA=="), None);
+        assert_eq!(md5_hex("crc32c=AAAAAA==,md5=AAAA"), None, "not 16 bytes");
+        assert_eq!(
+            tag_is_md5("\"D41D8CD98F00B204E9800998ECF8427E\"", &md5),
+            Some(true)
+        );
+        assert_eq!(
+            tag_is_md5("d41d8cd98f00b204e9800998ecf8427f", &md5),
+            Some(false)
+        );
+        let multipart = "\"d41d8cd98f00b204e9800998ecf8427e-2\"";
+        assert_eq!(tag_is_md5(multipart, &md5), None, "a multipart upload's");
+        assert_eq!(tag_is_md5("17", &md5), None, "a generation");
+    }
+}

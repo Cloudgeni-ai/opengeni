@@ -14,11 +14,8 @@ import {
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   prepareAgentTools,
   RunMcpCredentials,
@@ -157,7 +154,6 @@ test.each(["undelegated_personal", "unpinned_workspace"] as const)(
         effectiveTools: routes.tools,
         attemptId: crypto.randomUUID(),
         effectiveSandboxBackend: "docker",
-        variableSet: null,
       });
       const material = await resolver!.resolve({ purpose: "provision", forceRefresh: false });
       let nativeCalls = 0;

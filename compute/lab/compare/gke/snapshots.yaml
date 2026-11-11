@@ -1,0 +1,31 @@
+# Pod Snapshots for the compare namespace. Substitute BUCKET, then
+# `kubectl apply -f`. Snapshots are grouped per sandbox, as Agent Sandbox's
+# suspend and resume expect, so a resume restores the sandbox's own latest.
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotStorageConfig
+metadata:
+  name: compare-gcs
+spec:
+  snapshotStorageConfig:
+    gcs:
+      bucket: BUCKET
+      path: snapshots
+---
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotPolicy
+metadata:
+  name: compare
+  namespace: compare
+spec:
+  storageConfigName: compare-gcs
+  selector:
+    matchLabels:
+      app: compare-sandbox
+  triggerConfig:
+    type: manual
+    postCheckpoint: resume
+  snapshotGroupingRules:
+    groupByLabelValue:
+      labels: ["agents.x-k8s.io/sandbox-name-hash"]
+      groupRetentionPolicy:
+        maxSnapshotCountPerGroup: 2

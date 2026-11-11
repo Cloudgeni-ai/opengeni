@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { settingsWithWorkspaceSandboxImage } from "../src/sandbox/runtime-settings";
 
 describe("workspace default sandbox image", () => {

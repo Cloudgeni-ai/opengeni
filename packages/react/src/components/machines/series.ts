@@ -2,16 +2,17 @@
 // and the metric catalog the detail view + tiles iterate over.
 import type { MetricSample } from "../../types/machines";
 import type { SeriesPoint } from "./metric-history-chart";
+import { type OpenGeniText } from "../../messages/runtime";
 
 export type MetricWindow = "15m" | "1h" | "6h" | "24h";
 export const METRIC_WINDOWS: MetricWindow[] = ["15m", "1h", "6h", "24h"];
 
-export const WINDOW_LABEL: Record<MetricWindow, string> = {
-  "15m": "in the last 15 min",
-  "1h": "in the last hour",
-  "6h": "in the last 6 hours",
-  "24h": "in the last 24 hours",
-};
+export const WINDOW_LABEL = (msg: OpenGeniText): Record<MetricWindow, string> => ({
+  "15m": msg("machines.series.inTheLast15Min"),
+  "1h": msg("machines.series.inTheLastHour"),
+  "6h": msg("machines.series.inTheLast6Hours"),
+  "24h": msg("machines.series.inTheLast24Hours"),
+});
 
 function ptsFrom(samples: MetricSample[], pick: (s: MetricSample) => number | null): SeriesPoint[] {
   return samples.map((s) => ({ t: new Date(s.sampledAt).getTime(), v: pick(s) }));
@@ -51,7 +52,7 @@ const fmtBytes = (b: number): string => {
 
 // The catalog. GPU is included but the detail view only renders it when the
 // latest sample actually reports a GPU (gpuUtilPct != null).
-export const METRICS: MetricDef[] = [
+export const METRICS = (msg: OpenGeniText): MetricDef[] => [
   {
     key: "cpu",
     title: "CPU",
@@ -61,11 +62,11 @@ export const METRICS: MetricDef[] = [
     thresholds: { warn: 90, crit: 98 },
     pick: (s) => s.cpuPct,
     current: (s) => `${Math.round(s.cpuPct)}%`,
-    sub: (s) => `${s.runQueue} in run queue`,
+    sub: (s) => msg("machines.series.runqueueInRunQueue", { runQueue: s.runQueue }),
   },
   {
     key: "mem",
-    title: "Memory",
+    title: msg("machines.series.memory"),
     unit: "%",
     yMax: 100,
     color: "var(--og-color-status-idle)",
@@ -76,7 +77,7 @@ export const METRICS: MetricDef[] = [
   },
   {
     key: "disk",
-    title: "Disk",
+    title: msg("machines.series.disk"),
     unit: "%",
     yMax: 100,
     color: "var(--og-color-status-waiting)",
@@ -87,7 +88,7 @@ export const METRICS: MetricDef[] = [
   },
   {
     key: "load",
-    title: "Load average",
+    title: msg("machines.series.loadAverage"),
     unit: "",
     yMax: "auto",
     color: "var(--og-color-accent-strong)",

@@ -1,0 +1,105 @@
+/**
+ * The app's one meeting recorder, held above the screens so a recording keeps
+ * going while the person moves around the app (and, with the native module,
+ * while the phone is locked or another app is in front).
+ *
+ * Audio is written to this phone's storage as it is captured and uploaded in
+ * the background. Unsent audio is kept per signed-in account and only ever
+ * uploaded with that account's credential; recordings the app could not
+ * finish (killed, offline) finish the next time that account is active.
+ */
+import {
+  MeetingRecorderProvider as SharedRecorderProvider,
+  isCapturing,
+  showAudioImportError,
+  useMeetingRecorder,
+  useSharedAudioImport,
+  type MeetingRecorder,
+} from "@opengeni/react-native/meetings";
+import { useOpenGeniText } from "@opengeni/react/messages";
+import { fontStyle, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
+import { Stack } from "expo-router";
+import type { ReactNode } from "react";
+import { ActivityIndicator, Text, View } from "react-native";
+import { useAccount } from "@/account";
+
+export { isCapturing, useMeetingRecorder, type MeetingRecorder };
+
+export function MeetingRecorderProvider({ children }: { children: ReactNode }) {
+  const { account, client, workspaceId } = useAccount();
+  // A new account is a new client and a new store: the provider starts a fresh
+  // recorder for it, and the screens below stay as they are.
+  return (
+    <SharedRecorderProvider
+      client={client}
+      workspaceId={account && workspaceId ? workspaceId : null}
+      {...(account ? { storeScope: account.id } : {})}
+    >
+      <SharedAudioImport />
+      {children}
+    </SharedRecorderProvider>
+  );
+}
+
+/*
+ * A phone call recorded with the Phone app's button (kept in Notes), a voice
+ * memo or any audio file shared to the app becomes a meeting in the current
+ * workspace. The share opens Meetings (app/+native-intent.tsx), where it
+ * shows while it uploads.
+ */
+function SharedAudioImport() {
+  const msg = useOpenGeniText();
+  useSharedAudioImport({ onError: (error) => showAudioImportError(msg, error) });
+  return null;
+}
+
+/**
+ * Meetings and automations belong to a workspace. Until one is chosen (a new
+ * account, or the workspace list still loading) say so instead of rendering
+ * the screen.
+ */
+export function WorkspaceGate({
+  title,
+  message = "Choose a workspace to record and see its meetings.",
+  children,
+}: {
+  title: string;
+  /** What choosing a workspace lets the person do here. */
+  message?: string;
+  children: (workspaceId: string) => ReactNode;
+}) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const { status, workspaceId } = useAccount();
+  if (workspaceId) return <>{children(workspaceId)}</>;
+  return (
+    <>
+      <Stack.Screen
+        options={{
+          title,
+          headerStyle: { backgroundColor: c.bg },
+          headerTintColor: c.fg,
+          headerShadowVisible: false,
+        }}
+      />
+      <View style={{ flex: 1, backgroundColor: c.bg, padding: 24, alignItems: "center" }}>
+        {status === "loading" ? (
+          <ActivityIndicator style={{ marginTop: 24 }} color={c["fg-muted"]} />
+        ) : (
+          <Text
+            style={{
+              ...fontStyle(theme),
+              fontSize: 15,
+              lineHeight: 21,
+              color: c["fg-muted"],
+              textAlign: "center",
+              marginTop: 24,
+            }}
+          >
+            {message}
+          </Text>
+        )}
+      </View>
+    </>
+  );
+}

@@ -1,6 +1,7 @@
 import {
   applyGitAuthPointerEnvironment,
   codemodeWorkspaceUrl,
+  collectGitIdentityEnvironment,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
@@ -14,28 +15,13 @@ import {
   type GitCredentialTransport,
   type GitCredentials,
   type ResourceRef,
-  type SandboxSecrets,
   type SessionTurn,
   type TurnInitiator,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import { personalGitHubRepositoryResources } from "@opengeni/core";
 import { mintSandboxCodemodeToken, type SandboxCodemodeAuthority } from "@opengeni/runtime/sandbox";
-import {
-  loadVariableSetForRun as loadWorkspaceEnvironmentForRunFromDb,
-  type Database,
-  type VariableSetForRun as WorkspaceEnvironmentForRun,
-} from "@opengeni/db";
 import { createGitHubAppInstallationTokenWithExpiry, githubAppBotIdentity } from "@opengeni/github";
-
-// Re-exported from the shared @opengeni/db leaf (moved there so the API-direct
-// attach paths can load the SAME decrypted workspace environment the turn
-// declares — keeping the box-manifest env and agent-manifest env identical).
-// Existing worker import sites (agent-turn) continue importing from here.
-export {
-  loadWorkspaceEnvironmentForRunFromDb as loadWorkspaceEnvironmentForRun,
-  type WorkspaceEnvironmentForRun,
-};
 
 // §7.6 connection-credential provider — the run's workspace identity, threaded so the connection-credential
 // provider can be called with the run's tenant context AND so the workspace-scope cross-check
@@ -45,17 +31,14 @@ export type ConnectionScope = {
   workspaceId: string;
 };
 
-export type VariableSetCredentialAuthority = {
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
-  initiator: TurnInitiator;
-  initiatingHumanSubjectId: string | null;
-};
-
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
 export type GitTokenExpiries = Partial<Record<GitCredentialProvider, string>>;
+export type GitCommitIdentity = {
+  name: string;
+  email: string;
+  /** Set only when the committer differs from the author. */
+  committer?: { name: string; email: string } | undefined;
+};
 export type GitCredentialBindingSeed = {
   credentialBindingId: string;
   provider: GitCredentialProvider;
@@ -63,6 +46,14 @@ export type GitCredentialBindingSeed = {
   transport?: GitCredentialTransport;
   expiresAt?: string;
   providerBindingCount?: number;
+  /**
+   * Commit identity for the repositories behind this binding. The repository
+   * clone hook writes it into each repository's local Git config, so one
+   * session can commit as the GitHub App bot in one repository and as the
+   * person's own GitHub account in another. Absent: the repository uses the
+   * box-wide default (a deployment-configured identity, when present).
+   */
+  identity?: GitCommitIdentity;
 };
 export type MintedRunGitCredentials = {
   bindings: GitCredentialBindingSeed[];
@@ -122,80 +113,8 @@ type RunGitCredentialOptions = {
   authorizeGitHubTokenMint?: GitHubTokenMintAuthorization;
 };
 
-// §7.6 connection-credential provider — load the run's workspace environment, delegating the DECRYPT to a
-// host `sandboxSecrets` provider when one is bound (the host owns the secret
-// vault + encryption key in embedded/separate topologies) and otherwise running
-// today's local `environmentsEncryptionKeyBytes`-keyed decrypt byte-for-byte.
-//
-// Unattached runs (environmentId === null) short-circuit identically in BOTH
-// modes: zero DB/provider work, returns null. When a provider IS bound it owns
-// the decrypt end-to-end (it reads the host's own store), so the local DB read
-// is skipped — the provider is the sole source of truth for that leg.
-export async function loadWorkspaceEnvironmentForRunWithCredentials(
-  db: Database,
-  settings: Settings,
-  scope: ConnectionScope,
-  environmentId: string | null,
-  authority: VariableSetCredentialAuthority,
-  sandboxSecrets?: ConnectionCredentialsPort["sandboxSecrets"],
-  options: {
-    /**
-     * Exact accepted scheduled-occurrence generation for this Variable Set,
-     * resolved by the caller from the immutable run snapshot; null/omitted for
-     * ordinary live turns.
-     */
-    expectedGeneration?: number | null;
-  } = {},
-): Promise<WorkspaceEnvironmentForRun | null> {
-  if (!sandboxSecrets) {
-    return loadWorkspaceEnvironmentForRunFromDb(db, settings, {
-      ...scope,
-      variableSetId: environmentId,
-      authority: {
-        kind: "agent_attempt",
-        subjectId: authority.initiatingHumanSubjectId ?? authority.initiator.subjectId,
-        ...authority,
-      },
-    });
-  }
-  if (!environmentId) {
-    return null;
-  }
-  const expectedGeneration = options.expectedGeneration ?? null;
-  const secrets: SandboxSecrets = await sandboxSecrets({
-    accountId: scope.accountId,
-    workspaceId: scope.workspaceId,
-    ...authority,
-    variableSetId: environmentId,
-    ...(expectedGeneration === null ? {} : { expectedGeneration }),
-  });
-  // workspace-scope cross-check: the provider must echo THIS run's workspace before we apply its
-  // decrypted values into the sandbox.
-  assertWorkspaceEcho("sandboxSecrets", scope, secrets.workspaceId);
-  if (
-    secrets.accountId !== scope.accountId ||
-    secrets.sessionId !== authority.sessionId ||
-    secrets.turnId !== authority.turnId ||
-    secrets.attemptId !== authority.attemptId ||
-    secrets.executionGeneration !== authority.executionGeneration ||
-    secrets.variableSetId !== environmentId ||
-    // A scheduled attempt materializes only the exact accepted generation:
-    // the host must echo it and return that generation's values.
-    (expectedGeneration !== null &&
-      (secrets.expectedGeneration !== expectedGeneration ||
-        secrets.generation !== expectedGeneration))
-  ) {
-    throw new Error("connection-credential provider (sandboxSecrets) returned stale authority");
-  }
-  return {
-    id: secrets.id ?? environmentId,
-    name: secrets.name ?? environmentId,
-    description: secrets.description ?? null,
-    scope: secrets.scope,
-    generation: secrets.generation,
-    values: secrets.values,
-  };
-}
+// User secrets reach a sandbox command only through `{{secret:…}}` references
+// resolved at the exec boundary; the manifest carries deployment constants only.
 
 // Workspace-scope cross-check. A credential provider echoes the workspace it scoped
 // the credential to; we ASSERT it equals the run's workspace BEFORE the caller
@@ -217,7 +136,6 @@ function assertWorkspaceEcho(
 export async function sandboxEnvironmentForRun(
   settings: Settings,
   resources: ResourceRef[],
-  workspaceEnvironment: Record<string, string> = {},
   // §7.6 connection-credential provider - optional host git-credential provider + the run scope it needs
   // (unset, the standalone default → self-mint from `settings` byte-for-byte).
   // `skipGitHubToken` (Stage D): a connected-machine turn skips the inert platform
@@ -245,11 +163,10 @@ export async function sandboxEnvironmentForRun(
   codemodeToken?: string;
   codemodeTokenExpiresAt?: Date;
 }> {
-  // Precedence: deployment allowlist < git identity < workspace environment
-  // < backend-aware HOME (the STABLE base, shared with the API-direct attach
-  // paths via stableSandboxEnvironmentForRun) < platform run-scoped git auth
-  // (applied below, always last). Reserved name validation at write time prevents
-  // workspace values from colliding with the platform-managed entries.
+  // Precedence: deployment allowlist < git identity < backend-aware HOME (the
+  // STABLE base, shared with the API-direct attach paths via
+  // stableSandboxEnvironmentForRun) < platform run-scoped git auth (applied
+  // below, always last). No user values: secrets are delivered per command (W1).
   //
   // TOKEN-BROKER (B1): run-scoped git provider tokens are NO LONGER layered into
   // the box/agent MANIFEST env (no GH_TOKEN/GITHUB_TOKEN/GITLAB_TOKEN/
@@ -257,13 +174,15 @@ export async function sandboxEnvironmentForRun(
   // and returned separately as provider token seeds; the caller threads them
   // OFF-MANIFEST as clone-seed exec env vars so the clone hook writes stable token
   // files. The manifest carries only stable pointers (GIT_ASKPASS,
-  // GIT_TERMINAL_PROMPT, identity, OPENGENI_GIT_CREDENTIALS_DIR, and
+  // GIT_TERMINAL_PROMPT, OPENGENI_GIT_CREDENTIALS_DIR, and
   // OPENGENI_GIT_TOKEN_FILE), so token VALUES never ride the manifest and the SDK's
   // per-turn provided-session env delta stays empty even though tokens rotate.
+  // Per-repository commit identity rides each binding to the clone hook, which
+  // writes it into the repository's local Git config.
   // GitHub keeps the legacy `gitToken`/OPENGENI_GIT_TOKEN_FILE alias. The worker
   // proactively renews every selected provider behind these stable pointers.
   const stableOptions = options.scope ? { workspaceId: options.scope.workspaceId } : {};
-  const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment, stableOptions);
+  const environment = stableSandboxEnvironmentForRun(settings, stableOptions);
   const codemodeDelivery = options.codemodeDelivery ?? "managed_file";
   // Connected Machines keep their machine-wide environment untouched. Their
   // URL, package hint, and direct bearer are projected only onto an exact child
@@ -303,10 +222,9 @@ export async function sandboxEnvironmentForRun(
     };
   }
   if (options.deferGitHubToken) {
-    applyGitAuthPointerEnvironment(
-      environment,
-      await resolveRunGitIdentityWithSelections(settings, selections, options),
-    );
+    // Commit identity is per repository and travels with each minted binding
+    // to the clone hook, so the lazy path needs no identity lookup up front.
+    applyGitAuthPointerEnvironment(environment);
     return {
       environment,
       ...(codemodeToken
@@ -332,7 +250,7 @@ export async function sandboxEnvironmentForRun(
   // surface (viewer attach, channel-A) declares the IDENTICAL env when it
   // cold-creates the box for a repo-attached session — an attach-warmed box
   // missing these keys kills the next repo turn on the SDK's manifest-env guard.
-  applyGitAuthPointerEnvironment(environment, minted.identity);
+  applyGitAuthPointerEnvironment(environment);
   return {
     environment,
     ...(minted.gitTokens.github ? { gitToken: minted.gitTokens.github } : {}),
@@ -409,18 +327,6 @@ export async function mintRunGitToken(
   return (await mintRunGitTokens(settings, resources, options))?.github;
 }
 
-export async function resolveRunGitIdentity(
-  settings: Settings,
-  resources: ResourceRef[],
-  options: RunGitCredentialOptions = {},
-): Promise<{ name: string; email: string } | null> {
-  const selections = gitCredentialSelections(resources);
-  if (selections.length === 0) {
-    return null;
-  }
-  return await resolveRunGitIdentityWithSelections(settings, selections, options);
-}
-
 async function mintRunGitTokensWithIdentity(
   settings: Settings,
   selections: GitCredentialSelection[],
@@ -429,11 +335,10 @@ async function mintRunGitTokensWithIdentity(
   bindings: GitCredentialBindingSeed[];
   gitTokens: GitTokenSeeds;
   expiresAt: GitTokenExpiries;
-  identity: { name: string; email: string } | null;
 }> {
   const bindings: GitCredentialBindingSeed[] = [];
-  let identity: { name: string; email: string } | null = null;
   for (const selection of selections) {
+    let identity: GitCommitIdentity | null = null;
     let token: string | null = null;
     let transport: GitCredentialTransport | undefined;
     let tokenExpiresAt: string | undefined;
@@ -478,11 +383,7 @@ async function mintRunGitTokensWithIdentity(
       tokenExpiresAt = minted.expiresAt
         ? validatedGitCredentialExpiry(selection.provider, minted.expiresAt)
         : undefined;
-      if (minted.identity) {
-        identity = mergeGitIdentity(identity, minted.identity);
-      } else if (selection.provider === "github") {
-        identity = mergeGitIdentity(identity, githubAppBotIdentity(settings));
-      }
+      identity = repositoryCommitIdentity(settings, selection, minted.identity ?? null);
     } else if (selection.provider === "github" && selection.installationId > 0) {
       const minted = await createGitHubAppInstallationTokenWithExpiry(settings, {
         installationId: selection.installationId,
@@ -492,7 +393,7 @@ async function mintRunGitTokensWithIdentity(
       tokenExpiresAt = minted.expiresAt
         ? validatedGitCredentialExpiry("github", minted.expiresAt)
         : undefined;
-      identity = mergeGitIdentity(identity, githubAppBotIdentity(settings));
+      identity = repositoryCommitIdentity(settings, selection, null);
     }
     if (token) {
       bindings.push({
@@ -501,6 +402,7 @@ async function mintRunGitTokensWithIdentity(
         token,
         ...(transport ? { transport } : {}),
         ...(tokenExpiresAt ? { expiresAt: tokenExpiresAt } : {}),
+        ...(identity ? { identity } : {}),
       });
     }
   }
@@ -517,7 +419,7 @@ async function mintRunGitTokensWithIdentity(
     gitTokens[binding.provider] = binding.token;
     if (binding.expiresAt) expiresAt[binding.provider] = binding.expiresAt;
   }
-  return { bindings, gitTokens, expiresAt, identity };
+  return { bindings, gitTokens, expiresAt };
 }
 
 function validatedGitCredentialExpiry(provider: GitCredentialProvider, value: string): string {
@@ -648,37 +550,6 @@ export function assertGitCredentialRenewalTransportUnchanged(
       `renewed ${initial.provider} credential changed Git HTTP broker routes for binding ${initial.credentialBindingId}`,
     );
   }
-}
-
-async function resolveRunGitIdentityWithSelections(
-  settings: Settings,
-  selections: GitCredentialSelection[],
-  options: RunGitCredentialOptions,
-): Promise<{ name: string; email: string } | null> {
-  let identity: { name: string; email: string } | null = null;
-  for (const selection of selections) {
-    const gitCredentials = credentialsForSelection(options, selection);
-    assertPersonalGitHubConsumerAvailable(selection, gitCredentials, options.scope);
-    if (gitCredentials && options.scope) {
-      const request = gitCredentialsRequestForSelection(
-        options.scope,
-        requireGitCredentialAuthority(options),
-        selection,
-        "identity",
-      );
-      const resolved: GitCredentials = await gitCredentials(request);
-      assertWorkspaceEcho("gitCredentials", options.scope, resolved.workspaceId);
-      assertGitCredentialBindingEcho(selection, request, resolved);
-      if (resolved.identity) {
-        identity = mergeGitIdentity(identity, resolved.identity);
-      } else if (selection.provider === "github") {
-        identity = mergeGitIdentity(identity, githubAppBotIdentity(settings));
-      }
-    } else if (selection.provider === "github" && selection.installationId > 0) {
-      identity = mergeGitIdentity(identity, githubAppBotIdentity(settings));
-    }
-  }
-  return identity;
 }
 
 type GitCredentialSelection = {
@@ -880,7 +751,15 @@ function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelecti
           );
         }
         entry.installationId = installationId;
-        entry.repositoryIds.push(repositoryId);
+        // The same repository may legitimately be attached more than once
+        // (another ref or mount path), and sessions persisted before the
+        // web picker reconciled manual and catalog rows can hold an exact
+        // duplicate. One binding's token allowlist is the unique repository
+        // set; every resource keeps its own ref and mount above, and the
+        // GitHub token boundary still rejects duplicates from other callers.
+        if (!entry.repositoryIds.includes(repositoryId)) {
+          entry.repositoryIds.push(repositoryId);
+        }
       }
     }
     byBinding.set(bindingKey, entry);
@@ -919,19 +798,51 @@ function assertPersonalGitHubConsumerAvailable(
   }
 }
 
-function mergeGitIdentity(
-  current: { name: string; email: string } | null,
-  candidate: { name: string; email: string } | null,
-): { name: string; email: string } | null {
-  if (!candidate) return current;
-  if (
-    current &&
-    (current.name !== candidate.name ||
-      current.email.toLowerCase() !== candidate.email.toLowerCase())
-  ) {
-    throw new Error("repository resources require different Git commit identities");
+/**
+ * The commit identity one binding's repositories use.
+ *
+ * - A personal GitHub repository commits as the person: the identity the
+ *   personal Git broker returns (`<id>+<login>@users.noreply.github.com`). A
+ *   deployment-configured identity never overrides it; that is the point of
+ *   working through the person's own account.
+ * - A GitHub App (or host-brokered) repository keeps today's precedence: a
+ *   deployment-configured identity (OPENGENI_GIT_*) wins, otherwise the
+ *   host-provided identity, else the GitHub App bot identity. A partial
+ *   deployment identity fills its missing half from that fallback. It is always
+ *   written into the repository's own config, so the repository does not
+ *   depend on what the box's pinned env happens to carry.
+ */
+export function repositoryCommitIdentity(
+  settings: Settings,
+  selection: Pick<GitCredentialSelection, "provider" | "personalGitHub">,
+  providedIdentity: GitCommitIdentity | null,
+): GitCommitIdentity | null {
+  const usable = (identity: GitCommitIdentity | null | undefined): GitCommitIdentity | null =>
+    identity && identity.name.trim() && identity.email.trim()
+      ? { name: identity.name.trim(), email: identity.email.trim() }
+      : null;
+  if (selection.personalGitHub) {
+    return usable(providedIdentity);
   }
-  return current ?? candidate;
+  const fallback =
+    usable(providedIdentity) ??
+    (selection.provider === "github" ? usable(githubAppBotIdentity(settings)) : null);
+  const deployment = collectGitIdentityEnvironment(settings);
+  if (deployment.GIT_AUTHOR_NAME || deployment.GIT_AUTHOR_EMAIL) {
+    const author = usable({
+      name: deployment.GIT_AUTHOR_NAME ?? fallback?.name ?? "",
+      email: deployment.GIT_AUTHOR_EMAIL ?? fallback?.email ?? "",
+    });
+    if (!author) return null;
+    const committer = usable({
+      name: deployment.GIT_COMMITTER_NAME ?? author.name,
+      email: deployment.GIT_COMMITTER_EMAIL ?? author.email,
+    });
+    return committer && (committer.name !== author.name || committer.email !== author.email)
+      ? { ...author, committer }
+      : author;
+  }
+  return fallback;
 }
 
 function normalizedGitHost(uri: string): string {

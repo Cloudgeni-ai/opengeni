@@ -40,7 +40,12 @@ export async function auditWorkspaceBillingStatic(
     checkUnscopedOperationalRoutes(file, text, findings);
     await checkForbiddenProviderImports(file, text, findings);
     checkBillingPortalSurface(file, text, findings);
-    checkGithubWebhookAdvertising(file, text, findings);
+    if (file === GITHUB_APP_MANIFEST_FILE) {
+      const receiver = await Bun.file(GITHUB_WEBHOOK_RECEIVER_FILE)
+        .text()
+        .catch(() => "");
+      checkGithubWebhookAdvertising(file, text, receiver, findings);
+    }
     checkMcpDefaults(file, text, findings);
   }
 
@@ -72,13 +77,17 @@ async function listFiles(roots: string[]): Promise<string[]> {
   throw new Error("Unable to list source files: neither rg nor git ls-files is available");
 }
 
+function spawnFileListCommand(command: string[]) {
+  return Bun.spawn(command, {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+}
+
 async function runFileListCommand(command: string[]): Promise<string | null> {
-  let proc: ReturnType<typeof Bun.spawn>;
+  let proc: ReturnType<typeof spawnFileListCommand>;
   try {
-    proc = Bun.spawn(command, {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    proc = spawnFileListCommand(command);
   } catch (error) {
     if (
       error &&
@@ -105,10 +114,58 @@ function normalizeFileList(stdout: string): string[] {
   return stdout
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line && !line.includes("/node_modules/"));
+    .filter(
+      (line) =>
+        line && !line.includes("/node_modules/") && !line.startsWith("packages/react/demo-dist/"),
+    );
 }
 
-function checkUnscopedOperationalRoutes(file: string, text: string, out: Finding[]): void {
+// The organization MCP server is a distinct, explicitly admitted endpoint, not
+// the deleted unscoped workspace tool gateway. Keep its exact leaf reference
+// confined to its implementation, organization UI, SDK, generated inventory
+// and end-to-end tests (including personal API keys acting through it).
+// Child paths remain forbidden even in these files. See docs/mcp-surfaces.md.
+const organizationMcpSurfaceFiles = new Set([
+  "apps/api/src/mcp-oauth.ts",
+  // EU-only: the calling-workspace check covers the organization MCP endpoint too.
+  "apps/api/src/mcp/workspace-content-flow.ts",
+  "apps/api/src/organization-mcp.ts",
+  // Disconnect audit: an agent connected to the organization MCP endpoint disconnects.
+  "apps/api/test/disconnect-audit-postgres.test.ts",
+  // Organization admins list and disconnect agents connected to the organization MCP endpoint.
+  "apps/api/test/organization-admin-connected-agents.test.ts",
+  // Organization admins disconnect a member's agent connected to the endpoint.
+  "apps/api/test/organization-admin-integration-administration.test.ts",
+  // Auto-connect: Claude or an identity provider connects members to the endpoint.
+  "apps/api/test/mcp-auto-connect.test.ts",
+  "apps/api/test/organization-mcp-e2e.test.ts",
+  "apps/api/test/personal-api-keys.test.ts",
+  "apps/api/test/workspace-content-flow-e2e.test.ts",
+  "apps/api/test/workspace-content-flow-mcp.test.ts",
+  "apps/web/src/App.tsx",
+  "apps/web/src/components/organization-access/auto-connect.test.tsx",
+  "apps/web/src/components/organization-access/connected-agents.test.tsx",
+  "apps/web/src/components/organization-access/organization-connected-agents.tsx",
+  "apps/web/src/dev/ui-kit/sections/page-connected-agents.tsx",
+  // The auto-connect resource and audience name the organization MCP endpoint.
+  "packages/contracts/src/mcp-auto-connect.ts",
+  "packages/sdk/src/client.ts",
+  "packages/sdk/src/site-browser-runtime.gen.ts",
+  // Opengeni's organization MCP endpoint added as a remote MCP server.
+  "packages/runtime/test/calling-workspace-prepare.test.ts",
+  "scripts/public-api/surface.gen.json",
+]);
+
+function withoutOrganizationMcpEndpoint(file: string, text: string): string {
+  if (!organizationMcpSurfaceFiles.has(file.replace(/\\/g, "/"))) {
+    return text;
+  }
+  // Generated distributions can escape a closing quote, but a backslash
+  // before a path separator still leads to a forbidden workspace child path.
+  return text.replace(/\/v1\/mcp(?=["'`\s)\]]|\\["'`]|$)/g, "");
+}
+
+export function checkUnscopedOperationalRoutes(file: string, text: string, out: Finding[]): void {
   if (!isSourceLike(file)) {
     return;
   }
@@ -121,7 +178,8 @@ function checkUnscopedOperationalRoutes(file: string, text: string, out: Finding
     /["'`]\/v1\/github\/app(?:\/|["'`])/,
     /["'`]\/v1\/github\/repositories(?:\/|["'`])/,
   ];
-  if (forbidden.some((pattern) => pattern.test(text))) {
+  const operationalText = withoutOrganizationMcpEndpoint(file, text);
+  if (forbidden.some((pattern) => pattern.test(operationalText))) {
     out.push({
       file,
       message:
@@ -163,7 +221,25 @@ export async function checkForbiddenProviderImports(
   if (
     moduleSpecifiers.some((specifier) => specifier === "stripe" || specifier.startsWith("stripe/"))
   ) {
-    if (normalized !== "apps/api/src/routes/billing.ts") {
+    // Adapter tests exercise Stripe's real parameter and signature contracts.
+    if (
+      ![
+        "apps/api/src/routes/billing.ts",
+        "apps/api/src/billing-stripe-customer.ts",
+        "apps/api/src/billing-subscriptions.ts",
+        "apps/api/src/billing-auto-top-up.ts",
+        "apps/api/src/routes/billing-auto-top-up.ts",
+        "apps/api/test/billing-auto-top-up.test.ts",
+        "apps/api/test/billing-auto-top-up-adjustments-postgres.test.ts",
+        "apps/api/test/billing-auto-top-up-integration-postgres.test.ts",
+        "apps/api/test/billing-auto-top-up.stripe-proof.ts",
+        "apps/api/test/billing-subscriptions.test.ts",
+        "apps/api/test/billing-subscriptions-review-postgres.test.ts",
+        "apps/api/test/scoped-credit-checkout.test.ts",
+        "apps/api/test/scoped-credits-postgres.test.ts",
+        "apps/api/test/stripe-dispute-postgres.test.ts",
+      ].includes(normalized)
+    ) {
       out.push({ file, message: "imports Stripe outside billing route/provider code" });
     }
   }
@@ -201,6 +277,15 @@ const billingPortalSurfaceFiles = new Set([
   "packages/sdk/test/client-coverage.test.ts",
   // Generated public API inventory: records the canonical route, never serves it.
   "scripts/public-api/surface.gen.json",
+  // Published-SDK route inventory: records the routes a published SDK calls,
+  // never serves them.
+  "scripts/public-api/published-sdk.gen.json",
+  // Generated organization MCP action metadata likewise records, never serves,
+  // the billing route; calls dispatch through the canonical route's own guards.
+  "packages/contracts/src/app-action-catalog.gen.ts",
+  // Names the route a chat's action call may use, to show the page it opens;
+  // records, never serves, the route.
+  "packages/contracts/src/session-history.ts",
 ]);
 
 export function checkBillingPortalSurface(file: string, text: string, out: Finding[]): void {
@@ -216,19 +301,37 @@ export function checkBillingPortalSurface(file: string, text: string, out: Findi
   }
 }
 
-function checkGithubWebhookAdvertising(file: string, text: string, out: Finding[]): void {
-  if (
-    file === "packages/github/src/index.ts" &&
-    (text.includes("hook_attributes") || text.includes("/v1/github/webhook"))
-  ) {
-    out.push({
-      file,
-      message: "advertises GitHub webhooks without a signed/idempotent /v1/github/webhook receiver",
-    });
-  }
+const GITHUB_APP_MANIFEST_FILE = "packages/github/src/index.ts";
+const GITHUB_WEBHOOK_RECEIVER_FILE = "packages/core/src/domain/event-triggers/github-events.ts";
+const GITHUB_WEBHOOK_PATH = ["/v1", "webhooks", "github"].join("/");
+/** A template literal whose only content is one base-URL variable followed by the receiver path. */
+const GITHUB_WEBHOOK_URL_TEMPLATE = new RegExp(
+  `\`\\$\\{[A-Za-z_$][\\w$]*\\}${GITHUB_WEBHOOK_PATH.replaceAll("/", "\\/")}\``,
+);
+
+/**
+ * The GitHub App manifest may advertise webhooks only to the event-source
+ * receiver, which verifies `X-Hub-Signature-256` over the raw body and keys
+ * each delivery by `X-GitHub-Delivery`, so redeliveries are idempotent.
+ */
+export function checkGithubWebhookAdvertising(
+  file: string,
+  text: string,
+  receiver: string,
+  out: Finding[],
+): void {
+  if (file !== GITHUB_APP_MANIFEST_FILE || !text.includes("hook_attributes")) return;
+  const advertisesReceiver = GITHUB_WEBHOOK_URL_TEMPLATE.test(text);
+  const receiverSignedAndIdempotent =
+    receiver.includes('"x-hub-signature-256"') && receiver.includes('"x-github-delivery"');
+  if (advertisesReceiver && receiverSignedAndIdempotent) return;
+  out.push({
+    file,
+    message: `advertises GitHub webhooks without the signed, idempotent ${GITHUB_WEBHOOK_PATH} receiver`,
+  });
 }
 
-function checkMcpDefaults(file: string, text: string, out: Finding[]): void {
+export function checkMcpDefaults(file: string, text: string, out: Finding[]): void {
   if (!isSourceLike(file)) {
     return;
   }
@@ -237,8 +340,16 @@ function checkMcpDefaults(file: string, text: string, out: Finding[]): void {
   const withoutForeignUrls = text.replace(/https?:\/\/[^\s"'`\\)\]]+/g, (url) =>
     url.includes("opengeni") ? url : "",
   );
+  // RFC 8414 discovery names a resource in its suffix; it does not serve MCP.
+  const withoutDiscoveryRoutes = withoutForeignUrls.replace(
+    /\/\.well-known\/oauth-authorization-server\/v1\/mcp(?=["'`\s)\]]|$)/g,
+    "",
+  );
+  const defaultText = withoutOrganizationMcpEndpoint(file, withoutDiscoveryRoutes);
   if (
-    withoutForeignUrls.includes("/v1/mcp") &&
+    // A different route such as the organization sign-in request endpoint
+    // /v1/mcp-connections is not an unscoped MCP gateway default.
+    /\/v1\/mcp(?![\w-])/.test(defaultText) &&
     !text.includes("/v1/workspaces/{workspaceId}/mcp") &&
     !text.includes("/v1/workspaces/${workspaceId}/mcp")
   ) {
@@ -250,6 +361,11 @@ function checkMcpDefaults(file: string, text: string, out: Finding[]): void {
 }
 
 function isSourceLike(file: string): boolean {
+  // Historical release notes describe removed routes; they are not live defaults
+  // or current usage guidance. Keep other Markdown, source and config checked.
+  if (/(^|\/)CHANGELOG\.md$/.test(file.replace(/\\/g, "/"))) {
+    return false;
+  }
   return /\.(ts|tsx|js|jsx|yaml|yml|json|md|example)$/.test(file);
 }
 

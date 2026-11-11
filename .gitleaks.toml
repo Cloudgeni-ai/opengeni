@@ -1,4 +1,4 @@
-title = "OpenGeni gitleaks allowlist"
+title = "Opengeni gitleaks allowlist"
 
 [[allowlists]]
 description = "Deployment object-storage API enum value, not a credential"

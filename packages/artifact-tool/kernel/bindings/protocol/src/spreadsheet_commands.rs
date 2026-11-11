@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use opengeni_artifact_kernel::{
-    AuthoredCellContent, CellBlock, CellCoord, CellRange, DateValue, FormulaError, Number,
-    OperationId, SheetGeneration, StableId, MAX_CELLS_PER_TRANSACTION,
+    AuthoredCellContent, CellBlock, CellCoord, CellRange, DateValue, DimensionAxis, FormulaError,
+    Number, OperationId, SheetGeneration, StableId, MAX_CELLS_PER_TRANSACTION,
     MAX_OPERATIONS_PER_TRANSACTION,
 };
 
@@ -55,6 +55,12 @@ pub(crate) enum SpreadsheetCommand {
     ClearRange {
         sheet: SheetPrecondition,
         range: CellRange,
+    },
+    SetDimension {
+        sheet: SheetPrecondition,
+        axis: DimensionAxis,
+        index: u32,
+        pixels: Option<u32>,
     },
 }
 
@@ -122,7 +128,8 @@ pub(crate) fn decode_spreadsheet_commands(
     let mut created_sheet_ids = BTreeSet::new();
     let mut total_cells = 0usize;
     for command_index in 0..command_count {
-        let command = match reader.u8()? {
+        let tag = reader.u8()?;
+        let command = match tag {
             0 => {
                 let sheet_id = reader.sheet_id()?;
                 let name = reader.sheet_name(command_index)?;
@@ -207,6 +214,26 @@ pub(crate) fn decode_spreadsheet_commands(
                 SpreadsheetCommand::ClearRange {
                     sheet,
                     range: CellRange::new(start, end),
+                }
+            }
+            5 | 6 => {
+                let sheet = reader.precondition(command_index, &created)?;
+                let axis = if tag == 5 {
+                    DimensionAxis::Row
+                } else {
+                    DimensionAxis::Column
+                };
+                let index = reader.u32()?;
+                let raw = reader.u32()?;
+                let pixels = (raw != 0).then_some(raw);
+                if !axis.valid_pixels(pixels) || pixels == Some(axis.default_pixels()) {
+                    return Err(BindingError::NonCanonical("invalid dimension pixels"));
+                }
+                SpreadsheetCommand::SetDimension {
+                    sheet,
+                    axis,
+                    index,
+                    pixels,
                 }
             }
             tag => return Err(BindingError::InvalidTag(tag)),
@@ -553,6 +580,21 @@ impl Writer {
                 self.u32(range.start.column)?;
                 self.u32(range.end.row)?;
                 self.u32(range.end.column)
+            }
+            SpreadsheetCommand::SetDimension {
+                sheet,
+                axis,
+                index,
+                pixels,
+            } => {
+                self.u8(if *axis == DimensionAxis::Row { 5 } else { 6 })?;
+                self.precondition(*sheet)?;
+                self.u32(*index)?;
+                self.u32(
+                    pixels
+                        .filter(|value| *value != axis.default_pixels())
+                        .unwrap_or(0),
+                )
             }
         }
     }

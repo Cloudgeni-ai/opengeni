@@ -2,7 +2,7 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { PersonalGitHubDialog } from "../src/components/capabilities/personal-github-dialog";
-import { Button } from "../src/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import type {
   PersonalGitHubRepositoryCatalogItem,
   PersonalGitHubRepositorySelectionInput,

@@ -4,17 +4,20 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { CapabilityCatalogItem as CapabilityCatalogItemSchema } from "@opengeni/contracts";
 
-import type { ConnectionHealth } from "@/lib/capabilities";
-import type { CapabilityCatalogItem, ConnectionMetadata, SocialConnection } from "@/types";
-import { EnabledCapabilitiesSection } from "./capability-catalog-sections";
-import { Sheet } from "@/components/ui/sheet";
+import type { ConnectionHealth } from "@opengeni/react/app/lib/capabilities";
+import type {
+  CapabilityCatalogItem,
+  ConnectionMetadata,
+  SocialConnection,
+} from "@opengeni/react/app/types";
+import { Sheet } from "@opengeni/react/ui/sheet";
 import {
   ConnectionStatus,
   DEFAULT_CONNECTION_OWNERSHIP,
   DetailBody,
   OwnershipSelector,
   SocialConnectorControls,
-} from "./capability-detail-sheet";
+} from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -77,7 +80,7 @@ function socialConnection(overrides: Partial<SocialConnection> = {}): SocialConn
     ownership: "workspace",
     provider: "x",
     accountHandle: "opengeni",
-    accountName: "OpenGeni",
+    accountName: "Opengeni",
     externalAccountId: "x-account-1",
     status: "connected",
     scopes: ["tweet.read"],
@@ -117,6 +120,77 @@ function installedCuratedSkill(): CapabilityCatalogItem {
 }
 
 describe("connection ownership UI", () => {
+  test("1Password chat setup opens the protected service-account flow", async () => {
+    const view = await render(
+      <DetailBody
+        workspaceId="ws"
+        setupOnly
+        inline
+        showIdentity={false}
+        item={CapabilityCatalogItemSchema.parse({
+          id: "api:1password",
+          kind: "api",
+          source: "built_in",
+          name: "1Password",
+          surfaceType: "first_party_onepassword",
+          runtime: { available: true },
+        })}
+        health={{ state: "none" }}
+        logoSrc={null}
+        busy={false}
+        errorMessage={null}
+        canManageSocial={false}
+        onAction={() => {
+          throw new Error("Must not use generic setup");
+        }}
+      />,
+    );
+    try {
+      const link = view.container.querySelector<HTMLAnchorElement>('a[href*="/secrets"]');
+      expect(link?.getAttribute("href")).toBe("/workspaces/ws/secrets?view=connect-1password");
+      expect(link?.textContent).toContain("Connect 1Password");
+      expect(view.container.querySelector('input[type="password"]')).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+  test("a personal connector enabled by another member waits for this viewer's account before reading permissions", async () => {
+    const capability = CapabilityCatalogItemSchema.parse({
+      id: "mcp:slack",
+      kind: "mcp",
+      source: "manual",
+      name: "Slack",
+      enabled: true,
+      authKind: "oauth2",
+      mcpUrl: "https://mcp.slack.com/mcp",
+      connectionRef: {
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+      runtime: { available: true },
+    });
+    const rendered = await render(
+      <DetailBody
+        workspaceId="33333333-3333-4333-8333-333333333333"
+        item={capability}
+        inline
+        health={{ state: "attention", connection: null }}
+        logoSrc={null}
+        busy={false}
+        errorMessage={null}
+        canManageSocial
+        onAction={() => {}}
+      />,
+    );
+    try {
+      expect(rendered.container.querySelector('[aria-label="Tool permissions"]')).toBeNull();
+      expect(rendered.container.textContent).not.toContain("Couldn't load tool permissions");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   for (const authKind of ["oauth2", "api_key"] as const) {
     test(`${authKind} discloses the supplied account truthfully without changing default scope`, async () => {
       const capability = CapabilityCatalogItemSchema.parse({
@@ -270,7 +344,7 @@ describe("connection ownership UI", () => {
     );
     try {
       expect(rendered.container.textContent).toContain("Personal connection to linear.app");
-      expect(rendered.container.textContent).toContain("Your messages and personal schedules");
+      expect(rendered.container.textContent).toContain("Your messages and personal automations");
       expect(rendered.container.textContent).not.toContain("11111111-1111-4111-8111-111111111111");
     } finally {
       await rendered.unmount();
@@ -332,6 +406,49 @@ describe("connection ownership UI", () => {
         item: gmail,
         ownership: "workspace",
       });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a person alone in the workspace connects their own account without the sharing question", async () => {
+    const notes = CapabilityCatalogItemSchema.parse({
+      id: "mcp:notes",
+      kind: "mcp",
+      source: "manual",
+      name: "Notes",
+      category: "integrations",
+      providerDomain: "notes.example",
+      mcpUrl: "https://notes.example/mcp",
+      endpointUrl: "https://notes.example/mcp",
+      authKind: "oauth2",
+      runtime: { available: true, mcpServerId: "notes-runtime", notes: null },
+      metadata: {},
+    });
+    const onAction = mock((_action: unknown) => {});
+    const rendered = await render(
+      <Sheet open>
+        <DetailBody
+          item={notes}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial={false}
+          onAction={onAction}
+          nobodyToShareWith
+        />
+      </Sheet>,
+    );
+    try {
+      expect(rendered.container.textContent).not.toContain("Who can use this connection?");
+      expect(rendered.container.querySelector('input[type="radio"]')).toBeNull();
+      const connect = [...rendered.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Connect",
+      );
+      expect(connect).toBeDefined();
+      await act(async () => connect!.click());
+      expect(onAction).toHaveBeenCalledWith({ type: "oauth", item: notes, ownership: "personal" });
     } finally {
       await rendered.unmount();
     }
@@ -532,37 +649,6 @@ describe("Skill installation authority UI", () => {
   // The enabled Connectors strip can no longer contain a Skill at all: Skills
   // are Bundles and their authority, their remove affordance, and their
   // administrator guidance all live in the Bundles section instead.
-  test("the enabled Connectors strip offers no Skill removal shortcut", async () => {
-    const skill = installedCuratedSkill();
-    const onOpen = mock((_item: CapabilityCatalogItem) => {});
-    const onDisable = mock((_item: CapabilityCatalogItem) => {});
-    const rendered = await render(
-      <EnabledCapabilitiesSection
-        items={[skill]}
-        busyId={null}
-        connectionHealth={() => ({ state: "none" })}
-        logoUrl={() => null}
-        onOpen={onOpen}
-        onDisable={onDisable}
-      />,
-    );
-    try {
-      const inspect = rendered.container.querySelector<HTMLButtonElement>(
-        '[data-capability-id="skill:terraform-style-guide"]',
-      );
-      expect(inspect?.disabled).toBe(false);
-      expect(
-        [...rendered.container.querySelectorAll("button")].map((button) =>
-          button.textContent?.trim(),
-        ),
-      ).not.toContain("Remove");
-      await act(async () => inspect!.click());
-      expect(onOpen).toHaveBeenCalledWith(skill);
-      expect(onDisable).not.toHaveBeenCalled();
-    } finally {
-      await rendered.unmount();
-    }
-  });
 });
 
 describe("social provider integration UI", () => {
@@ -574,7 +660,7 @@ describe("social provider integration UI", () => {
     const needsReauth = socialConnection({
       id: "55555555-5555-4555-8555-555555555555",
       accountHandle: "opengeni_support",
-      accountName: "OpenGeni Support",
+      accountName: "Opengeni Support",
       externalAccountId: "x-account-2",
       status: "needs_reauth",
       updatedAt: "2026-08-02T00:00:00.000Z",
@@ -592,8 +678,8 @@ describe("social provider integration UI", () => {
       />,
     );
     try {
-      expect(rendered.container.textContent).toContain("OpenGeni");
-      expect(rendered.container.textContent).toContain("OpenGeni Support");
+      expect(rendered.container.textContent).toContain("Opengeni");
+      expect(rendered.container.textContent).toContain("Opengeni Support");
       expect(rendered.container.textContent).toContain("Needs reconnection");
       expect(rendered.container.textContent).toContain(
         "Workspace agents and automations can act through your account.",

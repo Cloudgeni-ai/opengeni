@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { DEFAULT_FIRST_PARTY_MCP_TOOLS, type AccessGrant } from "@opengeni/contracts";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { z } from "zod";
 
@@ -40,6 +41,7 @@ function tools() {
       _registeredTools: Record<
         string,
         {
+          description?: string;
           inputSchema: { safeParse(input: unknown): { success: boolean; data?: unknown } };
         }
       >;
@@ -97,6 +99,25 @@ describe("goal MCP report field contracts", () => {
       }).success,
     ).toBe(false);
   });
+  test("completion takes an optional final reply that never replaces evidence", () => {
+    const registered = tools();
+    const schema = registered.goal_complete!.inputSchema;
+    const reply = "Done.\n\n| check | result |\n|---|---|\n| tests | pass |";
+    expect(schema.safeParse({ evidence: "Tests pass.", reply }).data).toEqual({
+      evidence: "Tests pass.",
+      reply,
+    });
+    expect(schema.safeParse({ evidence: "Tests pass.", reply: null }).success).toBe(true);
+    expect(schema.safeParse({ reply }).success).toBe(false);
+    const json = z.toJSONSchema(schema as unknown as z.ZodType, { unrepresentable: "any" });
+    const properties = json.properties as Record<string, { description?: string }>;
+    expect(properties.reply?.description).toContain("verbatim");
+    expect(json.required).toEqual(["evidence"]);
+    const description = registered.goal_complete!.description!;
+    expect(description).toContain("ends the turn after this tool batch");
+    expect(description).toContain("on its own");
+    expect(description).toContain("Without reply, reply to the user after this tool succeeds");
+  });
   test("evidence has an explicit character cap without stripping spaces", () => {
     const schema = tools().goal_complete!.inputSchema;
     const evidence = " normal proof ".repeat(500);
@@ -105,6 +126,8 @@ describe("goal MCP report field contracts", () => {
     expect(schema.safeParse({ evidence: "x".repeat(8193) }).success).toBe(false);
   });
   test("every goal-tool text limit and purpose is model-visible, with normal spacing preserved", () => {
+    // Goal tools state the byte limits and the spacing rule once in the tool
+    // description; wait_for_input's reason keeps its own field description.
     const registered = tools();
     for (const [toolName, field, cap] of [
       ["goal_set", "text", 8192],
@@ -121,8 +144,16 @@ describe("goal MCP report field contracts", () => {
         json.properties as Record<string, { maxLength?: number; description?: string }>
       )[field]!;
       expect(property.maxLength).toBe(cap);
-      expect(property.description).toContain(`${cap} UTF-8 bytes`);
-      expect(property.description).toMatch(/normal spac/);
+      expect(property.description?.length).toBeGreaterThan(20);
+      const stated =
+        toolName === "wait_for_input" ? property.description! : registered[toolName]!.description!;
+      expect(stated).toContain(`${cap} UTF-8 bytes`);
+      expect(stated).toMatch(/normal spac/);
+      // The per-field boilerplate is gone.
+      if (toolName !== "wait_for_input") {
+        expect(property.description).not.toContain("UTF-8 bytes");
+        expect(property.description).not.toContain("ledger field");
+      }
     }
     const progress = registered.goal_progress!.inputSchema;
     const status = "Milestone verified with normal spaces. ".repeat(150);

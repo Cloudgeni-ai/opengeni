@@ -9,7 +9,7 @@ import {
   accountAuthPopupPath,
   postAccountAuthPopupAcknowledgement,
 } from "@/lib/browser-account-popup";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { signupReturnPath } from "@/lib/signup-attribution";
 
 type PendingPopup = {

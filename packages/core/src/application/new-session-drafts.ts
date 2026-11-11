@@ -5,13 +5,13 @@ import {
   SaveNewSessionDraftRequest,
   type AccessGrant,
   type NewSessionDraft as NewSessionDraftValue,
+  type RepositoryResourceRef,
 } from "@opengeni/contracts";
 import {
   getNewSessionDraftInTransaction,
   getEnrollment,
   getRig,
   getSandbox,
-  getVariableSet,
   NewSessionDraftAccessError,
   newSessionDraftModelProvided,
   newSessionDraftSelectedProjectChannelId,
@@ -32,14 +32,15 @@ import {
   validateGitHubRepositorySelection,
   validateToolRefs,
 } from "../domain/resources";
-import {
-  hasPermission,
-  externalAttributionForAuthorization,
-  type AccessGrantAuthorization,
-} from "../access";
+import { hasVerifiedOwningUserAuthorization, type AccessGrantAuthorization } from "../access";
 import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "../domain/sessions";
-import { resolveDefaultSessionModel } from "../default-session-model";
+import {
+  resolveCallerWorkspaceModelSelections,
+  resolveDefaultSessionModel,
+  workspaceCatalogListsModel,
+} from "../default-session-model";
 import { canonicalizeConfiguredModelId, type Settings } from "@opengeni/config";
+import { prepareDraftModel } from "./draft-model-preparation";
 
 type NewSessionDraftDependencies = Pick<AppDependencies, "settings" | "db" | "objectStorage">;
 
@@ -103,6 +104,32 @@ async function actorDefaultModel(
   });
 }
 
+/**
+ * False only when this workspace's catalog demonstrably no longer lists the
+ * model. A catalog read failure is not proof of removal, so it keeps the
+ * saved choice.
+ */
+async function workspaceCatalogMayHaveModel(
+  deps: Pick<NewSessionDraftDependencies, "db" | "settings">,
+  grant: AccessGrant,
+  workspaceId: string,
+  modelId: string,
+): Promise<boolean> {
+  try {
+    const selections = await resolveCallerWorkspaceModelSelections(deps.db, deps.settings, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+    });
+    return workspaceCatalogListsModel(
+      selections,
+      canonicalizeConfiguredModelId(deps.settings, modelId),
+    );
+  } catch {
+    return true;
+  }
+}
+
 type NewSessionDraftReadOptions = {
   /**
    * Project a draft that follows the default onto today's resolved default.
@@ -125,7 +152,18 @@ async function hydrateNewSessionDraft(
   // A draft that follows the default is projected onto today's default, so a
   // later subscription connect or credit purchase replaces an untouched free
   // model. The stored row is unchanged until the person saves again.
-  const modelProvided = draftModelProvided(deps.settings, stored);
+  let modelProvided = draftModelProvided(deps.settings, stored);
+  if (
+    modelProvided &&
+    readOptions.projectDefaultModel !== false &&
+    !(await workspaceCatalogMayHaveModel(deps, grant, workspaceId, stored.model))
+  ) {
+    // The saved choice left this workspace's catalog (a removed provider or a
+    // retired model). A new chat must not start on a model that cannot run, so
+    // the draft follows today's default until the person picks again. A model
+    // that is listed but temporarily unavailable keeps the person's choice.
+    modelProvided = false;
+  }
   let mapped: NewSessionDraftValue = { ...stored, modelProvided };
   if (!modelProvided && readOptions.projectDefaultModel !== false) {
     const resolved = await actorDefaultModel(deps, grant, workspaceId);
@@ -174,41 +212,17 @@ async function hydrateNewSessionDraft(
   }
 
   const options = { ...mapped.options };
-  const variableSetIds = options.variableSetIds ?? [];
-  if (variableSetIds.length > 0) {
-    const selectionsAuthorized =
-      hasPermission(grant.permissions, "variable-sets:attach") &&
-      hasPermission(grant.permissions, "variable-sets:use") &&
-      (
-        await Promise.all(
-          variableSetIds.map((variableSetId) =>
-            getVariableSet(
-              deps.db,
-              { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-              variableSetId,
-            ),
-          ),
-        )
-      ).every(Boolean);
-    if (selectionsAuthorized) {
-      options.variableSetIds = variableSetIds;
-      options.variableSetId = variableSetIds[variableSetIds.length - 1];
-    } else {
-      delete options.variableSetIds;
-      delete options.variableSetId;
-    }
-  } else {
-    delete options.variableSetIds;
-    delete options.variableSetId;
-  }
   if (options.rigId) {
-    const rig = await getRig(deps.db, workspaceId, options.rigId);
+    const rig = await getRig(deps.db, { ...grant, workspaceId }, options.rigId);
     if (!rig?.activeVersion) delete options.rigId;
   }
   if (options.targetSandboxId) {
-    const sandbox = await getSandbox(deps.db, workspaceId, options.targetSandboxId);
+    // The person's own view of the workspace, as creating the chat checks it:
+    // an organization machine, or their own one, can live in another workspace.
+    // Its enrollment lives there too.
+    const sandbox = await getSandbox(deps.db, { ...grant, workspaceId }, options.targetSandboxId);
     const enrollment = sandbox?.enrollmentId
-      ? await getEnrollment(deps.db, workspaceId, sandbox.enrollmentId)
+      ? await getEnrollment(deps.db, sandbox.workspaceId, sandbox.enrollmentId)
       : null;
     if (
       !sandbox ||
@@ -364,10 +378,11 @@ async function saveActorNewSessionDraftInFileScope(
           // A managed human's own personal workspace has no membership row at
           // all, so the human-removal fence above must fall back to the
           // organization-membership pointer for them — and only for the
-          // canonical managed-cookie session that owns it.
+          // verified owning-user authorization for this exact grant.
           personalWorkspaceOwnerException:
             canonicalManagedHumanSession ||
-            externalAttributionForAuthorization(externalAuthorization, grant) !== null,
+            (externalAuthorization?.grant === grant &&
+              hasVerifiedOwningUserAuthorization(externalAuthorization)),
         }),
       ),
     );
@@ -400,22 +415,29 @@ export async function getActorNewSessionDraft(
 export async function saveActorNewSessionDraft(
   ...args: Parameters<typeof saveActorNewSessionDraftInFileScope>
 ): Promise<NewSessionDraftValue> {
-  const [deps, grant, , , , authorization] = args;
+  const [deps, grant, workspaceId, , , authorization] = args;
   const actor = authorization
     ? await fileOwnerContextForAccess(deps, authorization, "sessions:create")
     : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
-  return withSessionRlsActorContext(actor, () => saveActorNewSessionDraftInFileScope(...args));
+  const saved = await withSessionRlsActorContext(actor, () =>
+    saveActorNewSessionDraftInFileScope(...args),
+  );
+  prepareDraftModel(
+    deps,
+    { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+    saved,
+  );
+  return saved;
 }
 
 /**
  * The model policy the person explicitly chose in the website composer, or an
  * empty object when their draft follows the default.
  *
- * Only the model policy is reused. Connectors, repositories, Variable Sets,
- * Sandbox Environment and compute target in the draft are the person's last
- * explicit narrowing of one website chat, so surfaces that start work without
- * the composer (Slack) resolve those from workspace defaults instead of
- * silently inheriting that narrowing.
+ * Connectors, Variable Sets, Sandbox Environment and compute target in the
+ * draft are the person's last explicit narrowing of one website chat, so
+ * surfaces that start work without the composer (Slack) resolve those from
+ * workspace defaults instead of silently inheriting that narrowing.
  */
 export async function getActorNewSessionModelChoice(
   deps: Parameters<typeof getActorNewSessionDraft>[0],
@@ -424,16 +446,44 @@ export async function getActorNewSessionModelChoice(
 ): Promise<
   Pick<NewSessionDraftValue, "model" | "reasoningEffort" | "latencyMode"> | Record<string, never>
 > {
+  return (await getActorNewSessionStartChoices(deps, grant, workspaceId)).modelChoice;
+}
+
+/**
+ * What a chat started without the composer (Slack) takes from the person's
+ * new-chat form, read once: the model policy they explicitly chose (empty when
+ * the form follows the default) and the repositories in the form, in form
+ * order. The repositories are exactly what a new chat in the app would start
+ * with now: after each chat starts, the form keeps its repositories for the
+ * next one. Hydration has already dropped repositories whose authorization
+ * was revoked; callers still check them against what they may attach.
+ */
+export async function getActorNewSessionStartChoices(
+  deps: Parameters<typeof getActorNewSessionDraft>[0],
+  grant: AccessGrant,
+  workspaceId: string,
+): Promise<{
+  modelChoice:
+    | Pick<NewSessionDraftValue, "model" | "reasoningEffort" | "latencyMode">
+    | Record<string, never>;
+  repositories: RepositoryResourceRef[];
+}> {
   // A draft that follows the default is not projected here; session creation
   // resolves the default itself, once.
   const draft = await getActorNewSessionDraft(deps, grant, workspaceId, undefined, {
     projectDefaultModel: false,
   });
-  return draft.revision > 0 && draft.modelProvided === true
-    ? {
-        model: draft.model,
-        reasoningEffort: draft.reasoningEffort,
-        latencyMode: draft.latencyMode,
-      }
-    : {};
+  return {
+    modelChoice:
+      draft.revision > 0 && draft.modelProvided === true
+        ? {
+            model: draft.model,
+            reasoningEffort: draft.reasoningEffort,
+            latencyMode: draft.latencyMode,
+          }
+        : {},
+    repositories: draft.resources.filter(
+      (resource): resource is RepositoryResourceRef => resource.kind === "repository",
+    ),
+  };
 }

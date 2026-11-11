@@ -1,10 +1,13 @@
+import "@/app-host";
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
   createMemoryHistory,
   createRootRoute,
+  createRoute,
   createRouter,
+  Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
 import { createElement, type ReactNode } from "react";
@@ -14,8 +17,10 @@ import { createRoot } from "react-dom/client";
 const workspaceId = "5d929faa-c755-4146-9d60-e55f42251f0d";
 const siteId = "dc24100a-e408-4713-9c12-ef41e3964f6a";
 const versionId = "11111111-1111-4111-8111-111111111111";
+const copyId = "22222222-2222-4222-8222-222222222222";
 
 let loadError: unknown = null;
+let withoutContent = false;
 
 const snapshot = {
   detail: {
@@ -25,6 +30,8 @@ const snapshot = {
       title: "Café menu",
       description: "An interactive workspace Site.",
       status: "active" as const,
+      visibility: "private" as const,
+      ownerSubjectId: "user:owner",
       currentVersion: { id: versionId, revision: 1, requestedTools: [] },
     },
     versions: [
@@ -47,15 +54,22 @@ const snapshot = {
 
 const siteClient = {
   tools: { forWorkspace: () => ({}) },
+  duplicateWorkspaceArtifact: mock(async (..._args: unknown[]) => ({
+    artifact: { ...snapshot.detail.artifact, id: copyId, title: "Café menu (copy)" },
+  })),
+  getSessionTenancyCreateCapabilities: async () => ({ canCreatePrivate: true }),
 };
 const accessContext = {
+  subjectId: "user:owner",
   workspaceGrants: [{ workspaceId, permissions: ["artifacts:read", "artifacts:publish"] }],
 };
 
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     accessContext,
     client: siteClient,
+    workspaces: [{ id: workspaceId, name: "Kitchen", kind: "shared" }],
+    managedSelfContext: null,
     startSession: async () => null,
     busy: false,
     authSession: { user: { name: "Dev" } },
@@ -65,27 +79,46 @@ mock.module("@/context", () => ({
 mock.module("@opengeni/react/sites", () => ({
   loadSiteSnapshot: async () => {
     if (loadError) throw loadError;
-    return snapshot;
+    return withoutContent ? { ...snapshot, content: null } : snapshot;
   },
 }));
 
-mock.module("@/lib/site-tool-bridge", () => ({
+mock.module("@opengeni/react/app/lib/site-tool-bridge", () => ({
   createSiteToolBridge: () => undefined,
 }));
 
-mock.module("@/components/artifacts/site-conversations", () => ({
+mock.module("@opengeni/react/app/components/artifacts/site-conversations", () => ({
   SiteConversations: () => createElement("button", { type: "button" }, "Conversations"),
 }));
 
 const actualArtifacts = await import("@opengeni/react/artifacts");
 mock.module("@opengeni/react/artifacts", () => ({
   ...actualArtifacts,
-  ArtifactSandbox: ({ children }: { children?: ReactNode }) =>
-    createElement("div", { "data-testid": "site-sandbox" }, children),
+  ArtifactSandbox: ({
+    children,
+    fullScreen,
+    onFullScreenChange,
+  }: {
+    children?: ReactNode;
+    fullScreen?: boolean;
+    onFullScreenChange?: (fullScreen: boolean) => void;
+  }) =>
+    createElement(
+      "div",
+      { "data-testid": "site-sandbox", "data-full-screen": String(fullScreen) },
+      createElement(
+        "button",
+        { type: "button", onClick: () => onFullScreenChange?.(!fullScreen) },
+        "Toggle full screen",
+      ),
+      children,
+    ),
 }));
 
-mock.module("@/components/ui/confirm-dialog", () => ({
+mock.module("@opengeni/react/ui/confirm-dialog", () => ({
   ConfirmDialog: () => null,
+  // The shared destructive confirmation imports this helper from the same module.
+  destructiveActionFocusTarget: () => null,
 }));
 
 beforeAll(() => {
@@ -98,18 +131,27 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-async function renderDetail() {
-  const { ArtifactDetailRoute } = await import("./artifacts");
-  const route = createRootRoute({
+async function renderDetail(initialEntry = "/?tab=versions") {
+  const { ArtifactDetailRoute } = await import("@opengeni/react/app/routes/artifacts");
+  const rootRoute = createRootRoute({ component: Outlet });
+  const detail = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/",
     component: () =>
       createElement(ArtifactDetailRoute, {
         workspaceId,
         artifactId: siteId,
       }),
   });
+  // Where the page sends people, for example the Site view.
+  const elsewhere = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "$",
+    component: () => null,
+  });
   const router = createRouter({
-    routeTree: route,
-    history: createMemoryHistory({ initialEntries: ["/"] }),
+    routeTree: rootRoute.addChildren([detail, elsewhere]),
+    history: createMemoryHistory({ initialEntries: [initialEntry] }),
   });
   const container = document.createElement("div");
   document.body.append(container);
@@ -118,12 +160,14 @@ async function renderDetail() {
     await router.load();
     root.render(createElement(RouterProvider, { router }));
   });
-  return { container, root };
+  return { container, root, router };
 }
 
-/** Archive lives in the page's ⋯ menu. */
+// Archive lives in the Site's Settings tab.
 function hasArchive(container: HTMLElement) {
-  return container.querySelector('button[aria-label^="More actions for"]') !== null;
+  return [...container.querySelectorAll('[role="tab"]')].some(
+    (tab) => tab.textContent?.trim() === "Settings",
+  );
 }
 
 function hasAction(container: HTMLElement, label: string) {
@@ -141,9 +185,75 @@ test("loaded Site keeps Archive and Edit with Opengeni behind permission checks"
     expect(hasArchive(container)).toBe(true);
     expect(hasAction(container, "Edit with Opengeni")).toBe(true);
     expect(container.textContent).toContain("Café menu");
+    // Its owner sees that it is Only me and can share it.
+    expect(container.textContent).toContain("Only me");
+    expect(hasAction(container, "Share with workspace")).toBe(true);
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+const sitePath = (id = siteId) => `/workspaces/${workspaceId}/sites/${id}`;
+
+test("a link to the Site, or the Artifacts list's old one, opens the Site view in its place", async () => {
+  loadError = null;
+  for (const entry of ["/", "/?browse=true", "/?fromSession=s1"]) {
+    const { container, root, router } = await renderDetail(entry);
+    try {
+      expect(router.state.location.pathname).toBe(sitePath());
+      // Replaced, so Back leaves the Site instead of bouncing into it again.
+      expect(router.history.length).toBe(1);
+      expect(container.querySelector('[data-testid="site-sandbox"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  }
+});
+
+test("the Site tab and Edit with Opengeni open the Site view; Edit starts a new conversation there", async () => {
+  loadError = null;
+  const tab = await renderDetail("/?tab=versions");
+  try {
+    const site = [...tab.container.querySelectorAll('[role="tab"]')].find(
+      (element) => element.textContent?.trim() === "Site",
+    ) as HTMLElement;
+    await act(async () => {
+      site.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+      site.click();
+    });
+    expect(tab.router.state.location.pathname).toBe(sitePath());
+    expect(tab.router.state.location.search).toEqual({});
+  } finally {
+    await act(async () => tab.root.unmount());
+    tab.container.remove();
+  }
+  const edit = await renderDetail("/?tab=conversations");
+  try {
+    const button = [...edit.container.querySelectorAll("button")].find((element) =>
+      element.textContent?.includes("Edit with Opengeni"),
+    )!;
+    await act(async () => button.click());
+    expect(edit.router.state.location.pathname).toBe(sitePath());
+    expect(edit.router.state.location.search).toEqual({ new: true });
+  } finally {
+    await act(async () => edit.root.unmount());
+    edit.container.remove();
+  }
+});
+
+test("an archived Site's details say so and offer no edit", async () => {
+  loadError = null;
+  snapshot.detail.artifact.status = "archived" as "active";
+  const archived = await renderDetail();
+  try {
+    expect(archived.container.textContent).toContain("This Site is archived");
+    expect(hasAction(archived.container, "Edit with Opengeni")).toBe(false);
+  } finally {
+    snapshot.detail.artifact.status = "active";
+    await act(async () => archived.root.unmount());
+    archived.container.remove();
   }
 });
 
@@ -154,15 +264,17 @@ test("missing Site hides Archive and Edit with Opengeni", async () => {
     expect(hasArchive(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
     expect(container.textContent).toContain("This Site isn't available");
-    expect(container.textContent).toContain("Reference: corr-missing-site");
-    expect(container.textContent).not.toContain("OpenGeni API 404");
+    // The reference sits behind a quiet Copy details, not in the text.
+    expect(container.textContent).toContain("Copy details");
+    expect(container.textContent).not.toContain("corr-missing-site");
+    expect(container.textContent).not.toContain("Opengeni API 404");
   } finally {
     await act(async () => root.unmount());
     container.remove();
   }
 });
 
-test("read-only Site hides mutation actions but keeps its preview", async () => {
+test("read-only Site hides mutation actions but keeps its details", async () => {
   loadError = null;
   const permissions = accessContext.workspaceGrants[0]!.permissions;
   accessContext.workspaceGrants[0]!.permissions = [];
@@ -170,7 +282,8 @@ test("read-only Site hides mutation actions but keeps its preview", async () => 
   try {
     expect(hasArchive(container)).toBe(false);
     expect(hasAction(container, "Edit with Opengeni")).toBe(false);
-    expect(container.querySelector('[data-testid="site-sandbox"]')).not.toBeNull();
+    expect(hasAction(container, "Share with workspace")).toBe(false);
+    expect(container.textContent).toContain("Café menu");
   } finally {
     accessContext.workspaceGrants[0]!.permissions = permissions;
     await act(async () => root.unmount());
@@ -229,5 +342,44 @@ test("Site read refusal explains missing artifact access instead of removal", as
       await act(async () => root.unmount());
       container.remove();
     }
+  }
+});
+
+test("Site without an openable version still shows its details instead of loading forever", async () => {
+  loadError = null;
+  withoutContent = true;
+  const { container, root } = await renderDetail();
+  try {
+    expect(container.textContent).toContain("Café menu");
+    expect(container.textContent).not.toContain("Loading Site");
+    expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(container.querySelector('[data-testid="site-sandbox"]')).toBeNull();
+  } finally {
+    withoutContent = false;
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Duplicate in Settings copies the Site and opens the copy in the Site view", async () => {
+  loadError = null;
+  withoutContent = false;
+  siteClient.duplicateWorkspaceArtifact.mockClear();
+  const { container, root, router } = await renderDetail("/?tab=settings");
+  try {
+    const duplicate = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Duplicate",
+    );
+    expect(duplicate).toBeDefined();
+    await act(async () => duplicate!.click());
+    expect(siteClient.duplicateWorkspaceArtifact).toHaveBeenCalledTimes(1);
+    const [calledWorkspace, calledSite, request] = siteClient.duplicateWorkspaceArtifact.mock
+      .calls[0] as [string, string, { idempotencyKey: string }];
+    expect([calledWorkspace, calledSite]).toEqual([workspaceId, siteId]);
+    expect(request.idempotencyKey).toBeString();
+    expect(router.state.location.pathname).toBe(sitePath(copyId));
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
   }
 });

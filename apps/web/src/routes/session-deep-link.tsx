@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { LoadingPanel, ProblemPanel } from "@/components/common";
-import { useAppContext } from "@/context";
+import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/common";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   useOptionalBrowserAccountBridge,
   type BrowserAccountSafeSlot,
-} from "@/lib/browser-account-bridge";
+} from "@opengeni/react/app/lib/browser-account-bridge";
 import {
   authorizedSessionReadWorkspaceIds,
   canonicalSessionDeepLinkTarget,
   resolveAuthorizedSessionWorkspace,
   shouldRedirectSessionDeepLink,
-} from "@/lib/session-deep-link";
+} from "@opengeni/react/app/lib/session-deep-link";
 
 export function SessionDeepLinkRoute({ sessionId }: { sessionId: string }) {
   const context = useAppContext();

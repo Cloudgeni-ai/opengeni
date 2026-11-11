@@ -210,6 +210,9 @@ export async function beginManagedAuthLoginTransaction(
   },
 ): Promise<ManagedAuthLoginTransactionType> {
   try {
+    // The function rejects expiries beyond its own clock plus ten minutes.
+    // Clamp to the database clock so an API host whose clock runs ahead of
+    // PostgreSQL still issues a full-length transaction instead of failing.
     const value = (await oneJson(
       db,
       sql`select managed_auth_session_set_begin_transaction(
@@ -219,7 +222,9 @@ export async function beginManagedAuthLoginTransaction(
           ${input.transactionId}::uuid, ${input.expectedActorEpoch}::bigint,
           ${input.transactionSecretHash}, ${input.kind},
           ${input.targetSlotId}::uuid, ${input.returnIntentId}::uuid,
-          ${input.returnPath}, ${input.expiresAt.toISOString()}::timestamptz
+          ${input.returnPath},
+          least(${input.expiresAt.toISOString()}::timestamptz,
+            pg_catalog.clock_timestamp() + interval '10 minutes')
         ) as result`,
     )) as { expiresAt?: unknown } | null;
     return ManagedAuthLoginTransaction.parse({

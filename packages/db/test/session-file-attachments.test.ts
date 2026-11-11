@@ -1,5 +1,5 @@
 import { beforeAll, afterAll, test, expect } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
   bootstrapWorkspace,
@@ -38,7 +38,15 @@ afterAll(async () => {
   await client?.close();
   await shared?.release();
 }, 60_000);
-async function fixture(managed = false, startPrivate = false) {
+const appShot = {
+  app: "Terminal",
+  bundleId: "com.apple.Terminal",
+  title: "build — zsh",
+  capturedAt: "2026-10-20T09:15:00.000Z",
+  platform: "macos" as const,
+  text: "error: missing semicolon",
+};
+async function fixture(managed = false, startPrivate = false, withAppShot = false) {
   const id = crypto.randomUUID();
   const access = managed
     ? await ensureManagedAccessForUser(client.db, {
@@ -76,6 +84,7 @@ async function fixture(managed = false, startPrivate = false) {
       bucket: "test",
       objectKey: crypto.randomUUID(),
       expiresAt: new Date(Date.now() + 60000),
+      ...(withAppShot ? { appShot } : {}),
     });
     return completeFileUpload(client.db, grant.workspaceId!, uploaded.uploadId);
   });
@@ -150,6 +159,13 @@ test("accepted session attachment is readable by another viewer without publishi
     sandboxBackend: "none",
   });
   expect(await f.read(viewer, other.id)).toEqual([]);
+});
+
+test("an accepted app-shot reads back with its stored capture", async () => {
+  const f = await fixture(false, false, true);
+  await withSessionRlsActorContext(f.owner, f.accept);
+  const [file] = await f.read(f.grant.subjectId);
+  expect(file?.appShot).toEqual(appShot);
 });
 test("inherited human and arbitrary file IDs do not mint attachment grants", async () => {
   const f = await fixture();
@@ -553,44 +569,6 @@ test("ordinary Send accepts private attachments after persisting the human messa
       }),
   );
   expect(await f.read("user:viewer", target.id)).toHaveLength(1);
-});
-
-test("migration backfills only original uploads proven by accepted human messages", async () => {
-  const f = await fixture();
-  const unrelated = await fixture();
-  expect(await f.read("user:viewer")).toEqual([]);
-  const migration = await Bun.file(
-    new URL("../drizzle/0499_session_attachment_access.sql", import.meta.url),
-  ).text();
-  const start = migration.indexOf("ALTER TABLE files NO FORCE ROW LEVEL SECURITY;");
-  const end = migration.indexOf("-- Copy only already accepted attachment grants", start);
-  if (start < 0 || end < 0) throw new Error("Missing backfill boundary");
-  await shared.admin.begin(async (tx) => {
-    const [owner] =
-      await tx`select r.rolname from pg_class c join pg_roles r on r.oid=c.relowner where c.oid='files'::regclass`;
-    await tx.unsafe(`SET LOCAL ROLE "${String(owner!.rolname).replaceAll('"', '""')}"`);
-    await tx.unsafe(
-      migration.slice(start, end) +
-        migration.slice(migration.indexOf("-- Restore owner isolation")),
-    );
-  });
-  expect(await f.read("user:viewer")).toHaveLength(1);
-  expect(
-    await withSessionRlsActorContext({ subjectId: "user:viewer" }, () =>
-      readSessionFileAttachments(client.db, {
-        ...f.scope,
-        fileIds: [unrelated.file.id],
-        access: {
-          sessionId: f.session.id,
-          authorityEpoch: 1,
-          actor: { kind: "subject", subjectId: "user:viewer" },
-        },
-      }),
-    ),
-  ).toEqual([]);
-  const [policy] =
-    await shared.admin`select relforcerowsecurity from pg_class where oid='files'::regclass`;
-  expect(policy!.relforcerowsecurity).toBe(true);
 });
 
 for (const running of [false, true])

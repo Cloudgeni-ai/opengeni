@@ -2,18 +2,15 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   bootstrapWorkspace,
+  listConnectionsMetadata,
   createDb,
   createOrganizationApiKey,
   deleteWorkspace,
   ensureExternalIdentity,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
-import { ATLASSIAN_REQUIRED_SCOPES } from "@opengeni/contracts/atlassian";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 let fixture: SharedTestDatabase;
@@ -31,7 +28,7 @@ afterAll(async () => {
   await fixture?.release();
 });
 
-test("embedded Atlassian preserves personal ownership, exact returns, replay and denial", async () => {
+test("native Atlassian connect answers 410 and its OAuth callback is gone", async () => {
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
     accountExternalId: randomUUID(),
@@ -57,7 +54,6 @@ test("embedded Atlassian preserves personal ownership, exact returns, replay and
     keyHash: createHash("sha256").update(key).digest("hex"),
     permissions: ["workspace:read", "connections:read", "connections:write"],
   });
-  let exchanges = 0;
   const app = createApp({
     db: client.db,
     bus: {} as never,
@@ -69,33 +65,7 @@ test("embedded Atlassian preserves personal ownership, exact returns, replay and
       publicBaseUrl: "https://opengeni.example.test",
       environmentsEncryptionKey: randomBytes(32).toString("base64"),
       integrationsStateSecret: "embedded-atlassian-fixture-state",
-      atlassianClientId: "fixture-client",
-      atlassianClientSecret: "fixture-secret",
     }),
-    atlassianFetch: async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/oauth/token")) {
-        exchanges++;
-        return Response.json({
-          access_token: "fixture-token",
-          refresh_token: "fixture-refresh",
-          expires_in: 3600,
-          scope: ATLASSIAN_REQUIRED_SCOPES.join(" "),
-        });
-      }
-      if (url.endsWith("/me"))
-        return Response.json({ account_id: "provider-user", name: "Product User" });
-      if (url.endsWith("/accessible-resources"))
-        return Response.json([
-          {
-            id: "cloud-1",
-            name: "Product",
-            url: "https://fixture.atlassian.net",
-            scopes: ["read:jira-work"],
-          },
-        ]);
-      throw new Error("Unexpected provider request");
-    },
   } as never);
   const headers = {
     authorization: `Bearer ${key}`,
@@ -117,31 +87,17 @@ test("embedded Atlassian preserves personal ownership, exact returns, replay and
         idempotencyKey: randomUUID(),
       }),
     });
-  expect((await begin("workspace")).status).toBe(422);
-  const started = await begin();
-  expect(started.status).toBe(200);
-  const attempt = await started.json();
-  const state = new URL(attempt.nextAction.url).searchParams.get("state")!;
-  const callback = (callbackState: string, denied = false) =>
-    app.request(
-      `/v1/integrations/atlassian/callback?${new URLSearchParams({ state: callbackState, ...(denied ? { error: "access_denied" } : { code: "fixture-code" }) })}`,
-    );
-  expect((await callback(state)).headers.get("location")).toBe(returnUrl);
-  const result = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
-  expect(result).toMatchObject({
-    state: "complete",
-    completionRequirement: "connection",
-    credentialsCommitted: true,
-    account: { providerId: "atlassian", ownership: "personal" },
-  });
-  expect((await callback(state)).headers.get("location")).toBe(returnUrl);
-  expect(exchanges).toBe(1);
-  const denied = await (await begin()).json();
-  const deniedState = new URL(denied.nextAction.url).searchParams.get("state")!;
-  expect((await callback(deniedState, true)).headers.get("location")).toBe(returnUrl);
-  expect(await (await app.request(`${base}/${denied.id}`, { headers })).json()).toMatchObject({
-    state: "cancelled",
-    credentialsCommitted: false,
-  });
-  expect(exchanges).toBe(1);
+  expect((await begin()).status).toBe(410);
+  expect((await begin("workspace")).status).toBe(410);
+  const catalog = await (
+    await app.request(base.replace("/attempts", "/catalog"), { headers })
+  ).json();
+  expect(catalog.some((provider: { id: string }) => provider.id === "atlassian")).toBe(false);
+  expect(catalog.some((provider: { id: string }) => provider.id === "mcp-oauth")).toBe(true);
+
+  const callback = await app.request(
+    `/v1/integrations/atlassian/callback?${new URLSearchParams({ state: "old", code: "fixture-code" })}`,
+  );
+  expect(callback.status).toBe(404);
+  expect(await listConnectionsMetadata(client.db, grant.workspaceId, grant.subjectId)).toEqual([]);
 });

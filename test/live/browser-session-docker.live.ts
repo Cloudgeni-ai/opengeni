@@ -1,10 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  MemoryEventBus,
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   BrowserActionReceipt,
   BrowserDownloadListResponse,

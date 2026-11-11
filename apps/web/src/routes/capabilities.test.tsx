@@ -3,9 +3,7 @@ import { ConnectionCatalog } from "@opengeni/react/connect";
 import { OPENGENI_SLACK_BOT_REQUESTED_SCOPES } from "@opengeni/contracts/slack-bot-scopes";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { atlassianChip } from "@/components/capabilities/use-atlassian-integration";
 import { githubChip } from "@/components/capabilities/use-github-integration";
-import { googleDriveChip } from "@/components/capabilities/use-google-drive-integration";
 import {
   canInstallOpenGeniSlackBot,
   canManageSlackReactionSummon,
@@ -13,16 +11,16 @@ import {
   localConnectedSlackPreview,
   slackBotDocumentDestinationAuthority,
 } from "@/components/capabilities/use-slack-integration";
-import type { AccessContext, GitHubAppInfo } from "@/types";
+import type { AccessContext, GitHubAppInfo } from "@opengeni/react/app/types";
 import {
   catalogStatusForChip,
   connectionAccessChip,
   connectionAccessModel,
   type IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
-import { capabilityStateChip } from "@/lib/capabilities";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
+import { capabilityStateChip } from "@opengeni/react/app/lib/capabilities";
 import {
-  canManageApiIntegrations,
+  apiIntegrationAccess,
   fetchOAuthReturnRows,
   integrationQuickConnect,
   integrationRowBusy,
@@ -124,24 +122,7 @@ describe("integration state chips", () => {
     expect(connectionAccessChip(integration.chip, false).label).toBe("Loading");
   });
 
-  test("normalizes Google Drive states onto the shared chip vocabulary", () => {
-    expect(googleDriveChip("connected", true, true).label).toBe("Connected");
-    expect(googleDriveChip("connected", true, false).label).toBe("Set up by an admin");
-    expect(googleDriveChip("paused", true, true).label).toBe("Needs attention");
-    expect(googleDriveChip("not_connected", true, true).label).toBe("Not connected");
-    expect(googleDriveChip("disconnected", true, true).label).toBe("Not connected");
-    expect(googleDriveChip("reconsent_required", true, true).label).toBe("Needs attention");
-    expect(googleDriveChip("unverified", true, true).label).toBe("Loading");
-    expect(googleDriveChip("connected", false, false).label).toBe("Set up by an admin");
-  });
-
-  test("normalizes Atlassian and GitHub states the same way", () => {
-    expect(atlassianChip("connected", true, true).label).toBe("Connected");
-    expect(atlassianChip("paused", true, true).label).toBe("Connected");
-    expect(atlassianChip("needs_attention", true, true).label).toBe("Needs attention");
-    expect(atlassianChip("not_connected", true, true).label).toBe("Not connected");
-    expect(atlassianChip("connected", true, false).label).toBe("Set up by an admin");
-
+  test("keeps GitHub installation states", () => {
     const bound: GitHubAppInfo = {
       configured: true,
       status: "bound",
@@ -214,6 +195,9 @@ describe("Slack integration authority", () => {
       false,
     );
     expect(canInstallOpenGeniSlackBot(accessContext(["connections:write"]), "workspace-a")).toBe(
+      false,
+    );
+    expect(canInstallOpenGeniSlackBot(accessContext(["capabilities:manage"]), "workspace-a")).toBe(
       true,
     );
     expect(canInstallOpenGeniSlackBot(accessContext(["workspace:admin"]), "workspace-a")).toBe(
@@ -228,13 +212,18 @@ describe("Slack integration authority", () => {
     expect(canManageSlackReactionSummon(accessContext(["workspace:admin"]), "workspace-a")).toBe(
       true,
     );
-    expect(canManageApiIntegrations(accessContext(["connections:write"]), "workspace-a")).toBe(
-      false,
-    );
-    expect(canManageApiIntegrations(accessContext(["capabilities:manage"]), "workspace-a")).toBe(
-      true,
-    );
-    expect(canManageApiIntegrations(accessContext(["workspace:admin"]), "workspace-a")).toBe(true);
+    const access = (permissions: string[], policy?: "members" | "admins") =>
+      apiIntegrationAccess(accessContext(permissions), "workspace-a", policy);
+    expect(access(["connections:write"])).toEqual({ add: true, manage: true, change: false });
+    expect(access(["connections:write"], "admins")).toEqual({
+      add: false,
+      manage: true,
+      change: false,
+    });
+    for (const permissions of [["connections:read"], ["connections:personal"]])
+      expect(access(permissions)).toEqual({ add: false, manage: false, change: false });
+    for (const permissions of [["capabilities:manage"], ["workspace:admin"]])
+      expect(access(permissions, "admins")).toEqual({ add: true, manage: true, change: true });
   });
 });
 

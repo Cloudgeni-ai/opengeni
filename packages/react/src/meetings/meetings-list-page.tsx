@@ -1,0 +1,442 @@
+/**
+ * Meetings: the recorder on top, then every meeting this person can see,
+ * newest first. A row opens the meeting's own page. Rows still recording, in
+ * progress elsewhere or transcribing say so and update on their own.
+ */
+import { useOpenGeniText } from "../messages/runtime";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type ComponentProps,
+} from "react";
+import { AudioLinesIcon, LockIcon, SearchIcon, Trash2Icon } from "lucide-react";
+import type { Recording } from "@opengeni/contracts";
+import {
+  formatDuration,
+  meetingHereStatus,
+  meetingPhase,
+  meetingStatusLabel,
+  meetingTitle,
+  useRecordingModels,
+  useRecordings,
+  useRecordingsClient,
+  type RecordingsClientOverride,
+} from "../recordings";
+
+import { Button } from "../ui/button";
+import { DropdownMenuItem } from "../ui/dropdown-menu";
+import { EmptyState } from "../ui/empty-state";
+import { ErrorMessage } from "../ui/error-message";
+import { inAppClick } from "../ui/in-app-click";
+import { Input } from "../ui/input";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "../ui/list-row";
+import { LogoTile } from "../ui/logo-tile";
+import { MetaChip } from "../ui/meta-chip";
+import { Notice } from "../ui/notice";
+import { PageHeader } from "../ui/page-header";
+import { RelativeTime } from "../ui/relative-time";
+import { StatusBadge } from "../ui/status-badge";
+
+import { DeleteMeetingDialog } from "./delete-meeting-dialog";
+import { nothingRecording, RecorderPanel, useOnline } from "./recorder-panel";
+import { useMeetingRecorder, usePendingMeetingStart } from "./recorder-context";
+import { MeetingsOverlayScope } from "./overlay-scope";
+
+function useDebounced<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delay);
+    return () => window.clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
+
+function useNarrow(): boolean {
+  const query = "(max-width: 639px)";
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== "undefined" && window.matchMedia?.(query).matches === true,
+  );
+  useEffect(() => {
+    const media = window.matchMedia?.(query);
+    if (!media) return;
+    const update = () => setNarrow(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return narrow;
+}
+
+function MeetingsListPageContent({
+  workspaceId,
+  liveTranscriptDefault,
+  liveTranscript = true,
+  defaultLanguage,
+  recordings: recordingsClient,
+  meetingHref,
+  onOpen,
+  externalRef = null,
+  notice = null,
+  header = true,
+  recordingOff = null,
+  viewerName = null,
+}: {
+  workspaceId: string;
+  /**
+   * Whether the recorder starts with the live transcript on. By default the
+   * workspace's setting, from the server.
+   */
+  liveTranscriptDefault?: boolean;
+  /** Offer the live transcript preview at all; false hides it even when a live model is connected. */
+  liveTranscript?: boolean;
+  /**
+   * The language the recorder starts on; null detects it. By default the
+   * workspace's meeting language, from the server.
+   */
+  defaultLanguage?: string | null;
+  /** A recordings client to use instead of the app's, for previews. */
+  recordings?: RecordingsClientOverride["recordings"];
+  meetingHref: (recordingId: string) => string;
+  onOpen: (recordingId: string) => void;
+  /**
+   * Show only the meetings with this id of the host's, such as a project, and
+   * give new recordings started here the same id.
+   */
+  externalRef?: string | null;
+  /** A short line shown before every start, such as a reminder to tell the people present. */
+  notice?: ReactNode;
+  /** Show the page title; false when the list sits inside a page of the host's. */
+  header?: boolean;
+  /**
+   * Shown instead of the recorder when the host doesn't let this person record
+   * here, such as a setting an administrator has to turn on first. Meetings
+   * already recorded stay listed, and a recording already underway keeps its controls.
+   */
+  recordingOff?: ReactNode;
+  /** The person recording's name, for their microphone's live text beside computer or tab audio. */
+  viewerName?: string | null;
+}) {
+  const msg = useOpenGeniText();
+  const columns: RowListColumn[] = [
+    { id: "length", label: msg("meetings.listPage.length"), width: 96 },
+    { id: "recorded", label: msg("meetings.listPage.recorded"), width: 148 },
+  ];
+  const [search, setSearch] = useState("");
+  const query = useDebounced(search.trim(), 250);
+  const override = { workspaceId, ...(recordingsClient ? { recordings: recordingsClient } : {}) };
+  const list = useRecordings({
+    ...override,
+    ...(query ? { query } : {}),
+    ...(externalRef ? { externalRef } : {}),
+  });
+  const { client } = useRecordingsClient(override);
+  const {
+    recorder,
+    finished,
+    workspaceId: recorderWorkspaceId,
+    openMeeting,
+  } = useMeetingRecorder();
+  const online = useOnline();
+  // A recording started in another workspace keeps going here; its meeting
+  // opens in its own workspace.
+  const openRecorded = useCallback(
+    (recordingId: string) => {
+      if (
+        recorderWorkspaceId &&
+        recorderWorkspaceId !== workspaceId &&
+        openMeeting(recordingId, recorderWorkspaceId)
+      ) {
+        return;
+      }
+      onOpen(recordingId);
+    },
+    [recorderWorkspaceId, workspaceId, openMeeting, onOpen],
+  );
+  const models = useRecordingModels(override);
+  const liveModel = models.liveModels.find((entry) => entry.available) ?? null;
+  // A desktop call notification's Record waits for the live model list, so
+  // the recording gets the same live-preview default as a click on Start.
+  const pendingStart = usePendingMeetingStart();
+  const autoStart = useMemo(
+    () => ({ pending: pendingStart.request !== null && !models.loading, take: pendingStart.take }),
+    [pendingStart.request, pendingStart.take, models.loading],
+  );
+  const narrow = useNarrow();
+  const [pendingDelete, setPendingDelete] = useState<Recording | null>(null);
+
+  // A recording that finished uploading in this tab changes state on the server.
+  const refresh = list.refresh;
+  const finishedCount = finished.length;
+  useEffect(() => {
+    if (finishedCount > 0) void refresh();
+  }, [finishedCount, refresh]);
+  // A recording that just started shows up in the list as soon as the server has it.
+  const liveId = recorder?.upload?.created ? recorder.recordingId : null;
+  const lastLiveId = useRef<string | null>(null);
+  useEffect(() => {
+    if (liveId && liveId !== lastLiveId.current) {
+      lastLiveId.current = liveId;
+      void refresh();
+    }
+  }, [liveId, refresh]);
+
+  const loading = list.loading && list.recordings.length === 0;
+  const empty = !list.loading && !list.error && list.recordings.length === 0;
+  const showRecorder = recordingOff === null || (recorder !== null && recorder.state !== "idle");
+
+  return (
+    <>
+      {header ? (
+        <PageHeader
+          icon={<AudioLinesIcon />}
+          title={msg("meetings.listPage.meetings")}
+          description={msg("meetings.listPage.recordAMeetingAndGet")}
+        />
+      ) : null}
+      <div className={header ? "mt-2 grid gap-8" : "grid gap-8"}>
+        {showRecorder ? (
+          <RecorderPanel
+            recorder={recorder}
+            onStopped={openRecorded}
+            onOpenNotes={openRecorded}
+            defaultLanguage={defaultLanguage !== undefined ? defaultLanguage : models.language}
+            autoStart={autoStart}
+            externalRef={externalRef}
+            notice={notice}
+            viewerName={viewerName}
+            liveTranscript={
+              liveTranscript && liveModel
+                ? {
+                    defaultOn: liveTranscriptDefault ?? models.liveTranscript ?? false,
+                    usdPerHour: liveModel.usdPerHour,
+                  }
+                : null
+            }
+          />
+        ) : (
+          <Notice tone="info">{recordingOff}</Notice>
+        )}
+        {recorder && recorder.recovered.length > 0 ? (
+          <Notice tone="info">
+            {msg("meetings.listPage.earlierRecordingsWereStillSaved", {
+              count: recorder.recovered.length,
+            })}
+          </Notice>
+        ) : null}
+        <div className="grid gap-3">
+          {list.recordings.length > 0 || query ? (
+            <div className="relative max-w-80">
+              <SearchIcon
+                aria-hidden="true"
+                className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-fg-subtle"
+              />
+              <Input
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder={msg("meetings.listPage.searchMeetings")}
+                aria-label={msg("meetings.listPage.searchMeetings")}
+                className="h-9 pl-9 pointer-coarse:h-11"
+              />
+            </div>
+          ) : null}
+          {loading ? (
+            <RowList
+              label={msg("meetings.listPage.meetings")}
+              columns={narrow ? [] : columns}
+              flush
+              busy
+            >
+              <ListRowSkeleton count={4} />
+            </RowList>
+          ) : list.error && list.recordings.length === 0 ? (
+            <ErrorMessage
+              align="center"
+              title={msg("meetings.listPage.couldnTLoadMeetings")}
+              details={[{ label: msg("meetings.listPage.error"), value: list.error.message }]}
+              action={
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void list.refresh()}
+                  className="pointer-coarse:h-11"
+                >
+                  {msg("meetings.listPage.tryAgain")}
+                </Button>
+              }
+            >
+              {msg("meetings.listPage.checkYourConnectionThenTry")}
+            </ErrorMessage>
+          ) : empty ? (
+            query ? (
+              <EmptyState
+                variant="inline"
+                title={msg("meetings.listPage.noMeetingsMatchQuery", { query: query })}
+                description={msg("meetings.listPage.searchFindsWordsInMeeting")}
+              />
+            ) : (
+              <EmptyState
+                variant="page"
+                icon={<AudioLinesIcon />}
+                title={msg("meetings.listPage.noMeetingsYet")}
+                description={
+                  showRecorder ? msg("meetings.listPage.startARecordingAboveWhen") : undefined
+                }
+                className="pt-8"
+              />
+            )
+          ) : (
+            <RowList
+              label={msg("meetings.listPage.meetings")}
+              columns={narrow ? [] : columns}
+              flush
+            >
+              {list.recordings.map((recording) => {
+                // Stopped here, its last audio is on its way: Transcribing, not In progress.
+                const here =
+                  recording.state === "capturing"
+                    ? meetingHereStatus(recorder, recording.id, online)
+                    : null;
+                const status = meetingStatusLabel(
+                  here === "transcribing"
+                    ? { kind: "transcribing", version: null }
+                    : meetingPhase(recording),
+                  msg,
+                );
+                // Recording here until Stop: after it, the row reads Transcribing.
+                const isLive = here === "recording" || here === "paused";
+                return (
+                  <ListRow
+                    key={recording.id}
+                    leading={<LogoTile icon={<AudioLinesIcon />} />}
+                    title={meetingTitle(recording, msg)}
+                    titleAddon={
+                      recording.sourceWorkspace ? (
+                        // The person's own Only me meeting, stored in another
+                        // workspace of the organization: say which.
+                        <MetaChip icon={<LockIcon />}>
+                          <span className="sr-only">
+                            {msg("meetings.listPage.onlyMeRecordedIn", {
+                              workspace: recording.sourceWorkspace.name,
+                            })}
+                          </span>
+                          <span aria-hidden="true">{recording.sourceWorkspace.name}</span>
+                        </MetaChip>
+                      ) : recording.visibility === "private" ? (
+                        <MetaChip icon={<LockIcon />}>
+                          <span className={narrow ? "sr-only" : undefined}>
+                            {msg("meetings.listPage.onlyMe")}
+                          </span>
+                        </MetaChip>
+                      ) : undefined
+                    }
+                    status={
+                      isLive ? (
+                        here === "paused" ? (
+                          <StatusBadge variant="dot" tone="neutral">
+                            {msg("meetings.recorderPanel.paused")}
+                          </StatusBadge>
+                        ) : recorder && nothingRecording(recorder) ? (
+                          // Every source went away: the clock runs, but nothing is heard.
+                          <StatusBadge variant="dot" tone="attention">
+                            {msg("meetings.recorderPanel.notRecording")}
+                          </StatusBadge>
+                        ) : (
+                          <StatusBadge variant="dot" tone="danger" pulse>
+                            {msg("meetings.listPage.recording")}
+                          </StatusBadge>
+                        )
+                      ) : status ? (
+                        <StatusBadge
+                          variant="dot"
+                          tone={status.tone}
+                          pulse={status.tone === "progress"}
+                        >
+                          {status.label}
+                        </StatusBadge>
+                      ) : undefined
+                    }
+                    meta={
+                      narrow
+                        ? [
+                            <RelativeTime key="recorded" date={recording.startedAt} />,
+                            recording.durationMilliseconds > 0
+                              ? formatDuration(recording.durationMilliseconds, msg)
+                              : null,
+                          ].filter(Boolean)
+                        : undefined
+                    }
+                    cells={{
+                      length:
+                        recording.durationMilliseconds > 0 ? (
+                          <span className="tabular-nums">
+                            {formatDuration(recording.durationMilliseconds, msg)}
+                          </span>
+                        ) : (
+                          <span className="text-fg-subtle">—</span>
+                        ),
+                      recorded: <RelativeTime date={recording.startedAt} />,
+                    }}
+                    menu={
+                      <DropdownMenuItem
+                        variant="destructive"
+                        onSelect={() => setPendingDelete(recording)}
+                      >
+                        <Trash2Icon aria-hidden="true" />
+                        {msg("meetings.listPage.deleteMeeting")}
+                      </DropdownMenuItem>
+                    }
+                    menuLabel={msg("meetings.listPage.moreActionsForTitle", {
+                      title: meetingTitle(recording, msg),
+                    })}
+                    href={meetingHref(recording.id)}
+                    linkProps={{ onClick: inAppClick(() => onOpen(recording.id)) }}
+                  />
+                );
+              })}
+            </RowList>
+          )}
+          {list.hasMore ? (
+            <div className="flex justify-center">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={list.loadingMore}
+                onClick={() => void list.loadMore()}
+                className="pointer-coarse:h-11"
+              >
+                {list.loadingMore
+                  ? msg("meetings.listPage.loading")
+                  : msg("meetings.listPage.showOlderMeetings")}
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+      <DeleteMeetingDialog
+        recording={
+          pendingDelete && { id: pendingDelete.id, title: meetingTitle(pendingDelete, msg) }
+        }
+        onClose={() => setPendingDelete(null)}
+        onDelete={async (recordingId) => {
+          await client.deleteRecording(workspaceId, recordingId);
+        }}
+        onDeleted={() => void list.refresh()}
+      />
+    </>
+  );
+}
+
+export function MeetingsListPage(props: ComponentProps<typeof MeetingsListPageContent>) {
+  return (
+    <MeetingsOverlayScope>
+      <MeetingsListPageContent {...props} />
+    </MeetingsOverlayScope>
+  );
+}

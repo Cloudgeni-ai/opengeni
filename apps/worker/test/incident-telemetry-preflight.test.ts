@@ -40,17 +40,17 @@ function incidentConfig(): ScheduledTaskAgentConfig {
         name: "incident-response",
         credentialHookIds: ["azure-monitor"],
       },
-      requiredVariableSetNames: ["incident-production"],
-      requiredVariableNames: ["PROMETHEUS_URL", "PROMETHEUS_TOKEN"],
+      requiredVaultNames: ["incident-production"],
+      requiredSecretNames: ["PROMETHEUS_URL", "PROMETHEUS_TOKEN"],
       dataSource: {
         kind: "prometheus",
         queryPath: "/api/v1/query_range",
         workspaceLabel: "workspace_id",
         alertSelectorLabels: ["alertname"],
         route: {
-          kind: "variable_set",
-          variableSetName: "incident-production",
-          variableNames: ["PROMETHEUS_URL", "PROMETHEUS_TOKEN"],
+          kind: "vault",
+          vaultName: "incident-production",
+          secretNames: ["PROMETHEUS_URL", "PROMETHEUS_TOKEN"],
         },
         requiredSeries: [
           {
@@ -86,10 +86,10 @@ function responder(
       credentialHooks: ["azure-monitor"],
       checkHealth: "passing",
     },
-    variableSets: [
+    vaults: [
       {
-        name: "incident-production",
-        variables: [{ name: "PROMETHEUS_TOKEN" }, { name: "PROMETHEUS_URL" }],
+        name: "Incident-Production",
+        items: [{ name: "prometheus_token" }, { name: "PROMETHEUS_URL" }],
       },
     ],
     toolPolicyVersion: 1,
@@ -130,8 +130,6 @@ function scheduledTask(agentConfig = incidentConfig()): ScheduledTask {
     createdByContext: {},
     reusableSessionId: null,
     targetSessionId: "44444444-4444-4444-8444-444444444444",
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     metadata: {},
     createdAt: "2026-08-14T00:00:00.000Z",
@@ -189,7 +187,7 @@ describe("incident telemetry dispatch preflight", () => {
       { firstPartyMcpTools: [] },
       { firstPartyMcpPermissions: [] },
       { rig: null },
-      { variableSets: [] },
+      { vaults: [] },
     ] satisfies Array<Partial<IncidentTelemetryResponderMetadata>>) {
       expect(evaluate(config, missing)).toEqual({
         action: "blocked",
@@ -331,7 +329,7 @@ describe("incident telemetry dispatch preflight", () => {
   });
 
   test("returns fixed blockers without secret, endpoint, repository, or identity leakage", () => {
-    const blocked = evaluate(incidentConfig(), { variableSets: [] });
+    const blocked = evaluate(incidentConfig(), { vaults: [] });
     const rendered = JSON.stringify(blocked);
     expect(rendered).toBe('{"action":"blocked","reason":"incident_responder_under_capable"}');
     for (const privateFact of [
@@ -400,7 +398,6 @@ describe("incident telemetry dispatch preflight", () => {
     }
     expect(evaluatorSource).not.toContain("fetch(");
     expect(evaluatorSource).not.toContain("process.env");
-    expect(evaluatorSource).not.toContain("getVariableSetValue");
     for (const forbidden of [
       "settingsWithEnabledCapabilityMcpServers",
       "settingsWithMcpCapabilityServers",

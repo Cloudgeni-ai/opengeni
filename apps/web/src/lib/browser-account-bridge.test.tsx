@@ -8,7 +8,7 @@ import {
   useOptionalBrowserAccountBridge,
   type BrowserAccountBridgeBlockerInspector,
   type BrowserAccountBridgeOperations,
-} from "./browser-account-bridge";
+} from "@opengeni/react/app/lib/browser-account-bridge";
 
 registerDom();
 

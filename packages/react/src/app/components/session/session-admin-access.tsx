@@ -1,0 +1,285 @@
+import type { SessionAdminAccess } from "@opengeni/sdk";
+import { ShieldCheckIcon } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "../../lib/toast";
+
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../../../ui/dropdown-menu";
+import { Field, FieldStack } from "../../../ui/field";
+import { FormDialog } from "../../../ui/form-dialog";
+import { SegmentedControl } from "../../../ui/segmented-control";
+import { useAppContext } from "../../app-context";
+import { hasInbox } from "../../lib/inbox";
+import {
+  ADMIN_ACCESS_DURATIONS,
+  ADMIN_ACCESS_GRANT_DESCRIPTION,
+  adminAccessDurationHours as durationHours,
+  adminAccessGrantedByText as grantedByText,
+  endsText,
+  type AdminAccessDuration,
+} from "../../../session-admin-access-model";
+import { userErrorText } from "../../../ui/api-error";
+
+export { ADMIN_ACCESS_DURATIONS, endsText, type AdminAccessDuration };
+
+/* ----------------------------------------------------------------------------
+   Full access for one session (named "admin access" in the API). Any member
+   gives a session they started their own access (when the organization
+   allows it, in Organization settings > Security & data) for an hour, a few
+   hours, a day or with no time limit; its agent can then do what they can in
+   the app, as them, and never more. The header shows a small shield while it is on,
+   with when it ends and a one-click way to turn it off.
+   -------------------------------------------------------------------------- */
+
+export type SessionAdminAccessControl = {
+  state: SessionAdminAccess;
+  busy: boolean;
+  grant: (duration: AdminAccessDuration) => Promise<void>;
+  revoke: () => void;
+};
+
+export function useSessionAdminAccess(session: {
+  workspaceId: string;
+  id: string;
+}): SessionAdminAccessControl | null {
+  const context = useAppContext();
+  const client = context.client;
+  const applies = hasInbox(context.accessContext);
+  const [state, setState] = useState<SessionAdminAccess | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [reloads, setReloads] = useState(0);
+  useEffect(() => {
+    if (!applies) return;
+    let current = true;
+    client
+      .getSessionAdminAccess(session.workspaceId, session.id)
+      .then((value) => {
+        if (current) setState(value);
+      })
+      // Older servers, or no access to read it: nothing to show.
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [applies, client, reloads, session.id, session.workspaceId]);
+  useEffect(() => {
+    setState(null);
+  }, [session.id, session.workspaceId]);
+
+  // When the time limit is reached, read it again so the shield goes away.
+  const expiresAt = state?.active ? state.expiresAt : null;
+  useEffect(() => {
+    if (!expiresAt) return;
+    const delay = Date.parse(expiresAt) - Date.now();
+    if (!Number.isFinite(delay)) return;
+    const timer = setTimeout(
+      () => setReloads((count) => count + 1),
+      Math.min(Math.max(delay + 1_000, 0), 2_147_000_000),
+    );
+    return () => clearTimeout(timer);
+  }, [expiresAt]);
+
+  const grant = useCallback(
+    async (duration: AdminAccessDuration) => {
+      setBusy(true);
+      const wasActive = state?.active === true;
+      try {
+        const value = await client.grantSessionAdminAccess(session.workspaceId, session.id, {
+          durationHours: durationHours(duration),
+        });
+        setState(value);
+        toast.success(wasActive ? "Full access updated" : "This session has full access", {
+          description: wasActive
+            ? endsText(value.expiresAt)
+            : `Its agent can use it from its next message. ${endsText(value.expiresAt)}.`,
+        });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, session.id, session.workspaceId, state?.active],
+  );
+
+  const revoke = useCallback(() => {
+    if (busy) return;
+    setBusy(true);
+    client
+      .revokeSessionAdminAccess(session.workspaceId, session.id)
+      .then((value) => {
+        setState(value);
+        toast.success("Full access is off for this session");
+      })
+      .catch((error: unknown) => {
+        toast.error("Couldn't turn off full access", {
+          description: userErrorText(error),
+        });
+      })
+      .finally(() => setBusy(false));
+  }, [busy, client, session.id, session.workspaceId]);
+
+  if (!state) return null;
+  if (!state.active && !state.canGrant) return null;
+  return { state, busy, grant, revoke };
+}
+
+/** The small shield beside the title while the session has full access. */
+export function SessionAdminAccessIndicator({
+  control,
+  onChangeTimeLimit,
+}: {
+  control: SessionAdminAccessControl;
+  /** Opens the time limit dialog; shown to the person who can give access. */
+  onChangeTimeLimit?: (() => void) | undefined;
+}) {
+  if (!control.state.active) return null;
+  return <ActiveIndicator control={control} onChangeTimeLimit={onChangeTimeLimit} />;
+}
+
+function ActiveIndicator({
+  control,
+  onChangeTimeLimit,
+}: {
+  control: SessionAdminAccessControl;
+  onChangeTimeLimit?: (() => void) | undefined;
+}) {
+  // Opening the dialog waits for the menu to close, so the menu's focus
+  // restoration can't pull focus out of the dialog.
+  const afterClose = useRef<(() => void) | null>(null);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label="Full access is on"
+          title="Full access is on"
+          data-session-admin-access=""
+          className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs text-fg-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11"
+        >
+          <ShieldCheckIcon aria-hidden="true" className="size-3 shrink-0 text-status-waiting" />
+          <span className="hidden sm:inline">Full access</span>
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        className="w-72"
+        onCloseAutoFocus={(event) => {
+          const action = afterClose.current;
+          if (!action) return;
+          afterClose.current = null;
+          event.preventDefault();
+          action();
+        }}
+      >
+        <SessionAdminAccessMenuItems
+          control={control}
+          onChangeTimeLimit={onChangeTimeLimit}
+          runAfterClose={(action) => {
+            afterClose.current = action;
+          }}
+        />
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * What full access is and how to change it, as menu items: the shield's own
+ * menu, or the header's "…" menu when the shield has no room beside the title.
+ * `runAfterClose` runs an action once the menu has closed.
+ */
+export function SessionAdminAccessMenuItems({
+  control,
+  onChangeTimeLimit,
+  runAfterClose,
+}: {
+  control: SessionAdminAccessControl;
+  onChangeTimeLimit?: (() => void) | undefined;
+  runAfterClose: (action: () => void) => void;
+}) {
+  if (!control.state.active) return null;
+  const changeTimeLimit = control.state.canGrant ? onChangeTimeLimit : undefined;
+  return (
+    <>
+      <div className="px-2 py-1.5 text-xs text-fg-muted">
+        <p className="flex items-center gap-1.5 font-medium text-fg">
+          <ShieldCheckIcon aria-hidden="true" className="size-3 shrink-0 text-status-waiting" />
+          Full access is on
+        </p>
+        <p className="mt-1">{grantedByText(control.state)}</p>
+        <p className="mt-1" data-session-admin-access-ends="">
+          {endsText(control.state.expiresAt)}.
+        </p>
+      </div>
+      {changeTimeLimit || control.state.canRevoke ? <DropdownMenuSeparator /> : null}
+      {changeTimeLimit ? (
+        <DropdownMenuItem disabled={control.busy} onSelect={() => runAfterClose(changeTimeLimit)}>
+          Change time limit…
+        </DropdownMenuItem>
+      ) : null}
+      {control.state.canRevoke ? (
+        <DropdownMenuItem disabled={control.busy} onSelect={() => control.revoke()}>
+          Turn off full access
+        </DropdownMenuItem>
+      ) : null}
+    </>
+  );
+}
+
+/** Gives this session full access, or changes how long it lasts while it is on. */
+export function GrantSessionAdminAccessDialog({
+  control,
+  open,
+  onOpenChange,
+}: {
+  control: SessionAdminAccessControl;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const changing = control.state.active;
+  const [duration, setDuration] = useState<AdminAccessDuration>("1");
+  useEffect(() => {
+    if (open) setDuration("1");
+  }, [open]);
+  return (
+    <FormDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      size="sm"
+      title={changing ? "Change the time limit" : "Give this session your full access?"}
+      description={
+        changing
+          ? "The new limit for full access starts now."
+          : `${ADMIN_ACCESS_GRANT_DESCRIPTION} You can turn it off at any time from the shield beside the title.`
+      }
+      submitLabel={changing ? "Save" : "Give full access"}
+      pendingLabel={changing ? "Saving…" : "Giving access…"}
+      initialFocus="cancel"
+      onSubmit={async () => {
+        await control.grant(duration);
+      }}
+      onSubmitted={() => onOpenChange(false)}
+    >
+      <FieldStack>
+        <Field label="How long" group hint={durationHint(duration)}>
+          <SegmentedControl
+            fullWidth
+            options={ADMIN_ACCESS_DURATIONS}
+            value={duration}
+            onValueChange={setDuration}
+          />
+        </Field>
+      </FieldStack>
+    </FormDialog>
+  );
+}
+
+function durationHint(duration: AdminAccessDuration): string {
+  if (duration === "none") return "It stays on until you turn it off.";
+  const hours = durationHours(duration)!;
+  return `${endsText(new Date(Date.now() + hours * 3_600_000).toISOString())}.`;
+}

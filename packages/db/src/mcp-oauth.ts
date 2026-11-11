@@ -1,6 +1,18 @@
-import { Permission, ToolGatewayIdentity, type AccessGrant } from "@opengeni/contracts";
+import {
+  OrganizationAccessPolicy,
+  Permission,
+  ToolGatewayIdentity,
+  type AccessGrant,
+} from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
-import { rawRows, type Database, withWorkspaceSubjectRls } from "./database";
+import { canonicalSecretPermissions } from "./canonical-secret-permissions";
+import { rawRows, type Database, withRlsContext, withWorkspaceSubjectRls } from "./database";
+import { rawMembershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
+import {
+  CONNECTION_DISCONNECTED_AUDIT_ACTION,
+  insertDisconnectAuditEventInScope,
+  type DisconnectAuditActor,
+} from "./disconnect-audit";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
 
@@ -9,22 +21,30 @@ export class McpOAuthClientRegistrationRateLimitError extends Error {
   readonly code = "mcp_oauth_client_registration_rate_limited";
 }
 
+export type McpOAuthGrantType =
+  | "authorization_code"
+  | "refresh_token"
+  | "urn:ietf:params:oauth:grant-type:jwt-bearer";
+
 export type McpOAuthClient = {
   clientId: string;
   redirectUris: string[];
   clientName: string | null;
-  grantTypes: Array<"authorization_code" | "refresh_token">;
+  grantTypes: McpOAuthGrantType[];
   responseTypes: ["code"];
   createdAt: Date;
 };
 
 export type McpOAuthGrantSnapshot = {
   accountId: string;
-  workspaceId: string;
+  /** Null for an organization connection, which carries organizationAccess. */
+  workspaceId: string | null;
   subjectId: string;
   resource: string;
   permissions: AccessGrant["permissions"];
   toolIdentities: Array<{ serverId: string; toolName: string }>;
+  /** What an organization connection may do and where; null for a workspace grant. */
+  organizationAccess: OrganizationAccessPolicy | null;
 };
 
 export type McpOAuthAuthorizationRequest = McpOAuthGrantSnapshot & {
@@ -55,11 +75,12 @@ type ClientRow = {
 
 type GrantRow = {
   account_id: string;
-  workspace_id: string;
+  workspace_id: string | null;
   subject_id: string;
   resource: string;
   permissions: unknown;
   tool_identities: unknown;
+  organization_access: unknown;
 };
 
 export async function registerMcpOAuthClient(
@@ -68,7 +89,7 @@ export async function registerMcpOAuthClient(
     clientId: string;
     redirectUris: string[];
     clientName: string | null;
-    grantTypes: Array<"authorization_code" | "refresh_token">;
+    grantTypes: McpOAuthGrantType[];
     responseTypes: ["code"];
     registrationScopeHash: string;
   },
@@ -113,6 +134,42 @@ export async function getMcpOAuthClient(
   return row ? mapClient(row) : null;
 }
 
+/**
+ * A client identified by its Client ID Metadata Document URL needs no
+ * registration: its document, fetched and checked by the caller, is stored
+ * as the client (and refreshed on each fetch).
+ */
+export async function upsertMcpOAuthMetadataDocumentClient(
+  db: Database,
+  input: {
+    clientId: string;
+    redirectUris: string[];
+    clientName: string | null;
+    grantTypes: McpOAuthGrantType[];
+  },
+): Promise<McpOAuthClient> {
+  const [row] = await rawRows<ClientRow>(
+    db,
+    sql`insert into mcp_oauth_clients (
+      client_id, redirect_uris, client_name, token_endpoint_auth_method, grant_types,
+      response_types, registration_scope_hash, expires_at
+    ) values (
+      ${input.clientId}, ${JSON.stringify(input.redirectUris)}::jsonb, ${input.clientName}, 'none',
+      ${JSON.stringify(input.grantTypes)}::jsonb, '["code"]'::jsonb,
+      encode(sha256(convert_to(${`cimd:${input.clientId}`}, 'UTF8')), 'hex'),
+      clock_timestamp() + interval '31 days'
+    )
+    on conflict (client_id) do update set
+      redirect_uris = excluded.redirect_uris,
+      client_name = excluded.client_name,
+      grant_types = excluded.grant_types,
+      expires_at = greatest(mcp_oauth_clients.expires_at, excluded.expires_at)
+    returning client_id, redirect_uris, client_name, grant_types, response_types, created_at`,
+  );
+  if (!row) throw new Error("MCP OAuth metadata document client was not persisted");
+  return mapClient(row);
+}
+
 async function extendMcpOAuthClientRetention(db: Database, clientId: string): Promise<void> {
   await db.execute(sql`update mcp_oauth_clients
     set expires_at = greatest(expires_at, clock_timestamp() + interval '31 days')
@@ -126,12 +183,13 @@ export async function createMcpOAuthAuthorizationRequest(
 ): Promise<void> {
   await db.execute(sql`insert into mcp_oauth_authorization_requests (
     request_hash, client_id, account_id, workspace_id, subject_id, resource,
-    redirect_uri, code_challenge, state, permissions, tool_identities, expires_at
+    redirect_uri, code_challenge, state, permissions, tool_identities, organization_access, expires_at
   ) values (
     ${input.requestHash}, ${input.clientId}, ${input.accountId}, ${input.workspaceId},
     ${input.subjectId}, ${input.resource}, ${input.redirectUri}, ${input.codeChallenge},
-    ${input.state}, ${JSON.stringify(input.permissions)}::jsonb,
-    ${JSON.stringify(input.toolIdentities)}::jsonb, ${input.expiresAt.toISOString()}::timestamptz
+    ${input.state}, ${JSON.stringify(canonicalMcpOAuthPermissions(input.permissions))}::jsonb,
+    ${JSON.stringify(input.toolIdentities)}::jsonb, ${jsonOrNull(input.organizationAccess)}::jsonb,
+    ${input.expiresAt.toISOString()}::timestamptz
   )`);
 }
 
@@ -151,7 +209,7 @@ export async function getMcpOAuthAuthorizationRequest(
   >(
     db,
     sql`select request_hash, client_id, account_id, workspace_id, subject_id, resource,
-        redirect_uri, code_challenge, state, permissions, tool_identities, expires_at
+        redirect_uri, code_challenge, state, permissions, tool_identities, organization_access, expires_at
       from mcp_oauth_authorization_requests
       where request_hash = ${requestHash} and expires_at > clock_timestamp()`,
   );
@@ -193,7 +251,7 @@ export async function rebindMcpOAuthAuthorizationRequest(
     sql`update mcp_oauth_authorization_requests
       set account_id = ${input.accountId},
           workspace_id = ${input.workspaceId},
-          permissions = ${JSON.stringify(input.permissions)}::jsonb,
+          permissions = ${JSON.stringify(canonicalMcpOAuthPermissions(input.permissions))}::jsonb,
           tool_identities = ${JSON.stringify(input.toolIdentities)}::jsonb
       where request_hash = ${input.requestHash}
         and subject_id = ${input.subjectId}
@@ -229,17 +287,17 @@ export async function consumeMcpOAuthAuthorizationRequest(
           and subject_id = ${input.subjectId}
           and expires_at > clock_timestamp()
         returning request_hash, client_id, account_id, workspace_id, subject_id, resource,
-          redirect_uri, code_challenge, state, permissions, tool_identities, expires_at`,
+          redirect_uri, code_challenge, state, permissions, tool_identities, organization_access, expires_at`,
     );
     if (!row) return null;
     await extendMcpOAuthClientRetention(tx, row.client_id);
     await tx.execute(sql`insert into mcp_oauth_authorization_codes (
       code_hash, client_id, account_id, workspace_id, subject_id, resource,
-      redirect_uri, code_challenge, permissions, tool_identities, expires_at
+      redirect_uri, code_challenge, permissions, tool_identities, organization_access, expires_at
     ) values (
       ${input.codeHash}, ${row.client_id}, ${row.account_id}, ${row.workspace_id},
       ${row.subject_id}, ${row.resource}, ${row.redirect_uri}, ${row.code_challenge},
-      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb,
+      ${JSON.stringify(canonicalMcpOAuthPermissions(row.permissions))}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
       ${input.codeExpiresAt.toISOString()}::timestamptz
     )`);
     return {
@@ -279,29 +337,30 @@ export async function exchangeMcpOAuthAuthorizationCode(
           and code_challenge = ${input.codeChallenge}
           and expires_at > clock_timestamp()
         returning client_id, account_id, workspace_id, subject_id, resource,
-          permissions, tool_identities`,
+          permissions, tool_identities, organization_access`,
     );
     if (!row) return null;
     await extendMcpOAuthClientRetention(tx, row.client_id);
     const familyId = crypto.randomUUID();
+    const permissions = canonicalMcpOAuthPermissions(row.permissions);
     if (input.refreshTokenHash) {
       await tx.execute(sql`insert into mcp_oauth_refresh_tokens (
         token_hash, family_id, generation, client_id, account_id, workspace_id,
-        subject_id, resource, permissions, tool_identities, expires_at
+        subject_id, resource, permissions, tool_identities, organization_access, connected_at, expires_at
       ) values (
         ${input.refreshTokenHash}, ${familyId}, 1, ${row.client_id}, ${row.account_id},
         ${row.workspace_id}, ${row.subject_id}, ${row.resource},
-        ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb,
-        ${input.refreshExpiresAt.toISOString()}::timestamptz
+        ${JSON.stringify(permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
+        clock_timestamp(), ${input.refreshExpiresAt.toISOString()}::timestamptz
       )`);
     }
     await tx.execute(sql`insert into mcp_oauth_access_tokens (
       token_hash, refresh_family_id, refresh_generation, client_id, account_id,
-      workspace_id, subject_id, resource, permissions, tool_identities, expires_at
+      workspace_id, subject_id, resource, permissions, tool_identities, organization_access, expires_at
     ) values (
       ${input.accessTokenHash}, ${familyId}, 1, ${row.client_id}, ${row.account_id},
       ${row.workspace_id}, ${row.subject_id}, ${row.resource},
-      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb,
+      ${JSON.stringify(permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
       ${input.accessExpiresAt.toISOString()}::timestamptz
     )`);
     return {
@@ -310,6 +369,7 @@ export async function exchangeMcpOAuthAuthorizationCode(
       refreshFamilyId: familyId,
       refreshGeneration: 1,
       ...mapGrant(row),
+      permissions,
       expiresAt: input.accessExpiresAt,
     };
   });
@@ -353,7 +413,7 @@ export async function rotateMcpOAuthRefreshToken(
     >(
       tx,
       sql`select client_id, family_id, generation, account_id, workspace_id,
-          subject_id, resource, permissions, tool_identities, revoked_at,
+          subject_id, resource, permissions, tool_identities, organization_access, revoked_at,
           expires_at > clock_timestamp() as active
         from mcp_oauth_refresh_tokens
         where token_hash = ${input.refreshTokenHash}
@@ -372,22 +432,24 @@ export async function rotateMcpOAuthRefreshToken(
       set revoked_at = clock_timestamp()
       where token_hash = ${input.refreshTokenHash}`);
     const generation = Number(row.generation) + 1;
+    const permissions = canonicalMcpOAuthPermissions(row.permissions);
     await tx.execute(sql`insert into mcp_oauth_refresh_tokens (
       token_hash, family_id, generation, client_id, account_id, workspace_id,
-      subject_id, resource, permissions, tool_identities, expires_at
+      subject_id, resource, permissions, tool_identities, organization_access, connected_at, expires_at
     ) values (
       ${input.nextRefreshTokenHash}, ${row.family_id}, ${generation}, ${row.client_id},
       ${row.account_id}, ${row.workspace_id}, ${row.subject_id}, ${row.resource},
-      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb,
-      ${input.refreshExpiresAt.toISOString()}::timestamptz
+      ${JSON.stringify(permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
+      (select previous.connected_at from mcp_oauth_refresh_tokens previous
+        where previous.token_hash = ${input.refreshTokenHash}), ${input.refreshExpiresAt.toISOString()}::timestamptz
     )`);
     await tx.execute(sql`insert into mcp_oauth_access_tokens (
       token_hash, refresh_family_id, refresh_generation, client_id, account_id,
-      workspace_id, subject_id, resource, permissions, tool_identities, expires_at
+      workspace_id, subject_id, resource, permissions, tool_identities, organization_access, expires_at
     ) values (
       ${input.accessTokenHash}, ${row.family_id}, ${generation}, ${row.client_id},
       ${row.account_id}, ${row.workspace_id}, ${row.subject_id}, ${row.resource},
-      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb,
+      ${JSON.stringify(permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb,
       ${input.accessExpiresAt.toISOString()}::timestamptz
     )`);
     return {
@@ -396,6 +458,7 @@ export async function rotateMcpOAuthRefreshToken(
       refreshFamilyId: row.family_id,
       refreshGeneration: generation,
       ...mapGrant(row),
+      permissions,
       expiresAt: input.accessExpiresAt,
     };
   });
@@ -425,7 +488,8 @@ export async function resolveMcpOAuthAccessToken(
   >(
     db,
     sql`select token_hash, client_id, refresh_family_id, refresh_generation,
-        account_id, workspace_id, subject_id, resource, permissions, tool_identities, expires_at
+        account_id, workspace_id, subject_id, resource, permissions, tool_identities,
+        organization_access, expires_at
       from mcp_oauth_access_tokens
       where token_hash = ${tokenHash}
         and revoked_at is null
@@ -447,41 +511,269 @@ export async function resolveLiveMcpOAuthGrant(
   db: Database,
   access: McpOAuthAccess,
 ): Promise<AccessGrant | null> {
-  return await withWorkspaceSubjectRls(
-    db,
-    access.workspaceId,
-    access.subjectId,
-    async (scopedDb) => {
-      if (!(await subjectHasLiveWorkspaceAuthorityInScope(scopedDb, access))) return null;
-      const [membership] = await rawRows<{
-        permissions: unknown;
-        account_id: string;
-      }>(
-        scopedDb,
-        sql`select membership.permissions, workspace.account_id
+  // Organization connections resolve per request through the person proof.
+  const workspaceId = access.workspaceId;
+  if (workspaceId === null) return null;
+  return await withWorkspaceSubjectRls(db, workspaceId, access.subjectId, async (scopedDb) => {
+    if (!(await subjectHasLiveWorkspaceAuthorityInScope(scopedDb, { ...access, workspaceId })))
+      return null;
+    const [membership] = await rawRows<{
+      permissions: unknown;
+      account_id: string;
+    }>(
+      scopedDb,
+      sql`select membership.permissions, workspace.account_id
           from workspace_memberships membership
           join workspaces workspace on workspace.id = membership.workspace_id
-          where membership.workspace_id = ${access.workspaceId}
+          where membership.workspace_id = ${workspaceId}
             and membership.subject_id = ${access.subjectId}
+            and ${rawMembershipOutsidePersonalWorkspace("membership")}
           limit 1`,
-      );
-      if (membership && membership.account_id !== access.accountId) return null;
-      const livePermissions = membership
-        ? Permission.array().parse(membership.permissions)
-        : access.permissions;
-      const liveSet = new Set(livePermissions);
-      const permissions = access.permissions.filter((permission) => liveSet.has(permission));
-      if (!permissions.includes("workspace:read")) return null;
-      return {
-        accountId: access.accountId,
-        workspaceId: access.workspaceId,
-        subjectId: access.subjectId,
-        permissions,
-        principalKind: "human_session",
-        metadata: { mcpOAuth: true, refreshFamilyId: access.refreshFamilyId },
-      };
-    },
+    );
+    if (membership && membership.account_id !== access.accountId) return null;
+    const livePermissions = membership
+      ? Permission.array().parse(membership.permissions)
+      : access.permissions;
+    const liveSet = new Set(canonicalMcpOAuthPermissions(livePermissions));
+    const permissions = canonicalMcpOAuthPermissions(access.permissions).filter((permission) =>
+      liveSet.has(permission),
+    );
+    if (!permissions.includes("workspace:read")) return null;
+    return {
+      accountId: access.accountId,
+      workspaceId,
+      subjectId: access.subjectId,
+      permissions,
+      principalKind: "human_session",
+      metadata: { mcpOAuth: true, refreshFamilyId: access.refreshFamilyId },
+    };
+  });
+}
+
+/* ----------------------------------------------------------------------------
+   Organization connections: an MCP OAuth grant bound to an organization and an
+   access setting instead of one workspace. One connection is one refresh-token
+   family; its live rows carry the setting.
+   -------------------------------------------------------------------------- */
+
+/** Bind a pending organization authorization request to the person's choice. */
+export async function setMcpOAuthRequestOrganizationAccess(
+  db: Database,
+  input: {
+    requestHash: string;
+    subjectId: string;
+    accountId: string;
+    organizationAccess: OrganizationAccessPolicy;
+  },
+): Promise<boolean> {
+  const [row] = await rawRows<{ request_hash: string }>(
+    db,
+    sql`update mcp_oauth_authorization_requests
+      set account_id = ${input.accountId},
+          organization_access = ${JSON.stringify(input.organizationAccess)}::jsonb
+      where request_hash = ${input.requestHash}
+        and subject_id = ${input.subjectId}
+        and workspace_id is null
+        and expires_at > clock_timestamp()
+      returning request_hash`,
   );
+  return Boolean(row);
+}
+
+export type OrganizationMcpConnection = {
+  /** The refresh-token family: stable for the life of the connection. */
+  id: string;
+  accountId: string;
+  subjectId: string;
+  clientId: string;
+  clientName: string | null;
+  redirectUris: string[];
+  organizationAccess: OrganizationAccessPolicy;
+  connectedAt: Date;
+  lastUsedAt: Date | null;
+  expiresAt: Date;
+  /**
+   * Connected automatically by a trusted issuer (an ID-JAG), with no sign-in
+   * screen. Its access is the issuer's and changes only there.
+   */
+  autoConnect: { trustedIssuerId: string; issuerName: string | null } | null;
+};
+
+/** Live organization connections, newest first. Pass subjectId for one person's own. */
+export async function listOrganizationMcpConnections(
+  db: Database,
+  input: { accountId: string; subjectId?: string; connectionId?: string },
+): Promise<OrganizationMcpConnection[]> {
+  const rows = await rawRows<{
+    family_id: string;
+    account_id: string;
+    subject_id: string;
+    client_id: string;
+    client_name: string | null;
+    redirect_uris: unknown;
+    organization_access: unknown;
+    connected_at: Date | string | null;
+    created_at: Date | string;
+    expires_at: Date | string;
+    last_used_at: Date | string | null;
+    trusted_issuer_id: string | null;
+  }>(
+    db,
+    sql`select refresh.family_id, refresh.account_id, refresh.subject_id, refresh.client_id,
+        client.client_name, client.redirect_uris, refresh.organization_access,
+        refresh.connected_at, refresh.created_at, refresh.expires_at, refresh.trusted_issuer_id,
+        (select max(access.created_at) from mcp_oauth_access_tokens access
+          where access.refresh_family_id = refresh.family_id) as last_used_at
+      from mcp_oauth_refresh_tokens refresh
+      join mcp_oauth_clients client on client.client_id = refresh.client_id
+      where refresh.account_id = ${input.accountId}
+        and refresh.organization_access is not null
+        and refresh.revoked_at is null
+        and refresh.expires_at > clock_timestamp()
+        ${input.subjectId === undefined ? sql`` : sql`and refresh.subject_id = ${input.subjectId}`}
+        ${input.connectionId === undefined ? sql`` : sql`and refresh.family_id = ${input.connectionId}::uuid`}
+      order by coalesce(refresh.connected_at, refresh.created_at) desc, refresh.family_id`,
+  );
+  const issuerIds = [
+    ...new Set(rows.flatMap((row) => (row.trusted_issuer_id ? [row.trusted_issuer_id] : []))),
+  ];
+  const issuerNames = new Map<string, string>();
+  if (issuerIds.length > 0) {
+    const issuers = await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: null },
+      (scoped) =>
+        rawRows<{ id: string; name: string }>(
+          scoped,
+          sql`select id, name from organization_mcp_trusted_issuers
+            where account_id = ${input.accountId}::uuid
+              and id in (${sql.join(
+                issuerIds.map((id) => sql`${id}::uuid`),
+                sql`, `,
+              )})`,
+        ),
+      undefined,
+      "none",
+    );
+    for (const issuer of issuers) issuerNames.set(issuer.id, issuer.name);
+  }
+  return rows.map((row) => ({
+    id: row.family_id,
+    accountId: row.account_id,
+    subjectId: row.subject_id,
+    clientId: row.client_id,
+    clientName: row.client_name,
+    redirectUris: stringArray(row.redirect_uris),
+    organizationAccess: OrganizationAccessPolicy.parse(row.organization_access),
+    connectedAt: new Date(row.connected_at ?? row.created_at),
+    lastUsedAt: row.last_used_at === null ? null : new Date(row.last_used_at),
+    expiresAt: new Date(row.expires_at),
+    autoConnect: row.trusted_issuer_id
+      ? {
+          trustedIssuerId: row.trusted_issuer_id,
+          issuerName: issuerNames.get(row.trusted_issuer_id) ?? null,
+        }
+      : null,
+  }));
+}
+
+/** Change what a connection can do; its next request uses the new setting. */
+export async function updateOrganizationMcpConnectionAccess(
+  db: Database,
+  input: {
+    accountId: string;
+    connectionId: string;
+    organizationAccess: OrganizationAccessPolicy;
+  },
+): Promise<boolean> {
+  return await db.transaction(async (tx) => {
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(
+        hashtextextended(${`mcp-oauth-refresh-family:${input.connectionId}`}, 0)
+      )`,
+    );
+    const access = JSON.stringify(input.organizationAccess);
+    const updated = await rawRows<{ token_hash: string }>(
+      tx,
+      sql`update mcp_oauth_refresh_tokens
+        set organization_access = ${access}::jsonb
+        where family_id = ${input.connectionId}::uuid
+          and account_id = ${input.accountId}
+          and organization_access is not null
+          and trusted_issuer_id is null
+          and revoked_at is null
+        returning token_hash`,
+    );
+    if (updated.length === 0) return false;
+    await tx.execute(sql`update mcp_oauth_access_tokens
+      set organization_access = ${access}::jsonb
+      where refresh_family_id = ${input.connectionId}::uuid
+        and account_id = ${input.accountId}
+        and organization_access is not null`);
+    return true;
+  });
+}
+
+/** Disconnect: every token of the connection is refused from now on. */
+export async function revokeOrganizationMcpConnection(
+  db: Database,
+  input: {
+    accountId: string;
+    connectionId: string;
+    /** Who disconnected the agent: audited in the same transaction. */
+    audit?: DisconnectAuditActor | null;
+  },
+): Promise<boolean> {
+  return await db.transaction(async (tx) => {
+    const [row] = await rawRows<{
+      family_id: string;
+      client_name: string | null;
+      subject_id: string;
+    }>(
+      tx,
+      sql`select token.family_id, client.client_name, token.subject_id
+        from mcp_oauth_refresh_tokens token
+        left join mcp_oauth_clients client on client.client_id = token.client_id
+        where token.family_id = ${input.connectionId}::uuid
+          and token.account_id = ${input.accountId}
+          and token.organization_access is not null
+        limit 1`,
+    );
+    if (!row) return false;
+    // Locked, so a concurrent or repeated disconnect sees this one's
+    // revocation and is not recorded again.
+    const family = input.audit
+      ? await rawRows<{ live: boolean }>(
+          tx,
+          sql`select revoked_at is null as live from mcp_oauth_refresh_tokens
+            where family_id = ${row.family_id}::uuid
+            for update`,
+        )
+      : [];
+    await revokeMcpOAuthRefreshFamily(tx, row.family_id);
+    if (input.audit && family.some((token) => token.live)) {
+      const audit = input.audit;
+      // The token tables carry no RLS; the audit row is written in the
+      // organization's own scope, still inside this transaction.
+      await withRlsContext(tx, { accountId: input.accountId, workspaceId: null }, (scoped) =>
+        insertDisconnectAuditEventInScope(scoped, {
+          accountId: input.accountId,
+          workspaceId: null,
+          action: CONNECTION_DISCONNECTED_AUDIT_ACTION,
+          actor: audit,
+          // The connector is the Opengeni organization MCP server itself;
+          // the outside client is named in the details.
+          target: {
+            type: "organization_mcp_connection",
+            id: row.family_id,
+            provider: "opengeni_mcp",
+          },
+          details: { clientName: row.client_name, connectedBySubjectId: row.subject_id },
+        }),
+      );
+    }
+    return true;
+  });
 }
 
 function mapClient(row: ClientRow): McpOAuthClient {
@@ -495,6 +787,13 @@ function mapClient(row: ClientRow): McpOAuthClient {
   };
 }
 
+/** Canonicalize only newly issued grants and the live permission comparison.
+ * Existing token and accepted-execution records retain their original bytes.
+ */
+function canonicalMcpOAuthPermissions(value: unknown): Permission[] {
+  return canonicalSecretPermissions(Permission.array().parse(value));
+}
+
 function mapGrant(row: GrantRow): McpOAuthGrantSnapshot {
   return {
     accountId: row.account_id,
@@ -503,7 +802,15 @@ function mapGrant(row: GrantRow): McpOAuthGrantSnapshot {
     resource: row.resource,
     permissions: Permission.array().parse(row.permissions),
     toolIdentities: ToolGatewayIdentity.array().parse(row.tool_identities),
+    organizationAccess:
+      row.organization_access === null || row.organization_access === undefined
+        ? null
+        : OrganizationAccessPolicy.parse(row.organization_access),
   };
+}
+
+function jsonOrNull(value: unknown): string | null {
+  return value === null || value === undefined ? null : JSON.stringify(value);
 }
 
 function stringArray(value: unknown): string[] {

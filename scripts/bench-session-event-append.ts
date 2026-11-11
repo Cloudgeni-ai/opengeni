@@ -9,7 +9,7 @@ import {
   createSession,
   initializeSessionStartAtomically,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 
 type EventClass = "raw" | "semantic";

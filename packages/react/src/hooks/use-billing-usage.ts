@@ -1,9 +1,10 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { BillingBalance, UsageEvent } from "@opengeni/sdk";
 import { useCallback } from "react";
 import { useOpenGeniClient, type ClientOverride } from "../provider";
 import { usePolledValue } from "./internal";
 
-export type UseBillingUsageOptions = Pick<ClientOverride, "client"> & {
+export type UseBillingUsageOptions = Pick<ClientOverride<ChatClient>, "client"> & {
   /** Account to read. Defaults to the caller's default account server-side. */
   accountId?: string | undefined;
   /** Filter usage to one workspace. */

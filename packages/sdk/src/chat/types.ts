@@ -27,8 +27,11 @@ export type ChatMemory = "user" | "workspace" | false;
 export type OpenGeniOptions = {
   /** Organization API key. Keep it on the server. */
   apiKey: string;
-  /** The organization (account) id that owns every tenant workspace. */
-  organizationId: string;
+  /**
+   * The organization (account) id that owns every workspace. Optional: when
+   * omitted it is read once from the API key.
+   */
+  organizationId?: string | undefined;
   /** Defaults to `https://app.opengeni.ai`. */
   baseUrl?: string | undefined;
   /**
@@ -40,25 +43,61 @@ export type OpenGeniOptions = {
   /** Display name for a tenant workspace created on first use. Defaults to the tenant id. */
   workspaceName?: ((tenant: string) => string) | undefined;
   /**
-   * Permissions for newly provisioned isolated users. Replaces the default
-   * workspace read, session create/read/control (including sending messages),
-   * file upload/read, and per-session MCP attachment permissions; no admin
-   * permissions by default. Does not update existing or revoked memberships.
-   * The organization API key must also allow these permissions.
+   * Your users' permissions in the workspaces the SDK resolves for them. A
+   * per-user workspace (`{ user }` alone, or `chats: "isolated"`) gets its one
+   * owner from the SDK with these permissions. In a tenant workspace, setting
+   * this makes the SDK add each user it resolves with exactly these
+   * permissions before their first request; without it, Opengeni adds a user
+   * on their first request. Both default to workspace read, session
+   * create/read/control (including sending messages), file upload/read, and
+   * per-session MCP attachment; per-user workspaces also let people connect
+   * their own accounts (see `identities`). No admin permissions. Never
+   * updates an existing membership: use `client.updateExternalWorkspaceMember`
+   * for that.
    */
   memberPermissions?: WorkspaceIdResolverOptions["memberPermissions"];
+  /**
+   * Whether each of your users is their own Opengeni user (`per_user`: your
+   * `resolve` returns a distinct `user` per person) or many of your users
+   * share one (`shared`). It decides whether people may connect their own
+   * accounts, such as Gmail, from the chat (`connections:personal`): a
+   * personal connection belongs to the Opengeni user, so with a shared
+   * identity everyone behind it could use it. Unset: per-user workspaces get
+   * it and tenant workspaces do not; `per_user`: both do (the SDK then adds
+   * tenant users itself); `shared`: neither. `memberPermissions` overrides it.
+   */
+  identities?: WorkspaceIdResolverOptions["identities"];
 };
 
+/**
+ * Which workspace, in your own ids: `tenant` (one workspace per tenant),
+ * neither (the `user`'s own workspace), or an explicit `workspaceId`.
+ */
 export type ChatTarget =
   | { tenant: string; workspaceId?: undefined }
-  | { workspaceId: string; tenant?: undefined };
+  | { workspaceId: string; tenant?: undefined }
+  | { user: string; tenant?: undefined; workspaceId?: undefined };
+
+/**
+ * A workspace in your own ids, for `og.workspaceId(...)`: `{ tenant }` (one
+ * workspace per tenant), `{ user }` (one workspace per user), or
+ * `{ workspaceId }`. Precedence: workspaceId, then tenant, then user.
+ */
+export type WorkspaceTarget = {
+  tenant?: string | undefined;
+  user?: string | undefined;
+  workspaceId?: string | undefined;
+};
 
 export type ChatOptions = ChatTarget & {
-  /** Host-authenticated external user; resolved through server-side asUser(). */
+  /**
+   * Host-authenticated external user; resolved through server-side asUser().
+   * Without a tenant or workspaceId, the user gets one workspace of their own.
+   */
   user?: string | undefined;
   /** Stable conversation id; the session id is derived from it deterministically. */
   conversation: string;
-  /** Prefer the actual OpenGeni session ID for shared or existing conversations.
+  /** Prefer the actual Opengeni session ID for shared or existing conversations.
    * The acting user is independent of the conversation's identity. */
   sessionId?: string | undefined;
   /**
@@ -159,7 +198,7 @@ export type ChatSendOptions = {
    * this send creates the session: they become the first message's
    * `modelContext` (skipped when `create.modelContext` was supplied), trimmed
    * from the oldest end to 30,000 characters. Never resent on later turns:
-   * after the first message OpenGeni owns the history.
+   * after the first message Opengeni owns the history.
    */
   importedHistory?: ChatImportedMessage[] | undefined;
   /** Model for this message's turn; omitted keeps the session's current policy. */

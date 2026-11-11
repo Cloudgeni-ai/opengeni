@@ -1,17 +1,19 @@
 import {
+  REGION_RESTRICTED,
   UpdateVideoGenerationPolicyRequest,
   VideoGenerationOperationSummary,
   VideoGenerationPolicy,
   WorkspaceVideoGenerationSettings,
+  type VideoGenerationFundingSource,
 } from "@opengeni/contracts";
 import {
   getVideoGenerationOperationSummary,
   withSessionRlsActorContext,
   getWorkspaceVercelAiGatewayConnectionMetadata,
+  getWorkspaceModelPolicy,
   getWorkspaceVideoGenerationPolicy,
   updateWorkspaceVideoGenerationPolicy,
   VideoGenerationConflictError,
-  workspaceXaiSubscriptionActive,
 } from "@opengeni/db";
 import {
   requireAccessGrant,
@@ -21,25 +23,42 @@ import {
   VIDEO_GENERATION_MODEL_CATALOG,
   videoGenerationModelSupportsFundingSource,
   videoGenerationCapabilitiesForPolicy,
+  settingsWithInferenceResidency,
+  sideFeatureRouteUnavailableReason,
   type ApiRouteDeps,
 } from "@opengeni/core";
+import type { SideFeatureResidencySettings } from "@opengeni/config";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { parseRequestJson } from "../http/request-body";
+import { workspaceXaiOperationAvailable } from "../xai-subscription-core";
 
 export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/video-generation", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const [policy, connection, supergrokConfigured] = await Promise.all([
-      getWorkspaceVideoGenerationPolicy(deps.db, workspaceId),
-      getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
-      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
-    ]);
+    const [policy, connection, supergrokConfigured, modelPolicy, residencySettings] =
+      await Promise.all([
+        getWorkspaceVideoGenerationPolicy(deps.db, workspaceId),
+        getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
+        workspaceXaiOperationAvailable(deps.db, deps.settings, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+        }),
+        getWorkspaceModelPolicy(deps.db, workspaceId),
+        settingsWithInferenceResidency(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          settings: deps.settings,
+        }),
+      ]);
     const fundingOptions = videoGenerationFundingOptions({
       managedConfigured: managedVideoGenerationConfigured(deps),
+      creditsDisabled: modelPolicy?.allowCreditModels === false,
       workspaceGatewayConfigured: connection !== null,
       supergrokConfigured,
+      residencySettings,
     });
     const selectedFunding = fundingOptions.find((option) => option.source === policy.fundingSource);
     const capabilities =
@@ -65,14 +84,26 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = await parseRequestJson(c, UpdateVideoGenerationPolicyRequest);
-    const [connection, supergrokConfigured] = await Promise.all([
+    const [connection, supergrokConfigured, modelPolicy, residencySettings] = await Promise.all([
       getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
-      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
+      workspaceXaiOperationAvailable(deps.db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }),
+      getWorkspaceModelPolicy(deps.db, workspaceId),
+      settingsWithInferenceResidency(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        settings: deps.settings,
+      }),
     ]);
     const fundingOptions = videoGenerationFundingOptions({
       managedConfigured: managedVideoGenerationConfigured(deps),
+      creditsDisabled: modelPolicy?.allowCreditModels === false,
       workspaceGatewayConfigured: connection !== null,
       supergrokConfigured,
+      residencySettings,
     });
     const selectedFunding = fundingOptions.find(
       (option) => option.source === payload.fundingSource,
@@ -129,20 +160,35 @@ function managedVideoGenerationConfigured(deps: ApiRouteDeps): boolean {
   return Boolean(deps.settings.vercelAiGatewayApiKey && deps.settings.environmentsEncryptionKey);
 }
 
-function videoGenerationFundingOptions(input: {
+export function videoGenerationFundingOptions(input: {
   managedConfigured: boolean;
+  /** The workspace turned Opengeni credits off (model policy). */
+  creditsDisabled: boolean;
   workspaceGatewayConfigured: boolean;
   supergrokConfigured: boolean;
+  /** Settings narrowed by the workspace's EU-only setting. */
+  residencySettings: SideFeatureResidencySettings;
 }) {
-  return [
+  // EU-only: a funding source whose route has no EU residency record is
+  // switched off, whatever else is configured.
+  const region = (source: VideoGenerationFundingSource) =>
+    sideFeatureRouteUnavailableReason(
+      input.residencySettings,
+      source === "supergrok_subscription"
+        ? "video_generation.supergrok_subscription"
+        : "video_generation.ai_gateway",
+    );
+  const options = [
     {
       source: "opengeni_credits" as const,
-      label: "OpenGeni",
-      description: "Uses OpenGeni credits through the managed Gateway route.",
-      available: input.managedConfigured,
-      unavailableReason: input.managedConfigured
-        ? null
-        : "OpenGeni-managed video generation is not configured.",
+      label: "Opengeni",
+      description: "Uses credits through the managed Gateway route.",
+      available: input.managedConfigured && !input.creditsDisabled,
+      unavailableReason: !input.managedConfigured
+        ? "Managed video generation is not configured."
+        : input.creditsDisabled
+          ? "Credits are turned off in this workspace."
+          : null,
     },
     {
       source: "supergrok_subscription" as const,
@@ -163,4 +209,15 @@ function videoGenerationFundingOptions(input: {
         : "Connect a workspace Vercel AI Gateway key first.",
     },
   ];
+  return options.map((option) => {
+    const restricted = region(option.source);
+    return restricted
+      ? {
+          ...option,
+          available: false,
+          unavailableReason: restricted,
+          unavailableCode: REGION_RESTRICTED,
+        }
+      : option;
+  });
 }

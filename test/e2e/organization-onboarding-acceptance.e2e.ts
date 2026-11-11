@@ -16,12 +16,12 @@ import {
 } from "@opengeni/sdk/organization-user-setup";
 import {
   acquireOwnerMigratedTestDatabase,
-  freePort,
-  MemoryEventBus,
-  testSettings,
-  waitFor,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { waitFor } from "@opengeni/testing/process";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
@@ -37,11 +37,13 @@ import {
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
+// Signup first asks how to use Opengeni; these flows take the cloud path.
+const USE_CASE_HEADING = "How do you want to use Opengeni?";
 // The model-access step leads with credits the organization already holds, or
 // the included default model when the deployment provides one, otherwise it
 // asks how to power chats.
 const MODEL_ACCESS_HEADING =
-  /^(Choose how to power your chats|Start chatting for free|Start chatting with Opengeni credits|You’re ready to chat)$/;
+  /^(Choose how to power your chats|Start chatting for free|You got \S+ in free credits|You got free Opengeni credits|You’re ready to chat)$/;
 const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const EVIDENCE_DIR =
   process.env.OPENGENI_ONBOARDING_EVIDENCE_DIR ?? "/tmp/opengeni-onboarding-evidence";
@@ -52,7 +54,7 @@ const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 type ScriptedOutcome = Exclude<ManagedEmailDeliveryResult, { status: "sent" }>;
 
 class ScriptableManagedEmailTransport implements ManagedEmailTransport {
-  readonly sender = "OpenGeni Acceptance <acceptance@example.test>";
+  readonly sender = "Opengeni Acceptance <acceptance@example.test>";
   readonly idempotency = {
     scope: "opengeni-onboarding-acceptance-v1",
     retentionSeconds: 86_400,
@@ -216,7 +218,14 @@ function isExpectedNavigationReadCancellation(problem: string): boolean {
     pathname === "/v1/config/client" ||
     pathname === "/v1/auth/get-session" ||
     /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname) ||
-    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:sessions|machines|new-session-draft)$/u.test(pathname) ||
+    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:sessions|machines|new-session-draft|vaults)$/u.test(
+      pathname,
+    ) ||
+    // Sending from the new-chat page routes to the new session, which can
+    // cancel that session's first composer-draft and secrets reads.
+    /^\/v1\/workspaces\/[0-9a-f-]+\/sessions\/[0-9a-f-]+\/(?:composer-draft|secrets)$/u.test(
+      pathname,
+    ) ||
     /^\/v1\/workspaces\/[0-9a-f-]+\/live-events\/stream$/u.test(pathname)
   );
 }
@@ -347,7 +356,7 @@ async function signUpAndVerify(page: Page, input: { name: string; email: string 
   expect(verificationUrl.startsWith(`${publicOrigin}/v1/auth/verify-email?`)).toBe(true);
   await page.goto(verificationUrl, { waitUntil: "domcontentloaded" });
   const authOrOnboarding = page
-    .getByRole("heading", { name: /^(Sign in|Create your organization)$/ })
+    .getByRole("heading", { name: /^(Sign in|How do you want to use Opengeni\?)$/ })
     .first();
   await authOrOnboarding.waitFor();
   if ((await authOrOnboarding.textContent())?.trim() === "Sign in") {
@@ -411,6 +420,8 @@ beforeAll(async () => {
     organizationUserSetupEmailTokenTransport: "query",
     organizationUserSetupQueryEdgeSanitizationConfirmed: true,
     sandboxBackend: "none",
+    // Vault values are encrypted; the setup key is saved to the owner's Only-me vault.
+    environmentsEncryptionKey: Buffer.alloc(32, 23).toString("base64"),
   });
   const api = createApp({
     settings,
@@ -483,7 +494,7 @@ afterAll(async () => {
 }, 180_000);
 
 describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQL", () => {
-  test("named signup creates only owner + Personal, activates private sessions, and administers shared workspaces", async () => {
+  test("cloud signup auto-names the organization, creates only owner + Personal, and administers shared workspaces", async () => {
     if (!browser || !owned) throw new Error("acceptance harness unavailable");
     const context = await browser.newContext({
       viewport: { width: 1440, height: 960 },
@@ -493,20 +504,28 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     const ownerEmail = `onboarding-owner-${RUN_ID}@example.test`;
 
     await signUpAndVerify(page, { name: "Onboarding Owner", email: ownerEmail });
-    await page.getByRole("heading", { name: "Create your organization" }).waitFor();
-    expect(await page.getByLabel("Organization name").count()).toBe(1);
-    expect(await page.getByLabel(/workspace/i).count()).toBe(0);
-    expect(await page.getByText(/create another organization/i).count()).toBe(0);
-    await page.getByLabel("Organization name").fill("Onboarding Greenfield Org");
+    await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
     const setupSettled = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
         new URL(response.url()).pathname === "/v1/auth/organization-onboarding",
     );
-    await page.getByRole("button", { name: "Create organization" }).click();
-    expect((await setupSettled).ok()).toBe(true);
+    await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
+    const setupResponse = await setupSettled;
+    expect(setupResponse.ok()).toBe(true);
+    expect(setupResponse.request().postDataJSON()).toMatchObject({
+      organizationName: "Onboarding Owner",
+      useCase: "cloud",
+    });
     await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
     expect(await page.getByLabel("Organization name").count()).toBe(0);
+    expect(await page.getByLabel(/workspace/i).count()).toBe(0);
+    expect(await page.getByText(/create another organization/i).count()).toBe(0);
+    await page
+      .getByText("Your organization is called Onboarding Owner.", {
+        exact: false,
+      })
+      .waitFor();
     await page.getByRole("button", { name: MODEL_ACCESS_CONTINUE }).click();
 
     const ownerCookie = await cookieHeader(context);
@@ -549,12 +568,17 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     expect(graph).toEqual({
       memberships: 1,
       personalWorkspaces: 1,
-      workspaceMemberships: 0,
+      // The owner's own row in their Personal workspace, and nothing else.
+      workspaceMemberships: 1,
       controls: 1,
       activations: 1,
       evidence: 1,
       privateSettings: 1,
     });
+    const ownerRows = await owned.admin<Array<{ workspaceId: string; subjectId: string }>>`
+      select workspace_id as "workspaceId", subject_id as "subjectId"
+      from workspace_memberships where account_id = ${organizationId}`;
+    expect(ownerRows).toEqual([{ workspaceId: personalWorkspaceId, subjectId: ownerSubjectId }]);
 
     const session = await owner.createSession(personalWorkspaceId, {
       initialMessage: "Onboarding immediate private session",
@@ -604,7 +628,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
 
     const peopleUrl = `${publicOrigin}/workspaces/${personalWorkspaceId}/organization?section=people`;
     await page.goto(peopleUrl, { waitUntil: "domcontentloaded" });
-    const people = page.getByRole("list", { name: "People in Onboarding Greenfield Org" });
+    const people = page.getByRole("list", { name: "People in Onboarding Owner" });
     await people
       .getByText("Only owner", { exact: true })
       .filter({ visible: true })
@@ -699,7 +723,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     ).toMatchObject({
       state: "pending",
       organizationId,
-      organizationName: "Onboarding Greenfield Org",
+      organizationName: "Onboarding Owner",
       targetEmail: invitedEmail,
       organizationRole: "member",
       sharedWorkspaceAccess: [
@@ -715,7 +739,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     await setupPage.goto(firstUrl(setupEmail), {
       waitUntil: "domcontentloaded",
     });
-    await setupPage.getByRole("heading", { name: "Join Onboarding Greenfield Org" }).waitFor();
+    await setupPage.getByRole("heading", { name: "Join Onboarding Owner" }).waitFor();
     let observedSetupCopy = "";
     await waitFor(
       async () => {
@@ -743,7 +767,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     expect(await setupPage.locator("body").textContent()).not.toContain(token);
     const setupCopy = await setupPage.locator("body").textContent();
     expect(setupCopy).toContain("Launch Operations: Member");
-    expect(setupCopy).toContain("Onboarding Greenfield Org");
+    expect(setupCopy).toContain("Onboarding Owner");
     expect(setupCopy).toContain(invitedEmail);
     await setupPage.getByText("This does not share anyone's Personal workspace.").waitFor();
     await expectNoAxeViolations(setupPage, "body");
@@ -797,6 +821,8 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
         personalWorkspaces: number;
         initialSharedMemberships: number;
         otherPersonalMemberships: number;
+        ownPersonalMemberships: number;
+        personalMembers: number;
         completedIntents: number;
         deliveryAttempts: number;
       }>
@@ -805,7 +831,9 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
         (select count(*)::int from organization_memberships where subject_id = ${invitedSubjectId}) as organizations,
         (select count(*)::int from workspaces where account_id = ${organizationId} and id = ${invitedPersonalWorkspaceId}) as "personalWorkspaces",
         (select count(*)::int from workspace_memberships where subject_id = ${invitedSubjectId} and workspace_id = ${sharedWorkspaceId}) as "initialSharedMemberships",
-        (select count(*)::int from workspace_memberships membership where membership.subject_id = ${invitedSubjectId} and membership.workspace_id in (select personal_workspace_id from organization_memberships where personal_workspace_id is not null)) as "otherPersonalMemberships",
+        (select count(*)::int from workspace_memberships membership where membership.subject_id = ${invitedSubjectId} and membership.workspace_id <> ${invitedPersonalWorkspaceId} and membership.workspace_id in (select personal_workspace_id from organization_memberships where personal_workspace_id is not null)) as "otherPersonalMemberships",
+        (select count(*)::int from workspace_memberships membership where membership.workspace_id = ${invitedPersonalWorkspaceId} and membership.subject_id = ${invitedSubjectId}) as "ownPersonalMemberships",
+        (select count(*)::int from workspace_memberships membership where membership.workspace_id = ${invitedPersonalWorkspaceId}) as "personalMembers",
         (select count(*)::int from organization_user_setup_intents where invitation_id = ${invitation.id} and status = 'completed') as "completedIntents",
         (select count(*)::int from organization_user_setup_delivery_attempts attempt join organization_user_setup_deliveries delivery on delivery.id = attempt.delivery_id where delivery.invitation_id = ${invitation.id}) as "deliveryAttempts"`;
     expect(joined).toEqual({
@@ -813,6 +841,9 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       personalWorkspaces: 1,
       initialSharedMemberships: 1,
       otherPersonalMemberships: 0,
+      // Their own Personal workspace has exactly one member: them.
+      ownPersonalMemberships: 1,
+      personalMembers: 1,
       completedIntents: 1,
       deliveryAttempts: expect.any(Number),
     });
@@ -856,7 +887,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       if (response.status() === 403) deniedReads.push(new URL(response.url()).pathname);
     });
     await setupPage.goto(`${publicOrigin}/workspaces/${sharedWorkspaceId}/sessions`);
-    await setupPage.getByRole("heading", { name: "What should the agent do?" }).waitFor();
+    await setupPage.getByRole("heading", { name: "What can I help with?" }).waitFor();
 
     expect(await setupPage.locator("body").textContent()).not.toContain(
       "GitHub account is unavailable",
@@ -865,9 +896,14 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       "Couldn't load your connected machines",
     );
     await setupPage.goto(`${publicOrigin}/workspaces/${sharedWorkspaceId}/machines`);
-    await setupPage
-      .getByText("Machines are managed by your workspace admin", { exact: true })
-      .waitFor();
+    // Members see and pick the workspace's machines; enrolling stays admin-managed.
+    await setupPage.getByRole("heading", { name: "Machines" }).first().waitFor();
+    await setupPage.waitForLoadState("networkidle");
+    expect(
+      await setupPage
+        .getByText("Machines are managed by your workspace admin", { exact: true })
+        .count(),
+    ).toBe(0);
     expect(await setupPage.getByRole("button", { name: /Connect a machine/ }).count()).toBe(0);
     expect(deniedReads).toEqual([]);
     await setupPage.screenshot({
@@ -1073,7 +1109,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       name: "Onboarding Alternate Owner",
       email: alternateOwnerEmail,
     });
-    await alternatePage.getByRole("heading", { name: "Create your organization" }).waitFor();
+    await alternatePage.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
     const alternateOwner = sdk(await cookieHeader(alternateContext));
     const alternateCreated = await alternateOwner.createOrganization({
       name: "Onboarding Alternate Org",
@@ -1102,7 +1138,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       name: "Onboarding Registered",
       email: registeredEmail,
     });
-    await registeredPage.getByRole("heading", { name: "Create your organization" }).waitFor();
+    await registeredPage.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
     const registeredInvite = await owner.createOrganizationInvitation(organizationId, {
       email: registeredEmail,
       name: "Onboarding Registered",
@@ -1133,7 +1169,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     if (!alternateSetupEmail) throw new Error("alternate invitation email was not captured");
     await registeredPage.reload({ waitUntil: "domcontentloaded" });
     await registeredPage.getByRole("heading", { name: "Invitation pending" }).waitFor();
-    await registeredPage.getByText("Onboarding Greenfield Org").waitFor();
+    await registeredPage.getByText("Onboarding Owner", { exact: true }).waitFor();
     await registeredPage.getByText("Onboarding Alternate Org").waitFor();
     const invitationChoices = registeredPage.locator("article");
     expect(await invitationChoices.count()).toBe(2);
@@ -1146,7 +1182,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       fullPage: true,
     });
     await invitationChoices
-      .filter({ hasText: "Onboarding Greenfield Org" })
+      .filter({ hasText: "Onboarding Owner" })
       .getByRole("button", { name: "Join organization" })
       .click();
     await registeredPage.waitForURL(/\/workspaces\//, { timeout: 20_000 });
@@ -1170,8 +1206,29 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       .getByRole("heading", { name: `This invitation is for ${registeredEmail}` })
       .waitFor();
     await alternatePage.getByText(`You're signed in as ${alternateOwnerEmail}`).waitFor();
+    // Capture the exact credential-mutation dispatch, before React can flush a
+    // batched reset after fetch has already started. The authenticated workspace
+    // tree must be gone before sign-out can revoke its background reads.
+    await alternatePage.evaluate(() => {
+      const checks: boolean[] = [];
+      const checkedWindow = window as Window & { workspaceTreeAtSignOut?: boolean[] };
+      checkedWindow.workspaceTreeAtSignOut = checks;
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input), location.href);
+        if (url.pathname === "/v1/auth/sign-out") {
+          checks.push(document.querySelector('a[href^="/workspaces/"]') !== null);
+        }
+        return nativeFetch(input, init);
+      };
+    });
     await alternatePage.getByRole("button", { name: "Switch account" }).click();
     await alternatePage.getByRole("heading", { name: "Sign in" }).waitFor();
+    expect(
+      await alternatePage.evaluate(
+        () => (window as Window & { workspaceTreeAtSignOut?: boolean[] }).workspaceTreeAtSignOut,
+      ),
+    ).toEqual([false]);
     const invitedEmailInput = alternatePage.getByLabel("Email");
     expect(await invitedEmailInput.inputValue()).toBe(registeredEmail);
     expect(await invitedEmailInput.isEditable()).toBe(false);
@@ -1408,4 +1465,126 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     );
     await registeredContext.close();
   }, 240_000);
+
+  test("adding agents to a product records the choice, creates a scoped setup key, and opens a setup chat without the key in history", async () => {
+    if (!browser || !owned) throw new Error("acceptance harness unavailable");
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 960 },
+      extraHTTPHeaders: { "x-forwarded-for": "198.51.100.60" },
+    });
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+      origin: publicOrigin,
+    });
+    const page = await context.newPage();
+    const problems = observeBrowser(page);
+    const email = `onboarding-embed-${RUN_ID}@example.test`;
+    await signUpAndVerify(page, { name: "Onboarding Builder", email });
+    await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor();
+    await page.getByRole("button", { name: /^Add AI agents to my product/ }).click();
+    await page.getByLabel("Organization name").fill("Onboarding Product Org");
+    await page.getByRole("button", { name: "Create organization" }).click();
+    await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
+    await page.getByRole("button", { name: /^(Continue|Skip for now)$/ }).click();
+    await page.getByRole("heading", { name: "Add AI agents to your product" }).waitFor();
+    // Shown once in its own copy step; the coding-agent prompt never carries it.
+    const keyField = page.locator("[data-slot=developer-setup-key]");
+    await keyField.waitFor();
+    const token = (await keyField.textContent())?.trim() ?? "";
+    expect(token).toStartWith("ogk_");
+    await page.getByRole("button", { name: "Copy key", exact: true }).click();
+    await page.getByRole("button", { name: "Key copied" }).waitFor();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(token);
+    await page.getByRole("button", { name: "Copy prompt", exact: true }).click();
+    await page.getByRole("button", { name: "Prompt copied" }).waitFor();
+    const prompt = await page.evaluate(() => navigator.clipboard.readText());
+    expect(prompt).not.toContain(token);
+    expect(prompt).toContain("server-only .env as OPENGENI_API_KEY");
+    expect(prompt).toContain(`Opengeni API: ${publicOrigin}`);
+    await expectNoAxeViolations(page, "body");
+
+    // The setup chat opens ready in its workspace's composer, and starts on Send.
+    await page.getByRole("button", { name: "Let Opengeni implement it" }).click();
+    await page.waitForURL(/\/workspaces\/[0-9a-f-]{36}\/sessions$/u, { timeout: 30_000 });
+    const composer = page.getByRole("textbox", { name: "Ask anything" });
+    await composer.waitFor({ timeout: 30_000 });
+    const composerDeadline = Date.now() + 30_000;
+    while (
+      (await composer.inputValue()) !== "I want to add AI agents to my product. Help me set it up."
+    ) {
+      if (Date.now() > composerDeadline) throw new Error("The setup chat was not ready to send");
+      await page.waitForTimeout(200);
+    }
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await page.waitForURL(/\/workspaces\/[0-9a-f-]{36}\/sessions\/[0-9a-f-]{36}$/u, {
+      timeout: 30_000,
+    });
+    const [, workspaceId, sessionId] =
+      /\/workspaces\/([0-9a-f-]{36})\/sessions\/([0-9a-f-]{36})$/u.exec(
+        new URL(page.url()).pathname,
+      )!;
+    await page
+      .getByText("I want to add AI agents to my product. Help me set it up.")
+      .first()
+      .waitFor({
+        timeout: 30_000,
+      });
+
+    const owner = sdk(await cookieHeader(context), "198.51.100.60");
+    const memberships = await owner.listOrganizationMemberships();
+    const organizationId = memberships.memberships[0]!.organizationId;
+    const keys = await owner.listOrganizationApiKeys(organizationId);
+    expect(keys.map((key) => [key.name, key.access, token.startsWith(key.prefix)])).toEqual([
+      ["Setup (full access)", "full", true],
+    ]);
+    expect(keys[0]!.expiresAt).not.toBeNull();
+    const workspace = await owner.getWorkspace(workspaceId!);
+    expect([workspace.name, workspace.kind, workspace.accountId]).toEqual([
+      "Opengeni setup",
+      "shared",
+      organizationId,
+    ]);
+    const session = await owner.getSession(workspaceId!, sessionId!);
+    expect(session.id).toBe(sessionId);
+    // The key reaches the setup chat only as a {{secret:}} reference to the owner's
+    // Only-me vault item; the onboarding context (which names it) is durable session data.
+    const sessionRows = (pattern: string) => owned!.admin<Array<{ count: number }>>`
+      select (
+        (select count(*) from session_events e where e.session_id = ${sessionId}
+           and row_to_json(e)::text like ${pattern})
+        + (select count(*) from session_history_items h where h.session_id = ${sessionId}
+           and row_to_json(h)::text like ${pattern})
+        + (select count(*) from session_turns t where t.session_id = ${sessionId}
+           and row_to_json(t)::text like ${pattern})
+        + (select count(*) from sessions s where s.id = ${sessionId}
+           and row_to_json(s)::text like ${pattern})
+      )::int as count`;
+    expect((await sessionRows(`%${token}%`))[0]?.count).toBe(0);
+    expect((await sessionRows("%{{secret:Opengeni setup API key}}%"))[0]?.count).toBeGreaterThan(0);
+    const vaults = owner.vaults(workspaceId!);
+    const privateVaults = (await vaults.listVaults()).filter((vault) => vault.ownerKind === "user");
+    const setupItems = (
+      await Promise.all(
+        privateVaults.map(async (vault) => (await vaults.listItems(vault.id)).items),
+      )
+    ).flat();
+    expect(setupItems.map((item) => [item.name, item.type])).toEqual([
+      ["Opengeni setup API key", "api_key"],
+    ]);
+    expect(JSON.stringify(setupItems)).not.toContain(token);
+    expect((await sessionRows("%builtin:opengeni-client%"))[0]?.count).toBeGreaterThan(0);
+    await page.screenshot({
+      path: `${EVIDENCE_DIR}/onboarding-developer-setup-chat-1440.png`,
+      fullPage: true,
+    });
+    // An idle session with no goal and a stubbed workflow answers its goal
+    // and stream reads with 404.
+    expectNoBrowserProblems({
+      ...problems,
+      consoleErrors: problems.consoleErrors.filter(
+        (problem) =>
+          !/status of 404 .*\/sessions\/[0-9a-f-]{36}\/(goal|stream-capabilities)$/u.test(problem),
+      ),
+    });
+    await context.close();
+  }, 180_000);
 });

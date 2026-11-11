@@ -1,0 +1,791 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type { AccessGrant } from "@opengeni/contracts";
+import { createAndStartSessionWithOutcome, type ApiRouteDeps } from "@opengeni/core";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
+import {
+  appendRecordingLiveSegments,
+  claimRecordingTranscriptVersion,
+  claimSessionWorkForAttempt,
+  completeRecordingTranscriptVersion,
+  createDb,
+  createRecording,
+  createWorkspace,
+  ensureManagedAccessForUser,
+  finalizeRecording,
+  getRecording,
+  listRecordingNotes,
+  markRecordingChunksUploaded,
+  reserveRecordingChunks,
+  saveRecordingNote,
+  startRecordingLiveTrack,
+  updateRecording,
+  updateRecordingSpeakers,
+  type DbClient,
+} from "@opengeni/db";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  formatMeetingTimestamp,
+  parseMeetingTimestamp,
+  registerMeetingTools,
+} from "../src/mcp/meeting-tools";
+
+let shared: SharedTestDatabase | null = null;
+let client: DbClient | null = null;
+beforeAll(async () => {
+  shared = await acquireSharedTestDatabase("meeting-tools");
+  if (shared) client = createDb(shared.appUrl);
+}, 180_000);
+afterAll(async () => {
+  await client?.close();
+  await shared?.release();
+});
+
+type Handler = (input: Record<string, unknown>) => Promise<{
+  content: { type: "text"; text: string }[];
+  isError?: boolean;
+}>;
+
+/** The meeting tools as an agent acting for `subjectId` calls them. */
+function toolsFor(grant: AccessGrant, sessionId: string = crypto.randomUUID()) {
+  const handlers = new Map<string, { handler: Handler; schema: Record<string, unknown> }>();
+  const server = {
+    registerTool(name: string, config: { inputSchema: Record<string, unknown> }, handler: Handler) {
+      handlers.set(name, { handler, schema: config.inputSchema });
+    },
+  };
+  registerMeetingTools({
+    server: server as never,
+    deps: { db: client!.db } as unknown as ApiRouteDeps,
+    grant,
+    sessionId,
+    authorize: async () => undefined,
+    json: (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] }),
+  });
+  return async (name: string, input: Record<string, unknown>) => {
+    const tool = handlers.get(name)!;
+    // Apply the declared defaults the way the MCP server does.
+    const { z } = await import("zod/v4");
+    const parsed = z.object(tool.schema as never).parse(input) as Record<string, unknown>;
+    const result = await tool.handler(parsed);
+    return { ...JSON.parse(result.content[0]!.text), isError: result.isError === true };
+  };
+}
+
+async function fixture() {
+  const db = client!.db;
+  const ownerUserId = `meeting-owner-${crypto.randomUUID()}`;
+  await shared!.admin`
+    insert into auth_users (id, name, email, email_verified)
+    values (${ownerUserId}, 'Ingrid Solberg', ${`${ownerUserId}@example.test`}, true)`;
+  const access = await ensureManagedAccessForUser(db, {
+    userId: ownerUserId,
+    email: `${ownerUserId}@example.test`,
+    name: "Ingrid Solberg",
+  });
+  const { accountId, workspaceId } = access.workspaceGrants.find(
+    (grant) => grant.workspaceId === access.defaultWorkspaceId,
+  )!;
+  const owner = `user:${ownerUserId}`;
+  const grantFor = (subjectId: string): AccessGrant => ({
+    accountId,
+    workspaceId,
+    subjectId,
+    principalKind: "human_session",
+    permissions: ["workspace:read", "sessions:read"],
+  });
+  const actor = { workspaceId, subjectId: owner };
+
+  async function meeting(input: {
+    /** Unnamed, as a meeting nobody named, when not given. */
+    title?: string;
+    visibility: "private" | "workspace";
+    segments?: Array<{ at: number; label: string; text: string }>;
+    /** Another workspace (and its organization) to store it in; this one by default. */
+    in?: { accountId: string; workspaceId: string };
+  }) {
+    const recordingId = crypto.randomUUID();
+    const storedIn = { workspaceId: input.in?.workspaceId ?? workspaceId, subjectId: owner };
+    await createRecording(db, {
+      ...storedIn,
+      accountId: input.in?.accountId ?? accountId,
+      recordingId,
+      ...(input.title === undefined ? {} : { title: input.title }),
+      visibility: input.visibility,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    if (!input.segments) return recordingId;
+    await reserveRecordingChunks(db, {
+      ...storedIn,
+      recordingId,
+      trackNumber: 0,
+      chunks: [
+        {
+          chunkNumber: 0,
+          byteLength: 100,
+          sha256: "a".repeat(64),
+          startMilliseconds: 0,
+          durationMilliseconds: 300_000,
+        },
+      ],
+    });
+    await markRecordingChunksUploaded(db, {
+      ...storedIn,
+      recordingId,
+      trackNumber: 0,
+      chunkNumbers: [0],
+    });
+    const versionId = crypto.randomUUID();
+    await finalizeRecording(db, {
+      ...storedIn,
+      recordingId,
+      tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      transcription: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
+      versionId,
+    });
+    const processingOwner = crypto.randomUUID();
+    await claimRecordingTranscriptVersion(db, {
+      ...storedIn,
+      versionId,
+      processingOwner,
+      leaseSeconds: 600,
+    });
+    await completeRecordingTranscriptVersion(db, {
+      ...storedIn,
+      versionId,
+      processingOwner,
+      languages: ["en"],
+      diarized: true,
+      diarization: "provider",
+      audioMilliseconds: 300_000,
+      segments: input.segments.map((segment) => ({
+        startMilliseconds: segment.at,
+        endMilliseconds: segment.at + 4_000,
+        trackNumber: 0,
+        speakerLabel: segment.label,
+        text: segment.text,
+      })),
+    });
+    return recordingId;
+  }
+  /** A workspace the owner (and anyone named) belongs to, in this organization or another. */
+  async function workspace(
+    name: string,
+    options: { accountId?: string; members?: string[]; permissions?: string[] } = {},
+  ): Promise<{ accountId: string; workspaceId: string }> {
+    const account =
+      options.accountId ??
+      String(
+        (await shared!.admin`insert into managed_accounts (name) values (${name}) returning id`)[0]!
+          .id,
+      );
+    const created = await createWorkspace(db, { accountId: account, name });
+    const permissions = JSON.stringify(options.permissions ?? ["sessions:read", "sessions:create"]);
+    for (const subjectId of [owner, ...(options.members ?? [])]) {
+      await shared!
+        .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, permissions)
+        values (${account}, ${created.id}, ${subjectId}, ${permissions}::jsonb)`;
+    }
+    return { accountId: account, workspaceId: created.id };
+  }
+  async function leave(fromWorkspaceId: string) {
+    await shared!.admin`delete from workspace_memberships
+      where workspace_id = ${fromWorkspaceId} and subject_id = ${owner}`;
+  }
+  return { accountId, workspaceId, owner, actor, grantFor, meeting, workspace, leave };
+}
+
+describe("meeting tools", () => {
+  test("timestamps read and write as m:ss and h:mm:ss", () => {
+    expect(parseMeetingTimestamp("12:31")).toBe(751_000);
+    expect(parseMeetingTimestamp("1:05:00")).toBe(3_900_000);
+    expect(parseMeetingTimestamp("0:60")).toBeNull();
+    expect(parseMeetingTimestamp("soon")).toBeNull();
+    expect(formatMeetingTimestamp(751_400)).toBe("12:31");
+    expect(formatMeetingTimestamp(3_900_000)).toBe("1:05:00");
+  });
+
+  test("search finds meetings by words and speaker, with the matching lines, page by page", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const call = toolsFor(scope.grantFor(scope.owner));
+    const roof = await scope.meeting({
+      title: "Site walk",
+      visibility: "workspace",
+      segments: [
+        { at: 0, label: "speaker_0", text: "Welcome." },
+        { at: 65_000, label: "speaker_1", text: "The roof budget is tight." },
+      ],
+    });
+    await updateRecordingSpeakers(client.db, {
+      ...scope.actor,
+      recordingId: roof,
+      assignments: [{ label: "speaker_1", name: "Tomas" }],
+    });
+    const standup = await scope.meeting({
+      title: "Standup",
+      visibility: "private",
+      segments: [{ at: 0, label: "speaker_0", text: "Roof crew starts Monday." }],
+    });
+
+    const found = await call("meetings_search", { query: "roof" });
+    expect(found.meetings.map((meeting: { id: string }) => meeting.id).sort()).toEqual(
+      [roof, standup].sort(),
+    );
+    const walk = found.meetings.find((meeting: { id: string }) => meeting.id === roof);
+    expect(walk).toMatchObject({
+      title: "Site walk",
+      status: "ready",
+      visibility: "workspace",
+      duration: "5:00",
+      speakers: ["Speaker 1", "Tomas"],
+      matches: ["[1:05] Tomas: The roof budget is tight."],
+    });
+    expect(found.meetings.find((meeting: { id: string }) => meeting.id === standup)).toMatchObject({
+      visibility: "only_me",
+    });
+
+    expect((await call("meetings_search", { person: "tomas" })).meetings).toHaveLength(1);
+    const first = await call("meetings_search", { limit: 1 });
+    expect(first.meetings).toHaveLength(1);
+    const second = await call("meetings_search", { limit: 1, cursor: first.nextCursor });
+    expect(second.meetings).toHaveLength(1);
+    expect(second.meetings[0].id).not.toBe(first.meetings[0].id);
+    expect(second.nextCursor).toBeNull();
+    expect(await call("meetings_search", { cursor: "nonsense" })).toMatchObject({
+      isError: true,
+      error: { code: "invalid_cursor" },
+    });
+  });
+
+  test("read gives details once, speaker-named lines in parts, and stretches by time", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const call = toolsFor(scope.grantFor(scope.owner));
+    const segments = Array.from({ length: 60 }, (_, index) => ({
+      at: index * 5_000,
+      label: index % 10 < 5 ? "speaker_0" : "speaker_1",
+      text: `Point number ${index} about the schedule, which runs long enough to fill a line.`,
+    }));
+    const recordingId = await scope.meeting({
+      title: "Planning",
+      visibility: "workspace",
+      segments,
+    });
+    await updateRecordingSpeakers(client.db, {
+      ...scope.actor,
+      recordingId,
+      assignments: [{ label: "speaker_0", name: "Ingrid" }],
+    });
+
+    const part = await call("meeting_read", { meetingId: recordingId, maxChars: 1_500 });
+    expect(part.meeting).toMatchObject({
+      title: "Planning",
+      status: "ready",
+      recordedBy: "Ingrid Solberg",
+      speakers: [
+        { label: "speaker_0", name: "Ingrid" },
+        { label: "speaker_1", name: "Speaker 2" },
+      ],
+    });
+    expect(part.transcript).toMatchObject({ version: 1, model: "scribe_v2", current: true });
+    const lines = part.lines.split("\n");
+    // One speaker's consecutive segments read as one line.
+    expect(lines[0]).toStartWith("[0:00] Ingrid: Point number 0 about");
+    expect(lines[0]).toContain("Point number 1 about");
+    expect(part.nextCursor).toStartWith("t:");
+
+    const next = await call("meeting_read", { meetingId: recordingId, cursor: part.nextCursor });
+    expect(next.meeting).toBeUndefined();
+    expect(next.lines.length).toBeGreaterThan(0);
+    expect(next.lines).not.toContain("Point number 0 about");
+    expect(next.nextCursor).toBeNull();
+
+    // Only segments overlapping the stretch: 12 (1:00) and 13 (1:05), both Ingrid's.
+    const stretch = await call("meeting_read", {
+      meetingId: recordingId,
+      from: "1:00",
+      to: "1:10",
+    });
+    expect(stretch.lines).toBe(
+      [
+        "[1:00] Ingrid: Point number 12 about the schedule, which runs long enough to fill a line. Point number 13 about the schedule, which runs long enough to fill a line.",
+      ].join("\n"),
+    );
+    expect(await call("meeting_read", { meetingId: recordingId, from: "noon" })).toMatchObject({
+      isError: true,
+      error: { code: "invalid_time" },
+    });
+  });
+
+  test("someone else's Only me meeting is not visible, and a live one reads its preview", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const hidden = await scope.meeting({
+      title: "Private",
+      visibility: "private",
+      segments: [{ at: 0, label: "speaker_0", text: "Secret." }],
+    });
+    const outsider = toolsFor(scope.grantFor(`user:someone-${crypto.randomUUID()}`));
+    expect(await outsider("meeting_read", { meetingId: hidden })).toMatchObject({ found: false });
+    expect((await outsider("meetings_search", {})).meetings).toEqual([]);
+
+    const live = await scope.meeting({ title: "Live now", visibility: "workspace" });
+    await startRecordingLiveTrack(client!.db, {
+      ...scope.actor,
+      recordingId: live,
+      trackNumber: 0,
+      providerId: "elevenlabs",
+      model: "scribe_v2_realtime",
+    });
+    await appendRecordingLiveSegments(client!.db, {
+      ...scope.actor,
+      recordingId: live,
+      trackNumber: 0,
+      streamedMilliseconds: 5_000,
+      pricing: () => ({ listPriceMicros: null, charge: null }),
+      segments: [
+        { segmentNumber: 0, startMilliseconds: 1_000, endMilliseconds: 3_000, text: "Hello all." },
+        {
+          segmentNumber: 1,
+          startMilliseconds: 3_500,
+          endMilliseconds: 5_000,
+          text: "Let's start.",
+        },
+      ],
+    });
+    const read = await toolsFor(scope.grantFor(scope.owner))("meeting_read", { meetingId: live });
+    expect(read.meeting).toMatchObject({ title: "Live now", status: "recording" });
+    expect(read.transcript).toStartWith("live preview");
+    expect(read.lines).toBe("[0:01] Microphone: Hello all. Let's start.");
+
+    // A stretch past a whole page of live lines still continues to it.
+    const later = Array.from({ length: 1_100 }, (_, index) => ({
+      segmentNumber: 2 + index,
+      startMilliseconds: 6_000 + index * 1_000,
+      endMilliseconds: 6_900 + index * 1_000,
+      text: `Line ${index}.`,
+    }));
+    await appendRecordingLiveSegments(client!.db, {
+      ...scope.actor,
+      recordingId: live,
+      trackNumber: 0,
+      streamedMilliseconds: 1_200_000,
+      pricing: () => ({ listPriceMicros: null, charge: null }),
+      segments: later,
+    });
+    const tools = toolsFor(scope.grantFor(scope.owner));
+    const stretch = await tools("meeting_read", { meetingId: live, from: "18:20", to: "18:23" });
+    expect(stretch.lines).toBe("");
+    expect(stretch.nextCursor).toStartWith("live:");
+    const rest = await tools("meeting_read", {
+      meetingId: live,
+      from: "18:20",
+      to: "18:23",
+      cursor: stretch.nextCursor,
+    });
+    expect(rest.lines).toBe("[18:20] Microphone: Line 1094. Line 1095. Line 1096.");
+    expect(rest.nextCursor).toBeNull();
+  });
+
+  test("read shows the notepad and notes; saving notes checks the revision and keeps the notepad", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const recordingId = await scope.meeting({
+      title: "Budget",
+      visibility: "workspace",
+      segments: [{ at: 0, label: "speaker_0", text: "We approve the budget." }],
+    });
+    const sessionId = crypto.randomUUID();
+    const tools = toolsFor(scope.grantFor(scope.owner), sessionId);
+
+    const before = await tools("meeting_read", { meetingId: recordingId });
+    expect(before.meeting.notes).toEqual({ revision: 0, text: null });
+    expect(before.meeting.notepad).toBeUndefined();
+
+    await saveRecordingNote(client.db, {
+      ...scope.actor,
+      recordingId,
+      kind: "notepad",
+      body: "- budget?",
+    });
+    const saved = await tools("meeting_notes_save", {
+      meetingId: recordingId,
+      notes: "## Decisions\n\n- The budget is approved.",
+      expectedRevision: 0,
+    });
+    expect(saved).toEqual({ saved: true, revision: 1, isError: false });
+
+    const after = await tools("meeting_read", { meetingId: recordingId });
+    expect(after.meeting.notepad).toBe("- budget?");
+    expect(after.meeting.notes).toEqual({
+      revision: 1,
+      text: "## Decisions\n\n- The budget is approved.",
+    });
+    const [row] = await shared!.admin<
+      { updated_by_session_id: string; updated_by_subject_id: string }[]
+    >`
+      select updated_by_session_id, updated_by_subject_id from recording_notes
+      where recording_id = ${recordingId} and kind = 'notes'`;
+    expect(row).toEqual({ updated_by_session_id: sessionId, updated_by_subject_id: scope.owner });
+
+    // A save against an older revision is refused with the current one.
+    const stale = await tools("meeting_notes_save", {
+      meetingId: recordingId,
+      notes: "Something else.",
+      expectedRevision: 0,
+    });
+    expect(stale).toMatchObject({ isError: true, error: { code: "notes_changed" } });
+    expect(stale.error.message).toContain("revision 1");
+
+    // A meeting the person can't see is not found, and its notes stay untouched.
+    const hidden = await scope.meeting({ title: "Private", visibility: "private" });
+    const outsider = toolsFor(scope.grantFor(`user:someone-${crypto.randomUUID()}`));
+    expect(
+      await outsider("meeting_notes_save", { meetingId: hidden, notes: "x", expectedRevision: 0 }),
+    ).toMatchObject({ found: false });
+  });
+
+  test("saving notes with a name names a meeting nobody named, never one a person named", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const tools = toolsFor(scope.grantFor(scope.owner), crypto.randomUUID());
+    const titleOf = async (recordingId: string) =>
+      await getRecording(client!.db, { ...scope.actor, recordingId });
+
+    const unnamed = await scope.meeting({ visibility: "workspace" });
+    expect((await titleOf(unnamed)).titleSource).toBe("default");
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: unnamed,
+        notes: "## Decisions\n\n- Ship it.",
+        expectedRevision: 0,
+        title: "Launch go/no-go",
+      }),
+    ).toEqual({ saved: true, revision: 1, titleUsed: true, isError: false });
+    expect(await titleOf(unnamed)).toMatchObject({
+      title: "Launch go/no-go",
+      titleSource: "conversation",
+    });
+
+    const named = await scope.meeting({ title: "Budget", visibility: "workspace" });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: named,
+        notes: "Notes.",
+        expectedRevision: 0,
+        title: "Something generated",
+      }),
+    ).toEqual({ saved: true, revision: 1, titleUsed: false, isError: false });
+    expect(await titleOf(named)).toMatchObject({ title: "Budget", titleSource: "person" });
+
+    // A refused save names nothing.
+    const stale = await scope.meeting({ visibility: "workspace" });
+    await tools("meeting_notes_save", { meetingId: stale, notes: "a", expectedRevision: 0 });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: stale,
+        notes: "b",
+        expectedRevision: 0,
+        title: "Too late",
+      }),
+    ).toMatchObject({ isError: true, error: { code: "notes_changed" } });
+    expect((await titleOf(stale)).titleSource).toBe("default");
+
+    // A name that can't be used never costs the notes: blank is ignored and
+    // a long one is shortened.
+    const blank = await scope.meeting({ visibility: "workspace" });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: blank,
+        notes: "Notes.",
+        expectedRevision: 0,
+        title: "   ",
+      }),
+    ).toEqual({ saved: true, revision: 1, titleUsed: false, isError: false });
+    const long = await scope.meeting({ visibility: "workspace" });
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: long,
+        notes: "Notes.",
+        expectedRevision: 0,
+        title: "Roadmap ".repeat(60),
+      }),
+    ).toMatchObject({ saved: true, titleUsed: true });
+    expect((await titleOf(long)).title.length).toBeLessThanOrEqual(300);
+  });
+
+  test("the person's own Only me meetings from their other workspaces of the organization, never another organization's", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const colleague = `user:colleague-${crypto.randomUUID()}`;
+    const sales = await scope.workspace("Sales", {
+      accountId: scope.accountId,
+      members: [colleague],
+    });
+    const lines = [{ at: 0, label: "speaker_0", text: "The pipeline doubled." }];
+    const own = await scope.meeting({
+      title: "Pipeline review",
+      visibility: "private",
+      segments: lines,
+      in: sales,
+    });
+    const allHands = await scope.meeting({
+      title: "All hands",
+      visibility: "workspace",
+      in: sales,
+    });
+    const tools = toolsFor(scope.grantFor(scope.owner));
+
+    // A new one works only where it was recorded, and in their Personal
+    // workspace, until they turn it on here too.
+    expect((await tools("meetings_search", { query: "pipeline" })).meetings).toEqual([]);
+    expect(await tools("meeting_read", { meetingId: own })).toMatchObject({ found: false });
+    await updateRecording(client.db, {
+      workspaceId: sales.workspaceId,
+      subjectId: scope.owner,
+      recordingId: own,
+      reachWorkspaceIds: [scope.workspaceId],
+    });
+
+    const found = await tools("meetings_search", { query: "pipeline" });
+    expect(found.meetings).toMatchObject([
+      { id: own, title: "Pipeline review", visibility: "only_me", recordedIn: "Sales" },
+    ]);
+    const read = await tools("meeting_read", { meetingId: own });
+    expect(read.meeting).toMatchObject({ title: "Pipeline review", recordedIn: "Sales" });
+    expect(read.lines).toContain("The pipeline doubled.");
+    expect(
+      await tools("meeting_notes_save", {
+        meetingId: own,
+        notes: "- Doubled.",
+        expectedRevision: 0,
+      }),
+    ).toMatchObject({ saved: true, revision: 1 });
+    // Shared with Sales, it stays in Sales.
+    expect(await tools("meeting_read", { meetingId: allHands })).toMatchObject({ found: false });
+    expect((await tools("meetings_search", {})).meetings.map((m: { id: string }) => m.id)).toEqual([
+      own,
+    ]);
+
+    // A colleague in both workspaces never sees it.
+    const theirs = toolsFor({ ...scope.grantFor(colleague) });
+    expect(await theirs("meeting_read", { meetingId: own })).toMatchObject({ found: false });
+    expect((await theirs("meetings_search", {})).meetings).toEqual([]);
+
+    // Another organization the same person belongs to: nothing crosses, either way.
+    const elsewhere = await scope.workspace("Other organization");
+    const foreign = await scope.meeting({
+      title: "Their board meeting",
+      visibility: "private",
+      segments: [{ at: 0, label: "speaker_0", text: "Board only." }],
+      in: elsewhere,
+    });
+    const there = toolsFor({ ...scope.grantFor(scope.owner), ...elsewhere });
+    expect(await there("meeting_read", { meetingId: own })).toMatchObject({ found: false });
+    expect(
+      await there("meeting_notes_save", { meetingId: own, notes: "x", expectedRevision: 1 }),
+    ).toMatchObject({ found: false });
+    expect((await there("meetings_search", {})).meetings.map((m: { id: string }) => m.id)).toEqual([
+      foreign,
+    ]);
+    expect(await tools("meeting_read", { meetingId: foreign })).toMatchObject({ found: false });
+    expect(JSON.stringify(await tools("meetings_search", {}))).not.toContain("board");
+
+    // Only allowed to read in Finance: the agent can read it there, never
+    // write. From before meetings had a list, it works in all their workspaces.
+    const finance = await scope.workspace("Finance", {
+      accountId: scope.accountId,
+      permissions: ["sessions:read"],
+    });
+    const budget = await scope.meeting({
+      title: "Budget review",
+      visibility: "private",
+      segments: [{ at: 0, label: "speaker_0", text: "Budget holds." }],
+      in: finance,
+    });
+    await shared!.admin`update recordings set reach_workspace_ids = null where id = ${budget}`;
+    expect((await tools("meeting_read", { meetingId: budget })).lines).toContain("Budget holds.");
+    expect(
+      await tools("meeting_notes_save", { meetingId: budget, notes: "x", expectedRevision: 0 }),
+    ).toMatchObject({ found: false });
+
+    // Leaving Sales takes its meetings with it.
+    await scope.leave(sales.workspaceId);
+    expect(await tools("meeting_read", { meetingId: own })).toMatchObject({ found: false });
+    expect((await tools("meetings_search", {})).meetings.map((m: { id: string }) => m.id)).toEqual([
+      budget,
+    ]);
+
+    // Turned off here again, it leaves this workspace.
+    const quarterly = await scope.meeting({
+      title: "Quarterly",
+      visibility: "private",
+      segments: [{ at: 0, label: "speaker_0", text: "Quarter closes." }],
+      in: finance,
+    });
+    await shared!.admin`update recordings set reach_workspace_ids = ${[scope.workspaceId]}::uuid[]
+      where id = ${quarterly}`;
+    expect((await tools("meeting_read", { meetingId: quarterly })).lines).toContain(
+      "Quarter closes.",
+    );
+    await shared!.admin`update recordings set reach_workspace_ids = '{}' where id = ${quarterly}`;
+    expect(await tools("meeting_read", { meetingId: quarterly })).toMatchObject({ found: false });
+  });
+
+  test("a meeting-summary chat reaches only its own meeting", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const segments = [{ at: 0, label: "speaker_0", text: "Tomas orders the tiles." }];
+    const own = await scope.meeting({ title: "Roof planning", visibility: "private", segments });
+    const otherPrivate = await scope.meeting({ title: "1:1", visibility: "private", segments });
+    const allHands = await scope.meeting({ title: "All hands", visibility: "workspace", segments });
+    const otherShared = await scope.meeting({ title: "Retro", visibility: "workspace", segments });
+    // The owner's own Only me meeting in another workspace of the organization.
+    const sales = await scope.workspace("Sales", { accountId: scope.accountId });
+    const ownInSales = await scope.meeting({
+      title: "Pipeline",
+      visibility: "private",
+      segments,
+      in: sales,
+    });
+
+    /** The summary chat for one meeting, as the worker creates it, and its live attempt's tools. */
+    async function summaryTools(
+      recordingId: string,
+      visibility: "user_private" | "workspace_shared",
+    ) {
+      const { session } = await createAndStartSessionWithOutcome({
+        db: client!.db,
+        bus: new MemoryEventBus(),
+        workflowClient: { wakeSessionWorkflow: async () => undefined },
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        visibility,
+        meetingSummary: { recordingId, ownerSubjectId: scope.owner },
+        initialMessage: "Write the notes.",
+        resources: [],
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+        metadata: { meetingSummaryRecordingId: recordingId },
+        createdBy: {
+          kind: "service",
+          subjectId: "meeting-summary",
+          label: "Opengeni meeting notes",
+        },
+        model: testSettings().openaiModel,
+        reasoningEffort: "medium",
+        sandboxBackend: "none",
+        turnExecutionPolicy: resolveTurnExecutionPolicyV1(testSettings(), {
+          modelId: testSettings().openaiModel,
+          requestedModelId: null,
+          modelSource: "deployment",
+          reasoningEffort: "medium",
+          reasoningSource: "deployment",
+          latencyMode: "standard",
+          latencyModeSource: "deployment",
+        }),
+        policyRole: "meeting_summary",
+        firstPartyMcpPermissions: ["sessions:read"],
+        firstPartyMcpTools: ["meeting_read", "meeting_notes_save"],
+        createIdempotencyKey: `meeting-summary:${crypto.randomUUID()}`,
+        subjectId: "meeting-summary",
+      });
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(client!.db, scope.workspaceId, {
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: `dispatch-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") throw new Error(`not claimed: ${JSON.stringify(claimed)}`);
+      const grant: AccessGrant = {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        subjectId: "meeting-summary",
+        principalKind: "agent_attempt",
+        permissions: ["sessions:read"],
+        metadata: {
+          sessionId: session.id,
+          turnId: claimed.turn.id,
+          attemptId,
+          executionGeneration: claimed.turn.executionGeneration,
+        },
+      };
+      return { session, call: toolsFor(grant, session.id) };
+    }
+
+    for (const [meeting, other, otherOfOwner, visibility] of [
+      [own, allHands, otherPrivate, "user_private"],
+      [allHands, otherShared, otherPrivate, "workspace_shared"],
+    ] as const) {
+      const { session, call } = await summaryTools(meeting, visibility);
+      expect(await call("meetings_search", { query: "tiles" })).toMatchObject({
+        isError: true,
+        error: { code: "not_allowed" },
+      });
+      for (const elsewhere of [other, otherOfOwner, ownInSales]) {
+        expect(await call("meeting_read", { meetingId: elsewhere })).toMatchObject({
+          found: false,
+        });
+        expect(
+          await call("meeting_notes_save", {
+            meetingId: elsewhere,
+            notes: "Not mine.",
+            expectedRevision: 0,
+          }),
+        ).toMatchObject({ found: false });
+      }
+      const read = await call("meeting_read", { meetingId: meeting });
+      expect(read.meeting).toMatchObject({ id: meeting, notes: { revision: 0 } });
+      expect(
+        await call("meeting_notes_save", {
+          meetingId: meeting,
+          notes: "Tomas orders the tiles.",
+          expectedRevision: 0,
+        }),
+      ).toMatchObject({ saved: true, revision: 1 });
+      const notes = await listRecordingNotes(client.db, { ...scope.actor, recordingId: meeting });
+      expect(notes.find((note) => note.kind === "notes")).toMatchObject({
+        body: "Tomas orders the tiles.",
+        updatedBy: { sessionId: session.id },
+      });
+      // It may revise its own notes, but never replace a person's, even when
+      // it passes their current revision.
+      expect(
+        await call("meeting_notes_save", {
+          meetingId: meeting,
+          notes: "Tomas orders the tiles by Friday.",
+          expectedRevision: 1,
+        }),
+      ).toMatchObject({ saved: true, revision: 2 });
+      await saveRecordingNote(client.db, {
+        ...scope.actor,
+        recordingId: meeting,
+        kind: "notes",
+        body: "Written by Ingrid.",
+        expectedRevision: 2,
+      });
+      expect(
+        await call("meeting_notes_save", {
+          meetingId: meeting,
+          notes: "Overwritten.",
+          expectedRevision: 3,
+        }),
+      ).toMatchObject({ isError: true, error: { code: "notes_changed" } });
+      expect(
+        (await listRecordingNotes(client.db, { ...scope.actor, recordingId: meeting })).find(
+          (note) => note.kind === "notes",
+        ),
+      ).toMatchObject({ body: "Written by Ingrid.", revision: 3 });
+    }
+    for (const untouched of [otherPrivate, otherShared]) {
+      expect(
+        await listRecordingNotes(client.db, { ...scope.actor, recordingId: untouched }),
+      ).toEqual([]);
+    }
+  });
+});

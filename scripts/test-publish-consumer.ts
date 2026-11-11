@@ -7,7 +7,7 @@
  * checks cannot catch a broken published exports map, missing CSS declaration,
  * cross-tarball declaration drift, or a client-only global reached during SSR.
  * This gate stages release-shaped tarballs, installs them twice (the second time
- * from the frozen Bun lock), typechecks with stable TypeScript 7, builds the root and session
+ * from the frozen Bun lock), typechecks with pinned tsrs, builds the root and session
  * subpaths through Vite, verifies the packed runtime skill-library subpath, and
  * server-renders populated embedded host surfaces without a DOM. A second
  * consumer installs only the session subpath's required peers. A third imports
@@ -401,9 +401,13 @@ try {
       "packages/codex",
       "packages/config",
       "packages/contracts",
+      "packages/decisions",
+      "packages/interaction",
+      "packages/jev",
       "packages/network",
       "packages/observability",
       "packages/tool-gateway",
+      "packages/vaults",
       "packages/xai-subscription",
     ].map((directory) => stageTarball(directory, stagingRoot, tarballRoot, versions)),
   );
@@ -433,16 +437,14 @@ try {
     ({ manifest }) => manifest.name === "@opengeni/codemode",
   );
   if (!codemode) throw new Error("runtime package closure did not stage @opengeni/codemode");
-  if (sdk.manifest.dependencies?.["@opengeni/contracts"] !== `^${contracts.manifest.version}`) {
+  if (sdk.manifest.dependencies?.["@opengeni/contracts"] !== contracts.manifest.version) {
     throw new Error("SDK tarball does not declare the staged canonical contracts version");
   }
   for (const consumer of [sdk, react]) {
-    if (consumer.manifest.dependencies?.["@opengeni/connect"] !== `^${connect.manifest.version}`)
+    if (consumer.manifest.dependencies?.["@opengeni/connect"] !== connect.manifest.version)
       throw new Error(`${consumer.manifest.name} does not declare the staged Connect version`);
   }
-  if (
-    codemode.manifest.dependencies?.["@opengeni/contracts"] !== `^${contracts.manifest.version}`
-  ) {
+  if (codemode.manifest.dependencies?.["@opengeni/contracts"] !== contracts.manifest.version) {
     throw new Error("Codemode tarball does not declare the staged canonical contracts version");
   }
   const codemodeTarballContents = await run(["tar", "-tzf", codemode.tarball], consumerRoot, true);
@@ -467,6 +469,14 @@ try {
     "package/dist/github-repository-contracts.d.ts",
     "package/dist/session-titles.js",
     "package/dist/session-titles.d.ts",
+    "package/dist/connection-account-label.js",
+    "package/dist/connection-account-label.d.ts",
+    "package/dist/personal-integration-setup.js",
+    "package/dist/personal-integration-setup.d.ts",
+    "package/dist/machine-access.js",
+    "package/dist/machine-access.d.ts",
+    "package/dist/encrypted-reasoning-refusal.js",
+    "package/dist/encrypted-reasoning-refusal.d.ts",
   ]) {
     if (!contractsTarballContents.split("\n").includes(artifact)) {
       throw new Error(`contracts tarball is missing ${artifact}`);
@@ -490,7 +500,12 @@ try {
   ) {
     throw new Error("contracts tarball has an invalid ./session-titles export");
   }
-  for (const subpath of ["github-repository", "github-repository-contracts"] as const) {
+  for (const subpath of [
+    "github-repository",
+    "github-repository-contracts",
+    "connection-account-label",
+    "personal-integration-setup",
+  ] as const) {
     const entry = contracts.manifest.exports?.[`./${subpath}`];
     if (
       !entry ||
@@ -536,8 +551,8 @@ try {
     private: true,
     type: "module",
     scripts: {
-      typecheck: "tsc -p tsconfig.json --noEmit",
-      "typecheck:nodenext": "tsc -p tsconfig.nodenext.json --noEmit",
+      typecheck: "tsrs -p tsconfig.json --noEmit",
+      "typecheck:nodenext": "tsrs -p tsconfig.nodenext.json --noEmit",
       build: "vite build --logLevel warn",
       "build:session": "vite build --config session.vite.config.ts --logLevel warn",
       "build:worker-entry": "vite build --config worker.vite.config.ts --logLevel warn",
@@ -561,7 +576,7 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      typescript: rootManifest.devDependencies?.typescript,
+      tsrs: rootManifest.devDependencies?.tsrs,
       "@vitejs/plugin-react": reactSource.devDependencies?.["@vitejs/plugin-react"],
       vite: reactSource.devDependencies?.vite,
     },
@@ -688,7 +703,7 @@ try {
     ),
     writeFile(
       join(consumerRoot, "index.html"),
-      '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenGeni consumer proof</title></head><body><div id="root"></div><script type="module" src="/browser.tsx"></script></body></html>\n',
+      '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opengeni consumer proof</title></head><body><div id="root"></div><script type="module" src="/browser.tsx"></script></body></html>\n',
     ),
     writeFile(
       join(consumerRoot, "browser.tsx"),
@@ -926,6 +941,19 @@ try {
       'import type { CreateSessionRequest, Session } from "@opengeni/sdk";\ntype Assert<T extends true> = T;\nexport type CreateSessionRequestExposesFirstPartyMcpTools = Assert<"firstPartyMcpTools" extends keyof CreateSessionRequest ? true : false>;\nexport type SessionExposesFirstPartyMcpTools = Assert<"firstPartyMcpTools" extends keyof Session ? true : false>;\n',
     ),
     writeFile(
+      join(consumerRoot, "connection-account-label-proof.ts"),
+      [
+        'import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";',
+        'const metadata = { providerEmail: "person@example.invalid", slackTeamName: "Host workspace" };',
+        "const before = JSON.stringify(metadata);",
+        'if (connectionAccountIdentityLabel(metadata, "Fallback") !== "person@example.invalid · Host workspace") throw new Error("packed contracts lost the account identity label");',
+        'if (connectionAccountIdentityLabel({ email: 42, teamName: {} }, "Fallback") !== "Fallback") throw new Error("packed contracts accepted invalid identity metadata");',
+        'if (JSON.stringify(metadata) !== before) throw new Error("packed account label mutated metadata");',
+        'console.log("CONNECTION_ACCOUNT_LABEL_PACKAGE_OK");',
+        "",
+      ].join("\n"),
+    ),
+    writeFile(
       join(consumerRoot, "session-title-proof.ts"),
       [
         'import { AUTOMATIC_SESSION_TITLE_FALLBACK, deriveSessionDisplayTitle } from "@opengeni/sdk";',
@@ -959,7 +987,7 @@ try {
     private: true,
     type: "module",
     scripts: {
-      typecheck: "tsc -p tsconfig.json --noEmit",
+      typecheck: "tsrs -p tsconfig.json --noEmit",
       build: "vite build --logLevel warn",
     },
     dependencies: {
@@ -973,7 +1001,7 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      typescript: rootManifest.devDependencies?.typescript,
+      tsrs: rootManifest.devDependencies?.tsrs,
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {
@@ -1038,7 +1066,7 @@ try {
     private: true,
     type: "module",
     scripts: {
-      typecheck: "tsc -p tsconfig.json --noEmit",
+      typecheck: "tsrs -p tsconfig.json --noEmit",
       build: "vite build --logLevel warn",
     },
     dependencies: {
@@ -1051,7 +1079,7 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      typescript: rootManifest.devDependencies?.typescript,
+      tsrs: rootManifest.devDependencies?.tsrs,
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {
@@ -1102,7 +1130,7 @@ try {
     private: true,
     type: "module",
     scripts: {
-      typecheck: "tsc -p tsconfig.json --noEmit",
+      typecheck: "tsrs -p tsconfig.json --noEmit",
       build: "vite build --logLevel warn",
       ssr: "bun realtime.tsx",
     },
@@ -1116,7 +1144,7 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      typescript: rootManifest.devDependencies?.typescript,
+      tsrs: rootManifest.devDependencies?.tsrs,
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {
@@ -1189,7 +1217,7 @@ try {
         "};",
         "",
         'if (sessionRealtimeTransportKind("gpt-live-1-boulder-alpha") !== "codex") throw new Error("Codex transport selection drifted");',
-        'if (sessionRealtimeTransportKind("opengeni-gateway/openai/gpt-realtime-2.1") !== "gateway") throw new Error("Gateway transport selection drifted");',
+        'if (sessionRealtimeTransportKind("opengeni-gateway/openai/gpt-realtime-2.1") !== "websocket") throw new Error("Gateway transport selection drifted");',
         "void createSessionRealtimeController;",
         "const markup = renderToStaticMarkup(",
         "  <>",
@@ -1211,7 +1239,7 @@ try {
         "    />",
         "  </>,",
         ");",
-        'if ((markup.match(/aria-label="Start voice with Codex Live"/g) ?? []).length !== 2) throw new Error("SSR output lost public realtime composer controls");',
+        'if ((markup.match(/aria-label="Start voice"/g) ?? []).length !== 2) throw new Error("SSR output lost public realtime composer controls");',
         'if (!markup.includes("Choose voice model and options")) throw new Error("SSR output lost realtime model picker ARIA copy");',
         "console.log(`REALTIME_SUBPATH_SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);",
         "",
@@ -1253,6 +1281,7 @@ try {
   }
   await run(["bun", "run", "typecheck"], consumerRoot);
   await run(["bun", "run", "typecheck:nodenext"], consumerRoot);
+  await run(["bun", "connection-account-label-proof.ts"], consumerRoot);
   await run(["bun", "run", "build"], consumerRoot);
   await run(["bun", "run", "build:session"], consumerRoot);
   await run(["bun", "run", "build:worker-entry"], consumerRoot);
@@ -1281,12 +1310,14 @@ try {
     join(minimalSpreadsheetRoot, "dist", "spreadsheet-artifact.js"),
     "utf8",
   );
-  if (!spreadsheetOnlyBundle.includes("This workbook has no worksheets.")) {
+  if (!spreadsheetOnlyBundle.includes("og-spreadsheet-canvas")) {
     throw new Error("Spreadsheet-only packed consumer did not include its editor runtime");
   }
+  // Code-only markers: every consumer carries the default English message catalog,
+  // so user-facing text such as "Document editor" no longer proves a modality leaked.
   for (const forbidden of [
     "DocumentArtifactSurface",
-    "Document editor",
+    "og-document-editor",
     "PresentationArtifactSurface",
     "presentation-selection",
   ]) {
@@ -1338,7 +1369,7 @@ try {
   for (const forbidden of [
     "function OpenGeniProvider",
     "streamWorkspaceControlEvents",
-    "OpenGeni updated",
+    // Provider code only; its "Opengeni updated" text lives in the shared catalog.
     "data-opengeni-api-contract-mismatch",
     "react/jsx-runtime",
     "@uiw/react-codemirror",
@@ -1402,7 +1433,7 @@ try {
     !compiledCss.includes("--og-color-bg") ||
     !compiledCss.includes(":where(.og-root).bg-og-surface-1")
   ) {
-    throw new Error("Vite output is missing OpenGeni tokens or scoped compiled utilities");
+    throw new Error("Vite output is missing Opengeni tokens or scoped compiled utilities");
   }
   for (const forbidden of ["@tailwind", "@theme", "@source", "@utility"]) {
     if (compiledCss.includes(forbidden)) {

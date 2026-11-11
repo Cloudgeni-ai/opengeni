@@ -1,13 +1,28 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
 import {
   CodemodeClient,
+  CodemodeApprovalPendingError,
+  CodemodeOperationError,
   generateCodemodeDeclarations,
+  materializeCodemodeImages,
   type AttemptToolCatalog,
   type AttemptToolCatalogEntry,
 } from "@opengeni/codemode";
+import { omitStructuredContentTextDuplicates, type AttemptToolResult } from "@opengeni/contracts";
 import packageManifest from "../package.json" with { type: "json" };
 import { compactOutput, parseListOptions } from "./catalog-discovery";
+import { readToolArguments } from "./tool-argument-source";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const PACKAGE_NAME = "@opengeni/ogtool";
 const VERSION = packageManifest.version;
@@ -18,12 +33,22 @@ function usage(exitCode = 1): void {
     "  ogtool list [--full | --json]",
     "              [--query <substring>] [--limit <1..100>] [--offset <nonnegative integer>]",
     "  ogtool show <tool-path-or-model-name>",
-    "  ogtool call <tool-path-or-model-name> [json-object]",
+    "  ogtool call <tool-path-or-model-name> [json-object | @file | -] [--full] [--save-image <path>]",
+    "  ogtool read <operation-id>",
+    "  ogtool resume <operation-id>",
     "  ogtool declarations [output-file]",
     "  ogtool doctor",
     "  ogtool --version",
     "",
     "list returns all authorized tools by default; --limit/--offset are opt-in slices",
+    "call reads its arguments inline, from a file with @path, or from stdin with -;",
+    "  use a file or stdin for large arguments",
+    "call omits a text block that only repeats structuredContent; --full prints the exact result",
+    "call writes images (such as screenshots) to files and prints their paths instead of base64;",
+    "  --save-image saves the result's single image at that path and never overwrites",
+    "  if the call completes but its image cannot be saved, the result is still printed",
+    "  with imageSaveError and the exit code is 4; do not repeat that call",
+    "  an error result (isError) prints as the answer, saves no file and exits 0",
     "",
     "requires OPENGENI_CODEMODE_URL and OPENGENI_CODEMODE_TOKEN or OPENGENI_CODEMODE_TOKEN_FILE",
   ].join("\n");
@@ -160,18 +185,119 @@ export function showOutput(catalog: AttemptToolCatalog, name: string): string {
   return `${output}\n`;
 }
 
-export function parseToolArguments(raw: string | undefined): Record<string, unknown> {
-  if (raw === undefined) return {};
-  let value: unknown;
+/**
+ * `call` prints the payload once by default: a text block that only repeats
+ * `structuredContent` as JSON is omitted. `--full` prints the exact result.
+ * The native client (`codemode call`) applies the same rule.
+ */
+export function callOutput(result: AttemptToolResult, full = false): string {
+  const printed = full ? result : omitStructuredContentTextDuplicates(result);
+  return `${JSON.stringify(printed, null, 2)}\n`;
+}
+
+/**
+ * Write a result's image blocks to files, as `tab.screenshot()` does, and,
+ * unless the exact result was requested, print each as
+ * `{type, mimeType, path, sizeBytes}` instead of base64 pixels. The native
+ * client (`codemode call`) does the same.
+ */
+export async function materializeCallImages(
+  result: AttemptToolResult,
+  options: { saveTo?: string; full?: boolean } = {},
+): Promise<AttemptToolResult> {
+  if (options.full && options.saveTo === undefined) return result;
+  const images = await materializeCodemodeImages(result, {
+    ...(options.saveTo === undefined ? {} : { saveTo: options.saveTo }),
+  });
+  if (options.saveTo !== undefined && images.length !== 1) {
+    throw new Error("--save-image needs a result with exactly one image");
+  }
+  if (options.full || images.length === 0) return result;
+  let next = 0;
+  return {
+    ...result,
+    content: result.content.map((block) => {
+      if (block.type !== "image") return block;
+      const image = images[next++]!;
+      return {
+        type: "image",
+        mimeType: image.mimeType,
+        path: image.path,
+        sizeBytes: image.sizeBytes,
+      } as unknown as (typeof result.content)[number];
+    }),
+  };
+}
+
+/**
+ * Refuse a --save-image path before the tool runs when the file could not be
+ * written anyway, so nothing is called for a screenshot that cannot be kept.
+ */
+export function preflightImagePath(saveTo: string): void {
+  const path = resolve(saveTo);
+  let exists = true;
   try {
-    value = JSON.parse(raw);
-  } catch {
-    throw new Error("tool arguments must be valid JSON");
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    exists = false;
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("tool arguments must be a JSON object");
+  if (exists) {
+    throw new Error(`--save-image ${path} already exists; choose a new path (nothing was called)`);
   }
-  return value as Record<string, unknown>;
+  mkdirSync(dirname(path), { recursive: true });
+  accessSync(dirname(path), constants.W_OK);
+}
+
+/**
+ * The tool call already completed, so a failure to save its image must not
+ * hide the result: print it (images kept in a private temporary file when
+ * possible) with the save error and the operation ID.
+ */
+export async function imageSaveFailureOutput(
+  result: AttemptToolResult,
+  error: unknown,
+  operationId: string,
+  full: boolean,
+): Promise<string> {
+  let printed = result;
+  if (!full) {
+    try {
+      printed = await materializeCallImages(result);
+    } catch {
+      printed = result;
+    }
+  }
+  return callOutput(
+    {
+      ...printed,
+      imageSaveError: {
+        operationId,
+        message: errorMessage(error),
+        note: "The call completed; only saving its image failed. Do not repeat the call.",
+      },
+    } as AttemptToolResult,
+    full,
+  );
+}
+
+function callFlags(args: string[]): { full: boolean; saveTo?: string; rest: string[] } {
+  let full = false;
+  let saveTo: string | undefined;
+  const rest: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--full") full = true;
+    else if (arg === "--save-image") {
+      const value = args[++index];
+      if (!value) throw new Error("--save-image requires a path");
+      saveTo = value;
+    } else if (arg.startsWith("--save-image=")) {
+      saveTo = arg.slice("--save-image=".length);
+      if (!saveTo) throw new Error("--save-image requires a path");
+    } else rest.push(arg);
+  }
+  return { full, ...(saveTo === undefined ? {} : { saveTo }), rest };
 }
 
 async function main(): Promise<void> {
@@ -197,6 +323,14 @@ async function main(): Promise<void> {
   }
 
   const client = configuredClient();
+  if (command === "read" || command === "resume") {
+    if (args.length !== 1 || !/^[0-9a-f-]{36}$/iu.test(args[0]!))
+      throw new Error("A valid operation ID is required");
+    const result =
+      command === "read" ? await client.status(args[0]!) : await client.resume(args[0]!);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
   if (command === "list") {
     const catalog = await client.catalog();
     if (listOptions!.full) {
@@ -211,15 +345,30 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "call") {
-    const name = process.argv[3];
+    const { full, saveTo, rest } = callFlags(args);
+    const [name, rawArguments] = rest;
     if (!name) throw new Error("tool path or model name is required");
-    const argumentsValue = parseToolArguments(process.argv[4]);
+    const argumentsValue = await readToolArguments(rawArguments);
     const catalog = await client.catalog();
     const entry = resolveTool(catalog, name);
-    const result = await client.call(entry.identity, argumentsValue, {
-      operationId: randomUUID(),
-    });
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    if (saveTo !== undefined) preflightImagePath(saveTo);
+    const operationId = randomUUID();
+    const result = await client.call(entry.identity, argumentsValue, { operationId });
+    // An error result has no image to save; print it as the call's answer
+    // rather than as a completed call whose image could not be saved.
+    const saveImage = result.isError === true ? undefined : saveTo;
+    let printed: AttemptToolResult;
+    try {
+      printed = await materializeCallImages(result, {
+        full,
+        ...(saveImage === undefined ? {} : { saveTo: saveImage }),
+      });
+    } catch (error) {
+      process.stdout.write(await imageSaveFailureOutput(result, error, operationId, full));
+      process.exitCode = 4;
+      return;
+    }
+    process.stdout.write(callOutput(printed, full));
     return;
   }
   if (command === "declarations") {
@@ -240,10 +389,24 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error: unknown) => {
+  if (error instanceof CodemodeApprovalPendingError) {
+    process.stdout.write(
+      `${JSON.stringify({ operationId: error.operationId, state: error.state, code: error.code, approvalRequestId: error.approvalRequestId, message: error.message })}\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  if (error instanceof CodemodeOperationError) {
+    process.stdout.write(
+      `${JSON.stringify({ operationId: error.operation.operationId, state: error.operation.state, code: error.code, message: error.message })}\n`,
+    );
+    process.exitCode = error.operation.state === "outcome_unknown" ? 3 : 1;
+    return;
+  }
   const code =
     error && typeof error === "object" && "code" in error
       ? String((error as { code: unknown }).code)
       : null;
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`${errorMessage(error)}\n`);
   process.exitCode = code === "tool_outcome_unknown" ? 3 : 1;
 });

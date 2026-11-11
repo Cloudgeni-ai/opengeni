@@ -4,6 +4,7 @@ import {
   CATALOG_IMPORT_SEMANTIC_VERSION,
   catalogCapabilityId,
   catalogImportFingerprint,
+  catalogMcpUrlRejection,
   catalogRowToDbInput,
   normalizeCatalogSnapshot,
   readSnapshotFile,
@@ -92,6 +93,47 @@ describe("integrations.sh catalog import normalization", () => {
     expect(changedSemantics.completedBatch).toBeNull();
     expect(changedLogos.snapshotRef).not.toBe(first.snapshotRef);
     expect(changedSemantics.snapshotRef).not.toBe(first.snapshotRef);
+  });
+
+  test("allows a query string only on an exact reviewed MCP URL", () => {
+    expect(catalogMcpUrlRejection("https://mcp.atlassian.com/v2/mcp?tools=all")).toBeNull();
+    for (const url of [
+      "https://mcp.atlassian.com/v2/mcp?tools=all&token=secret",
+      "https://mcp.atlassian.com/v2/mcp?tools=some",
+      "https://mcp.atlassian.com/v1/mcp?tools=all",
+      "https://other.example.test/v2/mcp?tools=all",
+    ])
+      expect(catalogMcpUrlRejection(url)).toBe("credential_query_parameter");
+  });
+
+  test("quarantines Figma remote access while allowing other reviewed servers", () => {
+    const normalized = normalizeCatalogSnapshot({
+      importRows: [
+        {
+          domain: "figma.com",
+          name: "Figma",
+          mcpUrl: "https://mcp.figma.com/mcp",
+          transport: "streamable-http",
+          authKind: "oauth2",
+          probe: { status: "real", reason: "auth_challenge", httpStatus: 401 },
+        },
+        {
+          domain: "example.com",
+          name: "Available server",
+          mcpUrl: "https://example.com/mcp",
+          transport: "streamable-http",
+          authKind: "none",
+          probe: { status: "real", reason: "mcp_json_rpc", httpStatus: 200 },
+        },
+      ],
+    });
+    expect(normalized.rows.map((integration) => integration.domain)).toEqual(["example.com"]);
+    expect(normalized.quarantined).toEqual([
+      expect.objectContaining({
+        row: expect.objectContaining({ domain: "figma.com" }),
+        reason: expect.stringContaining("approved MCP client"),
+      }),
+    ]);
   });
 
   test("normalizes the committed sample fixture and quarantines flagged suspicious URLs", async () => {
@@ -226,7 +268,7 @@ describe("integrations.sh catalog import normalization", () => {
     });
   });
 
-  test("promotes Google's official Gmail MCP contract with its reviewed tool scopes", () => {
+  test("promotes the reviewed Gmail REST bridge contract with its exact tool scopes", () => {
     const normalized = normalizeCatalogSnapshot({
       generatedAt: "2026-08-10T00:00:00.000Z",
       importRows: [
@@ -247,42 +289,80 @@ describe("integrations.sh catalog import normalization", () => {
       domain: "gmailmcp.googleapis.com",
       name: "Gmail",
       description:
-        "Search and read Gmail, draft and send mail, and organize messages through OpenGeni's reviewed Gmail bridge.",
+        "Search and read Gmail, download original messages and attachments, manage drafts and labels, organize mail, import messages, and read mailbox changes and settings through the reviewed Gmail bridge.",
       mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
       tier: "verified",
-      provenance: "official:developers.google.com/workspace/gmail/api/reference/mcp",
+      provenance: "first-party:opengeni-gmail-rest",
       authKind: "oauth2",
-      scopesHint: [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.compose",
-        "https://www.googleapis.com/auth/gmail.modify",
-      ],
+      // A first connection asks only to read; more is asked for in the chat.
+      scopesHint: ["https://www.googleapis.com/auth/gmail.readonly"],
       allowedTools: [
         "create_draft",
         "send_message",
         "send_draft",
-        "get_message",
-        "get_thread",
-        "label_message",
-        "label_thread",
         "list_drafts",
-        "list_labels",
+        "get_thread",
+        "get_message",
         "search_threads",
-        "unlabel_message",
+        "label_thread",
         "unlabel_thread",
+        "list_labels",
+        "label_message",
+        "unlabel_message",
+        "get_profile",
+        "search_messages",
+        "get_draft",
+        "update_draft",
+        "delete_draft",
+        "get_label",
+        "create_label",
+        "update_label",
+        "delete_label",
+        "modify_message",
+        "modify_thread",
+        "batch_modify_messages",
+        "trash_message",
+        "restore_message",
+        "trash_thread",
+        "restore_thread",
+        "download_attachment",
+        "download_message",
+        "get_history",
+        "watch_mailbox",
+        "stop_watch",
+        "get_settings",
+        "list_settings",
+        "import_message",
+        "insert_message",
       ],
       requireApproval: [
         "create_draft",
         "send_message",
         "send_draft",
-        "label_message",
         "label_thread",
-        "unlabel_message",
         "unlabel_thread",
+        "label_message",
+        "unlabel_message",
+        "update_draft",
+        "delete_draft",
+        "create_label",
+        "update_label",
+        "delete_label",
+        "modify_message",
+        "modify_thread",
+        "batch_modify_messages",
+        "trash_message",
+        "restore_message",
+        "trash_thread",
+        "restore_thread",
+        "watch_mailbox",
+        "stop_watch",
+        "import_message",
+        "insert_message",
       ],
       defaultConnectionOwnership: "personal",
       logoSourceUrl: null,
-      installUrl: "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+      installUrl: "https://developers.google.com/identity/protocols/oauth2/web-server",
     });
     expect(
       catalogRowToDbInput(normalized.rows[0]!, {
@@ -331,7 +411,7 @@ describe("integrations.sh catalog import normalization", () => {
       credentialFacts: [],
       tier: "verified",
       provenance: "official:mcp-registry:com.mobbin/mobbin@1.0.1",
-      logoSourceUrl: null,
+      logoSourceUrl: "https://integrations.sh/logo/mobbin.com",
       homepageUrl: "https://mobbin.com/mcp",
       installUrl: "https://docs.mobbin.com/mcp/clients/overview",
       documentationUrl: "https://docs.mobbin.com/mcp/introduction",
@@ -362,8 +442,8 @@ describe("integrations.sh catalog import normalization", () => {
       installUrl: "https://docs.mobbin.com/mcp/clients/overview",
       logoAssetPath: null,
       metadata: {
-        logoSource: "generic_monogram",
-        originalLogoUrl: null,
+        logoSource: "integrations.sh",
+        originalLogoUrl: "https://integrations.sh/logo/mobbin.com",
         documentationUrl: "https://docs.mobbin.com/mcp/introduction",
         officialMcpRegistry: {
           name: "com.mobbin/mobbin",

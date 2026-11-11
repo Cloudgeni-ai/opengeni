@@ -1,0 +1,64 @@
+import { describe, expect, test } from "bun:test";
+import { InteractionDefiniteDriverError } from "@opengeni/interaction";
+
+import { AgentBrowserCommandError } from "../src/runner";
+import { browserLaunchFailure } from "../src/supervisor";
+
+describe("browser launch failures", () => {
+  test("a machine without Chrome is an explicit unsupported placement", () => {
+    const failure = browserLaunchFailure(
+      new AgentBrowserCommandError(
+        "driver_rejected",
+        "no browser executable is installed",
+        "Chrome not found. Install Google Chrome or Chromium on this machine.",
+      ),
+    );
+    expect(failure).toBeInstanceOf(InteractionDefiniteDriverError);
+    expect(failure).toMatchObject({ code: "unsupported", retryable: false });
+    expect((failure as Error).message).toContain("No Google Chrome or Chromium is installed");
+    // The fix it names is one the built-in browser then finds, never a
+    // browser unpacked into the user's project.
+    expect((failure as Error).message).toContain("system-wide in its standard location");
+    expect((failure as Error).message).toContain(
+      "Do not install a browser or its libraries inside a project folder.",
+    );
+  });
+
+  test("a vanished browser executable is named, and still never goes into a project", () => {
+    const failure = browserLaunchFailure(
+      new AgentBrowserCommandError(
+        "driver_rejected",
+        "browser executable is missing",
+        "Chrome not found at /opt/browsers/chrome.",
+      ),
+    );
+    expect(failure).toMatchObject({ code: "unsupported", retryable: false });
+    expect((failure as Error).message).toBe(
+      "The browser this machine is set up to use (/opt/browsers/chrome) is missing, so a browser cannot start here. Reinstall it there, or open the browser on another placement. Do not install a browser or its libraries inside a project folder.",
+    );
+  });
+
+  test("a browser that crashed on startup carries the driver's reason", () => {
+    const failure = browserLaunchFailure(
+      new AgentBrowserCommandError(
+        "driver_rejected",
+        "browser exited during launch",
+        "Chrome exited early (1) without writing DevToolsActivePort",
+      ),
+    );
+    expect(failure).toMatchObject({ code: "driver_failed", retryable: false });
+    expect((failure as Error).message).toBe(
+      "The browser could not start on this machine: Chrome exited early (1) without writing DevToolsActivePort",
+    );
+  });
+
+  test("other failures keep their own type", () => {
+    const silent = new AgentBrowserCommandError(
+      "process_failed",
+      "managed browser did not terminate",
+    );
+    const other = new Error("profile is locked");
+    expect(browserLaunchFailure(silent)).toBe(silent);
+    expect(browserLaunchFailure(other)).toBe(other);
+  });
+});

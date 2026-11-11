@@ -194,7 +194,7 @@ describe("FileBrowser", () => {
         result={filesResult({
           source: "capture",
           capturedAt: "2026-07-19T10:44:52.383Z",
-          error: new Error("OpenGeni API 503: Workspace files are temporarily unavailable"),
+          error: new Error("Opengeni API 503: Workspace files are temporarily unavailable"),
         })}
       />,
     );
@@ -555,7 +555,7 @@ describe("SandboxFiles guarded-file routing", () => {
     let wakeCalls = 0;
     const files = filesResult({
       source: "capture",
-      error: new Error("OpenGeni API 503: Workspace files are temporarily unavailable"),
+      error: new Error("Opengeni API 503: Workspace files are temporarily unavailable"),
       readFile: async (path) => {
         throw new CapturedFileUnavailableError(path, "not-captured");
       },

@@ -5,7 +5,11 @@
    distinct progress (`uploading`) and loss-prevention (`hasUnresolved`) gates.
    -------------------------------------------------------------------------- */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { OpenGeniSecureContextRequiredError, type FileAsset } from "@opengeni/sdk";
+import {
+  formatErrorMessage,
+  OpenGeniSecureContextRequiredError,
+  type FileAsset,
+} from "@opengeni/sdk";
 import { act, startTransition, Suspense } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
@@ -106,6 +110,39 @@ describe("useFileAttachments", () => {
     await flushing(() => hook.result.current.addFiles([textFile()]));
     expect(created.length).toBe(0);
     expect(hook.result.current.attachments[0]?.previewUrl).toBeUndefined();
+    await hook.unmount();
+  });
+
+  test("an app-shot uploads its capture with the screenshot and keeps it on the chip", async () => {
+    const uploads: unknown[] = [];
+    const client = fakeClient({
+      uploadFile: async (_workspaceId: string, input: unknown) => {
+        uploads.push(input);
+        return fakeAsset({ filename: "Safari - Example Domain.png" });
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    const capture = {
+      app: "Safari",
+      title: "Example Domain",
+      capturedAt: "2026-10-20T09:15:00.000Z",
+      platform: "macos" as const,
+      text: "Example Domain",
+    };
+
+    await flushing(() =>
+      hook.result.current.addAppShot?.(imageFile("Safari - Example Domain.png"), capture),
+    );
+    expect(uploads).toHaveLength(1);
+    expect((uploads[0] as { appShot?: unknown }).appShot).toEqual(capture);
+    expect(created).toHaveLength(1);
+    const attachment = hook.result.current.attachments[0]!;
+    expect(attachment.status).toBe("ready");
+    expect(attachment.appShot).toEqual(capture);
+    expect(attachment.previewUrl).toBe(created[0]);
     await hook.unmount();
   });
 
@@ -540,6 +577,7 @@ describe("useFileAttachments", () => {
       sizeBytes: ready.sizeBytes,
       status: "ready",
       file: ready,
+      restored: true,
     });
     expect(hook.result.current.attachments[1]?.previewUrl).toBeUndefined();
     expect(hook.result.current.uploading).toBe(true);
@@ -560,12 +598,11 @@ describe("useFileAttachments", () => {
     const requested: Array<{
       workspaceId: string;
       fileId: string;
-      signal: AbortSignal | undefined;
     }> = [];
     const client = fakeClient({
       uploadFile: async () => ready,
-      createFileDownloadUrl: async (workspaceId, fileId, options) => {
-        requested.push({ workspaceId, fileId, signal: options?.signal });
+      createFileDownloadUrl: async (workspaceId, fileId) => {
+        requested.push({ workspaceId, fileId });
         return { url: "https://files.example/restored-preview", expiresAt: "2026-09-05T01:00:00Z" };
       },
     });
@@ -583,10 +620,34 @@ describe("useFileAttachments", () => {
     const controller = new AbortController();
     const url = await hook.result.current.loadPreview?.(restored.id, controller.signal);
     expect(url).toBe("https://files.example/restored-preview");
-    expect(requested).toEqual([
-      { workspaceId: WORKSPACE_ID, fileId: ready.id, signal: controller.signal },
-    ]);
+    expect(requested).toEqual([{ workspaceId: WORKSPACE_ID, fileId: ready.id }]);
     expect(created).toEqual([]);
+    await hook.unmount();
+  });
+
+  test("marks restored files as restored and looks up a file's content type on request", async () => {
+    const ready = fakeAsset({
+      id: "44444444-4444-4444-8444-444444444444",
+      filename: "restored.png",
+    });
+    const looked: Array<{ workspaceId: string; fileId: string }> = [];
+    const client = fakeClient({
+      uploadFile: async () => ready,
+      getFile: async (workspaceId, fileId) => {
+        looked.push({ workspaceId, fileId });
+        return fakeAsset({ id: fileId, contentType: "application/pdf" });
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flushing(() => hook.result.current.restoreReadyFiles([ready]));
+    expect(hook.result.current.attachments[0]?.restored).toBe(true);
+    await flushing(() => hook.result.current.addFiles([imageFile("new.png")]));
+    expect(hook.result.current.attachments[1]?.restored).toBeUndefined();
+    expect(await hook.result.current.loadFileContentType?.("file-doc")).toBe("application/pdf");
+    expect(looked).toEqual([{ workspaceId: WORKSPACE_ID, fileId: "file-doc" }]);
     await hook.unmount();
   });
 
@@ -680,7 +741,8 @@ describe("useFileAttachments", () => {
     await flush();
     const attachment = hook.result.current.attachments[0]!;
     expect(attachment.status).toBe("failed");
-    expect(attachment.error).toBe("blob storage exploded");
+    expect(attachment.error).toBe("The request could not be completed.");
+    expect((attachment.errorCause as Error).message).toBe("blob storage exploded");
     expect(hook.result.current.readyResources).toEqual([]);
     expect(hook.result.current.uploading).toBe(false);
     expect(hook.result.current.hasUnresolved).toBe(true);
@@ -710,7 +772,8 @@ describe("useFileAttachments", () => {
       name: "dragged.png",
       status: "failed",
       errorCode: "secure_context_required",
-      error: failure.message,
+      error: formatErrorMessage(failure),
+      errorCause: failure,
     });
     expect(hook.result.current.hasUnresolved).toBe(true);
     await hook.unmount();
@@ -745,7 +808,8 @@ describe("useFileAttachments", () => {
         name: "http.png",
         status: "failed",
         errorCode: "secure_context_required",
-        error: failure.message,
+        error: formatErrorMessage(failure),
+        errorCause: failure,
       });
       expect(hook.result.current.hasUnresolved).toBe(true);
     } finally {
@@ -780,7 +844,8 @@ describe("useFileAttachments", () => {
       name: "embedded.png",
       status: "failed",
       errorCode: "secure_context_required",
-      error: "Use HTTPS",
+      error: "Attachments require secure browser cryptography. Use a supported browser over HTTPS.",
+      errorCause: failure,
     });
     await hook.unmount();
   });
@@ -810,7 +875,7 @@ describe("useFileAttachments", () => {
     await flush();
     const id = hook.result.current.attachments[0]!.id;
     expect(hook.result.current.attachments[0]!.status).toBe("failed");
-    expect(hook.result.current.attachments[0]!.error).toBe("transient network error");
+    expect(hook.result.current.attachments[0]!.error).toBe("The request could not be completed.");
 
     await flushing(() => hook.result.current.retry(id));
     expect(hook.result.current.attachments[0]!.status).toBe("uploading");
@@ -822,6 +887,7 @@ describe("useFileAttachments", () => {
     const attachment = hook.result.current.attachments[0]!;
     expect(attachment.status).toBe("ready");
     expect(attachment.error).toBeUndefined();
+    expect(attachment.errorCause).toBeUndefined();
     expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: asset.id }]);
     expect(hook.result.current.hasUnresolved).toBe(false);
     expect(calls).toBe(2);

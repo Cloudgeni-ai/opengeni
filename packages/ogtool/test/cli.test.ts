@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAttemptToolEnvironment, digestAttemptToolCatalog } from "@opengeni/codemode";
@@ -50,33 +51,40 @@ async function tokenFile(value = "test-bearer"): Promise<{ root: string; path: s
 type RecordedRequest = { method: string; path: string; authorization: string | null };
 
 function codemodeServer(
-  options: { failStatus?: number; outcomeUnknown?: boolean; loseFirstPostResponse?: boolean } = {},
+  options: {
+    failStatus?: number;
+    outcomeUnknown?: boolean;
+    loseFirstPostResponse?: boolean;
+    result?: Record<string, unknown>;
+  } = {},
 ) {
   const requests: RecordedRequest[] = [];
   const operationId = "66666666-6666-4666-8666-666666666666";
-  const catalog = createAttemptToolEnvironment({
-    scope: {
-      accountId: "11111111-1111-4111-8111-111111111111",
-      workspaceId: "22222222-2222-4222-8222-222222222222",
-      sessionId: "33333333-3333-4333-8333-333333333333",
-      turnId: "44444444-4444-4444-8444-444444444444",
-      attemptId: "55555555-5555-4555-8555-555555555555",
-      executionGeneration: 1,
-    },
-    generation: 1,
-    createdAt: new Date("2026-08-09T12:00:00.000Z"),
-    definitions: [
-      {
-        identity: { serverId: "docs", toolName: "search" },
-        modelName: "docs__search",
-        description: "Search docs",
-        inputSchema: { type: "object" },
-        source: "docs",
-        approval: "none",
-        execute: async () => ({ content: [] }),
+  const catalog = structuredClone(
+    createAttemptToolEnvironment({
+      scope: {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
       },
-    ],
-  }).catalog;
+      generation: 1,
+      createdAt: new Date("2026-08-09T12:00:00.000Z"),
+      definitions: [
+        {
+          identity: { serverId: "docs", toolName: "search" },
+          modelName: "docs__search",
+          description: "Search docs",
+          inputSchema: { type: "object" },
+          source: "docs",
+          approval: "none",
+          execute: async () => ({ content: [] }),
+        },
+      ],
+    }).catalog,
+  );
   let storedOperation: Record<string, unknown> | null = null;
   let lostPost = false;
   const operationFor = (operationIdValue: string, argumentsValue: Record<string, unknown>) => {
@@ -98,7 +106,9 @@ function codemodeServer(
       state: terminalState,
       result:
         terminalState === "completed"
-          ? { content: [{ type: "text", text: JSON.stringify(argumentsValue) }] }
+          ? (options.result ?? {
+              content: [{ type: "text", text: JSON.stringify(argumentsValue) }],
+            })
           : null,
       errorCode: terminalState === "outcome_unknown" ? "tool_outcome_unknown" : null,
       errorMessage:
@@ -247,6 +257,228 @@ describe("ogtool CLI", () => {
         }
       } finally {
         mock.server.stop(true);
+      }
+    },
+    30_000,
+  );
+
+  const duplicatedStructuredContent = { items: [{ id: 1, title: 'Bug "quoted"' }], total: 1 };
+  const duplicatedResult = {
+    content: [
+      { type: "text", text: JSON.stringify(duplicatedStructuredContent, null, 2) },
+      { type: "text", text: "Found 1 issue." },
+      {
+        type: "text",
+        text: JSON.stringify(duplicatedStructuredContent),
+        annotations: { audience: ["user"] },
+      },
+    ],
+    structuredContent: duplicatedStructuredContent,
+    isError: false,
+  };
+
+  test("call writes images to files and prints their paths instead of base64", async () => {
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const imageResult = {
+      content: [{ type: "image", data: png.toString("base64"), mimeType: "image/png" }],
+      structuredContent: { kind: "browser_screenshot" },
+      isError: false,
+    };
+    const clients: string[][] = [[process.execPath, cliSource]];
+    if (process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT) {
+      clients.push([process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT, "codemode"]);
+    }
+    for (const client of clients) {
+      const mock = codemodeServer({ result: imageResult });
+      const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+      const directory = mkdtempSync(join(tmpdir(), "ogtool-save-image-"));
+      const posts = () => mock.requests.filter((request) => request.method === "POST").length;
+      try {
+        const printed = await run(["call", "docs.search", "{}"], environment, client);
+        expect(printed.exitCode).toBe(0);
+        const block = JSON.parse(printed.stdout).content[0];
+        expect(block).toMatchObject({
+          type: "image",
+          mimeType: "image/png",
+          sizeBytes: png.length,
+        });
+        expect(block.data).toBeUndefined();
+        expect(readFileSync(block.path)).toEqual(png);
+
+        const target = join(directory, "shots", "home.png");
+        const saved = await run(
+          ["call", "docs.search", "{}", "--save-image", target],
+          environment,
+          client,
+        );
+        expect(saved.exitCode).toBe(0);
+        expect(JSON.parse(saved.stdout).content[0].path).toBe(target);
+        expect(readFileSync(target)).toEqual(png);
+
+        // An existing path is refused before anything is called.
+        const before = posts();
+        const again = await run(
+          ["call", "docs.search", "{}", `--save-image=${target}`],
+          environment,
+          client,
+        );
+        expect(again.exitCode).toBe(1);
+        expect(again.stderr).toContain("already exists");
+        expect(posts()).toBe(before);
+
+        const full = await run(["call", "docs.search", "{}", "--full"], environment, client);
+        expect(JSON.parse(full.stdout)).toEqual(imageResult);
+      } finally {
+        mock.server.stop(true);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("a completed call whose image cannot be saved still prints its result", async () => {
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const image = { type: "image", data: png.toString("base64"), mimeType: "image/png" };
+    const twoImages = {
+      content: [image, image],
+      structuredContent: { kind: "browser_screenshot" },
+      isError: false,
+    };
+    const clients: string[][] = [[process.execPath, cliSource]];
+    if (process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT) {
+      clients.push([process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT, "codemode"]);
+    }
+    for (const client of clients) {
+      const mock = codemodeServer({ result: twoImages });
+      const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+      const directory = mkdtempSync(join(tmpdir(), "ogtool-save-image-"));
+      try {
+        const target = join(directory, "one.png");
+        const result = await run(
+          ["call", "docs.search", "{}", "--save-image", target],
+          environment,
+          client,
+        );
+        expect(result.exitCode).toBe(4);
+        const printed = JSON.parse(result.stdout);
+        expect(printed.structuredContent).toEqual({ kind: "browser_screenshot" });
+        expect(printed.imageSaveError.operationId).toMatch(/^[0-9a-f-]{36}$/u);
+        expect(printed.imageSaveError.message).toContain("exactly one image");
+        expect(printed.imageSaveError.note).toContain("Do not repeat the call");
+        expect(printed.content).toHaveLength(2);
+        for (const block of printed.content) {
+          expect(block.data).toBeUndefined();
+          expect(readFileSync(block.path)).toEqual(png);
+        }
+        expect(existsSync(target)).toBe(false);
+      } finally {
+        mock.server.stop(true);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("an error result with --save-image prints the error, not an image save failure", async () => {
+    const error = {
+      code: "internal_error",
+      message: "API 500: The workspace could not complete the request. Reference: r-1.",
+      retryable: true,
+      requestId: "r-1",
+    };
+    const errorResult = {
+      content: [{ type: "text", text: JSON.stringify({ error }) }],
+      structuredContent: { error },
+      isError: true,
+    };
+    const clients: string[][] = [[process.execPath, cliSource]];
+    if (process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT) {
+      clients.push([process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT, "codemode"]);
+    }
+    for (const client of clients) {
+      const mock = codemodeServer({ result: errorResult });
+      const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+      const directory = mkdtempSync(join(tmpdir(), "ogtool-save-image-"));
+      try {
+        const target = join(directory, "shot.png");
+        const result = await run(
+          ["call", "docs.search", "{}", "--save-image", target],
+          environment,
+          client,
+        );
+        expect(result.exitCode).toBe(0);
+        const printed = JSON.parse(result.stdout);
+        expect(printed.isError).toBe(true);
+        expect(printed.structuredContent).toEqual({ error });
+        expect(printed.imageSaveError).toBeUndefined();
+        expect(existsSync(target)).toBe(false);
+      } finally {
+        mock.server.stop(true);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("call prints the payload once by default and the exact result with --full", async () => {
+    const mock = codemodeServer({ result: duplicatedResult });
+    const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+    try {
+      const printed = await run(["call", "docs.search", "{}"], environment);
+      expect(printed.exitCode).toBe(0);
+      expect(printed.stdout).toBe(
+        `${JSON.stringify({ ...duplicatedResult, content: duplicatedResult.content.slice(1) }, null, 2)}\n`,
+      );
+      for (const args of [
+        ["call", "docs.search", "{}", "--full"],
+        ["call", "--full", "docs.search", "{}"],
+      ]) {
+        const full = await run(args, environment);
+        expect(full.exitCode).toBe(0);
+        expect(full.stdout).toBe(`${JSON.stringify(duplicatedResult, null, 2)}\n`);
+      }
+    } finally {
+      mock.server.stop(true);
+    }
+  });
+
+  test.skipIf(!process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT)(
+    "built native call prints the same result as ogtool call",
+    async () => {
+      const native = [process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT!, "codemode"];
+      for (const result of [
+        duplicatedResult,
+        {
+          content: [{ type: "text", text: '{"total":1.0,"big":12345678901234567000}' }],
+          structuredContent: { total: 1, big: 12345678901234567000 },
+        },
+        {
+          content: [{ type: "text", text: '{"total":1.0,"ratio":0.50}' }],
+          structuredContent: { total: 1, ratio: 0.5 },
+        },
+      ]) {
+        const mock = codemodeServer({ result });
+        const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+        try {
+          for (const args of [
+            ["call", "docs.search", "{}"],
+            ["call", "docs.search", "{}", "--full"],
+          ]) {
+            const [js, rust] = await Promise.all([
+              run(args, environment),
+              run(args, environment, native),
+            ]);
+            expect(js.exitCode).toBe(0);
+            expect(rust.exitCode).toBe(0);
+            // serde_json orders object keys; the printed JSON values are equal.
+            expect(JSON.parse(rust.stdout)).toEqual(JSON.parse(js.stdout));
+          }
+        } finally {
+          mock.server.stop(true);
+        }
       }
     },
     30_000,
@@ -606,6 +838,52 @@ describe("ogtool CLI", () => {
     }
   });
 
+  test("call reads its arguments from @file and from stdin", async () => {
+    const token = await tokenFile();
+    const mock = codemodeServer();
+    const environment = {
+      OPENGENI_CODEMODE_URL: mock.url,
+      OPENGENI_CODEMODE_TOKEN_FILE: token.path,
+    };
+    try {
+      const path = join(token.root, "large arguments.json");
+      const large = "x".repeat(200_000);
+      await writeFile(path, JSON.stringify({ query: "from-file", padding: large }));
+      const fromFile = await run(["call", "docs.search", `@${path}`], environment);
+      expect(fromFile.exitCode).toBe(0);
+      expect(fromFile.stdout).toContain("from-file");
+
+      const child = Bun.spawn([process.execPath, cliSource, "call", "docs.search", "-"], {
+        env: {
+          ...process.env,
+          OPENGENI_CODEMODE_TOKEN: undefined,
+          OPENGENI_OGTOOL_PACKAGE_SPEC: undefined,
+          ...environment,
+        },
+        stdin: new Blob([JSON.stringify({ query: "from-stdin" })]),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        child.exited,
+      ]);
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("from-stdin");
+
+      const before = mock.requests.length;
+      const missing = await run(
+        ["call", "docs.search", `@${join(token.root, "none.json")}`],
+        environment,
+      );
+      expect(missing.exitCode).toBe(1);
+      expect(missing.stderr).toContain("tool arguments file could not be read as UTF-8");
+      expect(mock.requests).toHaveLength(before);
+    } finally {
+      mock.server.stop(true);
+    }
+  });
+
   test("returns a bounded generic HTTP failure", async () => {
     const token = await tokenFile();
     const mock = codemodeServer({ failStatus: 503 });
@@ -619,6 +897,96 @@ describe("ogtool CLI", () => {
     } finally {
       mock.server.stop(true);
     }
+  });
+
+  describe('names why Opengeni cannot be reached instead of "fetch failed"', () => {
+    // The box runs the Node bundle (Node's fetch says only "fetch failed");
+    // Bun programs import the same client. Check both runtimes.
+    // One bundle for the whole block; the per-test cleanup must not remove it.
+    let bundleDirectory: string | undefined;
+    let built: Promise<Array<[string, string[]]>> | undefined;
+    afterAll(() => {
+      if (bundleDirectory) rmSync(bundleDirectory, { recursive: true, force: true });
+    });
+    const clients = (): Promise<Array<[string, string[]]>> => (built ??= bundleClients());
+    const bundleClients = async (): Promise<Array<[string, string[]]>> => {
+      const list: Array<[string, string[]]> = [["bun", [process.execPath, cliSource]]];
+      const node = Bun.which("node");
+      // The Node run is the regression itself; CI must not skip it silently.
+      if (!node && process.env.CI) throw new Error("node is required for the ogtool Node check");
+      if (node) {
+        bundleDirectory = mkdtempSync(join(tmpdir(), "ogtool-node-bundle-"));
+        const bundle = await Bun.build({
+          entrypoints: [cliSource],
+          outdir: bundleDirectory,
+          naming: "ogtool.cjs",
+          format: "cjs",
+          target: "node",
+        });
+        if (!bundle.success) throw new Error("ogtool Node bundle failed");
+        list.push(["node", [node, join(bundleDirectory, "ogtool.cjs")]]);
+      }
+      return list;
+    };
+
+    /** stderr and exit code of `ogtool list` against `url`, per runtime. */
+    const listFailures = async (url: string) => {
+      const results: Record<string, { exitCode: number; stderr: string }> = {};
+      for (const [runtime, client] of await clients()) {
+        const result = await run(
+          ["list"],
+          {
+            OPENGENI_CODEMODE_URL: url,
+            OPENGENI_CODEMODE_TOKEN: "test",
+            // A proxy would answer instead of the network under test.
+            ...Object.fromEntries(
+              [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+              ].map((name) => [name, undefined]),
+            ),
+          },
+          client,
+        );
+        results[runtime] = { exitCode: result.exitCode, stderr: result.stderr };
+      }
+      return results;
+    };
+
+    test("a host that does not resolve points at the DNS settings", async () => {
+      const results = await listFailures(
+        "https://opengeni-codemode.invalid/v1/workspaces/ws/codemode",
+      );
+      const expected = {
+        exitCode: 1,
+        stderr: expect.stringMatching(
+          process.platform === "linux"
+            ? /^Can't reach Opengeni: DNS lookup for opengeni-codemode\.invalid failed \((ENOTFOUND|EAI_AGAIN)\)\. Check \/etc\/resolv\.conf\.\n$/u
+            : /^Can't reach Opengeni: DNS lookup for opengeni-codemode\.invalid failed \((ENOTFOUND|EAI_AGAIN)\)\. Check this machine's DNS settings\.\n$/u,
+        ),
+      };
+      expect(results).toEqual(
+        Object.fromEntries(Object.keys(results).map((key) => [key, expected])),
+      );
+    }, 30_000);
+
+    test("a refused connection names the host and port", async () => {
+      const closed = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response() });
+      const port = closed.port;
+      closed.stop(true);
+      const results = await listFailures(`http://127.0.0.1:${port}/codemode`);
+      const expected = {
+        exitCode: 1,
+        stderr: `Can't reach Opengeni: the connection to 127.0.0.1:${port} was refused (ECONNREFUSED). Check this machine's network, firewall and proxy settings.\n`,
+      };
+      expect(results).toEqual(
+        Object.fromEntries(Object.keys(results).map((key) => [key, expected])),
+      );
+    }, 30_000);
   });
 
   test("reads a renewed token on the next process", async () => {

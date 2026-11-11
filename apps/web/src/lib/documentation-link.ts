@@ -1,4 +1,4 @@
-import type { ClientConfig } from "@/types";
+import type { ClientConfig } from "@opengeni/react/app/types";
 
 /**
  * The documentation URL the console's Help menu opens, or null when there is

@@ -67,7 +67,7 @@ export type CodexUsagePayload = {
         hasCredits: boolean;
         unlimited: boolean;
         overageLimitReached: boolean;
-        balance: string;
+        balance: string | null;
       }
     | undefined;
 };
@@ -264,7 +264,7 @@ export function normalizeCodexUsage(httpStatus: number, rawPayload: unknown): Co
         hasCredits: body.credits.has_credits ?? false,
         unlimited: body.credits.unlimited ?? false,
         overageLimitReached: body.credits.overage_limit_reached ?? false,
-        balance: body.credits.balance != null ? String(body.credits.balance) : "0",
+        balance: body.credits.balance != null ? String(body.credits.balance) : null,
       }
     : undefined;
 

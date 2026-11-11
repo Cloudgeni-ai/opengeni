@@ -25,9 +25,9 @@ export const CODEX_PROVIDER_ID = "codex-subscription";
 export const CODEX_PROVIDER_BASE_URL = "https://chatgpt.com/backend-api";
 export const CODEX_MODEL_ID_PREFIX = "codex/";
 
-// The only Codex subscription models OpenGeni exposes. Older families are not
+// The only Codex subscription models Opengeni exposes. Older families are not
 // advertised. A slug stays in this list before every account has rollout access
-// so the picker can offer it without another OpenGeni release.
+// so the picker can offer it without another Opengeni release.
 export const CODEX_FALLBACK_MODEL_SLUGS = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"] as const;
 
 // Live Codex model-catalog values for every exposed subscription slug.
@@ -48,12 +48,13 @@ export const CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT = Math.floor(
 );
 
 // Sent as the `version` header and inside the User-Agent. Staging-proven on
-// 2026-07-09: 0.142.4 filtered every GPT-5.6 slug out of GET /models. Keep this
+// 2026-07-09: 0.142.4 filtered every GPT-5.6 slug out of GET /models, and on
+// 2026-11-10 the backend began refusing gpt-6.1-sol from 0.159.2. Keep this
 // pinned to the latest stable Codex release whose bundled catalog and transport
 // contract have been reviewed here.
-export const CODEX_CLIENT_VERSION = "0.159.2";
+export const CODEX_CLIENT_VERSION = "0.167.1";
 
-// Public OpenGeni selector for native ChatGPT/Codex subscription WebRTC. This
+// Public Opengeni selector for native ChatGPT/Codex subscription WebRTC. This
 // remains stable for persisted sessions; the provider's remotely configured
 // model is resolved separately before call creation.
 export const CODEX_REALTIME_MODEL = "gpt-live-1-boulder-alpha";
@@ -62,9 +63,14 @@ export const CODEX_REALTIME_DEFAULT_VOICE = "cove";
 export const CODEX_REALTIME_CALL_TIMEOUT_MS = 15_000;
 export const CODEX_REALTIME_CONFIG_TIMEOUT_MS = 5_000;
 export const CODEX_REALTIME_CONFIG_ID = "3566525122";
-// Verified live on 2026-08-23. Used only when the authenticated remote config
-// is transiently unavailable or malformed; it is not the persisted model id.
-export const CODEX_REALTIME_PROVIDER_MODEL_FALLBACK = "gpt-live-1-codex";
+// Subscription voice calls are created on the WHAM base, beside the remote
+// config, as the official Codex desktop app does. Either path answers 404
+// for an account whose plan has no voice.
+export const CODEX_REALTIME_CALLS_URL = `${CODEX_WHAM_BASE}/wham/realtime/calls`;
+// The official Codex desktop app's default on 2026-11-04. Used only when the
+// authenticated remote config is transiently unavailable or malformed; it is
+// not the persisted model id.
+export const CODEX_REALTIME_PROVIDER_MODEL_FALLBACK = "gpt-live-1.1-codex";
 export const CODEX_REALTIME_PROVIDER_ARCHITECTURE_FALLBACK = "avas";
 
 export const CODEX_REFRESH_WINDOW_MS = 5 * 60 * 1000; // proactive refresh when within 5 min of exp (spec §1.1)

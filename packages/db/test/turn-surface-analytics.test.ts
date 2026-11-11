@@ -5,7 +5,7 @@ import {
   type HostUsageExportBatch,
   type SessionTurnSurface,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   acknowledgeHostExportBatch,
   addSessionSystemUpdate,

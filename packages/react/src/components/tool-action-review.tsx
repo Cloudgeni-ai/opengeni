@@ -1,0 +1,668 @@
+import {
+  ArrowLeftIcon,
+  CheckIcon,
+  ChevronRightIcon,
+  CircleAlertIcon,
+  CircleSlashIcon,
+  LoaderCircleIcon,
+  ShieldCheckIcon,
+} from "lucide-react";
+import { useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from "react";
+import type { ToolActionReview, ToolReviewDetailsPage, ToolReviewStatus } from "@opengeni/sdk";
+import { cn } from "../lib/cn";
+import { SecretRefText } from "./secret-ref-chip";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { reviewFacts } from "../approval-review-model";
+import {
+  DecisionActions,
+  DecisionButton,
+  DecisionMark,
+  decisionCardClass,
+  decisionCardPad,
+} from "./decision-card";
+
+export type ToolReviewDetailsLoader = (
+  review: ToolActionReview,
+  path: string,
+  offset: number,
+) => Promise<ToolReviewDetailsPage>;
+
+const statusText = (t: OpenGeniText): Record<ToolReviewStatus, string> => ({
+  pending: t("toolActionReview.approvalNeeded"),
+  approved: t("toolActionReview.approved"),
+  executing: t("toolActionReview.approvedRunning"),
+  completed: t("toolActionReview.approvedDone"),
+  partial: t("toolActionReview.partlyDone"),
+  unknown: t("toolActionReview.outcomeUnknown"),
+  rejected: t("toolActionReview.declined"),
+  cancelled: t("toolActionReview.cancelled"),
+  expired: t("toolActionReview.expired"),
+  revoked: t("toolActionReview.accessUnavailable"),
+  blocked: t("toolActionReview.blocked"),
+  stale: t("toolActionReview.noLongerValid"),
+  failed: t("toolActionReview.failed"),
+  unavailable: t("toolActionReview.detailsUnavailable"),
+});
+const statusDetail = (t: OpenGeniText): Partial<Record<ToolReviewStatus, string>> => ({
+  unknown: t("toolActionReview.itMayHaveRunCheck"),
+  rejected: t("toolActionReview.thisActionDidNotRun"),
+  cancelled: t("toolActionReview.thisActionDidNotRun"),
+  expired: t("toolActionReview.thisActionDidNotRun2"),
+  revoked: t("toolActionReview.thisActionDidNotRun3"),
+  stale: t("toolActionReview.theToolOrAccountChanged"),
+  partial: t("toolActionReview.someOfItRanCheck"),
+  failed: t("toolActionReview.theActionRanButReturned"),
+});
+type Tone = "waiting" | "ok" | "failed" | "muted";
+const statusTone: Record<ToolReviewStatus, Tone> = {
+  pending: "waiting",
+  approved: "ok",
+  executing: "ok",
+  completed: "ok",
+  partial: "failed",
+  unknown: "failed",
+  rejected: "muted",
+  cancelled: "muted",
+  expired: "muted",
+  revoked: "muted",
+  blocked: "muted",
+  stale: "muted",
+  failed: "failed",
+  unavailable: "muted",
+};
+/** One part of the header's status line, led by a separator dot that screen readers skip. */
+const headerPart =
+  "before:inline-block before:w-3 before:text-center before:text-og-fg-muted before:content-['·'_/_'']";
+
+const toneText: Record<Tone, string> = {
+  waiting: "text-og-fg-muted",
+  ok: "text-og-fg-muted",
+  failed: "text-og-status-failed",
+  muted: "text-og-fg-muted",
+};
+/** Shown when an older request's saved values are gone: approval is impossible, decline is not. */
+export const UNRECOVERABLE_TEXT = (t: OpenGeniText) => t("toolActionReview.theDetailsOfThisOlder");
+const ACCOUNT_OWNER_TEXT = (t: OpenGeniText, name: string | undefined) =>
+  name
+    ? t("toolActionReview.onlyNameCanApprove", { name })
+    : t("toolActionReview.onlyTheAccountOwnerCanApprove");
+
+function StatusIcon({ status, busy }: { status: ToolReviewStatus; busy?: boolean }) {
+  const className = "size-4";
+  if (busy || status === "executing" || status === "approved")
+    return <LoaderCircleIcon aria-hidden="true" className={cn(className, "animate-spin")} />;
+  if (status === "pending") return <ShieldCheckIcon aria-hidden="true" className={className} />;
+  if (status === "completed") return <CheckIcon aria-hidden="true" className={className} />;
+  if (statusTone[status] === "failed")
+    return <CircleAlertIcon aria-hidden="true" className={className} />;
+  return <CircleSlashIcon aria-hidden="true" className={className} />;
+}
+
+/** Card chrome shared by the review, its loading state and its load failure. */
+export function ToolReviewFrame({
+  tone,
+  icon,
+  eyebrow,
+  title,
+  titleId,
+  subtitle,
+  children,
+  footer,
+  bare = false,
+  ...rest
+}: {
+  tone: Tone;
+  icon: ReactNode;
+  /** The state of the action ("Approval needed", "Approved · running"). */
+  eyebrow: ReactNode;
+  title: ReactNode;
+  titleId?: string | undefined;
+  subtitle?: ReactNode;
+  children?: ReactNode;
+  /** Usually a `DecisionActions` row. */
+  footer?: ReactNode;
+  bare?: boolean | undefined;
+} & Omit<HTMLAttributes<HTMLElement>, "title">) {
+  const waiting = tone === "waiting";
+  return (
+    <article
+      aria-labelledby={titleId}
+      {...rest}
+      className={cn(
+        "min-w-0 text-og-fg",
+        !bare &&
+          (waiting
+            ? decisionCardClass
+            : "og-root @container/decision overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1"),
+        rest.className,
+      )}
+    >
+      <header
+        className={cn(
+          "flex min-w-0 items-start gap-3",
+          bare ? "pb-1" : cn(decisionCardPad, "pt-4", !children && !footer && "pb-4"),
+        )}
+      >
+        <DecisionMark tone={tone === "failed" ? "danger" : "neutral"}>{icon}</DecisionMark>
+        <div className="min-w-0 flex-1 pt-px">
+          <h3
+            tabIndex={-1}
+            id={titleId}
+            className="m-0 break-words text-og-md font-semibold leading-snug text-balance text-og-fg outline-hidden [overflow-wrap:anywhere]"
+          >
+            {title}
+          </h3>
+          {/* Each part leads with its separator, and the row is shifted left
+              by one separator and clipped, so a part that starts a line never
+              shows a dot and none is left dangling at a line's end. */}
+          <p className="m-0 mt-0.5 min-w-0 overflow-hidden text-og-xs leading-5 text-og-fg-muted">
+            <span className="-ml-3 flex min-w-0 flex-wrap items-center">
+              <span className={headerPart}>
+                <span
+                  className={cn("inline-flex items-center gap-1.5", toneText[tone])}
+                  role="status"
+                  aria-live="polite"
+                >
+                  {waiting ? (
+                    <span
+                      aria-hidden="true"
+                      className="size-1.5 shrink-0 rounded-full bg-og-status-waiting"
+                    />
+                  ) : null}
+                  {eyebrow}
+                </span>
+              </span>
+              {subtitle ? (
+                <span className={cn(headerPart, "min-w-0 break-words [overflow-wrap:anywhere]")}>
+                  {subtitle}
+                </span>
+              ) : null}
+            </span>
+          </p>
+        </div>
+      </header>
+      {children ? (
+        <div
+          className={cn("min-w-0", bare ? "pt-2" : cn(decisionCardPad, "pt-3", !footer && "pb-4"))}
+        >
+          {children}
+        </div>
+      ) : null}
+      {footer ? (
+        <footer className={cn("min-w-0", bare ? "pt-3" : cn(decisionCardPad, "pb-4 pt-4"))}>
+          {footer}
+        </footer>
+      ) : null}
+    </article>
+  );
+}
+
+const linkButton =
+  "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40 inline-flex min-h-8 items-center gap-1 rounded-og-sm text-left text-og-sm text-og-fg underline decoration-og-border-strong underline-offset-4 hover:decoration-current [@media(pointer:coarse)]:min-h-11";
+
+/** The facts of one saved action: consequences, selection and its key values. */
+function ReviewFacts({
+  review,
+  onViewDetails,
+  showStatusDetail,
+}: {
+  review: ToolActionReview;
+  onViewDetails?: ((path: string) => void) | undefined;
+  showStatusDetail: boolean;
+}) {
+  const t = useOpenGeniText();
+  const canOpen = Boolean(onViewDetails && review.detailsAvailable);
+  const { selection, shown, hiddenFields, effects } = reviewFacts(review);
+  const note =
+    (showStatusDetail
+      ? review.status === "blocked"
+        ? t("toolActionReview.reasonItDidNotRun", {
+            reason: review.reason || t("toolActionReview.yourPermissionSettingsBlockThis"),
+          })
+        : statusDetail(t)[review.status]
+      : undefined) ?? review.consequence;
+  const samples = review.samples ?? [];
+  const count = review.selectionCount ?? 0;
+  const noun =
+    review.selectionKind === "threads"
+      ? count === 1
+        ? "conversation"
+        : "conversations"
+      : count === 1
+        ? "message"
+        : "messages";
+  const hasContent =
+    note || effects.length || selection || shown.length || hiddenFields > 0 || samples.length;
+  if (!hasContent) return null;
+  return (
+    <div className="flex min-w-0 flex-col gap-3 text-og-sm">
+      {note ? <p className="m-0 leading-relaxed text-og-fg-muted">{note}</p> : null}
+      {effects.length > 0 ? (
+        <ul className="m-0 list-none space-y-1 p-0" aria-label={t("toolActionReview.alsoChanges")}>
+          {effects.map((effect) => (
+            <li key={effect} className="flex items-start gap-2 text-og-fg">
+              <span
+                aria-hidden="true"
+                className="mt-[0.55em] size-1 shrink-0 rounded-full bg-og-fg-muted"
+              />
+              <span className="min-w-0 break-words">{effect}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {selection ? (
+        <div className="min-w-0">
+          {samples.length > 0 ? (
+            <>
+              <p className="m-0 mb-1 text-og-xs text-og-fg-muted">
+                {t("toolActionReview.includes")}
+              </p>
+              <ul className="m-0 list-none divide-y divide-og-border rounded-og-md border border-og-border bg-og-surface-1 p-0">
+                {samples.map((sample) => (
+                  <li key={sample.id} className="min-w-0 px-3 py-2">
+                    <p className="m-0 truncate text-og-sm text-og-fg">{sample.title}</p>
+                    {sample.subtitle ? (
+                      <p className="m-0 mt-0.5 truncate text-og-xs text-og-fg-muted">
+                        {sample.subtitle}
+                      </p>
+                    ) : null}
+                  </li>
+                ))}
+                {count > samples.length ? (
+                  <li className="px-3 py-2 text-og-xs text-og-fg-muted">
+                    {t("toolActionReview.and")} {(count - samples.length).toLocaleString(t.locale)}{" "}
+                    {t("toolActionReview.more")}
+                  </li>
+                ) : null}
+              </ul>
+            </>
+          ) : null}
+          {canOpen && count > 0 ? (
+            <button
+              type="button"
+              className={cn(linkButton, samples.length > 0 && "mt-1")}
+              data-review-path={selection.path}
+              onClick={() => onViewDetails!(selection.path)}
+            >
+              {count === 1
+                ? t("toolActionReview.viewTheNoun", { noun })
+                : t("toolActionReview.viewAllLocalestringNoun", {
+                    localeString: count.toLocaleString(t.locale),
+                    noun,
+                  })}
+              <ChevronRightIcon className="size-3.5 shrink-0" aria-hidden="true" />
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {shown.length > 0 ? (
+        <dl className="m-0 min-w-0 space-y-2.5 rounded-og-md bg-og-fg/[0.035] px-3.5 py-3">
+          {shown.map((field) => (
+            <div
+              key={field.path}
+              className="grid min-w-0 gap-x-4 gap-y-0.5 @[30rem]/decision:grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)]"
+            >
+              <dt className="m-0 break-words text-og-xs text-og-fg-muted @[30rem]/decision:pt-px @[30rem]/decision:text-og-sm">
+                {field.label}
+              </dt>
+              <dd className="m-0 min-w-0 whitespace-pre-wrap break-words text-og-fg [overflow-wrap:anywhere]">
+                {field.protected ? (
+                  <span className="text-og-fg-muted">{t("toolActionReview.hidden")}</span>
+                ) : field.truncated && canOpen ? (
+                  <button
+                    type="button"
+                    data-review-path={field.path}
+                    aria-label={t("toolActionReview.viewLabelPreview", {
+                      label: field.label,
+                      preview: field.preview,
+                    })}
+                    onClick={() => onViewDetails!(field.path)}
+                    className={cn(linkButton, "max-w-full")}
+                  >
+                    <span className="line-clamp-4 min-w-0 break-words [overflow-wrap:anywhere]">
+                      <SecretRefText text={field.preview} linkable={false} />
+                    </span>
+                    <ChevronRightIcon className="size-3.5 shrink-0" aria-hidden="true" />
+                  </button>
+                ) : (
+                  <SecretRefText text={field.preview} />
+                )}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+      {hiddenFields > 0 ? (
+        <p className="m-0 text-og-xs text-og-fg-muted">
+          {hiddenFields === 1
+            ? t("toolActionReview.n1MoreValue")
+            : t("toolActionReview.hiddenfieldsMoreValues", { hiddenFields })}{" "}
+          {t("toolActionReview.inDetails")}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+export function DeclineButton({
+  busy,
+  submitting,
+  label,
+  onClick,
+}: {
+  busy: boolean;
+  submitting: boolean;
+  label?: string | undefined;
+  onClick: () => void;
+}) {
+  const t = useOpenGeniText();
+  return (
+    <DecisionButton kind="secondary" disabled={busy} busy={submitting} onClick={onClick}>
+      {submitting ? t("toolActionReview.declining") : (label ?? t("toolActionReview.decline"))}
+    </DecisionButton>
+  );
+}
+
+/** One host-neutral review. All callbacks refer to the immutable action; none can edit it. */
+export function ToolActionReviewCard({
+  review,
+  onApprove,
+  onReject,
+  submitting,
+  disabled,
+  onViewDetails,
+  pendingLabel,
+  rejectLabel,
+  bare,
+}: {
+  review: ToolActionReview;
+  onApprove?: (() => void) | undefined;
+  onReject?: (() => void) | undefined;
+  submitting?: "approve" | "reject" | null | undefined;
+  disabled?: boolean | undefined;
+  onViewDetails?: ((path: string) => void) | undefined;
+  pendingLabel?: string | undefined;
+  rejectLabel?: string | undefined;
+  /** Render without card chrome, e.g. inside an expanded timeline row. */
+  bare?: boolean | undefined;
+}) {
+  const t = useOpenGeniText();
+  const titleId = useId();
+  const canApprove = review.availableActions.includes("approve") && !!onApprove;
+  const canReject = review.availableActions.includes("reject") && !!onReject;
+  const actionable = review.status === "pending" && (canApprove || canReject);
+  const busy = Boolean(disabled || submitting);
+  const tone: Tone = statusTone[review.status];
+  const eyebrow = submitting
+    ? submitting === "approve"
+      ? t("toolActionReview.approving")
+      : t("toolActionReview.declining")
+    : review.status === "pending"
+      ? (pendingLabel ?? statusText(t).pending)
+      : statusText(t)[review.status];
+  const detailsLink =
+    review.detailsAvailable && onViewDetails ? (
+      <button
+        type="button"
+        className="inline-flex min-h-8 items-center rounded-og-sm text-og-sm text-og-fg-muted underline decoration-og-border-strong underline-offset-4 hover:text-og-fg hover:decoration-current [@media(pointer:coarse)]:min-h-11 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+        data-review-path=""
+        onClick={() => onViewDetails("")}
+      >
+        {t("toolActionReview.details")}
+      </button>
+    ) : null;
+  const reason = review.reason.trim();
+  return (
+    <ToolReviewFrame
+      tone={tone}
+      icon={<StatusIcon status={review.status} busy={Boolean(submitting)} />}
+      eyebrow={eyebrow}
+      title={review.title}
+      titleId={titleId}
+      subtitle={review.accountLabel}
+      bare={bare}
+      aria-busy={Boolean(submitting)}
+      data-og-tool-review=""
+      data-review-status={review.status}
+      footer={
+        actionable ? (
+          <DecisionActions
+            lead={
+              detailsLink || reason ? (
+                <>
+                  {detailsLink}
+                  {reason ? (
+                    <span className="min-w-0 text-og-xs leading-relaxed text-og-fg-subtle">
+                      {reason}
+                    </span>
+                  ) : null}
+                </>
+              ) : null
+            }
+          >
+            {canReject ? (
+              <DeclineButton
+                busy={busy}
+                submitting={submitting === "reject"}
+                label={rejectLabel}
+                onClick={onReject!}
+              />
+            ) : null}
+            {canApprove ? (
+              <DecisionButton
+                kind="primary"
+                disabled={busy}
+                busy={submitting === "approve"}
+                onClick={onApprove}
+              >
+                {submitting === "approve" ? t("toolActionReview.approving") : review.approveLabel}
+              </DecisionButton>
+            ) : null}
+          </DecisionActions>
+        ) : undefined
+      }
+    >
+      {actionable && !canApprove ? (
+        <p className="m-0 mb-3 text-og-sm leading-relaxed text-og-fg">
+          {review.approvedBy === "account_owner"
+            ? ACCOUNT_OWNER_TEXT(t, review.accountOwnerLabel)
+            : UNRECOVERABLE_TEXT(t)}
+        </p>
+      ) : null}
+      {actionable && canApprove && review.approvedBy === "you" ? (
+        <p className="m-0 mb-3 text-og-sm leading-relaxed text-og-fg">
+          {t("toolActionReview.onlyYouCanApprove")}
+        </p>
+      ) : null}
+      <ReviewFacts
+        review={review}
+        onViewDetails={onViewDetails}
+        showStatusDetail={review.status !== "pending"}
+      />
+      {!actionable && detailsLink ? <div className="mt-2">{detailsLink}</div> : null}
+    </ToolReviewFrame>
+  );
+}
+
+/** Full-page detail content: hosts choose navigation, never a nested scrolling panel. */
+export function ToolActionReviewDetails({
+  review,
+  path: initialPath = "",
+  load,
+  onBack,
+  manageFocus = true,
+}: {
+  review: ToolActionReview;
+  path?: string;
+  load: ToolReviewDetailsLoader;
+  onBack: () => void;
+  /** Hosts rendering simultaneous previews can retain their own focus. */
+  manageFocus?: boolean;
+}) {
+  const t = useOpenGeniText();
+  const [path, setPath] = useState(initialPath);
+  const [trail, setTrail] = useState<Array<{ path: string; label: string }>>([]);
+  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState<ToolReviewDetailsPage | null>(null);
+  const [error, setError] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const focusedOnce = useRef(false);
+  useEffect(() => {
+    if (page && manageFocus && !focusedOnce.current) {
+      focusedOnce.current = true;
+      heading.current?.focus({ preventScroll: true });
+      heading.current?.scrollIntoView({ block: "start" });
+    }
+  }, [page, manageFocus]);
+  useEffect(() => {
+    let active = true;
+    setPage(null);
+    setError(false);
+    void load(review, path, offset).then(
+      (value) => {
+        if (!active) return;
+        if (
+          value.actionDigest !== review.actionDigest ||
+          value.id !== review.id ||
+          value.path !== path
+        ) {
+          setError(true);
+          return;
+        }
+        setPage(value);
+      },
+      () => {
+        if (active) setError(true);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [review, path, offset, load, retry]);
+  const open = (next: string, label: string) => {
+    setTrail((value) => [...value, { path, label }]);
+    setPath(next);
+    setOffset(0);
+  };
+  const up = () => {
+    const previous = trail.at(-1);
+    setTrail((value) => value.slice(0, -1));
+    setPath(previous?.path ?? initialPath);
+    setOffset(0);
+  };
+  return (
+    <section
+      className="og-root mx-auto w-full max-w-3xl px-4 py-5 text-og-fg sm:px-6"
+      data-og-review-details=""
+    >
+      <button
+        type="button"
+        onClick={onBack}
+        className="mb-4 inline-flex min-h-11 items-center gap-2 rounded-og-md pr-2 text-og-sm text-og-fg-muted hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+      >
+        <ArrowLeftIcon className="size-4" aria-hidden="true" />
+        {t("toolActionReview.backToReview")}
+      </button>
+      <h2
+        ref={heading}
+        tabIndex={-1}
+        className="m-0 break-words text-og-md font-semibold outline-hidden [overflow-wrap:anywhere]"
+      >
+        {review.title}
+      </h2>
+      {review.accountLabel ? (
+        <p className="m-0 mt-1 text-og-sm text-og-fg-muted">{review.accountLabel}</p>
+      ) : null}
+      <p className="m-0 mt-2 text-og-xs text-og-fg-subtle">
+        {t("toolActionReview.theExactValuesSavedFor")}
+      </p>
+      {trail.length > 0 ? (
+        <button
+          type="button"
+          className="mt-3 inline-flex min-h-11 items-center gap-1.5 text-og-sm text-og-fg-muted underline underline-offset-4 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+          onClick={up}
+        >
+          <ArrowLeftIcon className="size-3.5" aria-hidden="true" />
+          {t("toolActionReview.backTo")} {trail.at(-1)?.label ?? t("toolActionReview.allValues")}
+        </button>
+      ) : null}
+      {error ? (
+        <div role="alert" className="mt-4 py-4 text-og-sm">
+          {t("toolActionReview.couldnTLoadTheseDetails")}{" "}
+          <button
+            type="button"
+            onClick={() => setRetry((value) => value + 1)}
+            className="min-h-11 underline underline-offset-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+          >
+            {t("toolActionReview.tryAgain")}
+          </button>
+        </div>
+      ) : !page ? (
+        <p role="status" className="mt-4 py-4 text-og-sm text-og-fg-muted">
+          {t("toolActionReview.loadingDetails")}
+        </p>
+      ) : (
+        <>
+          <dl className="m-0 mt-4 divide-y divide-og-border border-y border-og-border">
+            {page.items.map((item) => (
+              <div key={`${page.path}:${item.label}`} className="py-3">
+                <dt className="m-0 text-og-xs text-og-fg-muted">{item.label}</dt>
+                <dd className="m-0 mt-1 whitespace-pre-wrap break-words text-og-sm leading-relaxed [overflow-wrap:anywhere]">
+                  {item.truncated && item.path ? (
+                    <button
+                      type="button"
+                      aria-label={t("toolActionReview.openLabel", { label: item.label })}
+                      className={cn(linkButton, "max-w-full")}
+                      onClick={() => open(item.path!, item.label)}
+                    >
+                      <span className="min-w-0 break-words focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40">
+                        <SecretRefText text={item.value} linkable={false} />
+                      </span>
+                      <ChevronRightIcon className="size-3.5 shrink-0" aria-hidden="true" />
+                    </button>
+                  ) : (
+                    <SecretRefText text={item.value} />
+                  )}
+                  {item.detail ? (
+                    <span className="mt-0.5 block text-og-xs text-og-fg-muted">
+                      <SecretRefText text={item.detail} linkable={false} />
+                    </span>
+                  ) : null}
+                </dd>
+              </div>
+            ))}
+          </dl>
+          {page.total > page.items.length || offset > 0 ? (
+            <nav
+              aria-label={t("toolActionReview.detailPages")}
+              className="mt-4 flex flex-wrap items-center justify-between gap-3 text-og-sm"
+            >
+              <button
+                type="button"
+                disabled={offset === 0}
+                onClick={() => setOffset(Math.max(0, offset - 25))}
+                className="min-h-11 rounded-og-md border border-og-border px-3 hover:bg-og-hover disabled:opacity-40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+              >
+                {t("toolActionReview.previous")}
+              </button>
+              <span className="text-og-fg-muted tabular-nums">
+                {page.total === 0
+                  ? t("toolActionReview.noItems")
+                  : `${(offset + 1).toLocaleString(t.locale)}–${(offset + page.items.length).toLocaleString(t.locale)} of ${page.total.toLocaleString(t.locale)}`}
+              </span>
+              <button
+                type="button"
+                disabled={page.nextOffset === null}
+                onClick={() => setOffset(page.nextOffset ?? offset)}
+                className="min-h-11 rounded-og-md border border-og-border px-3 hover:bg-og-hover disabled:opacity-40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+              >
+                {t("toolActionReview.next")}
+              </button>
+            </nav>
+          ) : null}
+        </>
+      )}
+    </section>
+  );
+}

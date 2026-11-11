@@ -106,6 +106,9 @@ export type TranscriptionLifecycleStatus =
   | "error";
 
 export type TranscriptionErrorCode =
+  | "insufficient_credits"
+  | "allowance_exhausted"
+  | "monthly_model_cost_limit"
   | "permission_denied"
   | "not_supported"
   | "network"
@@ -116,7 +119,8 @@ export type TranscriptionErrorCode =
   | "unavailable"
   | "too_large"
   | "invalid_audio"
-  | "unknown";
+  | "unknown"
+  | "region_restricted";
 
 /** Native browser voice input defaults to the configured deployment capability. */
 export function resolveWorkspaceVoiceInputEnabled(settings: unknown): boolean | null {

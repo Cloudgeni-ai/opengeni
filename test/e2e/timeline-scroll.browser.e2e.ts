@@ -3,8 +3,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { freePort } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
 import { chromium, type Browser, type Page } from "playwright";
+import { MARKDOWN_TABLE_MAX_WIDTH_REM } from "../../packages/react/src/components/markdown-table-layout";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const demoRoot = `${repoRoot}/packages/react/demo`;
@@ -287,7 +288,12 @@ describe("timeline scroll ownership browser regression", () => {
           await tablePage.waitForTimeout(100); // ResizeObserver + layout measurement frames.
           const geometry = await tableGeometry(tablePage);
           assertTableContainment(geometry);
-          expect(geometry.tables.Oversized!.width).toBeCloseTo(geometry.right - geometry.left, 0);
+          // An oversized table widens into the panel gutters, but only up to the
+          // readable cap; beyond it its unbreakable cells scroll locally.
+          expect(geometry.tables.Oversized!.width).toBeCloseTo(
+            Math.min(geometry.right - geometry.left, MARKDOWN_TABLE_MAX_WIDTH_REM * 16),
+            0,
+          );
           expect(geometry.tables.Oversized!.scrollWidth).toBeGreaterThan(
             geometry.tables.Oversized!.width + 100,
           );
@@ -479,7 +485,7 @@ describe("timeline scroll ownership browser regression", () => {
     expect(duringPrepend.id).toBe(beforePrepend.id);
     expect(duringPrepend.top).toBeCloseTo(beforePrepend.top ?? 0, 0);
 
-    const scroller = page.locator("[data-timeline-test] .og-root > div");
+    const scroller = page.locator("[data-timeline-test] [data-og-timeline-scroller]");
     await scroller.hover();
     // wheel() dispatches input without waiting for native scrolling to finish.
     // Capture the reader's new anchor at scrollend, not at an arbitrary timer
@@ -701,7 +707,7 @@ describe("timeline scroll ownership browser regression", () => {
 
     await page.evaluate(() => window.timelineScrollHarness!.prepend());
     await nextFrames(page, 2);
-    const scroller = page.locator("[data-timeline-test] .og-root > div");
+    const scroller = page.locator("[data-timeline-test] [data-og-timeline-scroller]");
     await scroller.hover();
     await page.mouse.wheel(0, -96);
     await page.waitForTimeout(20);
@@ -720,7 +726,7 @@ describe("timeline scroll ownership browser regression", () => {
     await page.waitForFunction(() => window.timelineScrollHarness !== undefined);
     await page.locator('[data-timeline-row="row-1000"]').waitFor({ timeout: 15_000 });
 
-    const scroller = page.locator("[data-timeline-test] .og-root > div");
+    const scroller = page.locator("[data-timeline-test] [data-og-timeline-scroller]");
     await scroller.evaluate((node) => {
       node.scrollTop = node.scrollHeight - node.clientHeight - 24;
     });
@@ -737,7 +743,7 @@ describe("timeline scroll ownership browser regression", () => {
     // between the append and the snap.
     await page.waitForFunction(
       () => {
-        const node = document.querySelector("[data-timeline-test] .og-root > div");
+        const node = document.querySelector("[data-timeline-test] [data-og-timeline-scroller]");
         return (
           node instanceof HTMLElement && node.scrollHeight - node.scrollTop - node.clientHeight < 2
         );
@@ -864,7 +870,10 @@ describe("timeline scroll ownership browser regression", () => {
     expect(after.gap).toBeCloseTo(atTop.gap, 0);
     expect(after.pin).toBe("false");
     expect(afterAnchorTop).toBeCloseTo(beforeAnchorTop, 0);
-    expect(await page.locator("[data-og-jump-to-latest]").count()).toBe(1);
+    // The retained gap is now inside the normal near-tip band. The reader
+    // stays unpinned, but the jump is quiet until they move farther away.
+    await page.locator("[data-og-jump-to-latest]").waitFor({ state: "detached", timeout: 5_000 });
+    expect(await page.locator("[data-og-jump-to-latest]").count()).toBe(0);
   }, 30_000);
 
   test("keeps a nested row anchored when prepend merges into its activity group", async () => {
@@ -877,7 +886,7 @@ describe("timeline scroll ownership browser regression", () => {
     await target.waitFor({ timeout: 15_000 });
     await target.evaluate(async (node) => {
       const scroller = document.querySelector<HTMLElement>(
-        "[data-timeline-merge-test] .og-root > div",
+        "[data-timeline-merge-test] [data-og-timeline-scroller]",
       );
       if (!scroller) throw new Error("timeline merge scroller is unavailable");
       const settled =
@@ -938,7 +947,7 @@ describe("timeline scroll ownership browser regression", () => {
 
     // Expanding and collapsing a step changes row height, but it must neither
     // remove surrounding chat rows nor destroy the usable scroll range.
-    const step = page.getByRole("button", { name: /steps/ }).nth(4);
+    const step = page.locator('button[data-og-work-header="outer"]').nth(4);
     const anchor = page.locator('[data-conversation-message="user-201"]');
     // The clicked disclosure owns position; another row can move as it folds.
     await step.evaluate((node) => node.scrollIntoView({ block: "center" }));
@@ -1698,7 +1707,7 @@ describe("timeline scroll ownership browser regression", () => {
     );
     await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
 
-    const step = page.getByRole("button", { name: /steps/ }).first();
+    const step = page.locator('button[data-og-work-header="outer"]').first();
     await step.click();
     await page.waitForFunction(
       () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 0,
@@ -1758,7 +1767,7 @@ describe("timeline scroll ownership browser regression", () => {
     await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?dynamic-collapse`);
     await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
 
-    const step = page.getByRole("button", { name: /steps/ }).first();
+    const step = page.locator('button[data-og-work-header="outer"]').first();
     await step.click();
     await page.waitForFunction(
       () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 0,
@@ -1803,7 +1812,7 @@ describe("timeline scroll ownership browser regression", () => {
           exact: true,
         },
       );
-      const disclosure = page.getByRole("button", { name: /steps?/ }).first();
+      const disclosure = page.locator('button[data-og-work-header="outer"]').first();
 
       await fallback.waitFor({ timeout: 5_000 });
       expect(await fallback.count()).toBe(1);
@@ -1814,7 +1823,7 @@ describe("timeline scroll ownership browser regression", () => {
       expect(await disclosure.getAttribute("aria-expanded")).toBe("true");
       expect(await fallback.count()).toBe(1);
       expect(await fallback.isVisible()).toBe(true);
-      expect(await page.getByText("Wait for input", { exact: false }).count()).toBe(1);
+      expect(await page.getByText("Waited", { exact: true }).count()).toBe(1);
 
       await disclosure.click();
       expect(await disclosure.getAttribute("aria-expanded")).toBe("false");
@@ -1880,7 +1889,7 @@ async function nestedVisible(
 ): Promise<{ text: string; top: number; scrollTop: number; overflowAnchor: string }> {
   return await page.evaluate((targetText) => {
     const scroller = document.querySelector<HTMLElement>(
-      "[data-timeline-merge-test] .og-root > div",
+      "[data-timeline-merge-test] [data-og-timeline-scroller]",
     );
     const target = [...document.querySelectorAll<HTMLElement>("span, p")].find(
       (candidate) => candidate.textContent === targetText,

@@ -19,6 +19,7 @@ import { formatAsOf } from "../hooks/use-machine-chip";
 import type { SandboxGitFileDiff } from "../hooks/use-sandbox-git";
 import { useWindowedSections } from "../hooks/use-windowed-sections";
 import { PierreDiff } from "./pierre-diff";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
    Changes tab — a PR-review surface.
@@ -247,7 +248,10 @@ class ChangesRailVList extends Component<
 /** Order the files and build the rail rows (grouped past the threshold). The
  *  returned `orderedFiles` drives BOTH the rail and the diff pane so a rail row's
  *  `index` addresses the matching pane section. Exported for tests. */
-export function buildRail(files: SandboxGitFileDiff[]): {
+export function buildRail(
+  t: OpenGeniText,
+  files: SandboxGitFileDiff[],
+): {
   orderedFiles: SandboxGitFileDiff[];
   rows: RailRow[];
   grouped: boolean;
@@ -267,10 +271,10 @@ export function buildRail(files: SandboxGitFileDiff[]): {
   for (const file of files) {
     const slash = file.path.indexOf("/");
     const key = groupByRepo
-      ? file.repoRoot || "(workspace)"
+      ? file.repoRoot || t("workbenchChanges.workspace")
       : slash > 0
         ? file.path.slice(0, slash)
-        : "(root)";
+        : t("workbenchChanges.root");
     const bucket = groups.get(key);
     if (bucket) bucket.push(file);
     else groups.set(key, [file]);
@@ -313,6 +317,7 @@ export function WorkbenchChanges({
   onOpenFile,
   className,
 }: WorkbenchChangesProps) {
+  const t = useOpenGeniText();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [compact, setCompact] = useState(false);
   const [coarsePointer, setCoarsePointer] = useState(false);
@@ -327,7 +332,7 @@ export function WorkbenchChanges({
   );
   useUnicodeFallbackFonts(unicodeFontPaths);
 
-  const { orderedFiles, rows, grouped } = useMemo(() => buildRail(diff), [diff]);
+  const { orderedFiles, rows, grouped } = useMemo(() => buildRail(t, diff), [diff, t]);
   const selectedIndex = orderedFiles.findIndex((file) => file.path === activePath);
   const activeIndex = selectedIndex >= 0 ? selectedIndex : 0;
 
@@ -411,7 +416,7 @@ export function WorkbenchChanges({
     return () => el.removeEventListener("scroll", onPaneScroll);
   }, [windowed.scrollRef, onPaneScroll]);
 
-  const sourceBadge = describeSource(source, capturedAt, captureRevision ?? null);
+  const sourceBadge = describeSource(t, source, capturedAt, captureRevision ?? null);
   const activeFile = orderedFiles[activeIndex] ?? orderedFiles[0];
 
   return (
@@ -434,7 +439,7 @@ export function WorkbenchChanges({
           data-contrast-audited
           className="min-w-0 text-og-xs text-og-fg-muted"
         >
-          {diff.length} {diff.length === 1 ? "file" : "files"} changed
+          {t("workbenchChanges.filesChanged", { count: diff.length })}
           <span data-contrast-audited className="ml-2 text-og-status-idle">
             +{additions}
           </span>
@@ -457,11 +462,11 @@ export function WorkbenchChanges({
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="shrink-0 border-b border-og-border bg-og-surface-1 p-2">
             <label className="sr-only" htmlFor={pickerId}>
-              Changed file
+              {t("workbenchChanges.changedFile")}
             </label>
             <select
               id={pickerId}
-              aria-label="Changed file"
+              aria-label={t("workbenchChanges.changedFile")}
               value={activeIndex}
               onChange={(event) => {
                 const index = Number(event.currentTarget.value);
@@ -479,7 +484,7 @@ export function WorkbenchChanges({
             </select>
           </div>
           <div
-            aria-label="Changed file diff"
+            aria-label={t("workbenchChanges.changedFileDiff")}
             className="min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
             data-opengeni-changes-pane
             role="region"
@@ -531,7 +536,7 @@ export function WorkbenchChanges({
             full scroll height so scrolling + the rail-jump stay accurate. */}
           <div
             ref={windowed.scrollRef}
-            aria-label="Changed files diff"
+            aria-label={t("workbenchChanges.changedFilesDiff")}
             className="min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
             data-opengeni-changes-pane
             role="region"
@@ -579,11 +584,12 @@ function SourceBadge({
   capturedAt: string | null;
   label: string;
 }) {
+  const t = useOpenGeniText();
   if (source === "capture" && capturedAt) {
     return (
       <span
         className="inline-flex items-center gap-1 rounded-og-xs border border-og-border px-1.5 py-px text-og-xs text-og-fg-muted"
-        title={new Date(capturedAt).toLocaleString()}
+        title={new Date(capturedAt).toLocaleString(t.locale)}
       >
         <HistoryIcon className="size-3 shrink-0 text-og-status-running" aria-hidden />
         {label}
@@ -599,13 +605,16 @@ function SourceBadge({
 
 /** "Live diff" · "as of turn 7 · 14:32" · "as of 14:32" (no revision). */
 function describeSource(
+  t: OpenGeniText,
   source: "live" | "capture" | null,
   capturedAt: string | null,
   revision: number | null,
 ): string {
-  if (source !== "capture" || !capturedAt) return "Live diff";
-  const time = formatAsOf(capturedAt, Date.now());
-  return revision !== null ? `as of turn ${revision} · ${time}` : `as of ${time}`;
+  if (source !== "capture" || !capturedAt) return t("workbenchChanges.liveDiff");
+  const time = formatAsOf(t, capturedAt, Date.now());
+  return revision !== null
+    ? t("workbenchChanges.asOfTurnRevisionTime", { revision, time })
+    : `as of ${time}`;
 }
 
 function RailFileRow({
@@ -745,7 +754,10 @@ function GuardBody({
   file: GitFileDiff;
   onOpenFile?: ((path: string) => void) | undefined;
 }) {
-  const reason = file.isBinary ? "Binary file" : "Diff too large to show here";
+  const t = useOpenGeniText();
+  const reason = file.isBinary
+    ? t("workbenchChanges.binaryFile")
+    : t("workbenchChanges.diffTooLargeToShow");
   return (
     <div className="flex flex-wrap items-center gap-2 px-3 py-3 text-og-sm text-og-fg-subtle">
       <FileWarningIcon className="size-3.5 shrink-0" aria-hidden />
@@ -756,7 +768,7 @@ function GuardBody({
           onClick={() => onOpenFile(file.path)}
           className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11"
         >
-          Open in Files
+          {t("workbenchChanges.openInFiles")}
           <ArrowUpRightIcon className="size-3.5" aria-hidden />
         </button>
       ) : null}

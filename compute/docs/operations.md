@@ -1,0 +1,1569 @@
+# Operations
+
+How to deploy and run Opengeni compute in production, and what an operator
+must set up, check and know that the code cannot enforce alone. Each point
+says what compute does, what is left to the deployment, and what we
+chose not to build.
+
+- [Deploying](#deploying): the control service, the hosts, and Opengeni's
+  settings
+- [Hosts](#hosts): adding, draining and removing them; a lost host
+- [Keys and certificates](#keys-and-certificates), [Backups](#backups),
+  [Security](#security)
+- [Storage](#storage), [Deleting](#deleting), [Observing](#observing),
+  [Upgrades](#upgrades), [Emergencies](#emergencies), [Network](#network),
+  [Capacity and cost](#capacity-and-cost)
+- [Testing](#testing): CI, the KVM gate, the cloud gate and the end-to-end
+  suite
+
+## Deploying
+
+A deployment has three parts:
+
+| Part | What | Shipped as |
+| --- | --- | --- |
+| Control service | `compute-control`: hosts' leases, placement, moves, recovery, the API Opengeni calls, optionally the E2B front door | `ghcr.io/cloudgeni-ai/opengeni-compute-control` (`docker/control.Dockerfile`), run by the Opengeni Helm chart's `computeControl` |
+| Hosts | `compute-host` and its guard on Linux machines with KVM, archiving to object storage | the host bundle `compute-host-<version>-x86_64-linux.tar.gz` (`deploy/host`), installed by its `install.sh`; on GCP by `deploy/terraform/gcp-compute` |
+| Opengeni | the `compute` sandbox backend, selected per deployment or session | Opengeni's own images and chart |
+
+Releases come from `.github/workflows/compute-release.yml`: every push to
+main that touches `compute/` pushes the image as `sha-<commit>` and `main`
+and keeps the host bundle as a workflow artifact; a `compute-v<version>`
+tag (equal to `compute/Cargo.toml`'s workspace version) also tags the image
+`<version>` and publishes the bundle, its `SHA256SUMS` and build provenance
+as a GitHub Release. Verify either with `gh attestation verify`. The bundle
+is built twice from two paths and must come out byte for byte the same.
+
+### The control service
+
+Enable `computeControl` in the Opengeni chart. It is off by default, and
+enabling it changes no session's backend.
+
+1. **Its database.** It keeps its state in its own schema and login role
+   in Opengeni's Postgres (`computeControl.database`, role and schema
+   `compute`). With `database.provision` (the default, for the chart's
+   own Postgres only) a Job creates the role with the password from
+   `database.existingSecret`, sets its search path to the schema, creates
+   the schema it owns and grants it `connect`, using the migration owner
+   URL; nothing of Opengeni's is granted to it. The Job is an ordinary
+   part of the release, never a hook, so it is applied together with what
+   it needs (the chart's Postgres and, under `networkPolicy`, the rule
+   that admits it), on an install and on the upgrade that first enables
+   the service alike, and the service's pods wait for it, so `--wait`
+   completes. Its name follows its inputs: an upgrade that changes none of
+   them leaves it alone, and one that does runs a new Job.
+   For any other database (`database.host`, required
+   when the chart runs no Postgres, or a whole connection string in
+   `database.urlKey`), turn `provision` off and have its owner run the
+   same statements:
+
+   ```sql
+   create role compute login password '…';
+   alter role compute set search_path = compute;
+   create schema if not exists compute authorization compute;
+   grant connect on database <database> to compute;
+   ```
+
+   The password reaches the service in a variable of its own, so it needs
+   no quoting. The service creates its tables at start and upgrades them
+   in place, recording their version. For a managed database set
+   `database.sslmode: require` (the service takes `disable`, `prefer` and
+   `require`): the service, its sweep and every other `compute-control`
+   command then connect over TLS and check the database's certificate
+   against the image's system authorities, as `verify-full` would. For a
+   private authority, mount it and name it as `COMPUTE_CONTROL_DATABASE_CA`
+   in `extraEnv`, which reaches the sweep too (`--database-ca` on the
+   command line). Without `require` and without an authority the
+   connection is unencrypted, for a database beside the service. It also
+   takes two Postgres advisory
+   locks (7231401 for its schema, and its leader lock); keep them free in
+   a shared database.
+   Its connections give up on a database the network stops answering:
+   5 s to reach it, 10 s to open a connection in all, 15 s for data left
+   unacknowledged, and keepalives after a minute idle, under the idle
+   limit of cloud NAT gateways and load balancers. A connection string
+   can choose other values (`connect_timeout`, `tcp_user_timeout`,
+   `keepalives_idle`, `keepalives_interval`, `keepalives_retries`) but
+   not turn the bounds off: a zero for one of the four durations, and a
+   `keepalives_idle` of exactly 7200 (the library's default, which reads
+   as unset), get the bound. `keepalives=0` still turns keepalives off,
+   and `keepalives_retries=0` is kept as given. A
+   replica that has read no hosts from the database for three renewal
+   intervals (10 s) cannot tell which hosts renew: it answers creates and wakes 503
+   `unavailable` ("has not read its hosts from the store"), not
+   `no_capacity`.
+2. **Its keys.** API keys are `team key` lines in a Secret
+   (`computeControl.keys.existingSecret`, entry `keys`); the service
+   stores their digests at every start. Make one key for Opengeni's team
+   and one for the operator team (`computeControl.operatorTeam`, default
+   `operator`), which alone may list, drain and undrain hosts:
+
+   ```sh
+   opengeni_key=$(openssl rand -hex 32); operator_key=$(openssl rand -hex 32)
+   kubectl create secret generic compute-keys \
+     --from-literal=keys="opengeni $opengeni_key
+   operator $operator_key"
+   ```
+
+   Put the same `opengeni` key in Opengeni's runtime Secret as
+   `OPENGENI_COMPUTE_API_KEY`, and keep the operator key in the operators'
+   secret store.
+3. **TLS with the hosts.** The service and its hosts authenticate each
+   other with certificates of one authority, the hosts' authority, and the
+   service is that authority: one Secret
+   (`computeControl.hostsTls.secretName`) holds its certificate (`ca.crt`)
+   and key (`ca.key`, PKCS#8). The GCP root makes it (outputs
+   `host_authority_pem` and `host_authority_key_pem`); elsewhere
+   `compute-control new-host-authority --out <dir>` does:
+
+   ```sh
+   umask 077   # ca.key is the trust root: readable by you alone
+   terraform output -raw host_authority_pem > ca.crt
+   terraform output -raw host_authority_key_pem > ca.key
+   kubectl create secret generic compute-hosts-tls --from-file=ca.crt --from-file=ca.key
+   ```
+
+   The service issues itself a week's certificate from it, for the host
+   of `computeControl.hostUrl` (and `hostsTls.extraNames`), and a new one
+   every day, in memory, with no restart. Hosts trust the authority alone
+   and get their own certificates from the service (see Hosts). On GCP set
+   `computeControl.hostIdentity` to the `identity_tokens` output: the
+   project and service account whose instances may prove themselves hosts.
+4. **Where hosts reach it.** `computeControl.hostsService` exposes port
+   8443 outside the cluster: an internal `LoadBalancer` (with the cloud's
+   annotation) or a `NodePort`. `computeControl.hostUrl` is the URL hosts
+   dial, exactly as they are given it (the Terraform root's
+   `control_url`): the service's certificate is for its host, and hosts'
+   identity tokens are for the URL.
+5. **HTTPS for the API.** Opengeni sends its key to the API and refuses
+   plain HTTP outside local development. Give the service a certificate
+   for the name Opengeni calls (`computeControl.apiTls.secretName`:
+   `tls.crt`, `tls.key` and the `ca.crt` that signed them; the name is
+   `apiTls.host`, by default `<release>-compute-control.<namespace>.svc`).
+   The chart then serves the API with it (`--api-tls-cert`,
+   `--api-tls-key`), points `OPENGENI_COMPUTE_API_URL` at
+   `https://<host>:8080`, and has Opengeni's API and workers trust
+   `ca.crt` (`NODE_EXTRA_CA_CERTS`). A cert-manager `Certificate` from a
+   cluster issuer is the usual source.
+6. **Agent links** ([ADR 21](adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md),
+   [agent links](agent-link.md)). Each host keeps one link to its team's
+   agent gateway, the Opengeni API's public WSS endpoint, with a token the
+   service signs. Make the signing key once and keep it only in a Secret:
+
+   ```sh
+   openssl genpkey -algorithm ed25519 -out link.pem
+   kubectl create secret generic compute-link --from-file=link.pem
+   ```
+
+   and name it and each team's gateway in the values
+   (`computeControl.link.existingSecret`, `computeControl.teamLinks`).
+   Opengeni's gateway fetches the public keys from the API
+   (`GET /v1/link/keys`).
+7. **Archive and group.** `computeControl.archive` is the hosts' store
+   (`gs://bucket/prefix`); `computeControl.gcpGroup` the hosts' managed
+   instance group, which the service resizes and whose instances it
+   fences. Both use the pod's cloud identity: on GKE, bind
+   `computeControl.serviceAccount` to the `control_service_account` output
+   with Workload Identity (`iam.gke.io/gcp-service-account` annotation and
+   `control_workload_identity` in Terraform). A service that runs off
+   Google Cloud uses a key of that account instead (`gcloud iam
+   service-accounts keys create key.json --iam-account <the output>`,
+   where the organisation's policy allows keys): keep it in a Secret,
+   mount it through `computeControl.extraVolumes` and
+   `extraVolumeMounts`, and name it in `GOOGLE_APPLICATION_CREDENTIALS`
+   through `computeControl.extraEnv`. Both the archive and the group take
+   it from there; only service account key files are supported. Rotate
+   the key as any long-lived credential, and delete it when the service
+   moves onto Google Cloud.
+8. **Images.** Sandboxes start from stored images. Set
+   `computeControl.imageSources` (`name: registry/repository@sha256:<hex>`)
+   to the release's OCI images, normally the Opengeni sandbox and desktop
+   images (with `opengeni-agent`, ADR 21) of the same Opengeni commit as
+   the deployment. When a release names an OCI image no stored image was
+   built from with the fleet's guest programs, the service has a live
+   host with those programs build it (a few minutes, one at a time per
+   host, different OCI images on different hosts; the host's log says
+   `built and stored a sandbox image`), records it, and new creates of
+   that name start from it; until then they start from the image the name
+   had before. A host bundle upgrade that changes the guest programs
+   (`compute-guest`, envd, bash) has every followed image built again
+   once most live hosts run it, so new sandboxes get the new programs
+   without an app release; the control service's log says `new creates
+   start from the image built with the fleet's guest programs`. Existing
+   sandboxes keep theirs. A host builds into its state directory's `prepare/`
+   scratch space and needs `REGISTRY_TOKEN` (and `--registry-user`) only
+   for a private registry. `computeControl.storedImages` (`name: <image
+   id>`) still pins an image by hand, and is what a name starts from
+   before anything is built for it: build one with `compute-host
+   build-image <oci-ref> --guest <bundle>/guest --output image.ext4
+   --store gs://bucket/prefix` on any host (or a build machine with the
+   bundle), which prints the image id. Hosts fetch an image from the store
+   on its first create.
+9. **Checkpoints.** A running sandbox whose create names no sleep config
+   (Opengeni's never does) is checkpointed to the store after every ten
+   minutes it runs: losing its host costs it what it did since its newest
+   copy (ADR 18). `--checkpoint-every-s` (through
+   `computeControl.extraArgs`) sets that target for the fleet; 0 takes
+   none.
+10. **Metrics.** Set `computeControl.metrics.port` (for example 9464) to
+   serve the service's own metrics; `observability.serviceMonitor` and
+   `observability.prometheusRule` add their ServiceMonitor and alerts. For
+   the hosts' metrics, set `computeControl.metrics.hostsTo` to
+   Prometheus's OTLP receiver and add `--otlp-metrics-to-control` to the
+   hosts' `host_args` ([Observing](#observing)).
+
+A minimal values file:
+
+```yaml
+computeControl:
+  enabled: true
+  image:
+    tag: "0.1.0"
+    digest: "sha256:…"
+  database:
+    existingSecret: compute-database   # COMPUTE_DATABASE_PASSWORD
+  keys:
+    existingSecret: compute-keys
+  hostUrl: https://compute-control.example.com:8443
+  hostsTls:
+    secretName: compute-hosts-tls      # ca.crt, ca.key
+  hostIdentity:                        # the identity_tokens output
+    gcpProject: example
+    gcpAccount: opengeni-compute-host@example.iam.gserviceaccount.com
+  apiTls:
+    secretName: compute-api-tls        # tls.crt, tls.key, ca.crt
+  link:
+    existingSecret: compute-link       # link.pem
+  teamLinks:
+    opengeni: wss://opengeni.example.com/v1/compute/agent-link
+  hostsService:
+    type: LoadBalancer
+    annotations:
+      networking.gke.io/load-balancer-type: Internal
+  archive: gs://example-compute-archive/archive
+  gcpGroup: projects/example/zones/europe-west4-a/instanceGroupManagers/opengeni-compute-hosts
+  imageSources:
+    opengeni: ghcr.io/example/opengeni-sandbox@sha256:…
+    opengeni-desktop: ghcr.io/example/opengeni-desktop@sha256:…
+  serviceAccount:
+    annotations:
+      iam.gke.io/gcp-service-account: opengeni-compute-control@example.iam.gserviceaccount.com
+```
+
+The hourly sweep of the store (ADR 17, 25, 28, 29) runs as a CronJob from the
+same image, identity and database (`computeControl.sweep`), as
+`compute-control sweep`: it reads the pointers the service keeps. It deletes on
+any archive, `gs://`, `az://` or `s3://`. Each run lists only the hours that
+became old enough since the last run, and deletes what replaced copies alone
+named; once a day it lists everything. It keeps its progress under `sweep/` in
+the store, gives up starting new listings after 40 minutes, leaves what failed
+to the next run, and logs each step, so a run that is slow shows where it is.
+
+### Hosts
+
+On GCP, `deploy/terraform/gcp-compute` makes the whole host side: the
+hosts' instance template and zonal managed instance group (nested
+virtualization, or bare metal), the archive bucket (uniform access, no
+public access, a week of soft delete), the hosts' authority (a key and
+certificate, in Terraform's state; no managed certificate authority), a
+host and a control service account with only what each needs, and the
+firewall rules (the service to hosts on 7443, hosts to the service,
+optional SSH). See its `terraform.tfvars.example`. Each host's startup
+script names the hosts' memory profile (`memory_profile`, ADR 5): by
+default `nested` on nested-virtualization hosts, where huge pages keep
+memory faults cheap but every awake sandbox is booked at its full size,
+and `bare-metal` otherwise. `bare-metal` on a nested host books sandboxes
+at their request, lets them use more up to their size and adds the
+Compressed level, at the cost of slower memory faults. The startup
+script prepares the state volume (local NVMe SSDs, striped, or a
+persistent disk), fetches and checks the bundle the template names, and
+runs `install.sh` with the authority's certificate from the template's
+metadata. `install.sh` gets the host its certificate from the service
+(`compute-host-certificate`): the host proves its instance name with the
+instance's identity token, for `control_url`, and the service issues a
+week's certificate for that name; a daily timer renews it when fewer than
+four days are left, with a new token, so a host whose certificate expired
+gets a new one all the same. A host reset during or just after its
+install (as a group update may do) can come back with what the install
+wrote in place but empty, so neither script takes a step as done because
+a file is there: at every boot the startup script checks the unpacked
+bundle whole against the `SHA256SUMS` it came with and fetches it again
+when it is not, and `install.sh` compares each installed file and unit
+with the bundle's or its pin and writes again what differs. Both write
+each file to a temporary name, flushed to the disk before its rename, so
+the next boot repairs the host with no hand work. Terraform sets the group's first size; the service sizes it
+from then on. The group has no auto-healing (the service decides when a
+host is lost and fences it), and a new template reaches hosts as they are
+replaced, or, when it changes only their metadata (such as the bundle),
+as the operator refreshes them to it (Upgrades).
+
+Elsewhere, install a host by hand: a systemd Linux machine with KVM, an
+XFS state volume, a name unique among the hosts, and the bundle. With no
+identity token to prove its name, the host's first certificate comes from
+`compute-control issue-host-certificate`, run where the authority's key is
+(the service's Secret); from then on the host renews it with the current
+one:
+
+```sh
+tar -xzf compute-host-0.1.0-x86_64-linux.tar.gz && cd compute-host-0.1.0-x86_64-linux
+cp host.env.example host.env   # fill in the service, name, address, zone, store
+sudo ./install.sh --config host.env --authority ca.crt --state-device /dev/nvme1n1
+# fails, naming the request it left at /etc/compute/request/host.csr; where ca.key is:
+compute-control issue-host-certificate --name compute-host-1 --csr host.csr --authority <dir> > host.pem
+# back on the host:
+sudo install -m 600 host.pem /etc/compute/request/host.pem && sudo ./install.sh
+```
+
+A host whose certificate expired (off for over a week) needs a new one the
+same way.
+
+Nothing else on a host may drop forwarded traffic. A packet passes a
+firewall hook only if every chain on it accepts it, so another firewall
+whose forward chain drops by default, such as Docker's `FORWARD` chain or
+ufw's, cuts every sandbox off from everything unless it accepts traffic
+from and to the sandboxes' links, `ogc*`. The agent warns when it starts
+of each such chain it finds through nftables (it cannot see
+iptables-legacy rules). On a host running Docker with its iptables
+backend (its default, including over iptables-nft; its nftables backend
+has no `DOCKER-USER` chain):
+
+```sh
+sudo iptables -I DOCKER-USER -o 'ogc+' -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+sudo iptables -I DOCKER-USER -i 'ogc+' -j ACCEPT
+```
+
+These only keep the other firewall from dropping what the agent allows:
+the agent's own chain runs first, and what it drops stays dropped.
+Docker leaves `DOCKER-USER` alone, but rules added by hand are gone after
+a reboot: keep them the way the host keeps its other firewall rules.
+
+`install.sh` checks the bundle against `SHA256SUMS`; installs the packages
+the agent runs (iproute2, nftables, e2fsprogs, xfsprogs); installs the
+release under `/opt/compute/releases/<version>` behind
+`/opt/compute/current`, once its `compute-host` has run on this host (a
+binary that cannot, say one built for another C library, is refused
+before anything switches to it); downloads Firecracker, its jailer and the guest
+kernel that `pins.env` names, checking each SHA-256; mounts the state
+volume at `/var/lib/compute` the first time and records its filesystem
+UUID, in `/etc/compute/state-volume.uuid` and on the volume itself
+(`.compute-state-volume`); builds the base image from `COMPUTE_BASE_IMAGE_REF`; and
+installs three units:
+
+- `compute-host-setup.service` applies the kernel settings at every boot:
+  the huge-page pool (`COMPUTE_HUGE_PAGES`; when the kernel finds too few
+  free 2 MiB runs, as on a fresh host whose memory is page cache from the
+  base-image unpack, it drops the cache, compacts memory and asks again,
+  and fails only if still short), no transparent huge pages,
+  the software watchdog (3 s, `nowayout`) where the machine has no
+  hardware one, and no suspend;
+- `compute-guard.service`, never restarted on failure: it stops every VM
+  that is not its sandbox's only copy when the host's lease runs out
+  (ADR 18), and the watchdog resets the machine if
+  the guard itself ends or stalls. So that a host short of processors or
+  memory (guests holding more than it has, the swap file busy) does not
+  stall it into that reset, it runs at real-time priority, locks its own
+  memory in, and never waits on the journal (it drops log lines the
+  journal is too slow to take, and says how many) or on systemd. Locking
+  does not cover the pages of the files it reads, such as the lease file
+  on tmpfs, nor the kernel's own work for it.
+  An upgrade hands it over to the new release's guard (below);
+- `compute-host.service`, the agent, which checks before every start that
+  the mounted state volume is the recorded one and that its certificate,
+  Firecracker, kernel and base image are there (`check-host`), and runs
+  with `KillMode=process` so a restart leaves its VMs running. Each start
+  records what it uses (`agent-inputs`: the release, `installed.env`,
+  `host.env`, `ca.pem`, the base image and the unit as systemd loaded it)
+  under `/run`, with the start's invocation id, and `install.sh` restarts
+  an agent only when that changed, when the running agent's start is not
+  the one recorded (a start by an earlier release's unit after a rollback
+  records nothing), or when the agent does not answer within a minute of
+  being left running; it logs why it restarts. So the startup script that
+  installs again at every boot on GCP leaves the agent systemd just
+  started running, rather than stopping its lease renewals and cutting
+  short the wakes it began. Files `host.env` names (such as credentials)
+  and `systemctl set-environment` are not part of what is recorded: after
+  changing only those, restart the agent yourself.
+
+#### A host that shares its machine
+
+A host can run directly on a hypervisor, or any machine, that also runs
+other work ([ADR 26](adr/0026-a-host-that-shares-its-machine.md)): its
+sandboxes then get bare-metal memory faults and the Compressed level,
+with no host VM in between. Set `COMPUTE_MACHINE=shared` and the
+sandboxes' share of memory, `COMPUTE_MEMORY_TOTAL_MIB`, in `host.env`;
+leave the machine's other work room outside the share. Then:
+
+- the guard feeds systemd's watchdog of its own service instead of the
+  machine's, whose reset would end the other work too: `install.sh`
+  installs `compute-guard-shared.conf` as the guard's drop-in
+  (`WatchdogSec=3s`, `WatchdogSignal=SIGKILL`). systemd kills a guard that
+  stops feeding it, and after every end of the guard its stop hook
+  (`compute-host guard-stopped`) kills every VM, as a reset would, and
+  restarts the agent if it runs, which starts a new guard. An upgrade
+  hands the guard over instead (`compute-host hand-over-guard`), and the
+  VMs stay. The hook says in the guard's journal what it did;
+- `host-setup` loads no watchdog, leaves transparent huge pages as the
+  machine has them unless they are `always` (then `madvise`), and sizes
+  the swap file and zswap's pool from the share;
+- `check-host` refuses to start the agent while the guard's service lacks
+  the watchdog or the hook, and the guard refuses a `WatchdogSec=` longer
+  than 3 s.
+
+Let systemd feed the machine's hardware watchdog (`RuntimeWatchdogSec=`,
+for example `30s`): the guarantee rests on systemd running the guard's
+watchdog and hook, and a hardware watchdog resets the machine only if
+systemd itself stops. The other work can swap into compute's swap file
+under pressure; memory pinned for device passthrough never does, and a
+service kept out with `MemorySwapMax=0` does not. On a NixOS machine,
+or any machine whose own configuration owns its systemd units, the
+configuration installs and enables the bundle's units (on a shared
+machine with `compute-guard-shared.conf` as the guard's drop-in), straight
+from the bundle it names, and mounts the state volume itself; then
+`install.sh --units-installed` (no `--state-device`) checks that the units
+in place are the bundle's, writes none, and does the rest, handing the
+guard over and restarting the agent. Keep a configuration switch from
+restarting the guard, which would kill the VMs.
+
+### Opengeni's settings
+
+Opengeni's `compute` backend reads:
+
+| Setting | Value |
+| --- | --- |
+| `OPENGENI_SANDBOX_BACKEND` | `compute` for a deployment that uses it by default; leave it (default `modal`) to let sessions choose it |
+| `OPENGENI_COMPUTE_API_URL` | the service's API; when `computeControl` is enabled the chart sets `https://<apiTls.host>:8080` (plain `http://<release>-compute-control:8080` without `apiTls`, which Opengeni accepts only in local and test environments) |
+| `OPENGENI_COMPUTE_API_KEY` | the `opengeni` team's key, in the runtime Secret |
+| `OPENGENI_COMPUTE_LINK_URL` | the agent gateway's public `wss://` URL, the audience of the hosts' link tokens, so exactly the service's `--team-link` URL for Opengeni's team; the chart sets it from `computeControl.teamLinks[computeControl.opengeniTeam]` |
+| `OPENGENI_COMPUTE_IMAGE`, `OPENGENI_COMPUTE_DESKTOP_IMAGE` | stored image names, as in `computeControl.storedImages` |
+
+The backend also needs `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true`, the relay
+(`OPENGENI_SELFHOSTED_RELAY_URL` and its token secret) and the agent
+op-stream (`OPENGENI_AGENT_OP_STREAM_ENABLED`, on by default); Opengeni
+refuses to start with `OPENGENI_SANDBOX_BACKEND=compute` while any is missing.
+
+Every sandbox runs Opengeni's agent behind its host's link
+([ADR 21](adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)),
+so the backend also uses Opengeni's agent gateway (in the API, at the
+`teamLinks` URL) and its relay. The network needs:
+
+| From | To | Why |
+| --- | --- | --- |
+| Opengeni's API and workers | the service's API (8080, HTTPS) | create, wake, move, delete |
+| the service | hosts (7443, mutual TLS) | the fleet's calls to hosts |
+| hosts | the service's hosts endpoint (8443, mutual TLS) | registration, leases, link tokens |
+| hosts | Opengeni's public API (443, WSS) | the agent link, which carries the guests' control traffic |
+| guests | Opengeni's relay (443, HTTPS/WSS) | terminal, desktop and file streams |
+| hosts | object storage | the archive and stored images |
+
+Guests never reach Opengeni's NATS; it stays inside Opengeni's network.
+Hosts check the gateway's certificate against the system's authorities;
+for a gateway with a certificate of a private authority, give each host
+`--agent-link-ca <pem>` in `COMPUTE_HOST_ARGS`, and it trusts that
+authority alone for agent links.
+
+### Runner pools
+
+GitHub Actions runner pools ([ADR 23](adr/0023-github-actions-runner-pools.md))
+reach compute through its E2B front door. In the chart:
+
+1. **The front door.** Set `computeControl.e2b.enabled` and give the
+   runner template a shape with room for a job's disk, for example
+   `computeControl.e2b.templates: {github-runner: "runner:4x8192x30720"}`,
+   where `runner` is a stored image built from
+   `opengeni-compute-github-runner` (`storedImages` or `imageSources`).
+   Jobs rarely use all of their shape at once; a template that guarantees
+   less, for example `"runner:8x24576x65536,memory-request=8192"`, fits
+   more jobs on a host at once, each using more memory when the host has
+   it free, and warm templates saved from it guarantee the same. A host
+   that backs guest memory with huge pages reserves all of it anyway.
+   It listens on its own port (3000) of the API Service, with the API's
+   certificate under `apiTls`, and network policy admits only the pools
+   and `e2b.ingressFrom`.
+2. **A key.** Add a team for the pools to `computeControl.keys`; its
+   sandboxes are its own. Put the key in a Secret (`COMPUTE_API_KEY`).
+3. **GitHub.** A GitHub App installed on the organization or repository,
+   with administration access to self-hosted runners (repository
+   `administration: write`, or organization `self-hosted runners: write`)
+   and, for warm templates, `contents: read`; or a token with the same
+   rights. Its private key (`app.pem`) or token (`GITHUB_TOKEN`) goes in a
+   Secret.
+4. **The pool**, an entry of `computeRunners.pools`: name, scope,
+   template, `minIdle` and `max`, the two Secrets, and optionally `warm`
+   (repository, branch, prepare command) and `cache` (bucket, its address
+   as runners reach it, a token Secret). The cache's Service must be
+   reachable from the hosts, so give it a LoadBalancer or an Ingress and
+   name that address in `cache.url`; the pods' identity
+   (`computeRunners.serviceAccount.annotations`) needs read and write on
+   the bucket.
+
+Workflows say `runs-on: <pool name>`, and with a warm template check out
+with `clean: false` so the prepared dependencies stay. A pool's log shows
+each job it takes, each runner it starts and ends, and each warm refresh.
+
+A pool whose jobs deploy to a private destination, such as a cluster's
+API, reaches it as an offer of the hosts (see **Private destinations only
+some sandboxes need** under Network): give that pool a team of its own and
+grant the team the offer (`--team-reach TEAM=NAME`). Its sandboxes, created
+through the front door, reach every offer their team is given and go only
+to hosts that offer them; other pools' teams reach none.
+
+## Hosts
+
+- **Adding hosts.** On GCP the service grows the group itself as spare
+  memory runs short (`--scale-*` flags); to add one by hand, resize the
+  group. A new host registers with the service when its agent starts and
+  takes sandboxes at once. A host installed by hand joins the same way.
+  A member of the group counts as booting, its memory as coming, for
+  `--scale-boot-within-s` (10 minutes by default) without a registered
+  host; past that the service logs "a host group member has not
+  registered in time" and grows the group around it. Look at that
+  instance in the cloud console (quota, a stockout, a boot that fails);
+  the service never deletes it, and counts it again once its host
+  registers. A stalled member and a draining host each keep their place
+  in the group's size, so a growth asks for the hosts it is short on top
+  of them, and the service does not suggest shrinking while a member is
+  stalled. List hosts with the operator key:
+
+  ```sh
+  curl -s -H "X-API-Key: $operator_key" "$COMPUTE_API/v1/hosts" | jq
+  ```
+
+  Each host shows its memory and disk, `cpu_millis` (the processor time
+  it guarantees at once now) and
+  `cpu_free_millis` (what a wake can still reserve). A `cpu_millis` below
+  what the host was given means something outside the VMs' group takes
+  more of its processors than it keeps back; the agent logs it.
+
+- **Draining a host.** `POST /v1/hosts/<name>/drain` stops new sandboxes
+  going there and hands off every sandbox on it that nothing holds awake;
+  each is adopted elsewhere on its next wake (ADR 18). The answer counts
+  those `moved` and those `left` (held awake, or the host did not answer):
+  drain again until none are left. Some never let go: a desktop someone
+  keeps open, a program that never stops working. Once the sandboxes
+  that go to sleep have gone, drain with `{"awake": true}` as the body:
+  each sandbox still awake then has its holds and any wake asked of it
+  ended and is paused, saved and archived where it stands, memory and
+  all, and carries on where its next wake places it after a pause of
+  seconds to a minute. Its open connections end, as in any move; a
+  command still running goes on, and its output stays readable. One
+  whose VM cannot be saved (its disk may have lost writes) stays `left`:
+  deleting the host recovers it from its latest archive. A host from
+  before this option ignores it and leaves those sandboxes `left`.
+  `POST /v1/sandboxes/<id>/move` takes
+  `"awake": true` too. `POST /v1/hosts/<name>/undrain` takes the host
+  back. A drained host stays drained until then, even if it is given up
+  on meanwhile (its lease lapsed, or it was fenced) and registers again:
+  it comes back draining, so a host on its way out never takes new
+  sandboxes.
+- **Resizing a sandbox.** A deployment that creates sandboxes at a new
+  shape leaves older ones at theirs. `POST /v1/sandboxes/<id>/resize`
+  with any of `vcpus`, `memory_mib`, `memory_request_mib`,
+  `cpu_request_millis` and `disk_mib` (each omitted stays) moves the
+  sandbox off its host as `/move` does and gives it the new shape, which
+  its next wake places and books (ADR 27). Its files stay. A new `vcpus`
+  or `memory_mib` ends its running programs: it boots afresh from its
+  disk. New requests or a longer disk keep them; its file system grows to
+  fill the disk as it wakes. `disk_mib` may only grow. A sandbox held
+  awake is refused as `busy` unless the body has `"awake": true`; one
+  woken again each time it is handed off answers `unavailable`, and
+  asking again is safe.
+- **Removing a host.** Drain it to zero, then delete the machine (on GCP,
+  `gcloud compute instance-groups managed delete-instances` so the group
+  does not replace it). Never delete a host that still owns sandboxes: the
+  service would treat it as lost and recover them from their latest
+  archive, which loses their programs and what they wrote since; drain
+  with `{"awake": true}` first.
+- **A lost host.** A host whose lease renewals stop is given up on after
+  its term and margin if it holds no sandboxes, or its instance is found
+  stopped or gone. One that holds sandboxes is waited for first, up to
+  `--give-up-after-s` (120 by default) from its last renewal, because a
+  host cut off only by the network keeps its VMs frozen and runs them on
+  once it renews again; giving up on it would end every program they
+  run. Meanwhile their wakes retry and new sandboxes go elsewhere. Then
+  the service fences it (on GCP it resets the
+  instance, or finds it stopped or gone, or restarted since: see below),
+  then gives up on it. Its sandboxes stay its own and wait for it
+  (ADR 32): their wakes fail with `unavailable`, saying the host stopped
+  answering, and `GET /v1/sandboxes/<id>` shows `waiting_for`. A host that
+  comes back keeps all of them, newer writes and all. Only once the host
+  is declared gone (its group found its instance deleted, or an operator
+  calls `POST /v1/hosts/<name>/gone`, which answers each sandbox that goes
+  on and when its stored copy was saved) are their owners cleared with a
+  raised epoch, and each wakes on another host from its
+  latest archived copy on its next request. Declare a host gone only once
+  its disks are known lost, or when getting the sandboxes back now matters
+  more than what they wrote since their copies. Each such sandbox then shows
+  `restored`, with a plain `notice` saying what point in time it went back
+  to; its wake's answer carries the same. It boots from that copy's
+  files: its programs end and start afresh, and what it wrote since the
+  copy is lost, which is why sandboxes archive soon after they go idle
+  and are checkpointed while they run. Its memory is not brought back
+  because the lost host may have run it on past the copy (ADR 18); a
+  drain or move hands the latest state off, memory and all. The adopting
+  host raises the `programs_lost` alarm for each sandbox whose memory it
+  set aside, as a host does for a VM that died. Nothing has to be done by
+  hand, except declaring a host gone that will not come back, and
+  replacing the machine where no group does it. A host declared gone
+  that comes back after all sets aside each copy it would otherwise
+  drop: the directory moves, whole, to `vm/aside/<id>-e<epoch>-<ms>`
+  under its state root, and the host logs an error naming it. Copy out
+  what is needed (its disk image holds the files), then delete it;
+  nothing deletes it otherwise.
+  A GCP host whose machine restarted (its watchdog reset it, or it
+  crashed) is given up on as soon as its lease lapses, with no second
+  reset and no wait: its agent writes the machine's boot to the
+  instance's `compute/boot` guest attribute as it starts, numbered one
+  past the boot named there before, and the service sees a boot numbered
+  higher there than the old registration named. The agent registers
+  only once it has written the boot (or given up, within ten seconds),
+  and names it only if the write was taken. The
+  host template turns guest attributes on (`enable-guest-attributes`) and
+  the service's role may read them
+  (`compute.instances.getGuestAttributes`); without either, the agent
+  logs that the metadata server refused the boot, and a restarted
+  machine is reset once more before its host rejoins, as before.
+  If the host comes back, its guard has already stopped its VMs (its
+  lease ran out), and it registers again; the raised epochs keep it from
+  running any sandbox that moved (ADR 18). A host given up on stays in
+  `GET /v1/hosts` as `lost` for a day, then the service forgets it, so
+  machines replaced over months do not pile up there or in the metrics;
+  if it comes back after that, it registers as a new host. The database
+  refuses any write naming a forgotten host, including one from an older
+  replica during a rollout (that request gets an error instead), so the
+  control service can be rolled forward or back across this. A host whose
+  fence keeps failing is not given up on and stays `live` with a growing
+  `compute_fleet_host_renewal_age_seconds`: alert on that, or on
+  `compute_control_give_up_failures_total`, and fence it by hand (stop
+  the machine).
+
+## Keys and certificates
+
+- **API keys.** Add a key by adding its line to the keys Secret and
+  restarting the service (`kubectl rollout restart`), or with
+  `compute-control add-key --team <team> --database <url>`. The store
+  keeps digests only. Removing a line does not remove the key: delete its
+  row after the new key is in use: `delete from compute.compute_keys
+  where digest = '<digest>'`, the digest being the key's BLAKE3 hash in hex
+  (`printf %s "$key" | b3sum`). Callers send keys as `X-API-Key`. To rotate Opengeni's key: add the new one, switch
+  `OPENGENI_COMPUTE_API_KEY` and roll Opengeni out, then delete the old
+  row.
+- **Host certificates** last a week, from the service
+  (`POST /v1/hosts/certificate`), and each host's daily timer
+  (`compute-host-certificate.timer`) renews its own when fewer than four
+  days are left; the agent is restarted to use it, and its VMs keep
+  running. `compute-host-certificate --force` renews at once. The service
+  builds every certificate itself: it takes only the public key from the
+  host's request and names the host it proved, never a name the request
+  asks for, nor the service's own names, nor a name ending in a dot. Each
+  certificate records how its name was proven, as its organizational unit:
+  `proven by gce-identity` (an instance identity token) or `proven by
+  certificate` (a renewal by certificate, or `issue-host-certificate`).
+  Only the second kind renews by being presented, and only while it is
+  valid at the moment of renewal, whatever connection it came over; a
+  certificate a token proved renews only with a fresh token. On a host
+  the key and certificate are one unit: each pair is written to its own
+  directory under `/etc/compute/certificates/`, the symlink
+  `/etc/compute/certificate` is switched to it in one rename, and
+  `host.pem` and `host.key` point through it, so an interrupted renewal
+  leaves the old pair or the new one. A pair counts as current only if
+  the key is the certificate's and the certificate verifies against
+  `ca.pem`; runs take a lock. Each run first finishes what an
+  interrupted one left: it points `host.pem` and `host.key` through a
+  valid published pair they do not both point through yet, and does a
+  restart of the agent still owed. `/etc/compute/restart-owed` is written
+  before a pair is switched in and removed only once the agent restarted
+  (or systemd reported it not running), so a failure after the switch, in
+  cleaning up, in asking systemd or in the restart, is made good by the
+  next run (the daily timer at the latest). A restart that was tried is
+  marked so in that file, and the next run restarts the agent whatever its
+  state, since a failed restart may have stopped it; so it also starts an
+  agent you stopped in between. To keep an agent stopped while a restart
+  is owed, stop `compute-host-certificate.timer` too, or delete
+  `/etc/compute/restart-owed` once you have checked that the agent will
+  start with the published pair.
+- **Google's keys** (for identity tokens) are used only until their
+  answer's `Cache-Control` expiry. Past it, only a successful fetch makes
+  them usable again, so while Google's keys cannot be fetched no host gets
+  a certificate by token: hosts retry (the startup's backoff, the daily
+  timer with days to spare), and the outage only delays renewals.
+- **The service's certificate** needs nothing: the service issues itself
+  one for a week, from the authority, and a new one every day, for both
+  ends of its links with hosts. Open links keep the certificate they began
+  with.
+- **The authority** is ten years' (Terraform's) or as long as you made it.
+  Replace it in three steps, each a Secret change and a restart of the
+  service (`kubectl rollout restart`); hosts follow, because each renewal
+  replaces a host's `ca.pem` with the authorities the service trusts:
+  1. Make the new authority (`compute-control new-host-authority`, or with
+     Terraform keep the current `host_authority_pem` and
+     `host_authority_key_pem`, set `previous_host_authority_pem` to that
+     certificate, and `terraform apply
+     -replace=tls_private_key.authority`). Put both certificates in
+     `ca.crt`, the old one first, with the old key in `ca.key`. The service
+     still issues from the old one and now trusts both; new hosts trust
+     both. Wait a week, so every host has renewed and trusts the new one.
+  2. Put the new certificate first in `ca.crt`, then the old one, with the
+     new key in `ca.key`. The service issues from the new one and still
+     accepts hosts' certificates from the old. Wait a week, so every host's
+     certificate is from the new one.
+  3. Leave only the new certificate in `ca.crt`, set
+     `previous_host_authority_pem` to empty and apply, and destroy the old
+     key.
+- **The database password.** Change it in the Secret, set a new
+  `computeControl.database.passwordRevision`, a whole number above the
+  last, and upgrade the release: the revision runs a new database Job,
+  which gives the role the new password, and rolls the pods, which read it
+  only at start; each new pod waits at its database init container until
+  it can log in with the new password, so the old pods keep serving until
+  then. Each Job records its revision on the role (as the role's comment)
+  and changes nothing once a Job of a higher revision has run, so a Job
+  left running by an earlier, failed upgrade cannot give the role the
+  earlier password back. So never lower the revision, and on a new
+  installation over an existing database keep the last one. Once the role
+  has the new password, the old pods' open connections keep working but
+  new ones fail until each is replaced, so do it outside busy hours.
+  Without `provision`, change the role's password yourself before the
+  upgrade.
+- **The link signing key.** Make a new key, add it to the link Secret
+  under a new entry, and make the new entry `link.key` and the old one a
+  `link.previousKeys` entry: the service signs with the new key and still
+  publishes the old one at `/v1/link/keys`, so links opened with tokens
+  signed by it stay valid. Once every token signed with the old key has
+  expired, drop it from `previousKeys` and the Secret.
+- **The API's certificate** comes from its Secret; renew it there and
+  restart the service. Opengeni's pods read `ca.crt` at start, so a new
+  authority needs a rollout of Opengeni as well.
+
+## Backups
+
+- **The service's database** is small (hosts, sandboxes' owners and
+  specs, keys). Back it up with Opengeni's Postgres; the `compute` schema
+  is part of the same database. After a restore from an older backup, the
+  service's view of owners may be behind the hosts': restart the service,
+  and hosts' registrations and the epochs the fence keeps decide (ADR 18).
+- **Sandboxes** are their own backup: every idle sandbox reaches the
+  archive bucket, which is the copy recovery uses. Keep the bucket's soft
+  delete on, and consider turbo replication or a dual-region bucket where
+  a regional outage must not lose sandboxes.
+- **Hosts** hold nothing that is not in the bucket once their sandboxes
+  are archived; do not back them up.
+
+## Security
+
+What isolates a sandbox, and what a human security review must cover
+before users move to compute from Modal:
+
+- **The VMM.** Every sandbox is a Firecracker microVM started through
+  Firecracker's jailer: its own user and group, a chroot, its own cgroup
+  and namespaces, seccomp filters, and a pinned Firecracker release
+  checked by SHA-256 (`deploy/host/pins.env`). Guests share no kernel with
+  the host or each other.
+- **The network.** Each sandbox has its own namespace and nftables rules:
+  internet through NAT, nothing else; no host, no other sandbox, no
+  private or shared ranges, no metadata service
+  ([ADR 11](adr/0011-fixed-guest-network.md)), but for the exact
+  destinations and TCP ports a host lists with `--reach`. Guests resolve
+  names through the host's answer at their gateway, which asks public
+  name servers and never the host's own; the review should confirm that
+  each listed destination is one sandboxes are meant to reach.
+- **Hosts.** Hosts hold their sandboxes' disks and memory, encrypted at
+  rest by the provider, and the host account can read and write every
+  archived sandbox in the bucket. A host is as trusted as every sandbox
+  in the fleet; run hosts in a project of their own, with no other
+  workloads, OS Login and no SSH from the internet.
+- **Host identity.** Hosts and the service authenticate each other with
+  certificates of the hosts' authority, which only the service issues. On
+  GCP a host proves its instance name with the instance's identity token
+  (signed by Google, for the service's URL, of the configured project and
+  host service account), and its certificate names that instance only, so
+  a host compromised to root cannot get a certificate for another host.
+  Instance names are unique in a zone, not across zones: keep each
+  project's host names unique (the Terraform root's group does). Anyone
+  who can create an instance running as the host account can add a host,
+  so grant `iam.serviceAccountUser` on it to no one but the service.
+- **Revoking a host.** A GCP host's certificate renews only with a fresh
+  identity token, which only that instance's metadata server can give: so
+  once the instance is deleted, no new token can be had for it, and its
+  certificate and key, even stolen, never renew by themselves. The
+  service does not check offline whether an instance still exists,
+  though: an identity token the instance was given before (Google's last
+  an hour) gets a certificate until the token's `exp` plus the
+  verifier's 60 s leeway, as many times as it is presented. So what an
+  attacker took from the instance works for at most the token's remaining
+  lifetime, plus 60 s, plus the seven days of the last certificate it
+  got; with no token taken, until the certificate expires, a week at most. A
+  lost instance that comes back (stopped, reset, recreated under its
+  name) gets a new one by token. Off GCP, a host renews by presenting its
+  certificate, and the service keeps no list of retired hosts: a stolen
+  certificate and key of such a host renew themselves for as long as the
+  authority trusts them. Removing that host from the fleet does not stop
+  them, and neither does the three-step replacement of the authority (Keys
+  and certificates), during which they renew like any host's. Only
+  replacing the authority at once does: give the service a `ca.crt` and
+  `ca.key` of a new authority alone, replace the GCP hosts (`gcloud compute
+  instance-groups managed rolling-action replace`; new instances install
+  the new authority from their metadata), and on each remaining host off
+  GCP put the new `ca.crt` in `/etc/compute/ca.pem` and give it a new
+  certificate with `issue-host-certificate`. Every certificate of the old
+  authority stops working at once. Keep such hosts' keys as you keep the
+  service's.
+- **The authority's key** (`ca.key` in the service's Secret, and the
+  Terraform state that made it) is the hosts' trust root: whoever holds it
+  can act as any host or as the service. Keep it as the service's other
+  keys; it never reaches the service's database.
+- **The service.** It holds the Opengeni and operator keys' digests, the
+  host group's permissions (resize, reset, stop, start) and the bucket's
+  objects. Opengeni reaches it inside the cluster; only the host endpoint
+  is exposed, with mutual TLS.
+- **Sharing between customers.** Identical chunks are shared within a
+  store prefix (see Capacity and cost).
+- **What the review must check**, in order of risk:
+  1. the jailer's configuration as the agent builds it (user per VM,
+     chroot contents, seccomp level, cgroup limits on the VMM, no device
+     files beyond KVM, the TAP device and the vsock);
+  2. the per-sandbox nftables rules on a running host, from inside a
+     guest: host addresses, the metadata address, other sandboxes, the
+     VPC, IPv6, the cloud's public-to-private mapping (`--block`), each
+     `--reach` destination's other ports, and the sandbox's name server
+     (its gateway's port 53, the one thing in the namespace a guest
+     reaches), which parses guests' queries;
+  3. the guest-to-host channels, whose input from guests is untrusted:
+     the vsock ports the host serves (guest ports it forwards, and the
+     agent link of ADR 21) and the pagers' and gateway's replies;
+  4. the memory pagers (userfaultfd) and the store's checksums, which
+     keep one sandbox's memory from another's and from tampering in the
+     bucket;
+  5. host identity as above, the bucket's IAM, and the service's keys;
+  6. the host image: kernel version and its KVM mitigations, SMT, and
+     that the hosts' project runs nothing else.
+
+  Until it is done, keep Modal the default and compute opt-in.
+
+## Storage
+
+- **A state volume is formatted only when it is blank.** With
+  `--state-device`, `install.sh` keeps a file system it finds on the
+  device: a host whose boot disk was rebuilt (a cloud restart that
+  recreates the boot disk from a newer image, losing
+  `/etc/compute/state-volume.uuid` and the mount entry) mounts its state
+  volume again, sandboxes and all, and records it anew. It formats only a
+  device with nothing on it, and refuses one with a file system holding
+  other files, or with anything else (a partition table, swap, an array
+  member), leaving it as it is. To start a host over on such a device,
+  losing what it holds, pass `--reformat-state-device DEV` instead, with
+  `/var/lib/compute` unmounted. The Google Cloud startup script likewise
+  assembles striped local SSDs that already carry an array instead of
+  creating one over them.
+- **Mount the state volume before the agent starts.** The agent creates its
+  state root if the parent directory exists, so an unmounted volume looks
+  like an empty host and the agent would start keeping new records on the
+  wrong filesystem. Configure the volume's mount, start the agent from a
+  systemd unit with `RequiresMountsFor=<state root>` so it starts after
+  that mount, and check that the intended volume is there:
+  `AssertPathIsMountPoint=` on the volume's mount point, and an
+  `ExecStartPre=` that compares the mounted filesystem's UUID with the one
+  recorded when the volume was set up. Ordering alone does not prove which
+  volume occupies the path.
+- **Archives must go off the host.** `--store` takes a directory or object
+  storage. A directory is for tests and single machines: the agent warns at
+  start, and an archive there is lost with the host. Production hosts use
+  `gs://`, `az://` or `s3://`.
+- **Size state volumes for what is placed on them.** The agent books local
+  disk before anything writes: saves, guest disk growth, wakes from object
+  storage, new sandboxes' first files, ready-sandbox fills and template
+  builds ([ADR 14](adr/0014-requests-limits-and-admission.md)). What it
+  cannot book waits or is refused with `host_full`, so a volume too small
+  for its sandboxes shows as refused wakes and creates, not as lost data.
+  Bookings are worst cases (a disk's full length less what it holds
+  alone), so a host of many large, mostly empty disks fits fewer sandboxes
+  than its free space suggests. Writes outside the agent (logs, other
+  programs on the volume) are not booked: keep `--disk-reserve-mib` above
+  them and alert on free space early, for example below 20 %.
+  A sleeping sandbox's disk holds little more than its files use: the guest
+  trims its file system's free runs of 1 MiB or more before every pause, so
+  space it freed comes back to the volume
+  ([ADR 6](adr/0006-memory-images-and-disks.md)). Sandboxes whose VM
+  booted before a host had discards, or whose image's guest is older, keep
+  what they freed until their next fresh boot.
+- **Encryption is the volume's and the store's.** Chunks are stored raw or
+  compressed, not encrypted by us, and a host's state volume holds disks and
+  memory images. Check that every state volume and the bucket are encrypted
+  at rest by their provider. GCP encrypts local SSDs; on Azure, managed-disk
+  encryption does not cover temporary disks, so turn on encryption at host
+  there. We do not add our own per-tenant encryption.
+
+## Deleting
+
+- **Deleting a sandbox: its pointer goes last, its bytes later.** Removal
+  records the intent, stops the VM, removes its network and then deletes
+  its pointer; a step that fails is tried again, and the sandbox shows as
+  removing (or blocked) until all are done. An hourly sweep then deletes
+  the chunks and manifests no pointer names whose hour ended at least an
+  hour before it began, two to three hours after the last pointer naming
+  them went ([ADR 25](adr/0025-pointers-in-the-control-service-and-objects-by-day.md),
+  [28](adr/0028-stored-objects-carry-their-hour.md)); one named with a day,
+  by a host of an earlier release, once its day ended an hour before.
+  Objects in the old layout (`chunks/v1`, `manifests/v1`) go once they
+  were last stored more than a week before the sweep. A chunk another
+  sandbox still names stays: identical content is shared.
+- **Where pointers live.** In a fleet the control service keeps them, in
+  its database (`compute_pointers`); the sweep runs from the control image
+  (`compute-control sweep --store ... --delete`) with that database.
+  Upgrade the Helm chart together with the control image: the image no
+  longer carries `compute-host`, so an earlier chart's sweep job fails
+  against it rather than sweeping by the object store's pointers. A
+  host on its own keeps them in its object store, which must enforce
+  conditional writes (GCS, Azure, S3 itself; not Garage), and sweeps with
+  `compute-host sweep`. When a fleet first runs a release that keeps them
+  in the service, the service moves them in by itself once no host of an
+  earlier release is live, and marks the object store so that nothing
+  sweeps by the pointers left there; until then hosts of the new release
+  neither archive nor restore and the sweep refuses to start, so upgrade
+  every host soon after the service. `compute_control_pointers_imported`
+  says whether the move happened and
+  `compute_control_pointers_waiting_hosts` how many hosts of an earlier
+  release it waits for; `OpenGeniComputePointersWaiting` fires when that
+  stays above zero for 30 minutes. Right after the move, again a few
+  times over the next hour, and before each sweep that deletes, the
+  service adopts any pointer the object store still holds that it has
+  none of (one an import missed on a store that listed it late), and says
+  so. Objects of the old layout, which only those pointers name, are not
+  swept until a week after the move.
+- **Moving a fleet's archive to another store.** The pointers stay in the
+  service, so only chunks and manifests move: `compute-control
+  copy-archive --from <store> --to <store>` copies every one a pointer
+  names, checking each against its name as it reads it, and skips what
+  the other store holds already. What no pointer names (a sweep's
+  garbage), quarantined copies and the pointers an object store kept
+  stay behind, so it copies less than a whole-bucket copy and never
+  writes to the store it copies from. It needs the fleet's pointers in
+  the service, adopts any the import missed first, marks the other store
+  as one whose pointers the service keeps, and prints a report; it fails
+  if the other store lacks anything a pointer names, saying which
+  pointers or objects, and copying again picks up where it stopped. Each
+  store takes its provider's usual settings from the environment; for two
+  stores of one kind, such as two S3 stores, give the one copied to its
+  own in a file with `--to-env` (`AWS_ENDPOINT`, `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, one `NAME=value` a line). `--at-once` (16)
+  bounds the objects copied at a time; lower it when the stores serve
+  other traffic. To move: copy while hosts still archive to the old
+  store, which can take hours for a large archive; stop the service and
+  every host (or drain them) so no archive is in flight; copy again,
+  which copies only what was stored since; point `serve --archive` and
+  every host's `--store` at the new store; start them, wake a few
+  sandboxes, and run `compute-control sweep --store <new>` without
+  `--delete`, whose `stored` should equal its `named`. Keep the old store
+  until wakes from the new one have run for a while.
+- **One clock.** Hosts in a fleet name the day of what they store by the
+  fleet's clock, the database's, which the service tells with every
+  pointer answer, moved on between answers by the host's monotonic clock,
+  so a step of its system clock changes nothing; the sweep starts by it
+  too. A host or replica whose own clock is more than a minute from it
+  logs a warning, but stores safely.
+- **The archive store must keep what it acknowledges.** A host drops its
+  local copy once the store holds the chunks, so a store that acknowledges
+  a write before it is durable (Garage in its `dangerous` consistency
+  mode, which acknowledges once one node has it) can lose a stored copy if
+  a node fails in the moment before it passed a write on.
+- **Forgotten memory images** (30 days after last use by default) lose
+  their pointer entry together with their working-set pack, and their
+  chunks go at a following sweep under the same rule.
+- **Every store's sweep deletes.** No delete is conditional: a host writes
+  only names of its current hour (a day on an earlier release), so a late
+  delete of an older name never takes a newer write.
+- **Provider retention comes on top.** GCS soft delete keeps deleted
+  objects 7 days by default; set the bucket's policy to what we promise.
+- **Quarantined objects** (stored copies that failed their checksum, kept
+  for inspection under `quarantine/v1/`) are not swept. Give that prefix a
+  lifecycle rule, for example deletion after 30 days.
+- **Watch the sweep.** It stops before deleting anything when a pointer or
+  manifest cannot be read, by design: deleting around an unreadable entry
+  could take chunks it names. Alert when no sweep has succeeded for three
+  hours: what replaced copies named piles up meanwhile. Its error names
+  the key that stopped it.
+
+## Observing
+
+What the agent reports is in [ADR 16](adr/0016-observability.md).
+
+- **Metrics in Prometheus.** In a fleet, the control service and its
+  hosts report to the Prometheus that Opengeni's chart already feeds
+  (`deploy/observability`), with no collector or credentials on the hosts:
+  - The control service serves `GET /metrics` on `--metrics-listen`
+    (`computeControl.metrics.port`, for example 9464), which the chart's
+    ServiceMonitor scrapes. Every replica reports its API requests by route
+    and outcome (`compute_control_requests_total`, with their latency),
+    whether it leads, and the hosts' metrics it passed on; the leader alone
+    reports the fleet as it reads it: each host's state, what it has and
+    can still promise for memory, processors and disk, its sandboxes, how
+    long ago its lease was renewed, and the host group
+    (`compute_fleet_*`).
+  - Hosts run with `--otlp-metrics-to-control` (on GCP, in the Terraform
+    module's `host_args`) and post their metrics every ten seconds
+    to the control service over the same mutual TLS as their lease. The
+    service refuses an export whose resource names another host than its
+    certificate does (`host.name`, which the host sets to its name in the
+    fleet), and passes on only the metrics hosts send (the list in
+    `compute-protocol`'s `host_metrics`): each with its kind, cumulative
+    counters, exactly its labels with their listed values, plain values
+    and the shared histogram bounds, under the host's own name and with
+    no resource attributes but the service's name and the host's. A host
+    cannot pass off the control service's or the fleet's series, another
+    host's, or labels of its own, and cannot add series by varying what it
+    says about itself: its zone, memory profile and CPU template come from
+    its registration, on the leader's `compute_fleet_host_info`. Data
+    points left out are answered as an OTLP partial
+    success and counted in
+    `compute_control_host_metric_points_left_out_total`. It passes them on to `--host-metrics-to`
+    (`computeControl.metrics.hostsTo`): Prometheus's OTLP receiver,
+    `/api/v1/otlp/v1/metrics`, which `deploy/observability`'s
+    `values.compute.yaml` turns on with `host.name` promoted to the
+    `host_name` label. Events stay in the host's journal.
+  - The chart's PrometheusRule alerts on both (with
+    `observability.prometheusRule.enabled`), scoping each host to its
+    release through the leader's `compute_fleet_host_info`, and the
+    **Opengeni · Compute** dashboard shows them.
+- **Distinguish booking headroom from filesystem space.**
+  `compute_fleet_host_disk_booking_headroom_bytes` is what more wakes may book after
+  subtracting worst-case sandbox growth and the host's reserve from available
+  space, not the filesystem's free bytes. Placement also counts
+  `compute_fleet_host_disk_reclaimable_bytes`: saved idle copies and unused
+  caches it can safely release. Both remain useful capacity diagnostics.
+  A small unbooked fraction on one host does not prove a full filesystem or
+  failed fleet placement, so it does not alert by itself.
+  `OpenGeniComputeNoCapacity` still alerts on sustained actual fleet refusals;
+  host alarms and unhealthy-sandbox alerts remain.
+  `compute_fleet_host_disk_available_bytes` measures the state filesystem's
+  available bytes before bookings and reserve. `OpenGeniComputeHostDiskLow`
+  alerts when this falls below 10% of that filesystem for 15 minutes.
+  Monitor any separate backing filesystem independently: this reading covers
+  the state volume only.
+  Total filesystem size is part of the host description sampled at agent
+  startup. Restart the host agent after resizing its state filesystem so
+  the percentage denominator and advertised capacity reflect the new size;
+  an online resize alone does not refresh that description.
+  Upgrade the control service, host bundles, chart and dashboard together.
+  The former `compute_fleet_host_disk_free_bytes` metric is renamed to booking
+  headroom; update custom queries to the explicit new name. Older hosts omit
+  the new filesystem reading, so no physical-space series or disk alert exists
+  for them until upgraded. Missing is unknown; a reported zero is a full disk.
+  The wire field `disk_free_mib` retains its booking meaning for compatibility.
+- **Run a collector next to each host.** Pass `--otlp-endpoint
+  http://127.0.0.1:4318` to send events as OTLP log records and metrics
+  every ten seconds (`--otlp-metrics-every`); add `--otlp-header
+  name=value` for a remote collector that needs a token. Without it,
+  events go only to the agent's log, one JSON line each under the
+  `compute_event` target, which the journal keeps. `--no-journal-events`
+  turns that copy off once a collector takes them. With
+  `--otlp-metrics-to-control` as well, only events go to the collector.
+- **Run the canary** with `--canary-every 5m` and, if the guest image
+  serves a port, `--canary-port`. It costs one 128 MiB sandbox kept awake
+  and one created and removed per round, and a little store traffic. Its
+  two sandboxes show in status like any other; their ids start with
+  `ca4a79`, then 64 bits the host made up at random the first time and
+  keeps in `canary-id` in its state root, so hosts sharing a store never
+  touch each other's canary.
+- **Alert on these:**
+  - any increase of `compute.alarm.count`. Each occurrence also writes a
+    `compute.alarm` event naming the sandbox (or the stored object's key),
+    so group alerts on that.
+    A `programs_lost` alarm for a VM the host did not end on purpose
+    comes with a `compute.vm.lost` event for the same sandbox, written
+    before the VM is torn down, since its logs may go with it.
+    `compute.vm.end` says how it was lost: `vm_exited` (its process ended
+    on its own: the guest rebooted, which its kernel does on a panic, or
+    the VMM failed or was killed), `memory_lost` (its memory could no
+    longer be served), `guest_stopped` (it took no connection: halted,
+    powered off or hung), `ended_for_memory` or `fenced` (the host's
+    guard killed it because the host's lease ran out before it froze;
+    that also raises the `fenced` alarm). `compute.vm.guest_said`,
+    `.vmm_said` and `.pager_said` hold the last lines of the guest's
+    console, the VMM's own messages and its pager's log, which usually
+    say why.
+  - any `fenced` alarm, and the host log's warning `renewals to the
+    control service go unanswered`: a host whose renewals went
+    unanswered for most of its lease term (30 s) freezes its VMs three
+    seconds before the term runs out, and kills those that do not freeze
+    in time, all but those that are their sandbox's only copy (never
+    archived, such as a CI runner's), which run on. The service's histogram
+    `compute_fleet_host_renewal_gap_seconds`, by host, records how long
+    each host went unheard; gaps of more than 15 s say the link or the
+    host is close to that.
+  - `compute.canary.count` with outcome `failed` or `timed_out`, and a
+    `compute.canary.last_run` older than one rotation plus a period for
+    any path, which also catches an agent that died or hangs. A rotation
+    is four periods (three on a host without a store), since each run
+    takes the next path, so with `--canary-every 5m` that is 25 minutes.
+  - `compute.sample.age` above a minute: the agent's loop is stuck. In a
+    fleet the agent's process then stops itself for systemd to start it
+    again (log line `the agent has not said what the host can take on
+    for a minute`), keeping the VMs and the lease; repeated restarts mean
+    a host that needs a person. A stop that hangs a minute more ends the
+    process at once (log line `the stuck agent's process has not stopped
+    in a minute`).
+  - `compute.step.oldest_age` above the step's usual time, for example
+    ten minutes for an archive.
+  - `compute.sandbox.unhealthy` above zero: sandboxes broken, blocked or
+    unsavable need a person. A sandbox blocked as `not recovered, tried
+    again later` after an agent restart is tried again on its own, about
+    every five minutes once earlier tries failed, for as long as it stays
+    blocked (log lines `sandbox still not recovered` and `recovered a
+    sandbox on a later try`); `not recovered` alone is not tried again.
+    While its VM may still run, a blocked sandbox holds its full size on
+    the host, and a host the service gave up does not register again
+    while anything is blocked, except sandboxes whose VMs are held frozen
+    (`not recovered while its VM is held frozen`): it lists those, and
+    the service's rulings end or keep them before the guard thaws them.
+    Each round of tries holds the agent up to the two seconds a VMM is
+    given to answer.
+  - any increase of `compute.export.dropped`: the collector is slow, away
+    or refusing; events are still in the journal.
+  - `compute.memory.stalled` above zero in its `severe` bucket (40 % and
+    up) for ten minutes: sandboxes that spend most of their time waiting
+    on memory. Two alarms belong to the memory rule
+    ([ADR 24](adr/0024-busy-sandboxes-are-slowed-never-frozen.md)):
+    `ended_for_memory`, a VM ended because its guest could not be shrunk
+    while the host was short, and `oom_killed`, the kernel ending VM
+    processes at the VMs' wall. Either should be rare; repeated ones mean
+    requests too low for the work or a host packed too tightly.
+- **Tune requests and packing from the memory metrics.** With the memory
+  rule on (4 KiB pages, zswap and a swap device), each host reports what
+  running sandboxes requested, borrowed above that, compressed and keep
+  out of RAM (`compute.memory.requested`, `.borrowed`, `.compressed`,
+  `.swapped`), how many stall on memory by how much
+  (`compute.memory.stalled`), the level of borrowed memory idle and busy
+  sandboxes may keep and how many it holds back (`compute.memory.level`,
+  `.held_back`), how many the kernel cannot hold to their bound while the
+  host is pressed, such as sandboxes full of data that does not compress
+  (`compute.memory.over_bound`), how many it is still bringing down to it
+  then, slow to start because it ages a VM's pages before it compresses
+  any (`compute.memory.bringing_down`; a sandbox counts there for up to a
+  minute without coming down before it counts over its bound and its
+  guest is shrunk), what sandboxes being put to sleep and
+  spares ending are giving back (`compute.memory.relief`, which the levels
+  count as available), the shortfall even with everyone at their request
+  and that counted, which guests are shrunk for
+  (`compute.memory.shortfall`), and the guest shrinks by answer,
+  what they freed and the programs they ended (`compute.memory.shrink.*`,
+  `compute.memory.processes.ended`). Each shrink is a `compute.memory.shrink`
+  event naming its sandbox, the programs ended and its cause
+  (`compute.memory.cause`): `short`, the host short of memory with every
+  sandbox held to its request, which says the host is too full for what it
+  runs, or `over_bound`, a sandbox the kernel could not hold to its bound,
+  which says that sandbox's memory does not compress. The log line asking
+  the guest names the same cause, with the shortfall or what it holds over
+  its bound. Each running
+  sandbox's summary carries its peak use, request, compressed and swapped
+  memory and its stall: a kind of job that keeps peaking far above its
+  request, or stalling, wants a larger request. A sandbox that only stalls
+  itself is never shrunk for it: the severe-stall alert names the host,
+  and the sandbox summaries there show which one.
+- **Disk relief** ([ADR 30](adr/0030-disk-relief-for-admission.md)): what
+  a host frees for a create, adopt or wake without losing anything, idle
+  sandboxes' local copies that object storage holds and templates and
+  cached images nothing uses, is in its status (`disk.reclaimable`, bytes)
+  and its lease report (`disk_reclaimable_mib`), which the leader reports
+  as `compute_fleet_host_disk_reclaimable_bytes` and placement counts as
+  free disk. Each thing that goes is a `compute.disk.freed` event with its
+  kind (`copy`, `template` or `image`), the bytes it was measured to free
+  (`compute.disk.bytes`, a lower bound, 0 if never measured) and why
+  (`compute.disk.reason`): `relief` for room something booked, `unused`
+  for the week rule, `sleep` for a sandbox's own sleep policy. Many
+  `relief` events say the host's disk is too small for what it runs, and
+  templates removed that way are built again by the next create of their
+  shape.
+- **Find a slow sandbox** by querying `compute.step` and `compute.request`
+  events for its `compute.sandbox.id`. Steps carry time per phase, bytes,
+  cause and the host-side pressure the sandbox saw since its previous
+  event. A caller that sends `traceparent` finds them under its own trace.
+- **Find what woke a sandbox**: a wake step a caller asked for carries
+  `compute.wake.by`: `fleet` (a wake, touch, hold or connection through
+  the fleet), `agent_link` (a request for its agent, a message with a
+  reply subject; acknowledgements and other messages nobody waits on never
+  wake one) or `guest_port` (data for the guest on a port that wakes it).
+- **Find a guest that stopped.** A guest can power off, halt or hang
+  while its VM process runs on. On a host with `--restore-notice-port`,
+  whose guests must all listen on it, the agent connects to each running
+  guest's notice port every thirty seconds. It logs a warning for each
+  check a guest takes no connection on, and after five in a row an error
+  naming the sandbox (`guest took no connection on its notice port`).
+  It then ends the VM as a crashed one: a `compute.alarm` for programs
+  lost, files kept, and the next wake boots from the disk. A guest that
+  halted or powered off says so first: Firecracker on x86 gives it no
+  way to power off, so its kernel's last line on its console
+  (`console.log`, after which come only the VMM's own lines) is
+  `reboot: System halted` or `reboot: Power off not available: System
+  halted instead`. Such a guest is ended at its first miss that counts,
+  within about 35 seconds, with the error `guest said it halted`. The
+  line alone ends nothing: a guest that still takes connections keeps
+  running whatever its console says. A host whose guest image does not
+  listen on the notice port must not set it.
+  A check counts only if the guest could run all through it: no step
+  paused it meanwhile, the guard did not freeze it, and the machine did
+  not suspend. The guard says when it freezes the VMs, which it does on
+  its own steps, when the lease is about to run out and while a suspend
+  is prepared: it keeps a count of its freezes beside its lock
+  (`/run/compute-host/guard.lock.freezes`), odd while the VMs may not
+  run and even while they do, and writes it at each of its steps with the
+  time it wrote it. On a host with a lease a check counts only if the
+  count was even when it began and the guard still writes the same after
+  it ended. A guard that cannot write the file logs `the guard could not
+  write its freeze count` once, and until it can, no check counts.
+  A guard from before the count keeps none, and then no check counts
+  until the host runs a guard that does. It also
+  needs the host to be able to ask the VMM for the connection at all: a
+  host that cannot reach a VM's vsock socket, as when it is out of
+  descriptors, logs `could not check the guest` and counts nothing
+  against it.
+
+## Upgrades
+
+- **Order.** Upgrade every host before the control service. Hosts refuse
+  requests they do not know, and fields they do not know in the
+  service's answers to registration and lease renewal, its rulings and
+  sleep settings; they ignore other unknown fields of a request they
+  know.
+  So a newer service could send an older host something it refuses, or
+  a setting it silently ignores. The service ignores what it does not
+  know in a host's description and capacity, so newer hosts work with
+  the older service meanwhile.
+  A release that lets hosts leave out something they used to send, which
+  an older service would refuse, says so, and then the service goes
+  first.
+  A release that changes the lease terms (as the one that raised T from
+  10 s to 30 s did) also goes service first, and every host follows
+  promptly: a host's VMs must stop before the service gives up on it, so
+  a host must never hold a longer term than the service it renews with.
+  Until it is upgraded, a host renews the lease it holds but cannot
+  register again, since hosts only register under terms equal to their
+  own: one whose lease runs out meanwhile (cut off, or an agent restart
+  longer than its term) keeps its VMs frozen until it is upgraded. Never
+  roll the service back below such a release while hosts run it: roll
+  the hosts back first.
+- **The agent** can be replaced at any time; running VMs keep running
+  ([ADR 9](adr/0009-vms-outlive-the-agent.md)), and a host in a fleet
+  keeps its lease however many sandboxes it has: the old agent renews
+  the lease until its process exits and the new one from the moment its
+  process starts, while it takes its sandboxes back; until it has, it
+  refuses requests as unavailable, so the service places elsewhere
+  meanwhile
+  ([ADR 18](adr/0018-the-control-service-leases-and-fences.md)). Its log
+  lines `templates found`, `recovered` and `started` tell how long that
+  took and where. A VM it takes back still saves only the pages that
+  changed: `memory-base.json` in the sandbox's directory records what
+  that VM process's memory is based on. A VM saves every page the first
+  time when that record cannot vouch for its base: it is missing,
+  unreadable or names another process, or its image is gone, changed
+  (other hashes) or not wholly on local disk
+  ([ADR 6](adr/0006-memory-images-and-disks.md)). Template inputs'
+  hashes are kept under `templates/inputs/`, so a restart reads none of
+  the large files the templates depend on, such as the base image,
+  unless they changed. Run the new bundle's `install.sh` (without
+  `--config`, the installed
+  configuration stays):
+  it installs the release beside the old ones, points
+  `/opt/compute/current` at it and restarts the agent (unless it runs all
+  of that already); VMs keep running.
+  A release whose binary does not run on the host is refused first, and
+  the running release, guard and agent are left as they are: the guard
+  handed over to a binary that cannot start would let the watchdog reset
+  the host.
+  A guard running another binary (of another release, or one replaced
+  in this one) is handed over to this one's by restarting its service.
+  Opening or closing the watchdog feeds it (it stays armed), so the guard
+  opens it only at a step that may feed it and has systemd keep it open
+  in the service's file descriptor store (`systemd-analyze fdstore
+  compute-guard.service` shows it); it is ready only once systemd does. A
+  guard that ends, however it ends, then does not close it, and the new
+  guard takes it over from the store within milliseconds and goes on from
+  what the lease file and the freezer show (the watchdog resets the
+  machine if it does not within its 3 s). A guard of a release before
+  the store keeps the watchdog itself and would close it at whatever
+  moment it ended, so it is not handed over: it runs on until the host
+  starts again from a template naming a release with the store (see
+  below) or is replaced by a host made from one.
+  On a shared machine (Hosts, A host that shares its machine) the guard
+  feeds systemd's watchdog instead, and `install.sh` hands it over with
+  `compute-host hand-over-guard`: it marks the hand-over, so that the
+  guard's stop hook leaves the VMs to the new guard, and restarts the
+  service.
+  Installing such an earlier release over a later one (a rollback)
+  installs its unit, which keeps no descriptors, so systemd drops the
+  stored one; the running guard then keeps the watchdog itself, like an
+  earlier release's guard, until the host starts again.
+  Without the hand-over, a fix to the guard would reach a host only at
+  its next boot. Old releases stay under `/opt/compute/releases`;
+  remove one once no pager runs from it (`fuser
+  /opt/compute/releases/<version>/compute-host`). On GCP, set the new
+  bundle in Terraform and apply it, so hosts created from then on install
+  it. Then replace the hosts one at a time, each drained first, or upgrade
+  each in place. A running host keeps the metadata of the template it was
+  made from, and its startup script installs the bundle that metadata
+  names at every boot, so first move it to the new template:
+  `gcloud compute instance-groups managed update-instances <group>
+  --instances <host> --minimal-action refresh
+  --most-disruptive-allowed-action refresh` applies the new template
+  without stopping or restarting the VM (for a new bundle, that is its
+  metadata), and refuses a template that would need the machine
+  restarted (such as a new machine type: replace those hosts).
+  Then run `install.sh` from the new bundle on it. A host upgraded in
+  place without the refresh goes back to its old bundle when it reboots.
+- **The control service** is a Deployment: upgrade the chart with the new
+  image. Replicas share the store; one leads at a time, and a new leader
+  waits a whole lease term before giving up on any host, so a rollout
+  never loses hosts.
+  Its schema has versions (table `compute_schema`): each replica, as it
+  starts, applies the versions it knows and the database lacks, in order,
+  in one transaction under an advisory lock, so two starting replicas
+  never both migrate. A released version is never changed; a schema change
+  is a new version that keeps what the previous release reads, so old
+  replicas keep working beside new ones during a rollout, and a rollback
+  to the previous image starts (it logs that the schema is newer than it
+  knows).
+  The answer to a host's registration is stored (`compute_hosts.answer`)
+  and read back by whichever replica sees that attempt again, so it is
+  part of the schema too: a release adds to a ruling only what the
+  previous release's decoder accepts.
+  Back up the schema before an upgrade that adds a version.
+- **Firecracker**: a wake uses whichever configured Firecracker (the
+  current one or one kept with `--retained-firecracker`) reads the image's
+  snapshot format on the image's CPU, so a newer compatible release
+  restores older images and runs them from then on. Keep the previous
+  binary only when a release changes the snapshot format, until no saved
+  image needs it. Status shows the runtime the agent launches new VMs
+  under, not the runtime of every saved image; each image records its own.
+- **The host kernel**: Firecracker does not promise that a memory image
+  restores under another host kernel, and one made under a newer kernel
+  can be refused under an older one (KVM saved registers the older one
+  does not set). The runtime names the kernel, so warm templates are
+  rebuilt after a kernel change, and a saved image refused for another
+  kernel or processor is given up after a few wakes in a row: the sandbox
+  boots from its disk and its programs are lost, which the host alarms on.
+  So prefer kernel upgrades to rollbacks. Before rolling a new host image
+  out, save sandboxes on the old one and wake them on the new one (with
+  the `save_wake` and `lab` tests and a store both hosts share), and keep
+  the old image to roll back to.
+- **The guest kernel** a VM booted with stays through every save and wake;
+  only a fresh boot picks up a new one. A sandbox's own disk then boots
+  with the newest kernel, so a new guest kernel must be tested against the
+  root filesystems still in use. We never replace a user's disk to upgrade
+  it.
+- **Security patches.** A sandbox runs a patched Firecracker only once its
+  VMM process is replaced: when it wakes from a saved image (Saved,
+  Archived or Remote). One that resumes from Paused or Compressed resumes
+  the same process, and one that stays busy keeps it. A restore prefers
+  the binary that made the image while it is kept with
+  `--retained-firecracker`, so drop a vulnerable binary from that list
+  first; the current binary then restores every image whose snapshot
+  format it reads. To move a sandbox off a vulnerable VMM now, sleep it to
+  `saved` (the `Sleep` request), wait until status shows it saved (the
+  request answers at once, holds delay it and a wake cancels it), then
+  wake it. A guest kernel fix needs a
+  fresh boot, which means stopping affected sandboxes (they boot fresh
+  from their disks). There is no live patching.
+
+## Emergencies
+
+- **Stopping a sandbox when the state disk is read-only.** Removal writes
+  its intent first and refuses when it cannot. To contain a sandbox anyway,
+  kill its VM directly: `echo 1 > /sys/fs/cgroup/compute/<sandbox id>/cgroup.kill`
+  (the path under `--cgroup`). Its files stay and the agent treats
+  the VM's end like a crash. Remove the sandbox through the API once the
+  disk is writable again.
+- **Lifting the VMs' memory limit.** `echo max > /sys/fs/cgroup/compute/memory.high`
+  (the group under `--cgroup`) lifts it until the agent next starts, which
+  sets it again. The agent reads it back as it samples, so its count of
+  available memory stops counting the limit at once. Without it, guests
+  bursting together can take the host's memory faster than relief saves
+  them (see Capacity and cost).
+
+## Network
+
+- Sandboxes cannot reach the host, other sandboxes, private ranges or the
+  metadata address ([ADR 11](adr/0011-fixed-guest-network.md)). Where the
+  cloud maps a public address onto the host, the host can also be reached
+  through that address: pass it with `--block`, and check from a guest that
+  it is refused.
+- **Private destinations sandboxes need.** Where sandboxes must reach
+  something only a private or overlay network serves, such as an
+  Opengeni whose API, object storage and relay are private, list each
+  one with the ports needed: `--reach api.internal:443,9443,9445` in
+  `COMPUTE_HOST_ARGS` (the GCP root's `host_args`), repeated per
+  destination. A name is resolved by the host when its agent starts, so
+  the host's own resolver must know it, and the sandboxes' name server
+  answers it with those addresses; restart the agent if it moves.
+  Nothing else on the network opens, and the agent refuses an entry in a
+  range sandboxes may never reach. `--dns` names the upstream name
+  servers the host asks for everything else (1.1.1.1 and 8.8.8.8 by
+  default); keep them public, as sandboxes can look up whatever they
+  know.
+- **Private destinations only some sandboxes need.** Where only some
+  workloads should reach a private destination, such as CI jobs that
+  deploy to a private cluster's API, offer it under a name instead:
+  `--offer previews=k3s.internal:6443` in `COMPUTE_HOST_ARGS`, repeated
+  per destination (entries with one name make one offer). It is checked
+  and resolved as `--reach` is, but opens only to the sandboxes whose
+  create lists the name in `reach` (`"reach": ["previews"]`), in their
+  namespaces and, on the host, for their links' addresses alone; their
+  name servers alone answer its names. The host tells the control service
+  its offers' names, and placement puts such a sandbox only on a host that
+  offers every name it asks for: elsewhere its create answers 503 (no host
+  offers it). Grant each team the names its sandboxes may ask for on the
+  control service, `--team-reach TEAM=NAME`, repeated (in the chart,
+  `computeControl.extraArgs`); a create asking for one its team was not
+  given is refused with 400. E2B's API has no way to name an offer, so a
+  create through the E2B front door (runner pools' among them) reaches
+  every offer its team is given: give such workloads a team of their own.
+  A sandbox keeps its `reach` for life,
+  including on another host after a move, which must offer it too; one on
+  a host restarted without the offer reaches it no more, and is warned of.
+- **Hosts on an overlay network.** Where the control service and Opengeni
+  are reached only over an overlay network (a WireGuard mesh such as
+  Tailscale), the GCP root joins hosts to it at boot with
+  `host_startup_prelude`, a script run before anything else on every
+  attempt, and `advertise_interface` (such as `tailscale0`) makes each host
+  give the service that interface's address to dial. Keep the join key in
+  Secret Manager and list it in `host_readable_secrets` rather than in the
+  prelude, which is instance metadata. Overlay addresses in the shared
+  range (100.64.0.0/10) are blocked to sandboxes like any local network,
+  but for what `--reach` lists, and the overlay's name server is never
+  asked for them; do not accept routes or use an exit node on hosts, and
+  give hosts an overlay identity that may reach only the service's host
+  endpoint and Opengeni's endpoints.
+- **A control service in another cloud.** Where the control service runs
+  outside the hosts' network with no private path to it, such as in an
+  Opengeni cluster on another cloud, both directions go over public
+  addresses, still mutual TLS of the hosts' authority alone: the GCP
+  root's `assign_external_ip` and `advertise_public_address` make each
+  host give the service its public address, `control_source_ranges`
+  admits only the service's egress addresses to port 7443, and
+  `computeControl.hostsService` is a public `LoadBalancer` on a static
+  address whose name `hostUrl` gives. Hosts' public addresses change as
+  hosts are replaced, so the hosts endpoint takes connections from
+  anywhere: a caller without a certificate of the hosts' authority is
+  refused by every route but the one that issues a first certificate,
+  and that one needs an identity token of the configured project and host
+  account. A host's public address carries its traffic to the internet,
+  sandboxes' included, and the startup script blocks it to sandboxes
+  (`--block`).
+
+## Capacity and cost
+
+- **Nested hosts need their huge-page pool reserved** (`vm.nr_hugepages`,
+  or `hugepages=` on the kernel command line so it is reserved before
+  memory fragments). Pages in the pool serve only guests, so size it to the
+  guest memory meant to be resident at once, ready pool included, and leave
+  the rest to the host: page cache, pagers and the agent. The agent refuses
+  to start the nested profile without a pool. On cgroup v2 without the
+  `memory_hugetlb_accounting` mount option, a VM's huge pages do not show in
+  its `memory.current`.
+- **Nested hosts should run on an invariant TSC.** A host VM whose
+  hypervisor does not pass the invariant TSC through (`constant_tsc` and
+  `nonstop_tsc` missing from `/proc/cpuinfo`, `kvm-clock` as its clock
+  source) saves memory images without a realtime clock. They restore, but
+  a woken guest's monotonic clock leaves out the time it slept (ADR 3).
+  For a libvirt host VM, require the `invtsc` CPU feature.
+- **Sleeping sandboxes are not free on the host.** Each record keeps a
+  network namespace and its guest-port listeners even when its memory and
+  disk live only in object storage. The final measurements report agent
+  memory and open files per archived sandbox; placement must count records,
+  not only running VMs.
+- **The agent's processors come out of the headroom.** The agent runs a
+  quarter of the host's processors, from 2 to 8, as async workers, and
+  compresses as many chunks at once for object storage; blocking threads,
+  which mostly wait on local disk, are 64 more than that. Archiving is the
+  agent's only long processor-bound work. Sandboxes' requests are
+  guaranteed first: when every processor is busy, the agent and the rest
+  of the host share `--cpu-headroom-millis` (a sixteenth of the
+  processors, at least 500), and archiving then takes longer; a waking
+  sandbox's pager runs in its own VM's group, on its request. Otherwise
+  `--compress-threads` sets how fast idle sandboxes reach object storage
+  against how much idle processor time their neighbours could have used
+  (see the agent threads measurement in [measurements](measurements.md)).
+  Raise it, or the headroom, where saved sandboxes wait long for their
+  archive and local disk runs short; `--worker-threads` and
+  `--blocking-threads` rarely need changing.
+- **Bursting sandboxes stop short of the host's own memory.** On 4 KiB
+  pages with relief, the agent sets `memory.high` on the VMs' group
+  (`--cgroup`) to the host's memory less the high watermark, and logs it
+  (`memory the VMs may hold together`) as it starts, and `memory.max` to
+  the host's memory less the midpoint of the two watermarks, the wall
+  they never pass together. Relief pushes idle sandboxes out and asks balloons; a sandbox
+  in use is never paused for memory
+  ([ADR 24](adr/0024-busy-sandboxes-are-slowed-never-frozen.md)). With
+  zswap and a swap device (never written to: writeback is off), each
+  running VM keeps its request protected and gets its own `memory.high`,
+  so the sandboxes that borrowed the most are compressed and slowed
+  first, then shrunk from inside (their largest programs end), and only
+  as a last resort ended. A sandbox the kernel cannot hold to its
+  `memory.high` while the host is pressed (memory that does not compress,
+  a full pool) is shrunk after 10 s as if the host were short. The agent
+  never sets a VM's `memory.high` below what it holds, so such a VM's
+  `memory.high` stays where the kernel could bring it, above its bound;
+  `cat /sys/fs/cgroup/compute/<sandbox id>/memory.high` shows it. A sandbox
+  guaranteed all of its memory is never compressed. Give the host swap of at least a quarter of its
+  memory and a zswap pool of at least 20 %; the agent warns at start when
+  either is smaller, and on a host without swap running sandboxes are
+  never compressed. On a host shared with VMs or services beyond compute,
+  `--memory-total-mib` says how much of its memory compute may use: the
+  capacity, the watermarks, both limits and the levels come from that
+  share, so sandboxes never take memory promised to the rest. Keep the
+  `MemoryMin=` the agent's unit ships with, so host-wide reclaim never
+  takes its pages first.
+  A warning at start says the memory capacity is above the limit, which
+  the defaults never do (their headroom is the high watermark): with
+  `--memory-capacity-mib`, `--memory-headroom-mib` or the watermarks
+  given, keep the capacity at or under it so requests always fit.
+  `memory.events` in that group counts `high` each time the kernel slowed
+  the VMs.
+- **Busy is busy.** A sandbox that keeps computing stays awake, whether it
+  builds code or mines coins. Sleep policy does not decide who pays: usage
+  for billing and account budgets belongs to the layer above.
+- **Local disk holds caches, which give way.** Templates (about a
+  sandbox's disk each, more with ready sandboxes), cached images and the
+  local copies of idle archived sandboxes stay on a host's state volume
+  until a create, adopt or wake needs the room, when the least recently
+  used go first ([ADR 30](adr/0030-disk-relief-for-admission.md)), or until
+  a week unused. Size the volume for what runs and wakes at once, with
+  room for the templates of the shapes in use; a volume that only fits
+  with relief keeps rebuilding templates and fetching images and copies
+  back.
+- **Certificates cost nothing.** The hosts' authority is a key the service
+  holds; no managed certificate authority is billed.
+- **Sharing between customers.** Identical chunks are shared within a store
+  prefix. Give each sharing domain (one customer, or one trust zone) its own
+  prefix, chosen by the control plane; a host whose sandboxes span domains
+  needs one store per domain, which is not built yet.
+
+## Testing
+
+Four layers, each a superset of what the one before cannot reach:
+
+| Layer | Where | What | When |
+| --- | --- | --- | --- |
+| CI | `.github/workflows/compute-ci.yml` on GitHub-hosted runners | rustfmt; clippy with the workspace's pedantic lints as errors; the structure rules (`cargo arch`, comparing the baseline with the base commit's); every test that needs no KVM: unit, the seeded simulations of the core and the fleet protocol, property and crash-boundary tests, the fleet store against Postgres, checkpoints on XFS, and the smoke framework's own tests | every pull request and push to main that touches `compute/` |
+| KVM gate | the same workflow's `kvm` job | `ci/gate.sh` with real Firecracker VMs on the runner's KVM: the pager's kernel tests, the per-sandbox network, the engine, save and wake through an agent restart, many sandboxes through an agent kill, real images with our init, the smoke suite and the E2B conformance suite, on the nested profile | the same |
+| Lab gate | any Linux machine with KVM, prepared by `lab/host-setup.sh` | `ci/gate.sh` with every step, on bare metal or nested, with an object store (`STORE=gs://…`) | before a merge that changes the engine, the store or the fleet |
+| End to end | GCP, `e2e/` | a real Opengeni stack with the `compute` backend, the control service and three hosts; real agent sessions with a real model (below) | before a release, and on demand |
+
+GitHub's hosted x64 Linux runners are VMs with nested virtualization that
+expose `/dev/kvm` (root, group `kvm`, mode 0660); the job grants the runner
+user access with an ACL, makes an XFS lab directory on a loop file,
+reserves half of the runner's memory as huge pages for the nested
+profile, and caches the downloaded Firecracker, kernel and base image by
+the pins' hash. A runner that restores them from the cache still gets swap
+and zswap from `lab/host-boot.sh`, which the gate's lab-setup step runs
+either way. It runs four sandboxes where the lab gate runs twelve.
+
+Run the gate on a lab host:
+
+```sh
+bash lab/host-setup.sh                       # once
+bash lab/host-boot.sh                        # after each reboot: swap and zswap (the gate's lab-setup step runs it)
+PROFILE=nested bash ci/gate.sh               # all steps
+STEPS="engine save_wake" STORE=gs://bucket/gate bash ci/gate.sh
+```
+
+It ends with `GATE_PASSED` or `GATE_FAILED` and the failed steps. KVM
+steps set `COMPUTE_TEST_REQUIRE`, so a test that would skip for want of
+the lab, the store or the guest fails instead.

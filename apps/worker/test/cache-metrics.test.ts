@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   modelCallAccountContext,
   recordModelCacheTokens,
@@ -81,6 +81,45 @@ describe("recordModelCacheTokens — prompt-cache efficiency", () => {
     expect(metrics).toMatch(
       /opengeni_model_cache_read_telemetry_total\{[^}]*provider="openai"[^}]*status="missing"[^}]*\} 2\b/,
     );
+  });
+
+  test("a call that reported no usage at all counts as no_usage, not a missing cache field", async () => {
+    const observability = worker();
+    recordModelCacheTokens(observability, "codex-subscription", {
+      cachedTokens: null,
+      cacheWriteTokens: null,
+      promptTokens: 0,
+      usageReported: false,
+    });
+    recordModelCacheTokens(observability, "codex-subscription", {
+      cachedTokens: undefined,
+      promptTokens: null,
+      usageReported: false,
+    });
+    // Usage with tokens but no cached field is still missing.
+    recordModelCacheTokens(observability, "codex-subscription", {
+      cachedTokens: null,
+      promptTokens: 1000,
+      usageReported: true,
+    });
+    // A reported cached count is reported whatever the caller says.
+    recordModelCacheTokens(observability, "codex-subscription", {
+      cachedTokens: 0,
+      promptTokens: 0,
+      usageReported: false,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="codex-subscription"[^}]*status="no_usage"[^}]*\} 2\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="codex-subscription"[^}]*status="missing"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="codex-subscription"[^}]*status="reported"[^}]*\} 1\b/,
+    );
+    expect(metrics).not.toMatch(/opengeni_model_cache_hit_ratio/);
   });
 
   test("counts provider-reported cache writes without inventing absent writes", async () => {
@@ -219,23 +258,31 @@ describe("recordModelCacheTokens — prompt-cache efficiency", () => {
     expect(availabilityLabels).not.toMatch(/account|session|workspace|model|source/);
 
     const rule = await Bun.file("deploy/helm/opengeni/templates/prometheusrule.yaml").text();
+    const releaseScope =
+      "namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}";
     expect(rule).toContain("OpenGeniCodexPromptCacheTelemetryMissing");
     expect(rule).toContain("opengeni_model_cache_read_telemetry_total");
-    expect(rule).toContain('provider="codex-subscription",status="missing"');
+    expect(rule).toContain(
+      `opengeni_model_cache_read_telemetry_total{${releaseScope},provider="codex-subscription",status="missing"}`,
+    );
     // If a provider/SDK omits the ENTIRE usage object, no availability sample
     // exists. HTTP response traffic remains an independent activity signal,
     // not a denominator: it is recorded before streamed usage is committed.
     expect(rule).toContain(
-      'opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}',
+      `opengeni_model_calls_total{${releaseScope},provider="codex-subscription",outcome="completed"}`,
     );
     const alertBlock = rule.match(
       /- alert: OpenGeniCodexPromptCacheTelemetryMissing[\s\S]*?for: 15m/,
     )?.[0];
     expect(alertBlock).toBeDefined();
-    expect(alertBlock?.match(/and on\(\)/g)).toHaveLength(1);
-    expect(alertBlock).toMatch(
-      /sum\(rate\(opengeni_model_cache_read_telemetry_total\{provider="codex-subscription"\}\[30m\]\)\) or vector\(0\)\)\s*== 0/,
+    // One `and on()` gates missing fields by a minimum count and ratio, the
+    // other gates absent usage by active traffic.
+    expect(alertBlock?.match(/and on\(\)/g)).toHaveLength(2);
+    expect(alertBlock).toContain(
+      `sum(rate(opengeni_model_cache_read_telemetry_total{${releaseScope},provider="codex-subscription",status=~"reported|missing"}[30m])) or vector(0)) == 0`,
     );
+    // The worker's no-usage status is excluded from both usage observations.
+    expect(alertBlock?.slice(alertBlock.indexOf("expr:"))).not.toContain("no_usage");
     expect(alertBlock).not.toContain("<");
   });
 });

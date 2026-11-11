@@ -19,18 +19,21 @@ import {
   cancelExternalWorkspaceMemberGrant,
   updateExternalWorkspaceMemberOperation,
   lookupExternalIdentity,
-  nestedPostgresSqlState,
 } from "@opengeni/db";
-import { organizationMembershipHttpStatus } from "../domain/organization-membership-lifecycle";
+import { rethrowExternalWorkspaceOperation } from "../access/external-membership-refusal";
+import { releaseAdmissionBlocksAfterAccessChange } from "./admission-release";
 import {
   accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
   requireAccessContext,
+  requireApiKeyDelegationContext,
   requireFreshAccessGrant,
   type AccessDeps,
 } from "../access";
 
-/** Explicit host onboarding. Ordinary asUser reads never call this operation.
+/** Explicit host onboarding. Ordinary asUser requests never call this
+ * operation; their first-use membership is `provisionExternalMemberOnFirstUse`
+ * in `../access`, under the same key authority and lifecycle fence.
  * Existing memberships are not overwritten, including reduced permissions. */
 export async function addExternalWorkspaceMemberForRequest(
   c: Context,
@@ -38,8 +41,24 @@ export async function addExternalWorkspaceMemberForRequest(
   workspaceId: string,
   input: unknown,
 ): Promise<ExternalIdentity> {
+  const identity = await addExternalWorkspaceMember(c, deps, workspaceId, input);
+  // After commit: a returning member's saved messages may wait for this.
+  await releaseAdmissionBlocksAfterAccessChange(
+    { db: deps.db },
+    { accountId: identity.accountId, workspaceId, change: "membership" },
+  );
+  return identity;
+}
+
+async function addExternalWorkspaceMember(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  input: unknown,
+): Promise<ExternalIdentity> {
   const payload = AddExternalWorkspaceMemberRequest.parse(input);
   const context = await requireAccessContext(c, deps);
+  requireApiKeyDelegationContext(context, payload.permissions);
   const authority = accountScopedApiKeyWorkspaceAuthority(context);
   if (!authority)
     throw new HTTPException(403, {
@@ -118,19 +137,12 @@ export async function addExternalWorkspaceMemberForRequest(
   });
 }
 
-function rethrowExternalWorkspaceOperation(error: unknown): never {
-  const status = organizationMembershipHttpStatus(nestedPostgresSqlState(error));
-  if (status)
-    throw new HTTPException(status, {
-      message:
-        status === 409
-          ? "External membership operation changed or was cancelled"
-          : "External membership operation is not available",
-    });
-  throw error;
-}
-
-async function externalService(c: Context, deps: AccessDeps, organizationId: string) {
+async function externalService(
+  c: Context,
+  deps: AccessDeps,
+  organizationId: string,
+  workspaceId?: string,
+) {
   const context = await requireAccessContext(c, deps);
   const authority = accountScopedApiKeyWorkspaceAuthority(context);
   if (
@@ -141,6 +153,11 @@ async function externalService(c: Context, deps: AccessDeps, organizationId: str
     throw new HTTPException(403, {
       message: "External membership operation requires an organization service key",
     });
+  }
+  if (workspaceId !== undefined) {
+    const grant = await requireFreshAccessGrant(c, deps, workspaceId, "members:manage");
+    if (grant.accountId !== organizationId)
+      throw new HTTPException(403, { message: "External membership workspace authority changed" });
   }
   return { organizationId, actorSubjectId: context.subjectId };
 }
@@ -170,7 +187,7 @@ export async function cancelExternalWorkspaceMemberGrantForRequest(
   membershipId: string,
   input: unknown,
 ) {
-  const service = await externalService(c, deps, organizationId);
+  const service = await externalService(c, deps, organizationId, workspaceId);
   const request = CancelExternalWorkspaceMemberGrantRequest.safeParse(input);
   if (!request.success)
     throw new HTTPException(422, { message: "Invalid external grant cancellation" });
@@ -196,7 +213,7 @@ export async function updateExternalWorkspaceMemberForRequest(
   membershipId: string,
   input: unknown,
 ) {
-  const service = await externalService(c, deps, organizationId);
+  const service = await externalService(c, deps, organizationId, workspaceId);
   const request = UpdateExternalWorkspaceMemberRequest.safeParse(input);
   if (!request.success)
     throw new HTTPException(422, {
@@ -205,6 +222,7 @@ export async function updateExternalWorkspaceMemberForRequest(
         .map((issue) => `${issue.path.map(String).join(".") || "request"}: ${issue.message}`)
         .join("; ")}`,
     });
+  requireApiKeyDelegationContext(await requireAccessContext(c, deps), request.data.permissions);
   try {
     return await updateExternalWorkspaceMemberOperation(
       deps.db,

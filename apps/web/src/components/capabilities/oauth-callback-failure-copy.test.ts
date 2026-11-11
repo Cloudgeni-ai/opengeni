@@ -1,33 +1,8 @@
 import { describe, expect, test } from "bun:test";
-
-import { atlassianFailureMessage } from "@/components/capabilities/use-atlassian-integration";
-import { googleDriveFailureMessage } from "@/components/capabilities/use-google-drive-integration";
 import {
   oauthCallbackFailureMessage,
   oauthCallbackReasonMessage,
-} from "@/lib/oauth-callback-messages";
-
-describe("provider OAuth callback failure copy", () => {
-  for (const [provider, message] of [
-    ["Google Drive", googleDriveFailureMessage],
-    ["Atlassian", atlassianFailureMessage],
-  ] as const) {
-    test(`${provider} explains expired, reused, and invalid links instead of blaming configuration`, () => {
-      for (const reason of ["state_expired", "state_invalid", "state_replayed", "missing_code"]) {
-        expect(message(reason)).toBe(oauthCallbackReasonMessage(reason)!);
-        expect(message(reason)).not.toContain("configuration");
-      }
-      expect(message("state_expired")).toContain("expired");
-    });
-
-    test(`${provider} keeps its own copy for provider-specific reasons`, () => {
-      expect(message("provider_denied")).toContain("not approved");
-      expect(message("account_mismatch")).toContain("same");
-      // Only a genuinely unknown failure points at configuration.
-      expect(message("http_503")).toContain("configuration");
-    });
-  }
-});
+} from "@opengeni/react/app/lib/oauth-callback-messages";
 
 describe("generic OAuth callback failure copy", () => {
   test("uses the shared copy for a known reason", () => {
@@ -43,4 +18,21 @@ describe("generic OAuth callback failure copy", () => {
     expect(oauthCallbackFailureMessage(null)).toBe("Couldn't connect. Please try again.");
     expect(oauthCallbackFailureMessage("  ")).toBe("Couldn't connect. Please try again.");
   });
+});
+
+test("MCP duplicate failures give actionable guidance without raw codes", () => {
+  for (const reason of [
+    "account_mismatch",
+    "account_already_connected",
+    "account_identity_unavailable",
+    "account_reconnect_required",
+  ]) {
+    const message = oauthCallbackFailureMessage(reason);
+    expect(message).not.toContain(reason);
+    expect(message.toLowerCase()).toContain("reconnect");
+  }
+  // A service that can't identify accounts allows one; the way out is disconnecting it.
+  const single = oauthCallbackFailureMessage("account_limit_one");
+  expect(single).not.toContain("account_limit_one");
+  expect(single).toContain("Disconnect it to use a different one.");
 });

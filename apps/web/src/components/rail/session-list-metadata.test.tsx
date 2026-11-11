@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { ActiveWorkMark, RailTrailingMetadata } from "./session-row-content";
+import {
+  ActiveWorkMark,
+  RailTrailingMetadata,
+  SessionRowContent,
+} from "@opengeni/react/app/components/rail/session-row-content";
 
 const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
 const active = { kind: "active", count: 1, total: 1, label: "Running" } as const;
@@ -27,14 +31,35 @@ describe("RailTrailingMetadata", () => {
     },
   );
 
-  test("renders only status, schedule, and date metadata that actually exists", () => {
+  test("renders only status, automation, and date metadata that actually exists", () => {
     const markup = renderToStaticMarkup(
-      <RailTrailingMetadata summary={active} scheduled relativeTime="12 Aug" />,
+      <RailTrailingMetadata summary={active} automationWait="schedule" relativeTime="12 Aug" />,
     );
 
-    expect(markup).toContain("Scheduled task");
+    expect(markup).toContain("On a schedule");
     expect(markup).toContain("Running");
     expect(markup).toContain(">12 Aug</span>");
+  });
+
+  test("a chat an event can wake says it is waiting for one", () => {
+    const markup = renderToStaticMarkup(
+      <RailTrailingMetadata summary={neutral} automationWait="event" />,
+    );
+
+    expect(markup).toContain('aria-label="Waiting for an event"');
+    expect(markup).toContain('data-automation-wait="event"');
+    expect(markup).not.toContain("On a schedule");
+  });
+
+  test("a held ⌘ shows the row's jump key in place of its time", () => {
+    const markup = renderToStaticMarkup(
+      <RailTrailingMetadata summary={active} relativeTime="12 Aug" jumpKey="⌘3" />,
+    );
+
+    expect(markup).toContain("data-session-row-jump-key");
+    expect(markup).toContain(">⌘3</kbd>");
+    expect(markup).not.toContain("12 Aug");
+    expect(markup).toContain("Running");
   });
 
   test("runs the working spinner at 75% of its prior speed", () => {
@@ -42,6 +67,52 @@ describe("RailTrailingMetadata", () => {
 
     expect(markup).toContain('style="animation-duration:1.333333s"');
     expect(markup).toContain("motion-reduce:animate-none");
+  });
+
+  test("a session parked until it wakes shows a still hourglass, not the working spinner", () => {
+    const markup = renderToStaticMarkup(
+      <RailTrailingMetadata
+        summary={{ kind: "waiting", count: 1, total: 1, label: "1 waiting to resume" }}
+      />,
+    );
+
+    expect(markup).toContain("lucide-hourglass");
+    expect(markup).toContain('title="1 waiting to resume"');
+    expect(markup).not.toContain("animate-spin");
+  });
+
+  test("uses the dedicated teal token for unread chats and following up", () => {
+    const unread = renderToStaticMarkup(
+      <RailTrailingMetadata summary={{ kind: "unread", count: 1, total: 1, label: "1 unread" }} />,
+    );
+    const followingUp = renderToStaticMarkup(<RailTrailingMetadata summary={activeWork} />);
+
+    expect(unread).toContain("bg-session-update");
+    expect(unread).not.toContain("bg-brand");
+    expect(followingUp).toContain("text-session-update");
+    expect(followingUp).not.toContain("text-brand");
+  });
+
+  test.each([
+    ["active", "text-fg-subtle"],
+    ["queued", "text-fg-subtle"],
+    ["needs_attention", "bg-status-waiting"],
+    ["failed", "bg-status-failed"],
+    ["send_failed", "text-status-failed"],
+  ] as const)("keeps the existing %s marker color", (kind, color) => {
+    const markup = renderToStaticMarkup(
+      <RailTrailingMetadata summary={{ kind, count: 1, total: 1, label: kind }} />,
+    );
+    expect(markup).toContain(color);
+    expect(markup).not.toContain("session-update");
+  });
+
+  test("defines the approved teal shades separately from neutral brand colors", async () => {
+    const styles = await Bun.file(
+      new URL("../../../../../packages/react/styles/app.css", import.meta.url),
+    ).text();
+    expect(styles).toContain("--color-session-update: light-dark(#0f766e, #5ad4c5)");
+    expect(styles).toContain("--color-brand: var(--og-color-accent)");
   });
 
   test("reserves no trailing rail width when a row has no metadata", () => {
@@ -62,13 +133,18 @@ describe("RailTrailingMetadata", () => {
     const markup = renderToStaticMarkup(<ActiveWorkMark className="size-4" />);
 
     expect(markup).toContain("size-4");
-    expect(markup).toContain("text-brand");
+    expect(markup).toContain("text-session-update");
     expect(markup).toContain('d="M-8 43 C35 40 71 29 116 16"');
     expect(markup).toContain('d="M-8 86 C35 83 71 72 116 59"');
   });
 
   test("uses the shared active-work marker in both session action menus", async () => {
-    const source = await Bun.file(new URL("./session-list.tsx", import.meta.url)).text();
+    const source = await Bun.file(
+      new URL(
+        "../../../../../packages/react/src/app/components/rail/session-list.tsx",
+        import.meta.url,
+      ),
+    ).text();
 
     expect(source.match(/<ActiveWorkMark className="size-4" \/>/g)).toHaveLength(2);
     expect(source).not.toContain("CircleDashedIcon");
@@ -102,5 +178,37 @@ describe("RailTrailingMetadata waiting duration", () => {
       />,
     );
     expect(markup).not.toContain("data-session-row-waiting");
+  });
+});
+
+describe("SessionRowContent for a pinned sub-agent chat", () => {
+  const row = (parentTitle?: string) =>
+    renderToStaticMarkup(
+      <SessionRowContent
+        title="Fix flaky test"
+        parentTitle={parentTitle}
+        stateLabel="Idle"
+        mobile={false}
+        summary={neutral}
+        relativeTime="3h"
+      />,
+    );
+
+  test("says quietly which chat it belongs to, after its title", () => {
+    const markup = row("Release lead");
+    expect(markup).toContain('<span class="min-w-0 truncate">Fix flaky test</span>');
+    expect(markup).toMatch(
+      /data-session-row-parent="true" class="[^"]*text-fg-muted[^"]*">in Release lead</,
+    );
+    // The line fades at the column's edge like any title.
+    expect(markup).toMatch(/data-session-row-title="true" class="flex min-w-0/);
+  });
+
+  test("other rows keep their plain title", () => {
+    const markup = row();
+    expect(markup).not.toContain("data-session-row-parent");
+    expect(markup).toContain(
+      '<span data-session-row-title="true" class="block min-w-0 overflow-hidden whitespace-nowrap">Fix flaky test</span>',
+    );
   });
 });

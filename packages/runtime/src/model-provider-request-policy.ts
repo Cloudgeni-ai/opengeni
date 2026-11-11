@@ -27,6 +27,13 @@ import {
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
 import type { ModelJsonRequestPolicy } from "./replayable-json-body";
+import { geminiFunctionResponseRefPolicy } from "./gemini-function-response";
+import {
+  chatReasoning,
+  chatReasoningDetails,
+  joinChatReasoningMessages,
+  projectUnsignedClaudeChatReasoning,
+} from "./chat-reasoning";
 
 /**
  * Gateway's Kimi Responses adapter rejects the standard grouped parallel-tool
@@ -152,13 +159,94 @@ export function normalizeVercelGatewayRequestBody(
   }
 }
 
-export function azureModelRequestPolicy({
+/**
+ * Opengeni keeps each chat's history itself and sends it in full with every
+ * request: provider item ids are stripped and reasoning round-trips encrypted,
+ * so nothing reads a provider-stored response back. Responses `store` defaults
+ * to true, which keeps every response object for 30 days, so ask the provider
+ * not to keep one. A request is left alone when its caller chose `store`, or
+ * when it points at stored state: `previous_response_id`, `conversation`, or
+ * input items that still carry provider ids (`openaiProviderItemIds=preserve`).
+ * Returns the storeless body, or null when nothing changes.
+ */
+export function storelessResponsesBody(
+  path: string,
+  body: Readonly<Record<string, unknown>>,
+): Record<string, unknown> | null {
+  if (!(path.split("?", 1)[0] ?? path).endsWith("/responses")) return null;
+  if (body.input === undefined || body.store !== undefined) return null;
+  if (body.previous_response_id != null || body.conversation != null) return null;
+  const referencesStoredItems =
+    Array.isArray(body.input) &&
+    body.input.some(
+      (item) =>
+        item !== null &&
+        typeof item === "object" &&
+        typeof (item as Record<string, unknown>).id === "string",
+    );
+  return referencesStoredItems ? null : { ...body, store: false };
+}
+
+/** Applies {@link storelessResponsesBody} after another policy's projection. */
+export function withStorelessResponses(policy: ModelJsonRequestPolicy): ModelJsonRequestPolicy {
+  return (request) => {
+    const result = policy(request);
+    const storeless = storelessResponsesBody(request.path, result?.body ?? request.body);
+    return storeless ? { ...result, body: storeless } : result;
+  };
+}
+
+/**
+ * A workspace or organization OpenAI key, which always calls the OpenAI
+ * platform. The built-in provider never reaches this policy: its client is
+ * built from settings (`buildOpenAIClientFromSettings`), which checks the
+ * endpoint itself. An operator's registry provider is left alone even when it
+ * points at api.openai.com, as are OpenAI-compatible servers and gateways.
+ */
+export function isOpenAIPlatformResponsesProvider(provider: ResolvedModelProvider): boolean {
+  return (
+    provider.api === "responses" &&
+    provider.wireProfile === "openai" &&
+    (provider.kind === "direct-openai-workspace" || provider.kind === "direct-openai-organization")
+  );
+}
+
+function azureModelRequestProjection({
   body,
 }: {
   body: Readonly<Record<string, unknown>>;
 }): ReturnType<ModelJsonRequestPolicy> {
+  // Azure documents sources for web search and result snippets for reasoning
+  // models. Request only when the native tool is actually attached; this is not
+  // capability discovery or a second search. Effort presence is a conservative
+  // predicate: no/disabled reasoning still receives URL-only sources.
+  const hostedSearch =
+    body.input !== undefined &&
+    Array.isArray(body.tools) &&
+    body.tools.some((tool) => tool?.type === "web_search" || tool?.type === "web_search_preview");
+  let projectedBody: Record<string, unknown> = body;
+  if (hostedSearch && (body.include === undefined || Array.isArray(body.include))) {
+    const reasoning = body.reasoning as { effort?: unknown } | undefined;
+    const includes = [
+      ...(Array.isArray(body.include) ? body.include : []),
+      "web_search_call.action.sources",
+      ...(typeof reasoning?.effort === "string" &&
+      reasoning.effort.trim() &&
+      reasoning.effort !== "none"
+        ? ["web_search_call.results"]
+        : []),
+    ];
+    const include = [...new Set(includes)];
+    if (
+      !Array.isArray(body.include) ||
+      include.length !== body.include.length ||
+      include.some((value, index) => value !== (body.include as unknown[])[index])
+    ) {
+      projectedBody = { ...body, include };
+    }
+  }
   const input = body.input;
-  if (!Array.isArray(input)) return undefined;
+  if (!Array.isArray(input)) return projectedBody === body ? undefined : { body: projectedBody };
   const containsComputerProtocol = input.some(
     (item) =>
       item &&
@@ -166,7 +254,8 @@ export function azureModelRequestPolicy({
       ((item as Record<string, unknown>).type === "computer_call" ||
         (item as Record<string, unknown>).type === "computer_call_output"),
   );
-  if (!containsComputerProtocol) return undefined;
+  if (!containsComputerProtocol)
+    return projectedBody === body ? undefined : { body: projectedBody };
   const projectedInput = input.map((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return item;
     const record = item as Record<string, unknown>;
@@ -181,10 +270,45 @@ export function azureModelRequestPolicy({
     }
     return item;
   });
-  const projectedBody: Record<string, unknown> = { ...body, input: projectedInput };
-  const changedComputerCalls = rewriteComputerCallsToActionsOnly(projectedBody);
-  const changedScreenshots = rewriteEmptyComputerCallOutputImageUrls(projectedBody);
-  return changedComputerCalls || changedScreenshots ? { body: projectedBody } : undefined;
+  const computerBody = { ...projectedBody, input: projectedInput };
+  const changedComputerCalls = rewriteComputerCallsToActionsOnly(computerBody);
+  const changedScreenshots = rewriteEmptyComputerCallOutputImageUrls(computerBody);
+  return changedComputerCalls || changedScreenshots
+    ? { body: computerBody }
+    : projectedBody === body
+      ? undefined
+      : { body: projectedBody };
+}
+
+/** Azure's request projection, then storeless Responses (Azure accepts `store: false`). */
+export const azureModelRequestPolicy: ModelJsonRequestPolicy = withStorelessResponses(
+  azureModelRequestProjection,
+);
+
+/**
+ * Opper ids name Claude as a pool (`claude-sonnet-4-6`), a pinned route
+ * (`aws/claude-sonnet-4-6-eu`, `anthropic/claude-…`, `vertexai/claude-…`) or a
+ * provider-native alias (`eu.anthropic.claude-…`). Match the model family, not
+ * one route prefix.
+ */
+export function isOpperClaudeUpstreamModel(model: unknown): boolean {
+  return typeof model === "string" && /(?:^|[/.])claude-/iu.test(model);
+}
+
+function hasExplicitChatCacheControl(body: Record<string, unknown>): boolean {
+  const marked = (value: unknown): boolean =>
+    value !== null &&
+    typeof value === "object" &&
+    (Object.hasOwn(value, "cache_control") || Object.hasOwn(value, "prompt_cache_breakpoint"));
+  if (Object.hasOwn(body, "cache_control")) return true;
+  if (Array.isArray(body.tools) && body.tools.some(marked)) return true;
+  return (
+    Array.isArray(body.messages) &&
+    body.messages.some(
+      (message) =>
+        marked(message) || (Array.isArray(message?.content) && message.content.some(marked)),
+    )
+  );
 }
 
 /**
@@ -195,10 +319,72 @@ export function azureModelRequestPolicy({
 export function modelRequestPolicyForProvider(
   provider: ResolvedModelProvider,
   gatewayPolicies?: GatewayRequestPolicyLookup,
+  /** Opper upstream id -> `max_tokens` sent when a request sets no output cap. */
+  opperOutputLimits?: ReadonlyMap<string, number>,
 ): ModelJsonRequestPolicy {
-  return ({ path, body }) => {
+  const providerPolicy: ModelJsonRequestPolicy = ({ path, body }) => {
+    if (
+      (provider.kind === "openrouter-managed" ||
+        provider.kind === "openrouter-workspace" ||
+        provider.kind === "openrouter-organization") &&
+      (path.split("?", 1)[0] ?? path).endsWith("/chat/completions") &&
+      typeof body.model === "string" &&
+      body.model.startsWith("anthropic/") &&
+      Array.isArray(body.messages)
+    ) {
+      const messages = projectUnsignedClaudeChatReasoning(body.messages);
+      // OpenRouter's Anthropic routes require opt-in even for repeated prefixes.
+      // Request-level automatic caching leaves every earlier message/tool intact;
+      // do not move client-side breakpoints as new history arrives. Caller-owned
+      // cache controls win (including explicit breakpoints and their TTL/limit).
+      const automaticCache = !hasExplicitChatCacheControl(body);
+      return messages === body.messages && !automaticCache
+        ? undefined
+        : {
+            body: {
+              ...body,
+              messages,
+              ...(automaticCache ? { cache_control: { type: "ephemeral" } } : {}),
+            },
+          };
+    }
+    if (
+      (provider.kind === "opper-managed" ||
+        provider.kind === "opper-workspace" ||
+        provider.kind === "opper-organization") &&
+      gatewayPolicies &&
+      !gatewayPolicies.has(typeof body.model === "string" ? body.model : "")
+    ) {
+      throw new Error(`Opper model ${String(body.model)} is not in the reviewed catalog`);
+    }
+    if (
+      (provider.kind === "opper-managed" ||
+        provider.kind === "opper-workspace" ||
+        provider.kind === "opper-organization") &&
+      (path.split("?", 1)[0] ?? path).endsWith("/chat/completions")
+    ) {
+      let projected = body;
+      if (isOpperClaudeUpstreamModel(body.model) && Array.isArray(body.messages)) {
+        // Opper routes Claude through Anthropic, Bedrock, Vertex and Azure; all
+        // reject unsigned plaintext thinking exactly like OpenRouter `anthropic/…`.
+        const messages = projectUnsignedClaudeChatReasoning(body.messages);
+        if (messages !== body.messages) projected = { ...projected, messages };
+      }
+      // Opper caps output at 4,096 tokens when a request names no limit, which
+      // hidden reasoning can consume entirely (finish `length`, empty answer).
+      const outputLimit =
+        typeof body.model === "string" ? opperOutputLimits?.get(body.model) : undefined;
+      if (
+        outputLimit !== undefined &&
+        body.max_tokens === undefined &&
+        body.max_completion_tokens === undefined
+      ) {
+        projected = { ...projected, max_tokens: outputLimit };
+      }
+      return projected === body ? undefined : { body: projected };
+    }
     if (provider.wireProfile === "azure-openai") {
-      return azureModelRequestPolicy({ body });
+      return azureModelRequestPolicy({ path, body });
     }
     if (provider.kind === "codex-subscription") {
       if (!(path.split("?", 1)[0] ?? path).endsWith("/responses")) {
@@ -266,6 +452,76 @@ export function modelRequestPolicyForProvider(
         headers: { [GATEWAY_REQUEST_BODY_NORMALIZED_HEADER]: "1" },
       };
     }
+    if (isOpenAIPlatformResponsesProvider(provider)) {
+      const storeless = storelessResponsesBody(path, body);
+      return storeless ? { body: storeless } : undefined;
+    }
     return undefined;
   };
+  return (request) => {
+    const projected = chatModelRequestPolicy(request);
+    const result =
+      providerPolicy({ ...request, body: projected?.body ?? request.body }) ?? projected;
+    // Upstream-model wire quirk, independent of route: Gemini reserves `$ref`
+    // keys inside a parsed function response. Request-local copy only.
+    const gemini = geminiFunctionResponseRefPolicy({
+      path: request.path,
+      body: result?.body ?? request.body,
+    });
+    return gemini?.body ? { ...result, body: gemini.body } : result;
+  };
 }
+
+/** Output-only metadata can survive the SDK's conversion of retained replies.
+ * Project it off the Chat request without changing the retained history or
+ * provider extensions such as cache_control. Responses keeps its own schema.
+ */
+export const chatModelRequestPolicy: ModelJsonRequestPolicy = ({ path, body }) => {
+  if (!(path.split("?", 1)[0] ?? path).endsWith("/chat/completions")) return undefined;
+  if (!Array.isArray(body.messages)) return undefined;
+  let changed = false;
+  const messages = body.messages.map((message) => {
+    if (!message || typeof message !== "object" || message.role !== "assistant") return message;
+    if (!Array.isArray(message.content)) return message;
+    let contentChanged = false;
+    // Older non-streamed SDK replies retained message fields inside text parts.
+    // Recover their reasoning at message scope before removing invalid nesting.
+    let retainedReasoning = chatReasoning(message);
+    let retainedDetails = chatReasoningDetails(message);
+    const content = message.content.map((part: unknown) => {
+      if (!part || typeof part !== "object" || Array.isArray(part)) return part;
+      const record = part as Record<string, unknown>;
+      if (record.type !== "text" && record.type !== "refusal") return part;
+      retainedReasoning ??= chatReasoning(record);
+      retainedDetails ??= chatReasoningDetails(record);
+      const outputOnlyKeys = [
+        "annotations",
+        "logprobs",
+        "role",
+        "tool_calls",
+        "function_call",
+        "audio",
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+        "tools",
+        ...(record.type === "text" ? ["refusal"] : ["content"]),
+      ];
+      if (!outputOnlyKeys.some((key) => Object.hasOwn(record, key))) return part;
+      const projected = { ...record };
+      for (const key of outputOnlyKeys) delete projected[key];
+      contentChanged = true;
+      return projected;
+    });
+    if (!contentChanged) return message;
+    changed = true;
+    return {
+      ...message,
+      content,
+      ...(retainedReasoning ? { [retainedReasoning.field]: retainedReasoning.text } : {}),
+      ...(retainedDetails ? { reasoning_details: retainedDetails } : {}),
+    };
+  });
+  const joined = joinChatReasoningMessages(messages);
+  return changed || joined !== messages ? { body: { ...body, messages: joined } } : undefined;
+};

@@ -5,26 +5,41 @@ import {
   GoalSpec,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
-  MAX_SELECTED_VARIABLE_SETS,
   Permission,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
+  SESSION_APP_ACTION_TOOL_NAME_SET,
   SESSION_TITLE_MAX_CHARACTERS,
   WORK_DISCOVERY_QUERY_MAX_CHARS,
   type AccessGrant,
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { INTERACTION_ATTEMPT_TOOL_NAMES } from "@opengeni/runtime";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { listSessionDiscoverySummaries } from "@opengeni/db";
+import {
+  listSessionDiscoverySummaries,
+  SessionCreateConnectionSelectionUnavailableError,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import { createAttemptToolEnvironment, generateCodemodeDeclarations } from "@opengeni/codemode";
-import { buildOpenGeniMcpServer, slackBotFileContentResult } from "../src/mcp/server";
+import {
+  buildOpenGeniMcpServer,
+  grantMayListSlackBotTools,
+  mcpMessageNeedsSlackBotAvailability,
+  resolveSlackBotToolAvailability,
+  slackBotFileContentResult,
+  WAIT_FOR_INPUT_DESCRIPTION,
+} from "../src/mcp/server";
 import type { OpenGeniSlackBotClient } from "../src/integrations/slack-bot";
 import { buildFilesMcpServer } from "../src/mcp/files";
+import { ToolSearchIndex } from "../../../packages/runtime/src/tool-discovery-ranking";
+import { LazyToolRuntime } from "../../../packages/runtime/src/lazy-tool-transport";
+
+type SearchableTool = ConstructorParameters<typeof ToolSearchIndex>[0][number];
 
 const accountId = crypto.randomUUID();
 const workspaceId = crypto.randomUUID();
@@ -120,7 +135,12 @@ function broadServerTools(tools: readonly FirstPartyMcpToolName[]): FirstPartyMc
 
 function deps(): ApiRouteDeps {
   return {
-    settings: testSettings({ sandboxSelfhostedEnabled: true }),
+    // A configured Site SQL gateway, so the complete default catalog registers.
+    settings: testSettings({
+      sandboxSelfhostedEnabled: true,
+      sitesGatewayInternalOrigin: "https://internal.sites.test",
+      sitesGatewaySecret: "site-sql-gateway-secret-0123456789abcdef",
+    }),
     db: {},
     bus: new MemoryEventBus(),
     workflowClient: {},
@@ -208,6 +228,56 @@ async function callRegisteredTool(
 }
 
 describe("first-party MCP tool visibility policy", () => {
+  test("secret tools follow the secrets selection and permissions; secret_get needs literal secrets:read (AG-1)", () => {
+    const secretTools = (permissions: Permission[], selection?: FirstPartyMcpToolName[]) =>
+      registeredToolNames(buildOpenGeniMcpServer(deps(), grant(permissions, selection))).filter(
+        (name) => name.startsWith("secret_"),
+      );
+    const all: FirstPartyMcpToolName[] = [
+      "secret_search",
+      "secret_save",
+      "secret_get",
+      "secret_move",
+      "secret_delete",
+    ];
+    expect(secretTools(["secrets:list", "secrets:write", "secrets:use"], all)).toEqual([
+      "secret_delete",
+      "secret_move",
+      "secret_save",
+      "secret_search",
+    ]);
+    expect(secretTools(["secrets:list", "secrets:write", "secrets:read"], all)).toEqual([
+      "secret_delete",
+      "secret_get",
+      "secret_move",
+      "secret_save",
+      "secret_search",
+    ]);
+    expect(secretTools(["secrets:list"], all)).toEqual(["secret_search"]);
+    // Credential profile tools: reading needs secrets:list, changing secrets:write.
+    const profiles: FirstPartyMcpToolName[] = ["secret_profile_get", "secret_profile_set"];
+    expect(secretTools(["secrets:list", "secrets:write"], profiles)).toEqual([
+      "secret_profile_get",
+      "secret_profile_set",
+    ]);
+    expect(secretTools(["secrets:list"], profiles)).toEqual(["secret_profile_get"]);
+    // Capability off: the resolved selection holds no secret tools.
+    expect(secretTools(["secrets:list", "secrets:write", "secrets:read"], ["session_get"])).toEqual(
+      [],
+    );
+    // The retired Variable Set tools are never registered, even when selected.
+    const retired = registeredToolNames(
+      buildOpenGeniMcpServer(
+        deps(),
+        grant(
+          ["variable-sets:list", "variable-sets:read", "variable-sets:write", "secrets:list"],
+          ["variable_set_list", "environment_list", "variable_set_set_variable"],
+        ),
+      ),
+    );
+    expect(retired.filter((name) => /^(variable_set|environment)_/.test(name))).toEqual([]);
+  });
+
   test("project tools follow existing session permissions and exact selection", () => {
     const human = (permissions: Permission[]): AccessGrant => ({
       accountId,
@@ -274,7 +344,7 @@ describe("first-party MCP tool visibility policy", () => {
     );
   });
 
-  test("session_wait needs caller-session context as well as sessions:read", () => {
+  test("session_wait needs sessions:read and also serves sessionless callers", () => {
     const scoped = grant(["sessions:read"], ["session_wait"]);
     const { sessionId: _sessionId, ...sessionlessMetadata } = scoped.metadata!;
     expect(
@@ -284,7 +354,7 @@ describe("first-party MCP tool visibility policy", () => {
           metadata: sessionlessMetadata,
         }),
       ),
-    ).not.toContain("session_wait");
+    ).toContain("session_wait");
     expect(registeredToolNames(buildOpenGeniMcpServer(deps(), scoped))).toContain("session_wait");
     expect(
       registeredToolNames(
@@ -462,38 +532,110 @@ describe("first-party MCP tool visibility policy", () => {
     expect(description("session_wait")).toContain(
       "an unchanged session_get snapshot between waits is not new evidence",
     );
-    for (const name of [
-      "session_create",
-      "session_get",
-      "session_wait",
-      "wait_for_input",
-    ] as const) {
+    for (const name of ["session_create", "session_get", "session_wait"] as const) {
       expect(description(name)).toContain("payload.finalAnswer");
     }
-    expect(description("wait_for_input")).toContain(
-      "No preliminary short wait or status recheck is required",
+  });
+
+  test("wait_for_input states once, first, when not to wait, and names nothing a session may lack", () => {
+    const server = buildOpenGeniMcpServer(deps(), grant(["sessions:control"], ["wait_for_input"]));
+    const registered = (
+      server as unknown as { _registeredTools: Record<string, { description: string }> }
+    )._registeredTools;
+    const description = registered.wait_for_input!.description;
+    expect(description).toBe(WAIT_FOR_INPUT_DESCRIPTION);
+    // A person's answer arrives as a new message; waiting for it only costs a
+    // refused or extra call.
+    expect(description).toStartWith(
+      "End this turn and wait out of turn. If you are only waiting for the person's answer, do not call it: reply and end your turn, and their answer arrives as a new message. Use it only while something you started is still running or for an explicit timer,",
     );
-    expect(description("wait_for_input")).toContain(
-      "potentially hours or days within the schema limits",
+    // Text written just before the call can reach the person only as a
+    // summary, so the answer goes in `reply`, shown verbatim (session
+    // df030716, 2026-10-23); the runtime guard still refuses a wait without it.
+    expect(description).toContain(
+      "When this turn answers a person's message, put the complete answer in reply, shown exactly as written",
     );
-    expect(description("wait_for_input")).toContain(
-      "unless an explicit update cadence requires it",
+    expect(description).toContain("On success the runtime ends the turn after this tool batch.");
+    // Work outside these tools (a CI run, a deployment) wakes the session
+    // only through a configured event trigger or schedule, or the deadline.
+    expect(description).toContain(
+      "A new message, scheduled input, the result of work you started through your tools (outside systems such as CI only through a configured event trigger or schedule), or the deadline starts the next turn.",
     );
-    expect(description("wait_for_input")).toContain(
-      "passing the time remaining, not a fresh full timeout",
+    expect(description).toContain(
+      "for a long or uncertain wait, use it in place of sleeping or polling inside the turn",
     );
-    expect(description("wait_for_input")).toContain(
-      "If less than the schema minimum remains or the deadline has passed",
+    expect(description).toContain("potentially hours or days within the schema limits");
+    expect(description).toContain("no short wait or status check is needed first");
+    expect(description).toContain("the deadline never cancels a command");
+    // Each wait sets a fresh absolute deadline from its timeout, so a re-wait
+    // with the full timeout would push a timed recheck back on every question.
+    expect(description).toContain("The turn's first absolute deadline persists");
+    expect(description).toContain("keep the same reason and pass the time remaining");
+    expect(description).toContain(
+      "If less than the schema minimum remains or the deadline has passed, a turn that only answered a question and consumed no other machine input may end without a new wait",
     );
-    expect(description("wait_for_input")).toContain(
-      "consumed no immediate machine input may finish without replacing the retained wait",
-    );
-    expect(description("wait_for_input")).toContain(
-      "make any unavoidable deadline adjustment explicit",
-    );
-    expect(description("wait_for_input")).toContain(
-      "Pending Codemode calls require the same live attempt",
-    );
+    expect(description).toContain("say how the deadline changed");
+    // Session-specific guidance (goals, children, Steer, Codemode) lives in the
+    // prompt modules that render only with those features.
+    for (const absent of [
+      "goal",
+      "child",
+      "Steer",
+      "Codemode",
+      "session_wait",
+      "session_get",
+      "command_wait",
+      "payload.finalAnswer",
+    ]) {
+      expect(description).not.toContain(absent);
+    }
+  });
+
+  test("wait_for_input validates idempotencyKey as any hex UUID server-side", async () => {
+    const server = buildOpenGeniMcpServer(deps(), grant(["sessions:control"], ["wait_for_input"]));
+    const schema = registeredToolInputSchema(server, "wait_for_input");
+    const args = { reason: "Waiting for the build to finish.", timeoutSeconds: 60 };
+    expect(schema.safeParse(args).success).toBe(true);
+    expect(schema.safeParse({ ...args, idempotencyKey: crypto.randomUUID() }).success).toBe(true);
+    // A key the model makes up need not carry RFC version and variant digits;
+    // it only has to be unique, and it is stored as an opaque operation key.
+    for (const madeUp of [
+      "12345678-1234-1234-1234-123456789abc",
+      "11111111-1111-1111-1111-111111111111",
+      "123e4567-e89b-02d3-a456-426614174000",
+    ]) {
+      expect(schema.safeParse({ ...args, idempotencyKey: madeUp }).success).toBe(true);
+    }
+    expect(schema.safeParse({ ...args, idempotencyKey: "not-a-uuid" }).success).toBe(false);
+    expect(
+      schema.safeParse({ ...args, idempotencyKey: "12345678-1234-1234-1234-123456789ab" }).success,
+    ).toBe(false);
+    expect(schema.safeParse({ ...args, timeoutSeconds: 60.5 }).success).toBe(false);
+    // The listed pattern only repeats format: uuid, so the runtime drops it
+    // from the model's view (mcp-listed-tools.ts).
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "wait-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (entry) => entry.name === "wait_for_input",
+      )!;
+      const properties = tool.inputSchema.properties as Record<string, Record<string, unknown>>;
+      const key = properties.idempotencyKey!;
+      expect(key.format).toBe("uuid");
+      expect(key.pattern).toBe(
+        "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$",
+      );
+      // The runtime guard refuses a wait without `reply` when the turn answers
+      // a person's message, so the field must not invite leaving it out; when
+      // to pass it is the description's job.
+      expect(properties.reply!.description).toBe(
+        "Your complete message to the person, shown verbatim (Markdown, tables and artifact images work); do not also write it before this call.",
+      );
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
   });
 
   test("goal pause and resume descriptions preserve evidence and human authority", () => {
@@ -512,6 +654,9 @@ describe("first-party MCP tool visibility policy", () => {
       "Work already in flight or a meaningful timed recheck",
     );
     expect(registered.goal_pause!.description).toContain("Tool approvals remain human-only");
+    expect(registered.goal_pause!.description).toContain(
+      "is not by itself a reason to pause: if you still pause after trying those alternatives, name the ones you tried",
+    );
     expect(registered.goal_resume!.description).toContain(
       "A user's question alone is not a reason to resume",
     );
@@ -563,7 +708,18 @@ describe("first-party MCP tool visibility policy", () => {
     const server = buildOpenGeniMcpServer(
       deps(),
       grant([...Permission.options], [...DEFAULT_FIRST_PARTY_MCP_TOOLS]),
-      { workspaceMemoryEnabled: true },
+      {
+        workspaceMemoryEnabled: true,
+        // A session a person started: the app-action tools join the catalog.
+        appActions: {
+          access: {
+            origin: "http://opengeni.test",
+            dispatch: async () => new Response(null, { status: 500 }),
+          },
+          startedByPerson: true,
+          fullAccess: false,
+        },
+      },
     );
 
     const broad = registeredToolNames(server);
@@ -638,6 +794,23 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(disabled)).toEqual([]);
   });
 
+  test("Site SQL tools are offered only where a Site SQL gateway is configured", () => {
+    const selected: FirstPartyMcpToolName[] = ["site_sql_inspect", "site_sql_export"];
+    const configured = buildOpenGeniMcpServer(
+      deps(),
+      grant(["artifacts:read", "artifacts:publish"], selected),
+    );
+    expect(registeredToolNames(configured)).toEqual([...selected].sort());
+
+    const bare = deps();
+    bare.settings = testSettings({ sandboxSelfhostedEnabled: true });
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(bare, grant(["artifacts:read", "artifacts:publish"], selected)),
+      ),
+    ).toEqual([]);
+  });
+
   test("operator-disabled MCP relevance discovery fails before storage", async () => {
     let databaseTouches = 0;
     const routeDeps = deps();
@@ -693,7 +866,7 @@ describe("first-party MCP tool visibility policy", () => {
     ).rejects.toThrow("sessions_list query must be at most 200 characters");
   });
 
-  test("ordinary omission excludes connector tools while explicit authorized selection stays exact", () => {
+  test("an attempt without an accepted tool selection never receives connector tools", () => {
     const ordinary = buildOpenGeniMcpServer(
       deps(),
       grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]),
@@ -762,7 +935,6 @@ describe("first-party MCP tool visibility policy", () => {
   });
 
   test("model-facing session_create omits absolute depth and literal shared traps", async () => {
-    const variableSetId = crypto.randomUUID();
     let databaseTouches = 0;
     const routeDeps = deps();
     routeDeps.db = new Proxy(
@@ -789,16 +961,19 @@ describe("first-party MCP tool visibility policy", () => {
       const tool = (await client.listTools()).tools.find(
         (candidate) => candidate.name === "session_create",
       );
-      expect(tool?.description).toContain("non-delegating leaf");
-      expect(tool?.description).toContain("do not use a child-local depth override");
+      expect(tool?.description).toContain(
+        "Normally omit tools, mcpServers, and firstPartyMcpTools",
+      );
+      expect(tool?.description).toContain("capabilities: { from: 'all', subagents: false }");
+      expect(tool?.description).toContain("cannot start, message, or follow other sessions");
+      expect(tool?.description).toContain("Explicit tool arrays replace the inherited selection");
+      expect(tool?.description).toContain("Do not use a child-local depth override");
       expect(tool?.description).toContain("concise semantic title");
       const serialized = JSON.stringify(tool?.inputSchema);
       expect(serialized).not.toContain("maxNestedAgentDepth");
       expect(serialized).not.toContain('"const":"shared"');
       expect(serialized).not.toContain('"enum":["shared"');
       expect(serialized).toContain("machineTarget");
-      expect(serialized).toContain("variableSetIds");
-      expect(serialized).toContain(`"maxItems":${MAX_SELECTED_VARIABLE_SETS}`);
       expect(serialized).toContain("targetSandboxId");
       expect(serialized).toContain("workingDir");
       expect(serialized).toContain('"required":["targetSandboxId"]');
@@ -811,25 +986,11 @@ describe("first-party MCP tool visibility policy", () => {
       for (const arguments_ of [
         { initialMessage: "bad cwd", workingDir: "/tmp" },
         {
-          initialMessage: "bad shared variable set",
-          variableSetId: crypto.randomUUID(),
-          sandbox: "shared",
-        },
-        {
           initialMessage: "bad shared rig",
           rigId: crypto.randomUUID(),
           sandbox: "shared",
         },
         { initialMessage: "bad depth", maxNestedAgentDepth: 0 },
-        {
-          initialMessage: "duplicate variable sets",
-          variableSetIds: [variableSetId, variableSetId],
-        },
-        {
-          initialMessage: "mismatched variable set alias",
-          variableSetIds: [variableSetId, crypto.randomUUID()],
-          variableSetId,
-        },
       ]) {
         const result = await client.callTool({ name: "session_create", arguments: arguments_ });
         expect(result).toMatchObject({ isError: true });
@@ -894,6 +1055,65 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
+  test("session_create advertises only the caller's deployment-allowed selection", async () => {
+    const routeDeps = deps();
+    routeDeps.settings.allowedFirstPartyMcpTools = ["session_create", "session_get"];
+    const server = buildOpenGeniMcpServer(
+      routeDeps,
+      grant(["sessions:create", "sessions:read"], ["session_create", "command_wait"]),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "bounded-child-catalog", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (entry) => entry.name === "session_create",
+      )!;
+      expect(tool.inputSchema.properties?.firstPartyMcpTools).toMatchObject({
+        items: { enum: ["session_create"] },
+      });
+      expect(JSON.stringify(tool.inputSchema.properties?.firstPartyMcpTools)).not.toContain(
+        "command_wait",
+      );
+      expect(
+        registeredToolInputSchema(server, "session_create").safeParse({
+          initialMessage: "Work",
+          firstPartyMcpTools: ["session_get"],
+        }).success,
+      ).toBe(false);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  test("session_create safely normalizes JSON strings in object-only fields", () => {
+    const server = buildOpenGeniMcpServer(deps(), grant(["sessions:create"], ["session_create"]));
+    const schema = registeredToolInputSchema(server, "session_create") as z4.ZodType;
+    const agent = { capabilities: { from: "all", subagents: false } };
+    const goal = { text: "Run checks", successCriteria: "Checks pass" };
+    const parsed = schema.safeParse({
+      initialMessage: "  Work  ",
+      agent: JSON.stringify(agent),
+      goal: JSON.stringify(goal),
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data).toEqual({ initialMessage: "  Work  ", agent, goal });
+    for (const value of ["{", "[]", "null", '"all"', '{"text":42}']) {
+      expect(schema.safeParse({ initialMessage: "Work", goal: value }).success).toBe(false);
+    }
+    const extraGoal = { text: "Work", unknown: true };
+    expect(schema.safeParse({ initialMessage: "Work", goal: JSON.stringify(extraGoal) })).toEqual(
+      schema.safeParse({ initialMessage: "Work", goal: extraGoal }),
+    );
+    expect(
+      schema.safeParse({ initialMessage: "Work", agent: '{"capabilities":"all","x":1}' }).success,
+    ).toBe(false);
+    expect(schema.safeParse({ initialMessage: "Work", sandbox: '{"groupId":"bad"}' }).success).toBe(
+      false,
+    );
+  });
+
   test("session_create nested parser failures are actionable without reflecting input", async () => {
     let databaseTouches = 0;
     const routeDeps = deps();
@@ -939,11 +1159,18 @@ describe("first-party MCP tool visibility policy", () => {
       structuredContent: {
         error: {
           code: "session_create_failed",
-          message: "OpenGeni could not complete the request.",
+          message: "The workspace could not complete the request.",
         },
       },
     });
     expect(JSON.stringify(unknown)).not.toContain("private-");
+    expect(unknown.structuredContent?.error?.diagnostic).toMatchObject({
+      schema: "opengeni.failure-diagnostic.v1",
+      code: "mcp_orchestration_failed",
+      stage: "mcp.session_create",
+      causes: [{ kind: "Error", frames: expect.any(Array) }],
+    });
+    expect(unknown.structuredContent?.error?.diagnosticExport).toBe("disabled");
 
     routeDeps.db = new Proxy(
       {},
@@ -965,7 +1192,7 @@ describe("first-party MCP tool visibility policy", () => {
       structuredContent: {
         error: {
           code: "session_create_failed",
-          message: "OpenGeni could not complete the request.",
+          message: "The workspace could not complete the request.",
         },
       },
     });
@@ -1012,53 +1239,38 @@ describe("first-party MCP tool visibility policy", () => {
     expect(JSON.stringify(unauthorized)).not.toContain("private-");
   });
 
-  test("model-facing session_create accepts ordered Variable Sets and authorizes attachment before storage", async () => {
-    const firstVariableSetId = crypto.randomUUID();
-    const secondVariableSetId = crypto.randomUUID();
-    let databaseTouches = 0;
+  test("session_create exposes a known connection refusal without suggesting blind retry or reflecting its cause", async () => {
     const routeDeps = deps();
+    const failure = new SessionCreateConnectionSelectionUnavailableError(
+      new Error("private-connection-query-and-credential"),
+    );
     routeDeps.db = new Proxy(
       {},
       {
         get() {
-          databaseTouches += 1;
-          throw new Error("accepted model request reached storage");
+          throw failure;
         },
       },
     ) as ApiRouteDeps["db"];
-
-    const authorized = buildOpenGeniMcpServer(
-      routeDeps,
-      grant(["sessions:create", "variable-sets:attach", "variable-sets:use"], ["session_create"]),
-    );
-    const accepted = await callRegisteredTool(authorized, "session_create", {
-      initialMessage: "use both sets",
-      variableSetIds: [firstVariableSetId, secondVariableSetId],
-      variableSetId: secondVariableSetId,
+    const server = buildOpenGeniMcpServer(routeDeps, {
+      ...grant(["sessions:create"], ["session_create"]),
+      principalKind: "human_session",
+      metadata: { firstPartyMcpTools: ["session_create"] },
     });
-    expect(accepted.isError).toBe(true);
-    expect(databaseTouches).toBeGreaterThan(0);
-
-    databaseTouches = 0;
-    const denied = buildOpenGeniMcpServer(
-      routeDeps,
-      grant(["sessions:create"], ["session_create"]),
-    );
-    const databaseTouchesBeforeDeniedCall = databaseTouches;
-    const rejected = await callRegisteredTool(denied, "session_create", {
-      initialMessage: "must not attach",
-      variableSetIds: [firstVariableSetId, secondVariableSetId],
+    const result = await callRegisteredTool(server, "session_create", {
+      initialMessage: "private-task",
     });
-    expect(rejected).toMatchObject({
+    expect(result).toMatchObject({
       isError: true,
       structuredContent: {
         error: {
-          code: "session_create_forbidden",
-          message: "missing permission: variable-sets:attach",
+          code: "session_create_connection_selection_unavailable",
+          message: failure.message,
+          retryable: false,
         },
       },
     });
-    expect(databaseTouches).toBe(databaseTouchesBeforeDeniedCall);
+    expect(JSON.stringify(result)).not.toContain("private-");
   });
 
   test("orchestration failures return bounded structured code and message", async () => {
@@ -1085,6 +1297,7 @@ describe("first-party MCP tool visibility policy", () => {
     });
     expect(create.isError).toBe(true);
     expect(create.structuredContent?.error?.code).toBe("session_create_rejected");
+    expect(create.structuredContent?.error?.diagnostic).toBeUndefined();
     expect(create.structuredContent?.error?.message).not.toContain("\u0000");
     expect(create.structuredContent?.error?.message).not.toContain("�");
     expect(
@@ -1117,6 +1330,54 @@ describe("first-party MCP tool visibility policy", () => {
         },
       },
     });
+    expect(message.structuredContent?.error?.diagnostic).toBeUndefined();
+  });
+
+  test("all orchestration catches retain evidence bound to the caller, never request target", async () => {
+    const targetSessionId = crypto.randomUUID();
+    for (const tool of ["session_create", "session_send_message", "session_steer"] as const) {
+      let databaseTouches = 0;
+      const routeDeps = deps();
+      routeDeps.db = new Proxy(
+        {},
+        {
+          get() {
+            databaseTouches += 1;
+            throw Object.assign(new Error("private-database-message"), {
+              name: "PostgresError",
+              code: "42501",
+            });
+          },
+        },
+      ) as ApiRouteDeps["db"];
+      const server = buildOpenGeniMcpServer(
+        routeDeps,
+        grant(["sessions:create", "sessions:control"], [tool]),
+      );
+      const args =
+        tool === "session_create"
+          ? { initialMessage: "private-task" }
+          : {
+              sessionId: targetSessionId,
+              ...(tool === "session_steer"
+                ? { instruction: "private-steer" }
+                : { text: "private-message" }),
+              idempotencyKey: crypto.randomUUID(),
+            };
+      const result = await callRegisteredTool(server, tool, args);
+      expect(databaseTouches).toBe(1);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent?.error).toMatchObject({
+        code: `${tool}_failed`,
+        message: "The workspace could not complete the request.",
+        diagnosticExport: "disabled",
+        diagnostic: { sessionId, turnId, attemptId, executionGeneration: 1, sqlState: "42501" },
+      });
+      expect(JSON.stringify(result)).not.toContain(targetSessionId);
+      expect(JSON.stringify(result)).not.toContain("private-");
+      expect(result.structuredContent?.error).not.toHaveProperty("outcomeUnknown", false);
+      expect(result.structuredContent?.error).not.toHaveProperty("retryable", true);
+    }
   });
 
   test("the broad catalog excludes compatibility-only and local first-party tools", () => {
@@ -1127,7 +1388,23 @@ describe("first-party MCP tool visibility policy", () => {
     );
 
     const broad = registeredToolNames(server);
-    expect(broad).toEqual([...FIRST_PARTY_REMOTE_MCP_TOOL_NAMES].sort());
+    expect(broad).toEqual(
+      FIRST_PARTY_REMOTE_MCP_TOOL_NAMES.filter(
+        // App-action tools need a session a person started; this grant has none.
+        (name) => name !== "slack_bot_search" && !SESSION_APP_ACTION_TOOL_NAME_SET.has(name),
+      ).sort(),
+    );
+    // Generic agent calls cannot supply Slack's trusted interaction action token,
+    // even after an approved deployment enables full Slack access.
+    for (const slackAccessMode of ["limited", "full"] as const) {
+      const routeDeps = deps();
+      routeDeps.settings = testSettings({ slackAccessMode });
+      const searchSelection = buildOpenGeniMcpServer(
+        routeDeps,
+        grant([...Permission.options], ["slack_bot_search"]),
+      );
+      expect(registeredToolNames(searchSelection)).not.toContain("slack_bot_search");
+    }
     expect(broad).not.toContain("slack_bot_post_message");
     expect(INTERACTION_ATTEMPT_TOOL_NAMES).not.toContain("slack_bot_post_message");
     expect(broad).not.toContain("files_get_download_url");
@@ -1202,9 +1479,9 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
-  test("scheduled Slack posting tools take no destination and stay explicit-only", async () => {
-    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_prepare_message");
-    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_send_prepared_message");
+  test("bot posting is default-discoverable and accepts an ordinary chat destination", async () => {
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toContain("slack_bot_prepare_message");
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toContain("slack_bot_send_prepared_message");
     const server = buildOpenGeniMcpServer(
       deps(),
       grant(["connections:read"], ["slack_bot_prepare_message", "slack_bot_send_prepared_message"]),
@@ -1217,8 +1494,10 @@ describe("first-party MCP tool visibility policy", () => {
       const tools = (await client.listTools()).tools;
       const prepare = tools.find((tool) => tool.name === "slack_bot_prepare_message");
       const send = tools.find((tool) => tool.name === "slack_bot_send_prepared_message");
-      // The agent cannot name a channel, user, or bot connection.
+      // Ordinary chats choose a channel; scheduled execution enforces its fixed destination.
       expect(Object.keys(prepare?.inputSchema.properties ?? {}).sort()).toEqual([
+        "channelId",
+        "connectionId",
         "text",
         "threadTimestamp",
       ]);
@@ -1300,7 +1579,14 @@ describe("first-party MCP tool visibility policy", () => {
       expect(request?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["capabilityId", "rationale"]),
       });
-      expect(custom?.description).toContain("cannot add, enable, or contact");
+      // The review card itself contacts nothing; the authorized native lifecycle
+      // requires the existing connection-management permissions.
+      expect(custom?.description).toContain(
+        "Posting this card does not contact or connect the server.",
+      );
+      expect(custom?.description).toContain(
+        "delegated connections:read, connections:write and capabilities:manage",
+      );
       expect(custom?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["name", "endpointUrl", "rationale"]),
       });
@@ -1356,6 +1642,189 @@ describe("first-party MCP tool visibility policy", () => {
   });
 });
 
+describe("app-action tools", () => {
+  const adminTools = ["admin_action_call", "admin_action_describe", "admin_actions_search"];
+  const access = {
+    origin: "http://opengeni.test",
+    dispatch: async () => new Response(null, { status: 500 }),
+  };
+  const admin = (server: unknown) =>
+    registeredToolNames(server).filter((name) => name.startsWith("admin_"));
+  const selected = [...DEFAULT_FIRST_PARTY_MCP_TOOLS] as FirstPartyMcpToolName[];
+  const listed = async (server: ReturnType<typeof buildOpenGeniMcpServer>) => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "app-action-listing-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      return (await client.listTools()).tools.filter((tool) => tool.name.startsWith("admin_"));
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  };
+
+  test("are selected by default and listed in a session a person started, without full access", () => {
+    for (const name of adminTools) {
+      expect(DEFAULT_FIRST_PARTY_MCP_TOOLS as readonly string[]).toContain(name);
+    }
+    expect(
+      admin(
+        buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], selected), {
+          appActions: { access, startedByPerson: true, fullAccess: false },
+        }),
+      ),
+    ).toEqual(adminTools);
+  });
+
+  test("are not listed in a child or service session, or when the host leaves them out", () => {
+    // A child or service session: selected, but nobody started it.
+    expect(
+      admin(
+        buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], selected), {
+          appActions: { access, startedByPerson: false, fullAccess: false },
+        }),
+      ),
+    ).toEqual([]);
+    // An embedding host turns the route off by leaving the tools out of its selection.
+    expect(
+      admin(
+        buildOpenGeniMcpServer(
+          deps(),
+          grant(
+            [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+            selected.filter((name) => !adminTools.includes(name)),
+          ),
+          { appActions: { access, startedByPerson: true, fullAccess: false } },
+        ),
+      ),
+    ).toEqual([]);
+    // No route facts: nothing.
+    expect(
+      admin(
+        buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], selected)),
+      ),
+    ).toEqual([]);
+  });
+
+  test("full access still lists them whatever the selection or permissions, as before", () => {
+    expect(
+      admin(
+        buildOpenGeniMcpServer(deps(), grant([], []), {
+          appActions: { access, startedByPerson: false, fullAccess: true },
+        }),
+      ),
+    ).toEqual(adminTools);
+  });
+
+  test("are never carried into a child session's selection", () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], selected),
+      { appActions: { access, startedByPerson: true, fullAccess: false } },
+    ) as unknown as { holdsSelectableTool(name: FirstPartyMcpToolName): boolean };
+    for (const name of adminTools)
+      expect(server.holdsSelectableTool(name as FirstPartyMcpToolName)).toBe(false);
+  });
+
+  test("read the same, byte for byte, before and after the person gives the session full access", async () => {
+    const before = await listed(
+      buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], selected), {
+        appActions: { access, startedByPerson: true, fullAccess: false },
+      }),
+    );
+    const after = await listed(
+      buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], selected), {
+        appActions: { access, startedByPerson: true, fullAccess: true },
+      }),
+    );
+    expect(before.map((tool) => tool.name).sort()).toEqual(adminTools);
+    expect(JSON.stringify(after)).toBe(JSON.stringify(before));
+  });
+
+  test("need an agent turn bound to a session", () => {
+    const human: AccessGrant = {
+      accountId,
+      workspaceId,
+      subjectId: "user:someone",
+      principalKind: "human_session",
+      permissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+    };
+    expect(
+      admin(
+        buildOpenGeniMcpServer(deps(), human, {
+          appActions: { access, startedByPerson: true, fullAccess: true },
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  test("tool search finds a way to a chat in another workspace", async () => {
+    // The lazy pool a full-access agent searches: its default first-party
+    // tools plus the app-action tools, named as the runtime names them.
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], [...DEFAULT_FIRST_PARTY_MCP_TOOLS]),
+      { appActions: { access, startedByPerson: true, fullAccess: true } },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "admin-tool-search-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const listedTools = (await client.listTools()).tools;
+      const pool = listedTools.map(
+        (tool) =>
+          ({
+            type: "function",
+            name: `opengeni__${tool.name}`,
+            description: tool.description ?? "",
+            parameters: tool.inputSchema,
+            strict: false,
+            needsApproval: async () => false,
+            invoke: async () => "",
+          }) as unknown as SearchableTool,
+      );
+      const index = new ToolSearchIndex(pool);
+      // "read" also matches every *_read and *_get tool by name, so there the
+      // app actions sit near the end of the first page, where any wording
+      // change elsewhere in the pool shifts them by a place; the resource
+      // alone ranks them first.
+      expect(index.rank("read a chat in another workspace", 10).map((tool) => tool.name)).toContain(
+        "opengeni__admin_actions_search",
+      );
+      expect(index.rank("chat in a different workspace", 3).map((tool) => tool.name)).toContain(
+        "opengeni__admin_actions_search",
+      );
+      // Session-shaped queries rank the session tools by name; those now
+      // reach another workspace themselves, through workspaceId.
+      const message = index
+        .rank("message a session in another workspace", 3)
+        .map((tool) => tool.name);
+      expect(message).toContain("opengeni__session_send_message");
+      for (const name of ["session_send_message", "session_get", "session_events"]) {
+        expect(
+          JSON.stringify(listedTools.find((tool) => tool.name === name)?.inputSchema),
+          name,
+        ).toContain("workspaceId");
+      }
+      // The credential profile tools stay findable for credential setup
+      // without crowding out unrelated chat and workspace searches.
+      for (const query of [
+        "give every command GH_TOKEN from a saved secret",
+        "credential profile environment variables",
+      ]) {
+        const names = index.rank(query, 8).map((tool) => tool.name);
+        expect(names, query).toContain("opengeni__secret_profile_set");
+      }
+      expect(index.rank("show the credential profile", 8).map((tool) => tool.name)).toContain(
+        "opengeni__secret_profile_get",
+      );
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+});
+
 describe("agent-facing goal_set schema", () => {
   test("does not accept maxAutoContinuations; the ceiling is API/scheduled configuration", async () => {
     const server = buildOpenGeniMcpServer(deps(), grant(["goals:manage"], ["goal_set"]));
@@ -1378,5 +1847,170 @@ describe("agent-facing goal_set schema", () => {
       await client.close();
       await server.close();
     }
+  });
+});
+
+describe("workspace Slack bot tools follow bot availability", () => {
+  test("availability is read only for a tool listing or a bot tool call", () => {
+    const call = (name: unknown) => ({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name },
+    });
+    expect(
+      mcpMessageNeedsSlackBotAvailability({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    ).toBe(true);
+    expect(mcpMessageNeedsSlackBotAvailability(call("slack_bot_send_prepared_message"))).toBe(true);
+    expect(mcpMessageNeedsSlackBotAvailability(call("knowledge_search"))).toBe(false);
+    expect(mcpMessageNeedsSlackBotAvailability(call(undefined))).toBe(false);
+    expect(mcpMessageNeedsSlackBotAvailability({ jsonrpc: "2.0", method: "initialize" })).toBe(
+      false,
+    );
+    for (const malformed of [null, "tools/list", [{ method: "tools/list" }]])
+      expect(mcpMessageNeedsSlackBotAvailability(malformed)).toBe(false);
+  });
+
+  const SLACK_BOT_DEFAULT_TOOLS = DEFAULT_FIRST_PARTY_MCP_TOOLS.filter((name) =>
+    name.startsWith("slack_bot_"),
+  );
+  const defaultSession = () =>
+    grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], [...DEFAULT_FIRST_PARTY_MCP_TOOLS]);
+  const botTools = (server: unknown) =>
+    registeredToolNames(server).filter((name) => name.startsWith("slack_bot_"));
+  const human = (): AccessGrant => ({
+    accountId,
+    workspaceId,
+    subjectId: "user:someone",
+    principalKind: "human_session",
+    permissions: [],
+  });
+
+  test("a workspace without a bot lists no slack_bot tools", () => {
+    expect(SLACK_BOT_DEFAULT_TOOLS.length).toBeGreaterThan(0);
+    expect(
+      botTools(buildOpenGeniMcpServer(deps(), defaultSession(), { slackBotAvailable: false })),
+    ).toEqual([]);
+    // Nor for a sessionless caller that would otherwise see every bot tool.
+    expect(
+      botTools(
+        buildOpenGeniMcpServer(
+          deps(),
+          { ...human(), permissions: ["connections:read"] },
+          { slackBotAvailable: false },
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  test("a workspace with a bot keeps every bot tool the session holds", () => {
+    expect(
+      botTools(buildOpenGeniMcpServer(deps(), defaultSession(), { slackBotAvailable: true })),
+    ).toEqual([...SLACK_BOT_DEFAULT_TOOLS].sort());
+    const everyBotTool = FIRST_PARTY_MCP_TOOL_NAMES.filter((name) => name.startsWith("slack_bot_"));
+    const explicit = botTools(
+      buildOpenGeniMcpServer(deps(), grant(["connections:read", "files:read"], everyBotTool), {
+        slackBotAvailable: true,
+      }),
+    );
+    // Search and plain posting are reserved names that are never registered.
+    expect(explicit).toEqual(
+      everyBotTool
+        .filter((name) => name !== "slack_bot_search" && name !== "slack_bot_post_message")
+        .sort(),
+    );
+    // Omitting the fact keeps the earlier behaviour: the tools stay listed.
+    expect(botTools(buildOpenGeniMcpServer(deps(), defaultSession()))).toEqual(
+      [...SLACK_BOT_DEFAULT_TOOLS].sort(),
+    );
+  });
+
+  test("the availability read runs only when a bot tool could be listed", async () => {
+    expect(grantMayListSlackBotTools(defaultSession())).toBe(true);
+    expect(grantMayListSlackBotTools(grant(["connections:read"], ["goal_set"]))).toBe(false);
+    expect(grantMayListSlackBotTools(grant(["sessions:read"], [...SLACK_BOT_DEFAULT_TOOLS]))).toBe(
+      false,
+    );
+    expect(grantMayListSlackBotTools(grant(["connections:read"]))).toBe(false);
+    expect(grantMayListSlackBotTools({ ...human(), permissions: ["connections:read"] })).toBe(true);
+    // No read at all when nothing could list: a db that throws is never touched.
+    const untouched = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("availability read must not run");
+        },
+      },
+    ) as ApiRouteDeps["db"];
+    expect(
+      await resolveSlackBotToolAvailability(untouched, grant(["connections:read"], ["goal_set"])),
+    ).toBe(false);
+  });
+
+  test("a Slack request without a bot reaches the Connect card; with one it finds the bot", async () => {
+    const SLACK = { capabilityId: "registry:slack", name: "Slack" };
+    const search = async (slackBotAvailable: boolean) => {
+      const server = buildOpenGeniMcpServer(deps(), defaultSession(), { slackBotAvailable });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: "slack-bot-search-test", version: "1" });
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      try {
+        const pool = (await client.listTools()).tools.map(
+          (tool) =>
+            ({
+              type: "function",
+              name: `opengeni__${tool.name}`,
+              description: tool.description ?? "",
+              parameters: tool.inputSchema,
+              strict: false,
+              needsApproval: async () => false,
+              invoke: async () => "",
+            }) as unknown as SearchableTool,
+        );
+        const lookups: string[] = [];
+        const runtime = new LazyToolRuntime(
+          "generic_dispatch",
+          new Set(),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          false,
+          false,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          async (query: string) => {
+            lookups.push(query);
+            return /\bslack\b/i.test(query) ? [SLACK] : [];
+          },
+        );
+        runtime.refresh(pool as never);
+        const result = await runtime.prepareSearch({ query: "read posts in a Slack channel" });
+        return {
+          pool: pool.map((tool) => tool.name),
+          lookups,
+          loaded: result.tools?.map((tool) => tool.name) ?? [],
+          notConnected: JSON.parse(result.output).notConnected as string | undefined,
+        };
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    };
+    const withBot = await search(true);
+    expect(withBot.pool).toContain("opengeni__slack_bot_list_channels");
+    // The bot clearly matches, so search loads it. (Search may also offer the
+    // personal Slack Connect card for a named integration; that is its own rule.)
+    expect(withBot.loaded).toContain("opengeni__slack_bot_list_channels");
+    const withoutBot = await search(false);
+    expect(withoutBot.pool.filter((name) => name.includes("slack_bot_"))).toEqual([]);
+    // Nothing installed matches: search names Slack and loads its Connect card.
+    expect(withoutBot.lookups).toHaveLength(1);
+    expect(withoutBot.notConnected).toContain('Slack (capabilityId "registry:slack")');
+    expect(withoutBot.loaded).toContain("opengeni__capability_authorization_request");
   });
 });

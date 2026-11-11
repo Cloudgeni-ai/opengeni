@@ -1,20 +1,23 @@
 # `@opengeni/capabilities`
 
-Protocol-neutral integration compilation for OpenGeni. Immutable OpenAPI and
+Protocol-neutral integration compilation for Opengeni. Immutable OpenAPI and
 GraphQL revisions are compiled into local `MCPServer` implementations so they
 use the existing lazy tool router, session policy, approval, auth-needed,
 Toolspace, child-session, and scheduled-task paths.
 
 The package owns protocol parsing and invocation only. Connection persistence,
 credential encryption, tenant authority, operation receipts, and catalog
-lifecycle stay in OpenGeni's core/database layers.
+lifecycle stay in Opengeni's core/database layers.
 
 Security defaults:
 
 - credentials are resolved for one exact destination and verified before use;
 - header, query, and cookie placements are bounded and validated atomically;
 - curated Google/Microsoft Integration Definition OAuth stays in the normal encrypted Connection spine;
-- redirects are never followed on credential-bearing requests;
+- credentials never follow a redirect: a safe read (GET/HEAD) follows at most
+  three https redirects, such as a download's pre-signed URL, through the same
+  pinned transport with no credential header, cookie or query parameter, and a
+  mutation's redirect is rejected;
 - response bodies, schemas, operation counts, and deadlines are bounded;
 - mutating operations are marked approval-required by default;
 - a safe read/query may refresh and retry exactly once on `401`, while a
@@ -53,3 +56,41 @@ Contacts uses delegated `People.Read` for `/me/people`. OneDrive uses
 `Files.ReadWrite.All` and excludes the organization-only followed-sites API;
 neither requires organization-wide people or SharePoint permissions merely to
 connect a personal Microsoft account.
+
+SharePoint is its own work/school definition (`microsoft-sharepoint`) on the
+`organizations` endpoint with delegated `Sites.ReadWrite.All`, so OneDrive keeps
+working for personal accounts. It admits an exact reviewed allowlist: site search
+and lookup, followed sites, subsites, document libraries and their files, lists
+and list items (create and update need review), site pages, and Microsoft Search
+(`POST /search/query`). No site, list, page or permission administration is
+admitted.
+
+Colleague lookup is shared by the work/school definitions: SharePoint and Teams
+both admit read-only `/users` search (`$search` with the `ConsistencyLevel:
+eventual` header), `/users/{user-id}`, `/users/{user-id}/directReports` and
+`/me/directReports`. SharePoint requests `User.ReadBasic.All` (user consent;
+basic profiles only). Teams, which already needs administrator consent, requests
+`User.Read.All`, so profiles include job title and department, and it also
+admits `/users/{user-id}/manager` and `/me/manager`: Microsoft requires
+`User.Read.All` for any manager lookup. Outlook Contacts stays on the `common`
+endpoint without directory permissions, so personal accounts can still connect.
+
+Teams also admits `POST /search/query` as a reviewed read restricted to the
+`chatMessage` entity type: the same Microsoft Search index as the Teams search box,
+scoped to messages the signed-in person can see. Adding `User.Read.All` means
+existing Teams connections must reconnect, with administrator consent, before the
+directory tools work.
+
+A reviewed allowlist entry may set `readOnly: true` for a provider action that
+only reads despite its HTTP method, such as `POST /search/query`. The definition
+passes these as `readOnlyOperations` to `compileOpenApiRevision`; provider
+documents and custom APIs cannot relax the method's safety default themselves.
+An entry's `description` replaces the provider's generic text with reviewed
+guidance for the agent.
+
+OpenAPI query arrays declared with `style: form` (also the query default) and
+`explode: false` serialize as one comma-separated parameter, including Graph
+`$select`, `$expand`, and `$orderby`. Default or explicitly exploded arrays keep
+repeated parameter names. The corrected bindings receive a new immutable revision
+identity. Refresh an existing integration catalog to adopt them; already accepted
+revisions retain their original bindings and behavior.

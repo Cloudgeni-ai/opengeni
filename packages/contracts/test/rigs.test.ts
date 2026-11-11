@@ -23,16 +23,11 @@ describe("rig contracts", () => {
     const parsed = CreateRigRequest.parse({ name: "dev" });
     expect(parsed.checks).toEqual([]);
     expect(parsed.credentialHooks).toEqual([]);
-    expect(parsed.defaultVariableSetIds).toEqual([]);
     expect(CreateRigRequest.safeParse({ name: "" }).success).toBe(false);
     // A malformed check shape is rejected up front.
     expect(CreateRigRequest.safeParse({ name: "dev", checks: [{ name: "x" }] }).success).toBe(
       false,
     );
-    // Non-uuid default variable set ids are rejected.
-    expect(
-      CreateRigRequest.safeParse({ name: "dev", defaultVariableSetIds: ["not-a-uuid"] }).success,
-    ).toBe(false);
     expect(CreateRigRequest.safeParse({ name: "dev", image: "ubuntu:24.04" }).success).toBe(false);
   });
 
@@ -107,7 +102,6 @@ describe("rig contracts", () => {
       setupScript: "apt-get install -y ripgrep",
       checks: [{ name: "rg", command: "rg --version" }],
       credentialHooks: ["azure-cli-login"],
-      defaultVariableSetIds: [],
       changelog: "Initial version",
       providerImages: {},
       createdBy: "user:alice",

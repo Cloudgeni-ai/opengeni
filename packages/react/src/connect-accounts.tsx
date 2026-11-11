@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { ConnectAccount, ConnectController } from "@opengeni/connect";
 import { useConnect } from "./hooks/use-connect";
 import { ConnectAccountIdentity } from "./connect-account-identity";
 import { ConnectionSkeleton } from "./connection-skeleton";
 import type { CapabilityCatalogItem, OpenGeniClient } from "@opengeni/sdk";
+import { useOpenGeniText } from "./messages/runtime";
 
 export type ConnectAccountsProps = {
   controller: ConnectController;
@@ -11,7 +13,7 @@ export type ConnectAccountsProps = {
   /** Enables explicit account-bound reconnect. Host supplies the exact destination. */
   returnUrl?: string;
   /** Uses authenticated catalogue assets and exact connection references for service identity. */
-  client?: OpenGeniClient | undefined;
+  client?: ChatClient<OpenGeniClient> | undefined;
   /** Reconcile surrounding service state after a confirmed account disconnect. */
   onDisconnected?: (() => void) | undefined;
 };
@@ -35,6 +37,7 @@ function ScopedAccounts({
   client,
   onDisconnected,
 }: ConnectAccountsProps) {
+  const t = useOpenGeniText();
   const view = useConnect(controller);
   const [accounts, setAccounts] = useState<ConnectAccount[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -42,7 +45,7 @@ function ScopedAccounts({
   const [error, setError] = useState(false);
   const [reload, setReload] = useState(0);
   const [catalog, setCatalog] = useState<{
-    client: OpenGeniClient;
+    client: ChatClient<OpenGeniClient>;
     items: CapabilityCatalogItem[];
   } | null>(null);
   const mutation = useRef<AbortController | null>(null);
@@ -130,15 +133,13 @@ function ScopedAccounts({
   return (
     <section
       className={className}
-      aria-label="Connected accounts"
+      aria-label={t("connectAccounts.connectedAccounts")}
       aria-busy={busy || view.busy || (!accounts && !error)}
     >
-      <h3>Your connections</h3>
-      {error && (
-        <p role="alert">Account state could not be confirmed. Reload before trying again.</p>
-      )}
-      {!accounts && !error && <ConnectionSkeleton label="Loading accounts" />}
-      {accounts?.length === 0 && <p role="status">No connected accounts.</p>}
+      <h3>{t("connectAccounts.yourConnections")}</h3>
+      {error && <p role="alert">{t("connectAccounts.accountStateCouldNotBe")}</p>}
+      {!accounts && !error && <ConnectionSkeleton label={t("connectAccounts.loadingAccounts")} />}
+      {accounts?.length === 0 && <p role="status">{t("connectAccounts.noConnectedAccounts")}</p>}
       {accounts && accounts.length > 0 && (
         <ul>
           {accounts.map((account) => (
@@ -152,10 +153,10 @@ function ScopedAccounts({
                   />
                   <span className="og-connect-account-status" data-status={account.status}>
                     {account.status === "connected"
-                      ? "✓ Connected"
+                      ? t("connectAccounts.connected")
                       : account.status === "auth_needed"
-                        ? "Reconnect needed"
-                        : "Disconnected"}
+                        ? t("connectAccounts.reconnectNeeded")
+                        : t("connectAccounts.disconnected")}
                   </span>
                   <svg
                     className="og-connect-account-chevron"
@@ -174,34 +175,34 @@ function ScopedAccounts({
                   {returnUrl && account.status === "auth_needed" && (
                     <button
                       type="button"
-                      aria-label={`Reconnect ${account.label}`}
+                      aria-label={t("connectAccounts.reconnectLabel", { label: account.label })}
                       disabled={busy || view.busy}
                       onClick={() => void reconnect(account)}
                     >
-                      Reconnect
+                      {t("connectAccounts.reconnect")}
                     </button>
                   )}
                   {selected === `${account.providerId}:${account.id}` ? (
-                    <div role="group" aria-label={`Disconnect ${account.label}`}>
-                      <p>
-                        This removes local Opengeni access. It does not revoke consent at the
-                        provider.
-                      </p>
+                    <div
+                      role="group"
+                      aria-label={t("connectAccounts.disconnectLabel", { label: account.label })}
+                    >
+                      <p>{t("connectAccounts.thisRemovesLocalOpengeniAccess")}</p>
                       <button
                         type="button"
                         disabled={busy || view.busy}
                         onClick={() => void disconnect(account)}
                       >
-                        Confirm disconnect
+                        {t("connectAccounts.confirmDisconnect")}
                       </button>
                       <button type="button" disabled={busy} onClick={() => setSelected(null)}>
-                        Keep account
+                        {t("connectAccounts.keepAccount")}
                       </button>
                     </div>
                   ) : (
                     <button
                       type="button"
-                      aria-label={`Disconnect ${account.label}`}
+                      aria-label={t("connectAccounts.disconnectLabel", { label: account.label })}
                       disabled={
                         busy ||
                         view.busy ||
@@ -211,7 +212,7 @@ function ScopedAccounts({
                       }
                       onClick={() => setSelected(`${account.providerId}:${account.id}`)}
                     >
-                      Disconnect
+                      {t("connectAccounts.disconnect")}
                     </button>
                   )}
                 </div>
@@ -226,7 +227,7 @@ function ScopedAccounts({
         disabled={busy}
         onClick={() => setReload((value) => value + 1)}
       >
-        Reload accounts
+        {t("connectAccounts.reloadAccounts")}
       </button>
     </section>
   );

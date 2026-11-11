@@ -1,0 +1,233 @@
+import {
+  type ConnectionKind,
+  type ConnectionMetadata,
+  type ConnectionStatus,
+  OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+} from "@opengeni/contracts";
+import { and, desc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
+import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
+import * as schema from "./schema";
+
+/** Server-owned verification facts; public schemas expose them read-only and nullable. */
+export type ConnectionMetadataWithVerification = ConnectionMetadata & {
+  verifiedInstallAt: string | null;
+  verifiedInstallVersion: number | null;
+};
+
+export const connectionMetadataColumns = {
+  id: schema.connections.id,
+  authorityId: schema.connections.authorityId,
+  authorityGeneration: schema.connections.authorityGeneration,
+  accountId: schema.connections.accountId,
+  workspaceId: schema.connections.workspaceId,
+  subjectId: schema.connections.subjectId,
+  providerDomain: schema.connections.providerDomain,
+  kind: schema.connections.kind,
+  status: schema.connections.status,
+  grantedScopes: schema.connections.grantedScopes,
+  expiresAt: schema.connections.expiresAt,
+  lastRefreshAt: schema.connections.lastRefreshAt,
+  lastUsedAt: schema.connections.lastUsedAt,
+  lastError: schema.connections.lastError,
+  version: schema.connections.version,
+  verifiedInstallAt: schema.connections.verifiedInstallAt,
+  verifiedInstallVersion: schema.connections.verifiedInstallVersion,
+  metadata: schema.connections.metadata,
+  createdBySubjectId: schema.connections.createdBySubjectId,
+  updatedBySubjectId: schema.connections.updatedBySubjectId,
+  createdAt: schema.connections.createdAt,
+  updatedAt: schema.connections.updatedAt,
+};
+
+export function connectionSubjectVisibility(subjectId?: string | null): SQL {
+  return subjectId
+    ? or(isNull(schema.connections.subjectId), eq(schema.connections.subjectId, subjectId))!
+    : isNull(schema.connections.subjectId);
+}
+
+export async function withConnectionSubjectRls<T>(
+  db: Database,
+  workspaceId: string,
+  subjectId: string | null | undefined,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return subjectId
+    ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, fn)
+    : await withWorkspaceRls(db, workspaceId, fn);
+}
+
+export async function listConnectionsMetadata(
+  db: Database,
+  workspaceId: string,
+  subjectId?: string | null,
+): Promise<ConnectionMetadataWithVerification[]> {
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
+    return await listConnectionsMetadataInScope(scopedDb, workspaceId, subjectId);
+  });
+}
+
+/** Internal reader for callers that already hold this workspace's RLS scope. */
+export async function listConnectionsMetadataInScope(
+  scopedDb: Database,
+  workspaceId: string,
+  subjectId?: string | null,
+): Promise<ConnectionMetadataWithVerification[]> {
+  const rows = await scopedDb
+    .select(connectionMetadataColumns)
+    .from(schema.connections)
+    .where(
+      and(eq(schema.connections.workspaceId, workspaceId), connectionSubjectVisibility(subjectId)),
+    )
+    // Legacy rows can share created_at. UUID DESC is the immutable stable
+    // tie-breaker, so every caller that intentionally selects the first row
+    // collapses duplicates in the same documented direction.
+    .orderBy(desc(schema.connections.createdAt), desc(schema.connections.id));
+  return rows.map(mapConnectionMetadata);
+}
+
+export async function getConnectionMetadata(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  subjectId?: string | null,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select(connectionMetadataColumns)
+      .from(schema.connections)
+      .where(
+        and(
+          eq(schema.connections.workspaceId, workspaceId),
+          eq(schema.connections.id, connectionId),
+          connectionSubjectVisibility(subjectId),
+        ),
+      )
+      .limit(1);
+    return row ? mapConnectionMetadata(row) : null;
+  });
+}
+
+/**
+ * `getConnectionMetadata` for several connections of one workspace in one
+ * scope: the same context, visibility and row filter, so each id maps to
+ * exactly what its own `getConnectionMetadata` read returns (null when absent
+ * or not visible). Nothing else is read.
+ */
+export async function getConnectionMetadataByIds(
+  db: Database,
+  workspaceId: string,
+  connectionIds: readonly string[],
+  subjectId?: string | null,
+): Promise<Map<string, ConnectionMetadataWithVerification | null>> {
+  const ids = [...new Set(connectionIds)];
+  const found = new Map<string, ConnectionMetadataWithVerification | null>(
+    ids.map((id) => [id, null]),
+  );
+  if (ids.length === 0) return found;
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select(connectionMetadataColumns)
+      .from(schema.connections)
+      .where(
+        and(
+          eq(schema.connections.workspaceId, workspaceId),
+          inArray(schema.connections.id, ids),
+          connectionSubjectVisibility(subjectId),
+        ),
+      );
+    for (const row of rows) found.set(row.id, mapConnectionMetadata(row));
+    return found;
+  });
+}
+
+/**
+ * The workspace a provider connection was added in, when the caller may use
+ * it from `workspaceId`: their own personal connection (while they are an
+ * active organization member), or a shared connection an organization vault
+ * is linked through. Connected vaults reach beyond the workspace their token
+ * lives in (an Only-me vault follows its owner; an organization vault reaches
+ * every workspace it is available in), so the token is loaded from here.
+ * Null for anything else.
+ */
+export async function getProviderConnectionHomeWorkspace(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  subjectId?: string | null,
+): Promise<string | null> {
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
+    const [row] = await rawRows<{ workspace_id: string | null }>(
+      scopedDb,
+      sql`select provider_connection_home_workspace(${connectionId}::uuid) as workspace_id`,
+    );
+    return row?.workspace_id ?? null;
+  });
+}
+
+export function mapConnectionMetadata(row: {
+  id: string;
+  authorityId?: string | null;
+  authorityGeneration: number;
+  accountId: string;
+  workspaceId: string;
+  subjectId: string | null;
+  providerDomain: string;
+  kind: string;
+  status: string;
+  grantedScopes: string[];
+  expiresAt: Date | null;
+  lastRefreshAt: Date | null;
+  lastUsedAt: Date | null;
+  lastError: string | null;
+  version: number;
+  verifiedInstallAt: Date | null;
+  verifiedInstallVersion: number | null;
+  metadata: Record<string, unknown>;
+  createdBySubjectId: string | null;
+  updatedBySubjectId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}): ConnectionMetadataWithVerification {
+  const {
+    [OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _openRouterOperationId,
+    [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
+    [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
+    [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
+    anthropicCredentialOperationId: _anthropicOperationId,
+    anthropicCredentialOperationDigest: _anthropicOperationDigest,
+    claude_subscriptionCredentialOperationId: _claudeOperationId,
+    claude_subscriptionCredentialOperationDigest: _claudeOperationDigest,
+    [OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _opperOperationId,
+    [OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _opperOperationDigest,
+    ...publicMetadata
+  } = row.metadata;
+  return {
+    id: row.id,
+    ...(row.subjectId !== null && row.authorityId ? { authorityId: row.authorityId } : {}),
+    connectionAuthorityGeneration: row.authorityGeneration,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    subjectId: row.subjectId,
+    providerDomain: row.providerDomain,
+    kind: row.kind as ConnectionKind,
+    status: row.status as ConnectionStatus,
+    grantedScopes: row.grantedScopes,
+    expiresAt: row.expiresAt?.toISOString() ?? null,
+    lastRefreshAt: row.lastRefreshAt?.toISOString() ?? null,
+    lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
+    lastError: row.lastError,
+    version: row.version,
+    verifiedInstallAt: row.verifiedInstallAt?.toISOString() ?? null,
+    verifiedInstallVersion: row.verifiedInstallVersion,
+    metadata: publicMetadata,
+    createdBySubjectId: row.createdBySubjectId,
+    updatedBySubjectId: row.updatedBySubjectId,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}

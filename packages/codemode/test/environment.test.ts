@@ -1,14 +1,18 @@
-import { describe, expect, test } from "bun:test";
-import type { AttemptToolDefinition } from "../src";
+import { describe, expect, spyOn, test } from "bun:test";
+import { ATTEMPT_TOOL_CATALOG_VERSION, AttemptToolCatalog } from "@opengeni/contracts";
+import { prepareToolGatewayDefinitions } from "@opengeni/tool-gateway";
+import type { AttemptToolDefinition, CodemodeClient, CodemodeToolFunction } from "../src";
 import {
   AttemptToolApprovalRequiredError,
   AttemptToolCatalogIntegrityError,
   AttemptToolCatalogStaleError,
   AttemptToolInputValidationError,
   AttemptToolOutputValidationError,
-  AttemptToolPathCollisionError,
+  compileCodemodeTools,
   createAttemptToolEnvironment,
+  digestAttemptToolCatalog,
   parseVerifiedAttemptToolCatalog,
+  verifyAttemptToolCatalog,
 } from "../src";
 
 const scope = {
@@ -39,6 +43,166 @@ function definition(
 }
 
 describe("AttemptToolEnvironment", () => {
+  test("more tools than the catalog holds are left out and reported, not fatal", () => {
+    // Before: AttemptToolCatalog.parse rejected all 4,097 entries and the turn failed.
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const reported: string[] = [];
+      const definitions = Array.from({ length: 4_097 }, (_, index) =>
+        definition("big", `tool_${index}`),
+      );
+      const { catalog } = createAttemptToolEnvironment({
+        scope,
+        generation: 1,
+        definitions,
+        onWarnings: (warnings) => reported.push(...warnings.map((warning) => warning.code)),
+      });
+      expect(catalog.entries).toHaveLength(4_096);
+      expect(reported).toEqual(["catalog_entry_limit"]);
+      expect(warn.mock.calls[0]![1]).toMatchObject({ event: "tool_catalog_degraded", count: 1 });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("internal construction never re-signs a digest smuggled through scope", () => {
+    const suppliedScope = { ...scope, digest: "a".repeat(64) };
+    expect(() =>
+      createAttemptToolEnvironment({
+        scope: suppliedScope,
+        generation: 1,
+        definitions: [definition("docs", "search")],
+      }),
+    ).toThrow(AttemptToolCatalogIntegrityError);
+  });
+
+  test("does not partially freeze or memoize a catalog with mutable non-JSON annotations", () => {
+    const { catalog } = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [
+        {
+          ...definition("docs", "search"),
+          annotations: { observedAt: new Date("2026-08-09T12:00:00.000Z") },
+        },
+      ],
+    });
+    expect(Object.isFrozen(catalog)).toBe(false);
+    expect(Object.isFrozen(catalog.entries[0]!.inputSchema)).toBe(false);
+    expect(parseVerifiedAttemptToolCatalog(catalog)).not.toBe(catalog);
+  });
+
+  test("immutable snapshots preserve the prior catalog bytes and digest", () => {
+    const definitions = [definition("docs", "search"), definition("docs", "fetch")];
+    const createdAt = new Date("2026-08-09T12:00:00.000Z");
+    const unsigned = {
+      version: ATTEMPT_TOOL_CATALOG_VERSION,
+      ...scope,
+      generation: 1,
+      createdAt: createdAt.toISOString(),
+      entries: [
+        ...prepareToolGatewayDefinitions(
+          definitions.map((entry) => ({
+            ...entry,
+            execute: async () => ({ content: [] }),
+          })),
+        ).entries,
+      ],
+    };
+    const previous = AttemptToolCatalog.parse({
+      ...unsigned,
+      digest: digestAttemptToolCatalog(unsigned),
+    });
+    const current = createAttemptToolEnvironment({ scope, generation: 1, createdAt, definitions });
+    expect(JSON.stringify(current.catalog)).toBe(JSON.stringify(previous));
+  });
+
+  test("single-hash construction preserves ordered catalog bytes for varied metadata", () => {
+    for (let i = 0; i < 20; i++) {
+      const definitions: AttemptToolDefinition[] = ["zeta", "alpha", "middle"].map((name) => ({
+        ...definition("docs", name),
+        title: `Title ${i} — ${name}`,
+        inputSchema: {
+          type: "object",
+          properties: {
+            "10": { const: i },
+            "2": { enum: [null, true, "text"] },
+            z: { type: "array", items: { type: "string" } },
+          },
+          required: ["z", "2"],
+          additionalProperties: false,
+        },
+        outputSchema: { type: "object", properties: { value: { const: -0 } } },
+        annotations: { readOnlyHint: true, custom: { b: [i, null], a: "value" } },
+        icons: [{ src: "https://example.test/icon.svg", sizes: ["16x16", "32x32"] }],
+      }));
+      const createdAt = new Date("2026-08-09T12:00:00.000Z");
+      const unsigned = {
+        version: ATTEMPT_TOOL_CATALOG_VERSION,
+        ...scope,
+        generation: i + 1,
+        createdAt: createdAt.toISOString(),
+        firstPartyMcpPermissions: [] as [],
+        entries: [
+          ...prepareToolGatewayDefinitions(
+            definitions.map((entry) => ({
+              ...entry,
+              execute: async () => ({ content: [] }),
+            })),
+          ).entries,
+        ],
+      };
+      const previous = parseVerifiedAttemptToolCatalog({
+        ...unsigned,
+        digest: digestAttemptToolCatalog(unsigned),
+      });
+      const current = createAttemptToolEnvironment({
+        scope,
+        generation: i + 1,
+        createdAt,
+        firstPartyMcpPermissions: [],
+        definitions,
+      }).catalog;
+      expect(JSON.stringify(current)).toBe(JSON.stringify(previous));
+      expect(parseVerifiedAttemptToolCatalog(structuredClone(current))).toEqual(previous);
+    }
+  });
+
+  test("reuses only the exact immutable catalog snapshot and detaches caller schemas", () => {
+    const schema = { type: "object", properties: { query: { type: "string" } } };
+    const environment = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [{ ...definition("docs", "search"), inputSchema: schema }],
+    });
+    const { catalog } = environment;
+    expect(parseVerifiedAttemptToolCatalog(catalog)).toBe(catalog);
+    const receipt = verifyAttemptToolCatalog(catalog);
+    receipt.byteLength = 0;
+    receipt.catalog = { ...catalog, digest: "f".repeat(64) };
+    expect(verifyAttemptToolCatalog(catalog).catalog).toBe(catalog);
+    expect(verifyAttemptToolCatalog(catalog).byteLength).toBe(
+      new TextEncoder().encode(JSON.stringify(catalog)).byteLength,
+    );
+    expect(Object.isFrozen(catalog)).toBe(true);
+    expect(Object.isFrozen(catalog.entries)).toBe(true);
+    expect(Object.isFrozen(catalog.entries[0]!.inputSchema.properties)).toBe(true);
+    expect(() => {
+      catalog.entries[0]!.description = "changed";
+    }).toThrow();
+    schema.properties.query.type = "number";
+    expect(catalog.entries[0]!.inputSchema).toEqual({
+      type: "object",
+      properties: { query: { type: "string" } },
+    });
+    const copy = structuredClone(catalog);
+    expect(parseVerifiedAttemptToolCatalog(copy)).toEqual(catalog);
+    expect(parseVerifiedAttemptToolCatalog(copy)).not.toBe(copy);
+    copy.entries[0]!.description = "tampered";
+    Object.freeze(copy);
+    expect(() => parseVerifiedAttemptToolCatalog(copy)).toThrow(AttemptToolCatalogIntegrityError);
+  });
+
   test("binds a deterministic digest to exact attempt scope and tool catalog", () => {
     const createdAt = new Date("2026-08-09T12:00:00.000Z");
     const first = createAttemptToolEnvironment({
@@ -106,9 +270,10 @@ describe("AttemptToolEnvironment", () => {
     expect(isolated.catalog.entries[0]?.codemodePath).toEqual(paths[0]);
   });
 
-  test("rejects path-prefix collisions while allocating the canonical catalog", () => {
-    expect(() =>
-      createAttemptToolEnvironment({
+  test("re-paths a path-prefix collision instead of failing the canonical catalog", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const environment = createAttemptToolEnvironment({
         scope,
         generation: 1,
         definitions: [
@@ -118,8 +283,93 @@ describe("AttemptToolEnvironment", () => {
             codemodePath: ["docs", "search", "advanced"],
           },
         ],
-      }),
-    ).toThrow(AttemptToolPathCollisionError);
+      });
+      expect(environment.catalog.entries.map((entry) => entry.codemodePath)).toEqual([
+        ["docs", "search"],
+        ["docs", expect.stringMatching(/^search_advanced_[0-9a-f]{16}$/u)],
+      ]);
+      expect(warn.mock.calls[0]![1]).toMatchObject({
+        event: "tool_catalog_degraded",
+        sessionId: scope.sessionId,
+        attemptId: scope.attemptId,
+        warnings: [{ code: "path_disambiguated", toolName: "search_advanced" }],
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("an MCP server listing one tool twice still yields a usable attempt catalog", async () => {
+    // Staging, November 4, 2026: the ElevenLabs hosted MCP repeated a tool in
+    // tools/list and every turn with that account failed with
+    // `Tool path account_0939….agents_bulk_delete_knowledge_base_e8b6a12b01 collides`.
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const serverId = "account-0939a3b0e4a4afa388063b840830e169707a22f94853349c53a4e972948b5c52";
+      const listed = {
+        ...definition(serverId, "agents_bulk_delete_knowledge_base"),
+        modelName: "mcp_4736c7ab5c4aacc3203e2998__agents_bulk_delete_knowledge_base",
+        codemodePath: [serverId, "agents_bulk_delete_knowledge_base"],
+      };
+      const environment = createAttemptToolEnvironment({
+        scope,
+        generation: 1,
+        definitions: [listed, { ...listed }, definition("docs", "search")],
+      });
+      expect(environment.catalog.entries.map((entry) => entry.codemodePath.join("."))).toEqual([
+        "account_0939a3b0e4a4afa388063b840830e169707a22f94853349c53a4e972948b5c52.agents_bulk_delete_knowledge_base_e8b6a12b01",
+        "docs.search",
+      ]);
+      const result = await environment.callModel({
+        modelName: listed.modelName,
+        arguments: { document_ids: ["a"] },
+        subjectId: "agent:test",
+      });
+      expect(result.content).toEqual([{ type: "text", text: '{"document_ids":["a"]}' }]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("the Codemode namespace keeps the first tool when a signed catalog overlaps", () => {
+    const entry = (toolName: string, codemodePath: string[]) => ({
+      identity: { serverId: "docs", toolName },
+      modelName: `docs__${toolName}`,
+      codemodePath,
+      inputSchema: { type: "object" },
+      source: "mcp" as const,
+      approval: "none" as const,
+    });
+    const signed = (entries: ReturnType<typeof entry>[]) => {
+      const unsigned = {
+        version: ATTEMPT_TOOL_CATALOG_VERSION,
+        ...scope,
+        generation: 1,
+        createdAt: "2026-11-04T00:00:00.000Z",
+        entries,
+      };
+      return { ...unsigned, digest: digestAttemptToolCatalog(unsigned) };
+    };
+    const client = {} as CodemodeClient;
+    const leafFirst = compileCodemodeTools(
+      signed([entry("search", ["docs", "search"]), entry("deep", ["docs", "search", "deep"])]),
+      client,
+    );
+    expect(typeof leafFirst.docs!).toBe("object");
+    const leaf = (leafFirst.docs as Record<string, CodemodeToolFunction>).search!;
+    expect(typeof leaf).toBe("function");
+    expect((leaf as unknown as { entry: { identity: unknown } }).entry.identity).toEqual({
+      serverId: "docs",
+      toolName: "search",
+    });
+    // A later leaf never replaces an existing namespace (or the tools inside it).
+    const namespaceFirst = compileCodemodeTools(
+      signed([entry("deep", ["docs", "search", "deep"]), entry("search", ["docs", "search"])]),
+      client,
+    );
+    const namespace = (namespaceFirst.docs as Record<string, Record<string, unknown>>).search!;
+    expect(typeof namespace).toBe("object");
+    expect(typeof namespace.deep).toBe("function");
   });
 
   test("routes model and Codemode calls through one opaque executor", async () => {

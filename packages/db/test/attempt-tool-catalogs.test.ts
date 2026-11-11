@@ -1,8 +1,28 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type postgres from "postgres";
 import { AttemptToolCatalogIntegrityError, createAttemptToolEnvironment } from "@opengeni/codemode";
-import type { AttemptToolCall } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import type { AttemptToolCall, McpConnectionAccountBinding } from "@opengeni/contracts";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
+  getSessionTurn,
+  settleSessionAttemptInterruptions,
+  mutateSessionControlInTransaction,
+  mutateWorkspaceControlInTransaction,
+  submitHumanPromptInTransaction,
+  steerQueuedTurnInTransaction,
+  withWorkspaceSessionActivityRls,
+  withWorkspaceSubjectSessionActivityRls,
+  bindCodemodePreparation,
+  requestSessionTurnRecovery,
+  getToolActionReview,
+  getToolReviewDetailsPage,
+  prepareConnectorActionApproval,
+  waitForCodemodeApproval,
+  saveRunState,
+  applySessionTurnSettlement,
+  acceptSessionApprovalDecision,
+  adoptCodemodeApproval,
+  readTurnCodemodeOperation,
   AttemptToolCatalogAuthorityError,
   AttemptToolCatalogConflictError,
   CodemodeOperationConflictError,
@@ -20,6 +40,9 @@ import {
   markCodemodeOperationExecutionStarted,
   persistAttemptToolCatalog,
   submitCodemodeOperation,
+  getCodemodeCallExecutionSandboxId,
+  createConnection,
+  encryptEnvironmentValue,
 } from "../src";
 
 let available = true;
@@ -41,7 +64,8 @@ afterAll(async () => {
   await shared?.release();
 });
 
-async function fixture() {
+const fixtureSubjects = new Map<string, string>();
+async function fixture(providerDomain?: string) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -53,6 +77,37 @@ async function fixture() {
     subjectId: `catalog-subject-${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
+  let bindings: McpConnectionAccountBinding[] | undefined;
+  if (providerDomain) {
+    const connection = await createConnection(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      providerDomain,
+      kind: "oauth2",
+      createdBySubjectId: grant.subjectId,
+      credentialEncrypted: encryptEnvironmentValue(Buffer.alloc(32, 17), "fixture-only"),
+    });
+    bindings = [
+      {
+        serverId: "mail",
+        canonicalServerId: "mail",
+        connectionId: connection.id,
+        originWorkspaceId: grant.workspaceId!,
+        subjectScope: "workspace",
+        ownerSubjectId: null,
+        accountLabel: "mail@example.test",
+        providerDomain,
+        kind: "oauth2",
+        connectionRef: {
+          connectionId: connection.id,
+          subjectScope: "workspace",
+          providerDomain,
+          kind: "oauth2",
+        },
+        connectionAuthorityGeneration: connection.connectionAuthorityGeneration ?? undefined,
+      },
+    ];
+  }
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
@@ -63,6 +118,9 @@ async function fixture() {
     reasoningEffort: "medium" as const,
     latencyMode: "standard" as const,
     sandboxBackend: "none",
+    ...(bindings
+      ? { mcpAccountBindings: bindings, tools: [{ kind: "mcp" as const, id: "mail" }] }
+      : {}),
   });
   const started = await initializeSessionStartAtomically(client.db, {
     accountId: grant.accountId,
@@ -82,6 +140,7 @@ async function fixture() {
     trigger: { kind: "next" },
   });
   if (claimed.action !== "claimed") throw new Error(`claim failed: ${claimed.reason}`);
+  fixtureSubjects.set(session.id, grant.subjectId);
   return {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
@@ -130,6 +189,40 @@ function codemodeCall(
 }
 
 describe("durable attempt tool catalogs", () => {
+  test("fresh persistence verifies RETURNING without reloading the header; replay reads it", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const first = catalog(scope);
+    const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+    const prior = driver.options.debug;
+    const queries: string[] = [];
+    driver.options.debug = (_connection, query) => {
+      queries.push(query);
+    };
+    const headerReads = () =>
+      queries.filter(
+        (query) => /^select\b/i.test(query) && query.includes('"session_attempt_tool_catalogs"'),
+      );
+    try {
+      expect(await persistAttemptToolCatalog(client.db, first)).toEqual(first);
+      expect(headerReads()).toHaveLength(0);
+      expect(
+        queries.some(
+          (query) =>
+            /^insert\b/i.test(query) &&
+            query.includes('"session_attempt_tool_catalogs"') &&
+            query.includes("returning"),
+        ),
+      ).toBe(true);
+      queries.length = 0;
+      const replay = catalog(scope, "search", new Date("2026-08-09T13:00:00.000Z"));
+      expect(await persistAttemptToolCatalog(client.db, replay)).toEqual(first);
+      expect(headerReads()).toHaveLength(1);
+    } finally {
+      driver.options.debug = prior;
+    }
+  });
+
   test("persists one exact verified catalog idempotently and reads it under RLS", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -146,6 +239,33 @@ describe("durable attempt tool catalogs", () => {
         attemptId: scope.attemptId,
       }),
     ).toEqual(first);
+  });
+
+  test("reuses one frozen verified catalog while the row read still gates access", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const first = catalog(scope);
+    await persistAttemptToolCatalog(client.db, first);
+    const read = () =>
+      getAttemptToolCatalog(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        attemptId: scope.attemptId,
+      });
+    const verified = await read();
+    expect(verified).toEqual(first);
+    // Repeated reads reuse one frozen verified catalog instead of re-hydrating it.
+    expect(await read()).toBe(verified);
+    expect(Object.isFrozen(verified!.entries[0]!.inputSchema)).toBe(true);
+    // The row read still gates every hit: another workspace's scope sees nothing.
+    const other = await fixture();
+    expect(
+      await getAttemptToolCatalog(client.db, {
+        accountId: other.accountId,
+        workspaceId: other.workspaceId,
+        attemptId: scope.attemptId,
+      }),
+    ).toBeNull();
   });
 
   test("rejects a different immutable catalog for the same attempt", async () => {
@@ -231,6 +351,45 @@ describe("durable attempt tool catalogs", () => {
 
     expect(submissions.map(({ created }) => created).sort()).toEqual([false, true]);
     expect(submissions[0]!.operation).toEqual(submissions[1]!.operation);
+  });
+
+  test("records the machine a run_on exec's Codemode call came from, and only for its session", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const exactCatalog = catalog(scope);
+    await persistAttemptToolCatalog(client.db, exactCatalog);
+    const machine = crypto.randomUUID();
+    const remote = codemodeCall(exactCatalog.digest);
+    const local = codemodeCall(exactCatalog.digest);
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: remote,
+      executionSandboxId: machine,
+    });
+    await submitCodemodeOperation(client.db, { ...scope, call: local, executionSandboxId: null });
+    const lookup = (operationId: string, sessionId = scope.sessionId) =>
+      getCodemodeCallExecutionSandboxId(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sessionId,
+        operationId,
+      });
+    expect(await lookup(remote.operationId)).toBe(machine);
+    // Code on the session's own sandbox, and ids that name no Codemode call
+    // (a model call's operation), resolve paths on the active sandbox.
+    expect(await lookup(local.operationId)).toBeNull();
+    expect(await lookup(crypto.randomUUID())).toBeNull();
+    // Another session cannot borrow the call's machine.
+    expect(await lookup(remote.operationId, crypto.randomUUID())).toBeNull();
+    const other = await fixture();
+    expect(
+      await getCodemodeCallExecutionSandboxId(client.db, {
+        accountId: other.accountId,
+        workspaceId: other.workspaceId,
+        sessionId: scope.sessionId,
+        operationId: remote.operationId,
+      }),
+    ).toBeNull();
   });
 
   test("claims once and records one durable result under the owning claim fence", async () => {
@@ -444,3 +603,639 @@ describe("durable attempt tool catalogs", () => {
     ).rejects.toBeInstanceOf(CodemodeToolApprovalRequiredError);
   });
 });
+
+describe("durable programmatic review", () => {
+  test("review facts and paginated details are bound to saved arguments and tenant", async () => {
+    if (!available) throw new Error("Real database is required");
+    const scope = await fixture();
+    const turn = (await getSessionTurn(client.db, scope.workspaceId, scope.turnId))!;
+    const approvalId = crypto.randomUUID();
+    const args = {
+      messageIds: Array.from({ length: 600 }, (_, i) => `synthetic-${i}`),
+      addLabelIds: ["TRASH"],
+      removeLabelIds: ["INBOX"],
+      note: "a\u0000b",
+      apiKey: "private-canary",
+    };
+    const prepared = await prepareConnectorActionApproval(
+      client.db,
+      { ...scope, initiator: turn.initiator },
+      {
+        approvalId,
+        connectionId: "session-mcp:mail:synthetic",
+        serverId: "mail",
+        toolName: "batch_modify_messages",
+        arguments: args,
+        approvalMode: "session_mcp",
+        reviewContext: { kind: "gmail", accountLabel: "mail@example.test" },
+      },
+    );
+    if (!prepared.managed) throw new Error("Expected review");
+    const input = { ...scope, approvalId };
+    const review = await getToolActionReview(client.db, input);
+    expect(review).toMatchObject({
+      title: "Move 600 messages to Trash",
+      selectionCount: 600,
+      accountLabel: "mail@example.test",
+      actionDigest: prepared.actionFingerprint,
+      availableActions: [],
+    });
+    expect(JSON.stringify(review)).not.toContain("private-canary");
+    const page = await getToolReviewDetailsPage(client.db, {
+      ...input,
+      actionDigest: prepared.actionFingerprint,
+      path: "/messageIds",
+      offset: 575,
+    });
+    expect(page).toMatchObject({ total: 600, nextOffset: null });
+    expect(page!.items).toHaveLength(25);
+    expect(page!.items[24]!.value).toBe("synthetic-599");
+    const text = await getToolReviewDetailsPage(client.db, {
+      ...input,
+      actionDigest: prepared.actionFingerprint,
+      path: "/note",
+      offset: 0,
+    });
+    expect(text!.items[0]!.value).toBe("a\u0000b");
+    expect(
+      await getToolReviewDetailsPage(client.db, {
+        ...input,
+        actionDigest: "0".repeat(64),
+        path: "",
+        offset: 0,
+      }),
+    ).toBeNull();
+    expect(
+      await getToolActionReview(client.db, { ...input, accountId: crypto.randomUUID() }),
+    ).toBeNull();
+    await applySessionTurnSettlement(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      turnId: scope.turnId,
+      attemptId: scope.attemptId,
+      triggerEventId: turn.triggerEventId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: scope.turnId,
+      events: [],
+    });
+    expect(await getToolActionReview(client.db, input)).toMatchObject({
+      availableActions: ["approve", "reject"],
+    });
+  });
+  for (const crash of ["before_review", "after_review", "after_effect_start"] as const) {
+    test(`recovers without replay after crash ${crash}`, async () => {
+      if (!available) throw new Error("Real database is required");
+      const original = await fixture();
+      const turn = (await getSessionTurn(client.db, original.workspaceId, original.turnId))!;
+      const definitions = [
+        {
+          identity: { serverId: "mail", toolName: "change" },
+          modelName: "mail__change",
+          inputSchema: { type: "object" },
+          source: "mcp" as const,
+          approval: "policy" as const,
+          execute: () => ({ content: [] }),
+        },
+      ];
+      const environment = createAttemptToolEnvironment({
+        scope: original,
+        generation: 1,
+        definitions,
+      });
+      await persistAttemptToolCatalog(client.db, environment.catalog);
+      const operationId = crypto.randomUUID(),
+        claimId = crypto.randomUUID();
+      const call = {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: definitions[0]!.identity,
+        arguments: { ids: ["synthetic-message"] },
+        caller: { kind: "codemode" as const, subjectId: `sandbox:${original.attemptId}` },
+      };
+      await submitCodemodeOperation(client.db, { ...original, call, durableApproval: true });
+      expect(
+        await claimCodemodeOperation(client.db, {
+          ...original,
+          operationId,
+          claimId,
+          catalogDigest: call.catalogDigest,
+        }),
+      ).toMatchObject({ status: "claimed" });
+      const effectDigest = environment.effectDigest(call.identity);
+      expect(
+        await bindCodemodePreparation(client.db, {
+          ...original,
+          operationId,
+          claimId,
+          effectDigest,
+        }),
+      ).toBe(true);
+      if (crash === "after_review") {
+        const request = await prepareConnectorActionApproval(
+          client.db,
+          { ...original, initiator: turn.initiator },
+          {
+            approvalId: operationId,
+            connectionId: "session-mcp:mail:synthetic",
+            serverId: "mail",
+            toolName: "change",
+            arguments: call.arguments,
+            approvalMode: "session_mcp",
+          },
+        );
+        expect(request).toMatchObject({ managed: true, approvalStatus: "pending" });
+      }
+      if (crash === "after_effect_start")
+        expect(
+          await markCodemodeOperationExecutionStarted(client.db, {
+            ...original,
+            operationId,
+            claimId,
+          }),
+        ).toBe(true);
+      expect(
+        await requestSessionTurnRecovery(client.db, original.workspaceId, {
+          sessionId: original.sessionId,
+          turnId: original.turnId,
+          attemptId: original.attemptId,
+          triggerEventId: turn.triggerEventId,
+          reason: "worker_restart",
+        }),
+      ).toMatchObject({ action: "recovering" });
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(client.db, original.workspaceId, {
+        sessionId: original.sessionId,
+        workflowId: `session-${original.sessionId}`,
+        workflowRunId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        attemptId,
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") throw new Error(`Recovery not claimed: ${claimed.reason}`);
+      const current = {
+        ...original,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+      };
+      const next = createAttemptToolEnvironment({ scope: current, generation: 1, definitions });
+      await persistAttemptToolCatalog(client.db, next.catalog);
+      const adopted = await adoptCodemodeApproval(client.db, {
+        ...current,
+        operationId,
+        callerSubjectId: `sandbox:${attemptId}`,
+        catalogDigest: next.catalog.digest,
+        effectDigest,
+      });
+      expect(adopted).toMatchObject({
+        state:
+          crash === "after_effect_start"
+            ? "outcome_unknown"
+            : crash === "after_review"
+              ? "waiting_for_approval"
+              : "queued",
+        attemptId: original.attemptId,
+        catalogDigest: environment.catalog.digest,
+        arguments: call.arguments,
+      });
+      expect(
+        await completeCodemodeOperation(client.db, {
+          ...original,
+          operationId,
+          claimId,
+          result: { content: [] },
+        }),
+      ).toBe(false);
+      expect(
+        await markCodemodeOperationExecutionStarted(client.db, {
+          ...original,
+          operationId,
+          claimId,
+        }),
+      ).toBe(false);
+    });
+  }
+  for (const outcome of ["approve", "reject", "stale"] as const) {
+    test(`preserves origin and fences continuation: ${outcome}`, async () => {
+      if (!available) throw new Error("Real database is required");
+      const original = await fixture();
+      const turn = (await getSessionTurn(client.db, original.workspaceId, original.turnId))!;
+      const environment = createAttemptToolEnvironment({
+        scope: original,
+        generation: 1,
+        definitions: [
+          {
+            identity: { serverId: "mail", toolName: "change" },
+            modelName: "mail__change",
+            inputSchema: { type: "object" },
+            source: "mcp",
+            approval: "policy",
+            execute: () => ({ content: [] }),
+          },
+        ],
+      });
+      await persistAttemptToolCatalog(client.db, environment.catalog);
+      const operationId = crypto.randomUUID(),
+        claimId = crypto.randomUUID();
+      const call = {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "mail", toolName: "change" },
+        arguments: { ids: ["synthetic-message"] },
+        caller: { kind: "codemode" as const, subjectId: `sandbox:${original.attemptId}` },
+      };
+      const submitted = await submitCodemodeOperation(client.db, {
+        ...original,
+        call,
+        durableApproval: true,
+      });
+      expect(submitted.operation.durableApproval).toBe(true);
+      expect(
+        await claimCodemodeOperation(client.db, {
+          ...original,
+          operationId,
+          claimId,
+          catalogDigest: environment.catalog.digest,
+        }),
+      ).toMatchObject({ status: "claimed" });
+      const preparation = await prepareConnectorActionApproval(
+        client.db,
+        { ...original, initiator: turn.initiator },
+        {
+          approvalId: operationId,
+          connectionId: "session-mcp:mail:synthetic",
+          serverId: "mail",
+          toolName: "change",
+          arguments: call.arguments,
+          approvalMode: "session_mcp",
+        },
+      );
+      if (!preparation.managed || !preparation.requestId) throw new Error("Expected exact review");
+      const effectDigest = environment.effectDigest(call.identity);
+      expect(
+        await waitForCodemodeApproval(client.db, {
+          ...original,
+          operationId,
+          claimId,
+          requestId: preparation.requestId,
+          actionFingerprint: preparation.actionFingerprint,
+          effectDigest,
+        }),
+      ).toBe(true);
+      expect(await getCodemodeOperation(client.db, { ...original, operationId })).toMatchObject({
+        state: "waiting_for_approval",
+        executionStartedAt: null,
+        claimedAt: null,
+      });
+      expect(
+        await markCodemodeOperationExecutionStarted(client.db, {
+          ...original,
+          operationId,
+          claimId,
+        }),
+      ).toBe(false);
+      await saveRunState(client.db, {
+        ...original,
+        expectedExecutionGeneration: original.executionGeneration,
+        expectedAttemptId: original.attemptId,
+        serializedRunState: "{}",
+        pendingApprovals: [{ id: operationId, source: "codemode" }],
+      });
+      await applySessionTurnSettlement(client.db, original.workspaceId, {
+        sessionId: original.sessionId,
+        turnId: original.turnId,
+        triggerEventId: turn.triggerEventId,
+        attemptId: original.attemptId,
+        turnStatus: "requires_action",
+        sessionStatus: "requires_action",
+        activeTurnId: original.turnId,
+        events: [],
+      });
+      const clientEventId = crypto.randomUUID();
+      const decisionInput = {
+        accountId: original.accountId,
+        workspaceId: original.workspaceId,
+        sessionId: original.sessionId,
+        subjectId: "human:fixture",
+        payload: { approvalId: operationId, decision: outcome === "reject" ? "reject" : "approve" },
+        clientEventId,
+      };
+      const decision = await acceptSessionApprovalDecision(client.db, decisionInput);
+      if (decision.action !== "accepted") throw new Error("Review was not accepted");
+      const duplicate = await acceptSessionApprovalDecision(client.db, decisionInput);
+      expect(duplicate.action).toBe("accepted");
+      if (duplicate.action === "accepted") expect(duplicate.event.id).toBe(decision.event.id);
+      const attemptId = crypto.randomUUID();
+      const resumed = await claimSessionWorkForAttempt(client.db, original.workspaceId, {
+        sessionId: original.sessionId,
+        workflowId: `session-${original.sessionId}`,
+        workflowRunId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        attemptId,
+        trigger: { kind: "approval", triggerEventId: decision.event.id },
+      });
+      if (resumed.action !== "claimed") throw new Error("Resume not claimed");
+      const current = {
+        ...original,
+        attemptId,
+        executionGeneration: resumed.turn.executionGeneration,
+      };
+      const nextEnvironment = createAttemptToolEnvironment({
+        scope: current,
+        generation: 1,
+        definitions: [
+          {
+            identity: call.identity,
+            modelName: "mail__change",
+            inputSchema: { type: "object" },
+            source: "mcp",
+            approval: "policy",
+            execute: () => ({ content: [] }),
+          },
+          {
+            identity: { serverId: "mail", toolName: "unrelated" },
+            modelName: "mail__unrelated",
+            inputSchema: { type: "object" },
+            source: "mcp",
+            approval: "none",
+            execute: () => ({ content: [] }),
+          },
+        ],
+      });
+      await persistAttemptToolCatalog(client.db, nextEnvironment.catalog);
+      expect(nextEnvironment.effectDigest(call.identity)).toBe(effectDigest);
+      const continuation = {
+        ...current,
+        operationId,
+        callerSubjectId: `sandbox:${attemptId}`,
+        catalogDigest: nextEnvironment.catalog.digest,
+        effectDigest: outcome === "stale" ? "0".repeat(64) : effectDigest,
+      };
+      expect(
+        await adoptCodemodeApproval(client.db, {
+          ...continuation,
+          callerSubjectId: "different-caller",
+        }),
+      ).toBeNull();
+      const adopted = await adoptCodemodeApproval(client.db, continuation);
+      expect(adopted).toMatchObject({
+        state: outcome === "approve" ? "queued" : "cancelled",
+        attemptId: original.attemptId,
+        catalogDigest: environment.catalog.digest,
+        executionStartedAt: null,
+      });
+      expect(await readTurnCodemodeOperation(client.db, continuation)).toMatchObject({
+        operationId,
+      });
+      await expect(
+        readTurnCodemodeOperation(client.db, {
+          ...original,
+          operationId,
+          callerSubjectId: call.caller.subjectId,
+        }),
+      ).rejects.toThrow("active running");
+      expect(
+        await claimCodemodeOperation(client.db, {
+          ...original,
+          operationId,
+          claimId: crypto.randomUUID(),
+          catalogDigest: environment.catalog.digest,
+        }),
+      ).toMatchObject({ status: "rejected" });
+      if (outcome === "approve") {
+        const nextClaimId = crypto.randomUUID();
+        const claim = {
+          ...current,
+          operationId,
+          claimId: nextClaimId,
+          catalogDigest: nextEnvironment.catalog.digest,
+        };
+        const claims = await Promise.all([
+          claimCodemodeOperation(client.db, claim),
+          claimCodemodeOperation(client.db, { ...claim, claimId: crypto.randomUUID() }),
+        ]);
+        expect(claims.filter((value) => value.status === "claimed")).toHaveLength(1);
+        expect(claims.filter((value) => value.status === "already_running")).toHaveLength(1);
+        const winner = claims.find((value) => value.status === "claimed")!;
+        if (winner.status !== "claimed") throw new Error("No winner");
+        expect(
+          await markCodemodeOperationExecutionStarted(client.db, {
+            ...current,
+            operationId,
+            claimId: winner.claimId,
+          }),
+        ).toBe(true);
+        expect(
+          await completeCodemodeOperation(client.db, {
+            ...current,
+            operationId,
+            claimId: winner.claimId,
+            result: { content: [{ type: "text", text: "Synthetic effect completed" }] },
+          }),
+        ).toBe(true);
+      }
+    });
+  }
+});
+
+async function submitPrompt(
+  scope: { accountId: string; workspaceId: string; sessionId: string },
+  subjectId: string,
+  text: string,
+  delivery: "send" | "steer",
+) {
+  return await withWorkspaceSubjectSessionActivityRls(
+    client.db,
+    scope.workspaceId,
+    subjectId,
+    (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          ...scope,
+          subjectId,
+          actor: { type: "human", subjectId: subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery,
+          text,
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+  );
+}
+
+async function steerNow(
+  scope: { accountId: string; workspaceId: string; sessionId: string },
+  subjectId: string,
+  text: string,
+) {
+  const queued = await submitPrompt(scope, subjectId, text, "send");
+  const row = await getSessionTurn(client.db, scope.workspaceId, queued.turnId);
+  await withWorkspaceSessionActivityRls(client.db, scope.workspaceId, (db) =>
+    db.transaction((tx) =>
+      steerQueuedTurnInTransaction(tx as unknown as typeof db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sessionId: scope.sessionId,
+        turnId: queued.turnId,
+        expectedTurnVersion: row!.version,
+        actor: { type: "human", subjectId },
+        operationKey: crypto.randomUUID(),
+        interrupt: true,
+      }),
+    ),
+  );
+}
+
+test("a Steer waiting for the next model step leaves the running step's programmatic calls open", async () => {
+  if (!available) throw new Error("Real database is required");
+  const scope = await fixture(),
+    exactCatalog = catalog(scope);
+  const subjectId = fixtureSubjects.get(scope.sessionId)!;
+  await persistAttemptToolCatalog(client.db, exactCatalog);
+  const call = codemodeCall(exactCatalog.digest),
+    claimId = crypto.randomUUID();
+  await submitCodemodeOperation(client.db, { ...scope, call, durableApproval: true });
+  expect(
+    await claimCodemodeOperation(client.db, {
+      ...scope,
+      operationId: call.operationId,
+      claimId,
+      catalogDigest: call.catalogDigest,
+    }),
+  ).toMatchObject({ status: "claimed" });
+  await submitPrompt(scope, subjectId, "Use a new direction", "steer");
+  expect(
+    await markCodemodeOperationExecutionStarted(client.db, {
+      ...scope,
+      operationId: call.operationId,
+      claimId,
+    }),
+  ).toBe(true);
+  expect(
+    await completeCodemodeOperation(client.db, {
+      ...scope,
+      operationId: call.operationId,
+      claimId,
+      result: { content: [{ type: "text", text: "Synthetic effect completed" }] },
+    }),
+  ).toBe(true);
+});
+
+for (const [control, started] of [
+  ["pause", false],
+  ["cancel", false],
+  ["workspace_pause", false],
+  ["steer", false],
+  ["cancel", true],
+] as const) {
+  test(`programmatic admission and effect boundary obey canonical ${control}${started ? " after execution starts" : ""}`, async () => {
+    if (!available) throw new Error("Real database is required");
+    const scope = await fixture(),
+      exactCatalog = catalog(scope);
+    const subjectId = fixtureSubjects.get(scope.sessionId)!;
+    await persistAttemptToolCatalog(client.db, exactCatalog);
+    const call = codemodeCall(exactCatalog.digest),
+      claimId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, { ...scope, call, durableApproval: true });
+    expect(
+      await claimCodemodeOperation(client.db, {
+        ...scope,
+        operationId: call.operationId,
+        claimId,
+        catalogDigest: call.catalogDigest,
+      }),
+    ).toMatchObject({ status: "claimed" });
+    if (started)
+      expect(
+        await markCodemodeOperationExecutionStarted(client.db, {
+          ...scope,
+          operationId: call.operationId,
+          claimId,
+        }),
+      ).toBe(true);
+    if (control === "steer") {
+      // "Send now": an interrupting Steer fences the attempt like Pause does.
+      await steerNow(scope, subjectId, "Use a new direction");
+    } else {
+      await withWorkspaceSessionActivityRls(client.db, scope.workspaceId, (db) =>
+        db.transaction(async (tx) => {
+          if (control === "workspace_pause")
+            await mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
+              accountId: scope.accountId,
+              workspaceId: scope.workspaceId,
+              actor: { type: "human", subjectId: subjectId },
+              operationKey: crypto.randomUUID(),
+              action: "pause",
+              reason: "fixture",
+            });
+          else
+            await mutateSessionControlInTransaction(tx as unknown as typeof db, {
+              ...scope,
+              actor: { type: "human", subjectId: subjectId },
+              operationKey: crypto.randomUUID(),
+              action: control,
+            });
+        }),
+      );
+    }
+    expect(
+      await markCodemodeOperationExecutionStarted(client.db, {
+        ...scope,
+        operationId: call.operationId,
+        claimId,
+      }),
+    ).toBe(false);
+    await expect(
+      submitCodemodeOperation(client.db, {
+        ...scope,
+        call: codemodeCall(exactCatalog.digest),
+        durableApproval: true,
+      }),
+    ).rejects.toThrow("active running");
+    await expect(
+      bindCodemodePreparation(client.db, {
+        ...scope,
+        operationId: call.operationId,
+        claimId,
+        effectDigest: "1".repeat(64),
+      }),
+    ).rejects.toThrow("active running");
+    await expect(
+      adoptCodemodeApproval(client.db, {
+        ...scope,
+        operationId: call.operationId,
+        callerSubjectId: call.caller.subjectId,
+        catalogDigest: call.catalogDigest,
+        effectDigest: "1".repeat(64),
+      }),
+    ).rejects.toThrow("active running");
+    // Status polling is a plain read of the exact live attempt: a pending
+    // control never blocks it; only the settled end of the attempt does.
+    const statusRead = {
+      ...scope,
+      operationId: call.operationId,
+      callerSubjectId: call.caller.subjectId,
+    };
+    expect(await readTurnCodemodeOperation(client.db, statusRead)).toMatchObject({
+      operationId: call.operationId,
+    });
+    if (control === "cancel") {
+      await settleSessionAttemptInterruptions(
+        client.db,
+        scope.workspaceId,
+        scope.sessionId,
+        scope.attemptId,
+      );
+      await expect(readTurnCodemodeOperation(client.db, statusRead)).rejects.toThrow(
+        "active running",
+      );
+    }
+    expect(
+      await getCodemodeOperation(client.db, { ...scope, operationId: call.operationId }),
+    ).toMatchObject({
+      executionStartedAt: started ? expect.any(String) : null,
+      ...(control === "cancel" ? { state: started ? "outcome_unknown" : "cancelled" } : {}),
+    });
+  }, 30_000);
+}

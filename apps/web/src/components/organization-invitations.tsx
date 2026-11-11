@@ -1,27 +1,28 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { Loader2Icon, MailIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { DropdownMenuItem, DropdownMenuMeta } from "@/components/ui/dropdown-menu";
-import { Notice } from "@/components/ui/notice";
-import { isOrganizationConflict } from "@/lib/organization-admin";
+} from "@opengeni/react/ui/dialog";
+import { DropdownMenuItem, DropdownMenuMeta } from "@opengeni/react/ui/dropdown-menu";
+import { Notice } from "@opengeni/react/ui/notice";
+import { isOrganizationConflict } from "@opengeni/react/app/lib/organization-admin";
 import {
   clearOrganizationInvitationContinuation,
   readOrganizationInvitationContinuation,
   storeOrganizationInvitationContinuation,
   type OrganizationInvitationContinuation,
 } from "@/lib/organization-invitation-continuation";
-import { cn } from "@/lib/utils";
-import type { OrganizationInvitation } from "@/types";
+import { cn } from "@opengeni/react/app/lib/utils";
+import type { OrganizationInvitation } from "@opengeni/react/app/types";
 
 export type OrganizationInvitationsController = {
   open: boolean;
@@ -48,7 +49,7 @@ export type OrganizationInvitationsController = {
 };
 
 export function useOrganizationInvitations(input: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   enabled: boolean;
   activeEmail?: string | null;
   onUseInvitedAccount?: (targetEmail: string) => void;

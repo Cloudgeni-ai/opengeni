@@ -180,6 +180,32 @@ Rollback never mutates history. Its target must be a revision that was previousl
 active for the same target, and rollback creates a new activation event and a new
 head version.
 
+### Clearing a policy
+
+A target is cleared by activating an empty revision. Only a human draft may be
+empty, and a human draft with blank content stores exactly `''`. Migration
+`1085_workspace_instruction_policy_clear.sql` relaxes the revision content check
+to "exactly empty, or not only spaces" (the old `btrim` rule; text of only
+newlines or tabs was and stays storable through agent edits), and
+`1086_validate_workspace_instruction_policy_content.sql` validates it. Response
+schemas accept any stored content. The clear then uses the ordinary activation: it is CAS-fenced,
+records the actor and reason, advances the activation version, and stays in
+history, so rollback can restore any earlier version.
+
+Company Brain packages leave empty revisions out: a clear is not guidance.
+
+An active empty revision means no policy. Accepted-turn snapshots leave it out,
+so that target composes nothing, exactly as when it has no head. The agent
+instruction tools read it as no text: an append saves only the new rule and an
+exact edit has nothing to match. Clearing deliberately does not remove the
+head. Head removal stays limited to the governed-learning compensation above,
+so no new privileged routine is needed.
+
+When every charter and policy for the workspace is empty, a stored legacy
+`workspaces.agent_instructions` override applies again, as before any policy
+was activated. Knowledge > Instructions therefore also clears that override
+when it saves empty text.
+
 ## HTTP and SDK surface
 
 The API and `OpenGeniClient` expose:
@@ -195,13 +221,24 @@ The API and `OpenGeniClient` expose:
 
 They also expose list/create onboarding proposals below
 `/v1/workspaces/:workspaceId/instruction-policies/onboarding-proposals`. Listing
-requires `workspace:read`; creating an inactive proposal requires
-`workspace:admin`.
+requires `workspace:read`; creating an inactive proposal requires the same
+access as editing (below).
 
 The routes live below
 `/v1/workspaces/:workspaceId/instruction-policies`. List, get, and diff require
-`workspace:read`. Draft creation, legacy import, activation, and rollback require
-`workspace:admin`.
+`workspace:read`. Draft creation, legacy import, activation, and rollback are
+open to everyone who may start chats in the workspace (`sessions:create`), like
+shared Skills and Knowledge: workspace admins, the owner of a Personal workspace,
+and Members. A Member must act as themselves: signed in to the app, or through
+their own chat, connected agent or personal API key within what they allowed
+(those act as the Member). An agent's own token, organization and workspace
+API keys without settings access, services and people from another product
+are refused (`requireWorkspaceContributorGrant` in
+`packages/core/src/access/index.ts`); agents change instructions only through
+agent learning below. Reviewing the agent's proposed instruction changes
+(`/v1/workspaces/:workspaceId/agent-learning/instructions/*`) needs the same
+access. The workspace's learning settings (Off, Review first, Automatic) stay
+with workspace admins and the Personal owner.
 
 The agent-facing `instruction_policy_save` surface is deliberately an edit
 contract rather than a complete-document save. The agent must read the active
@@ -298,16 +335,14 @@ An active policy revision is composed verbatim into the prompt of every session
 it applies to, for as long as it stays active. A global charter or global policy
 applies to every session in the workspace; a role policy applies to every session
 bound to that role. At most three entries compose at once (charter, global
-policy, matching role policy), so the standing ceiling the agent budget implies
-is three times the per-entry cap. Either way the length is a permanent per-turn
-cost rather than a one-time one, and agents are bad at judging that on their own:
-asked for "always track work in Linear", a model will happily author a five-step
-numbered procedure. The budget is therefore explicit and enforced, separately
-from the human editor limit:
+policy, matching role policy). Agent and human instruction writes share the
+same storage limit. This lets localized edits preserve existing long policies
+without forcing a rewrite. Concise new rules remain the authoring guidance;
+the separate 131,072-byte prompt-composition bound is unchanged.
 
 | Author | Surface | Limit |
 | --- | --- | --- |
-| Agent | `instruction_policy_save` supplied text and resulting instruction; legacy `remember`/proposal/promotion paths | `AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (600) |
+| Agent | `instruction_policy_save` supplied text and resulting instruction; legacy `remember`/proposal/promotion paths | `WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (262,144; agent compatibility export aliases it) |
 | Agent | `remember` lane `preference`, `preference_propose`, `task_note_promote_preference` | `AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS` (1,200) |
 | Human | Workspace State editor, HTTP/SDK policy routes | `WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (262,144) |
 
@@ -315,8 +350,11 @@ The constants and the actionable rejection messages live in
 [`packages/contracts/src/agent-authored-durable-text.ts`](../packages/contracts/src/agent-authored-durable-text.ts).
 The direct proposal surfaces are bounded by the request contracts. Native
 instruction edits bound each supplied text and the complete result, so an append
-cannot grow the standing prompt past the same limit and no path truncates stored
-content. Task-note
+cannot grow the stored instruction past the common limit and no path truncates
+content. Rolling migration `0584_agent_instruction_size_parity.sql` updates the
+database check without changing exact edits, authorization, review, CAS,
+operation identity or the activation-preservation fence. Old applications may
+still enforce 600 characters until their binaries are upgraded. Task-note
 promotion is bounded in
 [`packages/db/src/company-brain-governed-writes.ts`](../packages/db/src/company-brain-governed-writes.ts)
 instead, because there the content is the note rather than a request field: a
@@ -404,12 +442,8 @@ This slice deliberately does not implement:
 Canonical implementation: `packages/contracts/src/workspace-instruction-policies.ts`,
 `packages/db/src/workspace-instruction-policies-schema.ts`,
 `packages/db/src/workspace-instruction-policies.ts`,
-`packages/db/drizzle/0130_workspace_instruction_policies.sql`,
-`packages/db/drizzle/0157_session_policy_role_snapshots.sql`,
-`packages/db/drizzle/0168_workspace_instruction_policy_operation_receipts.sql`,
-`packages/db/drizzle/0169_workspace_instruction_policy_onboarding_proposals.sql`,
 `apps/api/src/routes/workspace-instruction-policies.ts`, and
-`packages/sdk/src/workspace-instruction-policies.ts`, with the bounded admin
+`packages/sdk/src/workspace-instruction-policies.ts`, with the bounded
 composer in `apps/web/src/routes/workspace-state.tsx`, plus runtime composition in
 `packages/runtime/src/workspace-governance.ts` and
 `apps/worker/src/activities/agent-turn/governance-model.ts`.

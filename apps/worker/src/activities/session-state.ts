@@ -1,3 +1,4 @@
+import { FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE } from "./agent-turn/provider-recovery-policy";
 import {
   settleSessionAttemptInterruptions,
   applySessionTurnSettlement,
@@ -6,29 +7,42 @@ import {
   blockSessionWorkBeforeAttemptClaim,
   requestSessionTurnRecovery,
   recoverSessionDispatch,
+  reconcileSettledSessionAttempt,
   reconcileSessionAttemptQuiescence,
+  reconcileCompletedSandboxSetup,
   peekSessionWork as peekSessionWorkDb,
+  isSessionDefinitivelyDeleted,
   settleSessionInputWait as settleSessionInputWaitDb,
   countQueuedTurns,
   getSessionAttemptActivityRef,
   getSessionEvent,
   getSessionTurnForAttempt,
+  getWorkspace,
   expireSessionInteractionIntervention as expireSessionInteractionInterventionDb,
   expireScheduledRunHumanWait as expireScheduledRunHumanWaitDb,
   expireSessionHumanInputRequest,
   markSessionAttemptQuiesced,
   requireSession,
   settleSessionIdleWithParentOutbox,
+  SANDBOX_SETUP_RECOVERY_LIMIT,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { CancelledFailure } from "@temporalio/activity";
 import { currentActivityContext } from "./streaming";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
+import { interactionInterventionMetricObserver } from "@opengeni/observability";
 import { recordTurnsQueuedGauge, recordWorkerDeathRecoveryMetrics } from "../observability-metrics";
 import {
   MAX_AUTOMATIC_PROVIDER_RECOVERIES,
   providerRecoveryCountFromMetadata,
+  providerRecoveryLimit,
 } from "./agent-turn/errors";
+import {
+  PROVIDER_OVERLOAD_RECOVERY_CODE,
+  validProviderOverloadRecoveryDelay,
+} from "./agent-turn/provider-recovery-policy";
+import { writeSessionUsageReceipts } from "./agent-turn/session-usage-custody";
+import { resolveWorkerShutdownTiming } from "../worker-shutdown";
 import type {
   ControlActivityServices,
   ExpireSessionHumanInputInput,
@@ -45,6 +59,8 @@ import type {
   PersistSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceResult,
+  ReconcileSettledSessionAttemptInput,
+  ReconcileSettledSessionAttemptResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
   RecoverEscapedMcpTimeoutInput,
@@ -61,13 +77,17 @@ export type SessionStateActivityOverrides = Partial<{
   blockSessionWorkBeforeAttemptClaim: typeof blockSessionWorkBeforeAttemptClaim;
   requestSessionTurnRecovery: typeof requestSessionTurnRecovery;
   recoverSessionDispatch: typeof recoverSessionDispatch;
+  reconcileSettledSessionAttempt: typeof reconcileSettledSessionAttempt;
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
+  reconcileCompletedSandboxSetup: typeof reconcileCompletedSandboxSetup;
   peekSessionWork: typeof peekSessionWorkDb;
+  isSessionDefinitivelyDeleted: typeof isSessionDefinitivelyDeleted;
   settleSessionInputWait: typeof settleSessionInputWaitDb;
   countQueuedTurns: typeof countQueuedTurns;
   getSessionAttemptActivityRef: typeof getSessionAttemptActivityRef;
   getSessionEvent: typeof getSessionEvent;
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
+  getWorkspace: typeof getWorkspace;
   expireSessionHumanInputRequest: typeof expireSessionHumanInputRequest;
   expireSessionInteractionIntervention: typeof expireSessionInteractionInterventionDb;
   expireScheduledRunHumanWait: typeof expireScheduledRunHumanWaitDb;
@@ -104,15 +124,22 @@ export function createSessionStateActivities(
   const requestSessionTurnRecoveryFn =
     overrides.requestSessionTurnRecovery ?? requestSessionTurnRecovery;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
+  const reconcileSettledSessionAttemptFn =
+    overrides.reconcileSettledSessionAttempt ?? reconcileSettledSessionAttempt;
   const reconcileSessionAttemptQuiescenceFn =
     overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
+  const isSessionDefinitivelyDeletedFn =
+    overrides.isSessionDefinitivelyDeleted ?? isSessionDefinitivelyDeleted;
+  const reconcileCompletedSandboxSetupFn =
+    overrides.reconcileCompletedSandboxSetup ?? reconcileCompletedSandboxSetup;
   const settleSessionInputWaitFn = overrides.settleSessionInputWait ?? settleSessionInputWaitDb;
   const countQueuedTurnsFn = overrides.countQueuedTurns ?? countQueuedTurns;
   const getSessionAttemptActivityRefFn =
     overrides.getSessionAttemptActivityRef ?? getSessionAttemptActivityRef;
   const getSessionEventFn = overrides.getSessionEvent ?? getSessionEvent;
   const getSessionTurnForAttemptFn = overrides.getSessionTurnForAttempt ?? getSessionTurnForAttempt;
+  const getWorkspaceFn = overrides.getWorkspace ?? getWorkspace;
   const expireSessionHumanInputRequestFn =
     overrides.expireSessionHumanInputRequest ?? expireSessionHumanInputRequest;
   const expireSessionInteractionInterventionFn =
@@ -137,7 +164,21 @@ export function createSessionStateActivities(
     input: FailSessionAttemptInput,
   ): Promise<FailSessionAttemptResult> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
-    const session = await requireSessionFn(db, input.workspaceId, input.sessionId);
+    let session: Awaited<ReturnType<typeof requireSession>>;
+    try {
+      session = await requireSessionFn(db, input.workspaceId, input.sessionId);
+    } catch (error) {
+      if (
+        await isSessionDefinitivelyDeletedFn(
+          db,
+          input.workspaceId,
+          input.sessionId,
+          input.accountId,
+        )
+      )
+        return { action: "terminal" };
+      throw error;
+    }
     if (session.status === "failed" || session.status === "cancelled") {
       // The activity may be retried after failure settlement committed but its
       // response or event fanout was lost. Preserve terminal session truth so
@@ -176,6 +217,9 @@ export function createSessionStateActivities(
           workflowId,
           attemptId: input.attemptId,
           fence: input.admissionFence,
+          ...(input.admissionWakeRevision !== undefined
+            ? { wakeRevision: input.admissionWakeRevision }
+            : {}),
           reason: input.preClaimFailure.reason,
           sqlState: input.preClaimFailure.sqlState ?? null,
         });
@@ -239,6 +283,11 @@ export function createSessionStateActivities(
       turn.triggerEventId === postClaimRecovery.triggerEventId &&
       turn.executionGeneration === postClaimRecovery.executionGeneration,
     );
+    // A typed checkpoint belongs to one exact turn/generation. A stale wire
+    // cannot recover or terminally fail a different current attempt.
+    if (postClaimRecovery && !postClaimIdentityMatches) {
+      return { action: "stale" };
+    }
     const providerRecoveryCount = postClaimIdentityMatches
       ? postClaimRecovery?.providerRecoveryCount
       : undefined;
@@ -247,7 +296,26 @@ export function createSessionStateActivities(
       : undefined;
     const hasProviderRecoveryCount = providerRecoveryCount !== undefined;
     const hasProviderFailureCode = providerFailureCode !== undefined;
+    const providerRecoveryContinueDelayMs = postClaimIdentityMatches
+      ? postClaimRecovery?.providerRecoveryContinueDelayMs
+      : undefined;
+    const setupOutcomeUnknown =
+      postClaimIdentityMatches && postClaimRecovery?.sandboxSetupOutcomeUnknown === true;
+    const setupRecoveryExhausted =
+      postClaimIdentityMatches && postClaimRecovery?.sandboxSetupRecoveryExhausted === true;
+    if (
+      (setupOutcomeUnknown && setupRecoveryExhausted) ||
+      ((setupOutcomeUnknown || setupRecoveryExhausted) &&
+        (hasProviderRecoveryCount || hasProviderFailureCode)) ||
+      (setupRecoveryExhausted &&
+        turn.metadata?.providerRecoveryCount !== SANDBOX_SETUP_RECOVERY_LIMIT)
+    ) {
+      return { action: "stale" };
+    }
     if (hasProviderRecoveryCount !== hasProviderFailureCode) {
+      return { action: "stale" };
+    }
+    if (!validProviderOverloadRecoveryDelay(providerFailureCode, providerRecoveryContinueDelayMs)) {
       return { action: "stale" };
     }
     if (
@@ -255,7 +323,7 @@ export function createSessionStateActivities(
       (!Number.isSafeInteger(providerRecoveryCount) ||
         providerRecoveryCount <= 0 ||
         providerRecoveryCount !== providerRecoveryCountFromMetadata(turn.metadata ?? {}) + 1 ||
-        providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_RECOVERIES ||
+        providerRecoveryCount > (providerRecoveryLimit(providerFailureCode) ?? Infinity) ||
         typeof providerFailureCode !== "string" ||
         !/^[a-z][a-z0-9_]{0,63}$/.test(providerFailureCode))
     ) {
@@ -270,20 +338,71 @@ export function createSessionStateActivities(
           ? "legacy_retryable_preclaim_database_failure"
           : null;
     if (recoveredClaimCode) {
+      // Known usage from the failed attempt is recorded under its original
+      // source identities before any replacement attempt can dispatch. A
+      // failure here retries this DB-only lane; nothing is re-requested.
+      const heldReceipts = postClaimIdentityMatches
+        ? (postClaimRecovery?.sessionUsageReceipts ?? [])
+        : [];
+      if (heldReceipts.length > 0) {
+        await writeSessionUsageReceipts(
+          db,
+          { accountId: input.accountId, workspaceId: input.workspaceId },
+          heldReceipts,
+        );
+      }
       const recovery = await requestSessionTurnRecoveryFn(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: turn.id,
         triggerEventId: turn.triggerEventId,
         attemptId: input.attemptId,
-        reason: providerFailureCode ?? "claimed_attempt_database_failure",
-        ...(providerRecoveryCount !== undefined ? { providerRecoveryCount } : {}),
+        reason: setupOutcomeUnknown
+          ? "sandbox_command_start_outcome_unknown"
+          : setupRecoveryExhausted
+            ? "sandbox_command_start_recovery_exhausted"
+            : (providerFailureCode ?? "claimed_attempt_database_failure"),
+        ...(setupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
+        ...(setupRecoveryExhausted ? { sandboxSetupRecoveryExhausted: true } : {}),
+        // The internal setup wire count is a CAS witness only. Preserve the
+        // existing model-provider budget and clock while our API is unavailable.
+        ...(providerRecoveryCount !== undefined &&
+        providerFailureCode !== FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE
+          ? { providerRecoveryCount }
+          : {}),
+        ...(providerRecoveryContinueDelayMs !== undefined
+          ? { retryAfterMs: providerRecoveryContinueDelayMs }
+          : {}),
         detail: {
-          code: providerFailureCode ?? recoveredClaimCode,
-          retryable: true,
+          code: setupOutcomeUnknown
+            ? "sandbox_command_start_outcome_unknown"
+            : setupRecoveryExhausted
+              ? "sandbox_command_start_recovery_exhausted"
+              : providerFailureCode === PROVIDER_OVERLOAD_RECOVERY_CODE
+                ? "provider_unavailable"
+                : (providerFailureCode ?? recoveredClaimCode),
+          retryable: !setupOutcomeUnknown && !setupRecoveryExhausted,
+          ...(setupOutcomeUnknown ? { setupOutcome: "unknown", replay: "blocked" } : {}),
+          ...(setupRecoveryExhausted
+            ? {
+                setupOutcome: "not_started",
+                replay: "blocked",
+                recoveryExhausted: true,
+                providerRecoveryCount: SANDBOX_SETUP_RECOVERY_LIMIT,
+              }
+            : {}),
           ...(providerRecoveryCount !== undefined
             ? {
                 databaseFailureCode: recoveredClaimCode,
-                providerRecoveryCount,
+                ...(providerFailureCode !== FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE
+                  ? { providerRecoveryCount }
+                  : {}),
+                ...(providerFailureCode === PROVIDER_OVERLOAD_RECOVERY_CODE
+                  ? {
+                      providerCondition: "overloaded",
+                      maxProviderRecoveryCount: providerRecoveryLimit(providerFailureCode),
+                      continueDelayMs: providerRecoveryContinueDelayMs,
+                    }
+                  : {}),
               }
             : {}),
           recoverySource: "workflow_activity_failure",
@@ -298,7 +417,12 @@ export function createSessionStateActivities(
         countQueuedTurnsFn,
         recordTurnsQueuedGaugeFn,
       );
-      return { action: "recovering" };
+      return {
+        action: "recovering",
+        ...(providerRecoveryContinueDelayMs !== undefined
+          ? { continueDelayMs: providerRecoveryContinueDelayMs }
+          : {}),
+      };
     }
     const trigger = await getSessionEventFn(db, input.workspaceId, turn.triggerEventId);
     const result = await applySessionTurnSettlementFn(db, input.workspaceId, {
@@ -338,19 +462,6 @@ export function createSessionStateActivities(
     input: SettleSessionInterruptionsInput,
   ): Promise<{ action: "paused" | "continue" | "stale" }> {
     const { db, bus, observability } = await services();
-    if (input.phase === "attempt_quiesced") {
-      // Replay compatibility only: v1 histories scheduled this idempotent
-      // fallback after WAIT_CANCELLATION_COMPLETED. Receipt-gated v2 workflows
-      // never call it; runAgentTurn writes immediately after its hard fence.
-      const events = await markSessionAttemptQuiescedFn(db, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        attemptId: input.attemptId,
-        temporalWorkflowId: input.workflowId,
-      });
-      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, events);
-      return { action: "stale" };
-    }
     const applied = await settleSessionAttemptInterruptionsFn(
       db,
       input.workspaceId,
@@ -391,7 +502,7 @@ export function createSessionStateActivities(
       observability.error("session-attempt quiescence event fanout failed", {
         "opengeni.session_id": input.sessionId,
         "opengeni.attempt_id": input.attemptId,
-        error: error instanceof Error ? error.message : String(error),
+        error,
       });
     }
   }
@@ -399,7 +510,7 @@ export function createSessionStateActivities(
   async function reconcileSessionAttemptQuiescenceActivity(
     input: ReconcileSessionAttemptQuiescenceInput,
   ): Promise<ReconcileSessionAttemptQuiescenceResult> {
-    const { db, bus, inspectSessionAttemptActivity } = await services();
+    const { db, bus, inspectSessionAttemptActivity, settings } = await services();
     const activityRef = await getSessionAttemptActivityRefFn(db, {
       ...input,
       temporalWorkflowId: input.workflowId,
@@ -419,6 +530,9 @@ export function createSessionStateActivities(
       temporalWorkflowRunId: activityRef.workflowRunId,
       temporalActivityId: activityRef.activityId,
       activitySettled: true,
+      // A worker-shutdown closure's process has exited once this has passed.
+      workerProcessExitDeadlineMs: resolveWorkerShutdownTiming("turn", settings)
+        .processExitDeadlineMs,
     });
     if (result.events.length > 0) {
       await publishDurableSessionEventsFn(
@@ -428,6 +542,63 @@ export function createSessionStateActivities(
         result.events,
       ).catch(() => undefined);
     }
+    return { action: result.action };
+  }
+
+  /** A new authenticated inspection, never trust the earlier observer hint.
+   * The DB seam independently revalidates the entire stored/current identity,
+   * control and both writer predicates under canonical locks before closing. */
+  async function reconcileSettledSessionAttemptActivity(
+    input: ReconcileSettledSessionAttemptInput,
+  ): Promise<ReconcileSettledSessionAttemptResult> {
+    const { db, bus, inspectSessionAttemptActivity, settings, observability, wakeSessionWorkflow } =
+      await services();
+    const ref = await getSessionAttemptActivityRefFn(db, {
+      ...input,
+      temporalWorkflowId: input.workflowId,
+    });
+    if (!ref || ref.workflowRunId !== input.workflowRunId || ref.activityId !== input.activityId)
+      return { action: "stale" };
+    if (!inspectSessionAttemptActivity) return { action: "pending" };
+    try {
+      if ((await inspectSessionAttemptActivity(ref)) !== "settled") return { action: "pending" };
+    } catch (error) {
+      if (error instanceof CancelledFailure) throw error;
+      if (currentActivityContext()?.cancellationSignal.aborted)
+        throw new CancelledFailure("Settled-owner reconciliation cancelled");
+      return { action: "pending" };
+    }
+    if (currentActivityContext()?.cancellationSignal.aborted)
+      throw new CancelledFailure("Settled-owner reconciliation cancelled");
+    const result = await reconcileSettledSessionAttemptFn(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      attemptId: input.attemptId,
+      executionGeneration: input.executionGeneration,
+      temporalWorkflowId: ref.workflowId,
+      temporalWorkflowRunId: ref.workflowRunId,
+      temporalActivityId: ref.activityId,
+      activitySettled: true,
+      maxRedispatches: WORKER_DEATH_MAX_REDISPATCHES,
+    });
+    // Atomic Postgres recovery/quiescence/wake truth is already sufficient if
+    // live fanout fails. It must not be replaced by an observer-only wake.
+    if (result.events.length > 0)
+      await publishDurableSessionEventsFn(
+        bus,
+        input.workspaceId,
+        input.sessionId,
+        result.events,
+      ).catch(() => undefined);
+    if (result.action === "exceeded")
+      await deliverFailedChildTurnToParentFn(
+        { db, bus, settings, observability, wakeSessionWorkflow },
+        input.workspaceId,
+        input.sessionId,
+        result.turnId,
+      );
     return { action: result.action };
   }
 
@@ -511,6 +682,7 @@ export function createSessionStateActivities(
       attemptId: input.attemptId,
       reason: "mcp_transport_timeout",
       providerRecoveryCount: input.providerRecoveryCount,
+      retryAfterMs: input.continueDelayMs,
       detail: {
         code: "mcp_transport_timeout",
         retryable: true,
@@ -529,15 +701,58 @@ export function createSessionStateActivities(
   }
 
   async function peekSessionWork(input: PeekSessionWorkInput) {
-    const { db, observability, inspectSessionAttemptActivity } = await services();
-    const peek = await peekSessionWorkFn(
+    const { db, bus, observability, inspectSessionAttemptActivity } = await services();
+    // Already scheduled activities retain their old input across workflow upgrades.
+    // Resolve its workspace scope exactly as the legacy DB path did, then use the
+    // observer path so absent rows and a still-owned attempt are observations.
+    const observerAccountId =
+      input.observerAccountId ?? (await getWorkspaceFn(db, input.workspaceId))?.accountId;
+    const unavailable = async () =>
+      input.includeDeletion &&
+      (await isSessionDefinitivelyDeletedFn(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        observerAccountId,
+      ))
+        ? ({ kind: "deleted" } as const)
+        : ({ kind: "unavailable" } as const);
+    if (!observerAccountId) return await unavailable();
+    let peek = await peekSessionWorkFn(
       db,
       input.workspaceId,
       input.sessionId,
       input.includeAdmissionFence,
-      input.observerAccountId,
+      observerAccountId,
     );
-    if (peek.kind === "unavailable") return peek;
+    if (peek.kind === "unavailable") return await unavailable();
+    if (peek.kind === "admission-blocked" && peek.reason === "sandbox_setup_outcome_unknown") {
+      const ref = peek.ref;
+      if (ref && "turnId" in ref && "attemptId" in ref) {
+        const settled = await reconcileCompletedSandboxSetupFn(db, {
+          accountId: observerAccountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: ref.turnId,
+          attemptId: ref.attemptId,
+        });
+        if (settled.events.length > 0)
+          await publishDurableSessionEventsFn(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            settled.events,
+          );
+        if (settled.reconciled)
+          peek = await peekSessionWorkFn(
+            db,
+            input.workspaceId,
+            input.sessionId,
+            input.includeAdmissionFence,
+            observerAccountId,
+          );
+      }
+    }
     if (peek.kind === "attempt-owned") {
       // Observation never revokes a writer or recovers a live owner. In
       // particular, a settled Temporal activity is not physical-writer proof.
@@ -562,7 +777,7 @@ export function createSessionStateActivities(
         input.workspaceId,
         input.sessionId,
         input.includeAdmissionFence,
-        input.observerAccountId,
+        observerAccountId,
       );
       if (
         current.kind !== "attempt-owned" ||
@@ -608,8 +823,16 @@ export function createSessionStateActivities(
   async function expireSessionInteractionIntervention(
     input: ExpireSessionInteractionInterventionInput,
   ): Promise<ExpireSessionInteractionInterventionResult> {
-    const { db, bus } = await services();
+    const { db, bus, observability } = await services();
     const result = await expireSessionInteractionInterventionFn(db, input);
+    if (result.action === "expired" && result.intervention) {
+      // The unanswered-handoff timer settles here, never through the API.
+      interactionInterventionMetricObserver(observability)({
+        kind: result.intervention.kind,
+        outcome: "expired",
+        waitMs: Date.now() - result.intervention.createdAt.getTime(),
+      });
+    }
     if (result.events.length > 0) {
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
     }
@@ -630,11 +853,16 @@ export function createSessionStateActivities(
 
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
-    const settled = await settleSessionIdleWithParentOutboxFn(
-      db,
-      input.workspaceId,
-      input.sessionId,
-    );
+    let settled: Awaited<ReturnType<typeof settleSessionIdleWithParentOutbox>>;
+    try {
+      settled = await settleSessionIdleWithParentOutboxFn(db, input.workspaceId, input.sessionId);
+    } catch (error) {
+      // Deletion can commit after the last workflow peek, including while this
+      // activity is already retrying. Do not parse error text or turn an RLS-
+      // hidden row into a terminal result: re-prove absence in worker scope.
+      if (await isSessionDefinitivelyDeletedFn(db, input.workspaceId, input.sessionId)) return;
+      throw error;
+    }
     if (settled.events.length > 0) {
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, settled.events);
     }
@@ -653,15 +881,46 @@ export function createSessionStateActivities(
     );
   }
 
+  async function settleUnlessDeleted<T>(
+    input: { workspaceId: string; sessionId: string; accountId?: string },
+    deletedResult: T,
+    settle: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await settle();
+    } catch (error) {
+      const { db } = await services();
+      if (
+        await isSessionDefinitivelyDeletedFn(
+          db,
+          input.workspaceId,
+          input.sessionId,
+          input.accountId,
+        )
+      )
+        return deletedResult;
+      throw error;
+    }
+  }
+
   return {
     failSessionAttempt,
-    settleSessionInterruptions,
-    persistSessionAttemptQuiescence,
+    // These can already be scheduled when quiescent deletion commits. In
+    // particular, a late proof signal must not pin the workflow before its peek.
+    settleSessionInterruptions: (input: SettleSessionInterruptionsInput) =>
+      settleUnlessDeleted(input, { action: "stale" as const }, () =>
+        settleSessionInterruptions(input),
+      ),
+    persistSessionAttemptQuiescence: (input: PersistSessionAttemptQuiescenceInput) =>
+      settleUnlessDeleted(input, undefined, () => persistSessionAttemptQuiescence(input)),
     reconcileSessionAttemptQuiescence: reconcileSessionAttemptQuiescenceActivity,
-    recoverDispatch,
+    reconcileSettledSessionAttempt: reconcileSettledSessionAttemptActivity,
+    recoverDispatch: (input: RecoverDispatchInput) =>
+      settleUnlessDeleted(input, { action: "stale" as const }, () => recoverDispatch(input)),
     recoverEscapedMcpTimeout,
     peekSessionWork,
-    settleSessionInputWait,
+    settleSessionInputWait: (input: SettleSessionInputWaitInput) =>
+      settleUnlessDeleted(input, { action: "stale" as const }, () => settleSessionInputWait(input)),
     expireSessionHumanInput,
     expireSessionInteractionIntervention,
     expireScheduledRunHumanWait,

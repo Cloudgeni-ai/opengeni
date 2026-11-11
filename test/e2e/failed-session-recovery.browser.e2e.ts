@@ -2,7 +2,8 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION, type SandboxRecoveryProjection } from "@opengeni/sdk";
 import { fakeCapabilities } from "../../packages/react/test/sandbox-fixtures";
 
@@ -57,6 +58,41 @@ afterAll(async () => {
   await Promise.allSettled([browser?.close(), web?.stop()]);
 });
 
+for (const width of [1440, 390]) {
+  test(`incompatible Knowledge scope shows a new-message remedy without Retry at ${width}px`, async () => {
+    const page = await browser.newPage({ viewport: { width, height: 960 } });
+    const retries: unknown[] = [];
+    const reason =
+      "This turn's Knowledge scope no longer matches this chat. Send a new message to continue with the current settings.";
+    try {
+      await installApi(page, false, retries, true, true, null, {
+        code: "knowledge_learning_scope_changed",
+        error: reason,
+        retryable: false,
+      });
+      await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
+      const banner = page.getByTestId("failed-session-banner");
+      await banner.waitFor({ timeout: 45_000 });
+      expect(await banner.textContent()).toBe(reason);
+      expect(await banner.getByRole("button").count()).toBe(0);
+      const composer = page.getByPlaceholder("Send a follow-up…");
+      await composer.fill("Continue with the current settings");
+      expect(await composer.inputValue()).toBe("Continue with the current settings");
+      expect(retries).toHaveLength(0);
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+      ).toBeLessThanOrEqual(1);
+      if (evidenceDir)
+        await page.screenshot({
+          path: `${evidenceDir}/knowledge-scope-${width}.png`,
+          fullPage: true,
+        });
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+}
+
 for (const unsupported of [true, false]) {
   test(`real desktop session shows compact ${unsupported ? "unsupported model" : "retry"} recovery`, async () => {
     const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
@@ -88,11 +124,25 @@ for (const unsupported of [true, false]) {
       ]);
       const picker = page.getByRole("button", { name: "Model and effort", exact: true });
       await picker.waitFor();
-      expect(await banner.locator("details").count()).toBe(0);
+      const details = banner.locator("details");
+      // The banner is the one place this failure is told; text its headline
+      // replaced stays reachable, closed, behind Details.
+      expect(await details.count()).toBe(1);
+      expect(await details.evaluate((node) => (node as HTMLDetailsElement).open)).toBe(false);
+      if (unsupported) {
+        expect(await details.locator("p").textContent()).toBe(
+          "The model `example` is not supported with this account.",
+        );
+      } else {
+        expect(await details.locator("p").textContent()).toBe("Connection interrupted.");
+        expect(await banner.locator("span").first().textContent()).toBe(
+          "The session stopped unexpectedly.",
+        );
+      }
       expect(await banner.getByRole("button", { name: /Choose/ }).count()).toBe(0);
       if (unsupported) {
         expect(await banner.textContent()).toBe(
-          "This model isn’t available. Choose another below.",
+          "This model isn’t available. Choose another below.DetailsThe model `example` is not supported with this account.",
         );
         expect(await banner.getByRole("button").count()).toBe(0);
       } else {
@@ -254,7 +304,7 @@ for (const lane of ["checkpoint", "fresh_workspace"] as const) {
           expect(text).toContain("Newer files are unavailable.");
         } else {
           expect(text).toContain(
-            "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
+            "Retry will continue with an empty workspace. Opengeni cannot restore the previous sandbox files automatically.",
           );
         }
         expect(await banner.getByRole("button").count()).toBe(1);
@@ -295,6 +345,80 @@ test("a failure without a retained logical turn never offers Retry", async () =>
   }
 }, 60_000);
 
+// Operator text recorded on a sandbox that never started, as a compute host
+// reports an image whose agent predates the running release.
+const SANDBOX_START_DIAGNOSTIC =
+  "This compute sandbox's agent is too old: it does not support releasing command output (capabilities.op_release). Rebuild the sandbox image with the agent from this Opengeni release or later.";
+const SANDBOX_START_FAILURE_EVENTS = [
+  { type: "turn.started", payload: {} },
+  { type: "sandbox.operation.started", payload: { name: "sandbox.provision", provisionId: "p1" } },
+  {
+    type: "sandbox.operation.failed",
+    payload: {
+      name: "sandbox.provision",
+      provisionId: "p1",
+      error: SANDBOX_START_DIAGNOSTIC,
+      internalAttempts: 1,
+      failureCategory: "unknown",
+      failureStage: "unknown",
+      failureCode: "unknown",
+      expectedTransition: false,
+      retryable: false,
+    },
+  },
+  { type: "turn.failed", payload: { error: SANDBOX_START_DIAGNOSTIC } },
+];
+
+for (const [size, viewport] of [
+  ["desktop", { width: 1440, height: 960 }],
+  ["mobile", { width: 390, height: 844 }],
+] as const) {
+  test(`a sandbox that didn't start reads as plain copy with its diagnostic behind Details (${size})`, async () => {
+    const page = await browser.newPage({ viewport });
+    try {
+      await installApi(page, false, [], true, true, null, undefined, SANDBOX_START_FAILURE_EVENTS);
+      await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
+      const banner = page.getByTestId("failed-session-banner");
+      await banner.waitFor({ timeout: 45_000 });
+      await page.getByText("Review the implementation and verify the tests.").waitFor();
+      const main = page.locator("main");
+      // The person reads plain outcomes; the operator text is nowhere visible.
+      expect(await banner.locator("span").first().textContent()).toBe("The sandbox didn’t start.");
+      // The banner tells the failure; the turn's row keeps a quiet status.
+      expect(
+        await main.locator(`[title=${JSON.stringify(SANDBOX_START_DIAGNOSTIC)}]`).count(),
+      ).toBe(0);
+      const workHeader = main.locator('[data-og-work-header="outer"]').first();
+      expect(await workHeader.innerText()).toMatch(/^Worked for \S+ · Failed$/);
+      expect((await main.innerText()).split("The sandbox didn’t start.").length - 1).toBe(1);
+      expect(await main.innerText()).not.toContain("capabilities.op_release");
+      await banner.getByRole("button", { name: "Retry", exact: true }).waitFor();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+      if (evidenceDir)
+        await page.screenshot({ path: `${evidenceDir}/sandbox-start-${size}.png`, fullPage: true });
+
+      // Operators and admins still reach the exact text behind Details: on the
+      // failed startup step and on the banner.
+      const step = main.locator('[role="button"][data-status="failed"]');
+      expect(await step.getAttribute("aria-expanded")).toBe("false");
+      await step.click();
+      await main.getByText(SANDBOX_START_DIAGNOSTIC, { exact: true }).first().waitFor();
+      const details = banner.locator("details");
+      expect(await details.evaluate((node) => (node as HTMLDetailsElement).open)).toBe(false);
+      await details.locator("summary").click();
+      expect(await details.locator("p").textContent()).toBe(SANDBOX_START_DIAGNOSTIC);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+      if (evidenceDir)
+        await page.screenshot({
+          path: `${evidenceDir}/sandbox-start-${size}-details.png`,
+          fullPage: true,
+        });
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+}
+
 test("permission-disabled model picker never receives recovery guidance", async () => {
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
   try {
@@ -305,7 +429,12 @@ test("permission-disabled model picker never receives recovery guidance", async 
     const picker = page.getByRole("button", { name: "Model and effort", exact: true });
     await picker.waitFor();
     expect(await picker.isDisabled()).toBe(true);
-    expect(await banner.textContent()).toBe("This model isn’t available.");
+    expect(await banner.textContent()).toBe(
+      "This model isn’t available.DetailsThe model `example` is not supported with this account.",
+    );
+    expect(
+      await banner.locator("details").evaluate((node) => (node as HTMLDetailsElement).open),
+    ).toBe(false);
     expect(await banner.getByRole("alert").count()).toBe(0);
     expect(await banner.getByRole("button").count()).toBe(0);
     if (evidenceDir)
@@ -325,6 +454,9 @@ async function installApi(
   retainedTurn = true,
   canControl = true,
   automaticLane: "checkpoint" | "fresh_workspace" | null = null,
+  failurePayload?: { code: string; error: string; retryable: boolean },
+  /** The failed turn's own events after its message; the last one is its `turn.failed`. */
+  turnEvents: Array<{ type: string; payload: Record<string, unknown> }> = [],
 ) {
   const workspace = {
     id: workspaceId,
@@ -395,7 +527,7 @@ async function installApi(
     queueHeadPosition: 0,
     queueTailPosition: 0,
     effectiveControl,
-    lastSequence: 2,
+    lastSequence: 2 + turnEvents.length,
     codexCompactionMode: "portable",
     createdAt: now,
     updatedAt: now,
@@ -403,9 +535,9 @@ async function installApi(
     failureDiagnostics: {
       eventId: failureId,
       turnId: retainedTurn ? turnId : null,
-      sequence: 2,
+      sequence: turnEvents.length > 0 ? 1 + turnEvents.length : 2,
       occurredAt: now,
-      payload: {
+      payload: turnEvents.at(-1)?.payload ?? {
         error: unsupported
           ? "The model `example` is not supported with this account."
           : automaticLane
@@ -414,6 +546,7 @@ async function installApi(
         ...(automaticLane
           ? { failureCategory: "archive_recovery", failureCode: "restore_degraded" }
           : {}),
+        ...failurePayload,
       },
     },
   };
@@ -427,6 +560,22 @@ async function installApi(
     payload: { text: session.initialMessage, resources: [] },
     occurredAt: now,
   };
+  const events = [
+    event,
+    ...turnEvents.map((entry, index) => ({
+      id:
+        index === turnEvents.length - 1
+          ? failureId
+          : `99999999-9999-4999-8999-${String(index).padStart(12, "0")}`,
+      workspaceId,
+      sessionId,
+      turnId,
+      sequence: index + 2,
+      type: entry.type,
+      payload: entry.payload,
+      occurredAt: new Date(Date.parse(now) + (index + 1) * 1_000).toISOString(),
+    })),
+  ];
   await page.route(`${baseUrl}/v1/**`, async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -488,8 +637,49 @@ async function installApi(
     if (path === `/v1/workspaces/${workspaceId}`) return json(workspace);
     if (path === `/v1/workspaces/${workspaceId}/skills/content`)
       return json({ skills: [], nextCursor: null });
-    if (path.endsWith("/sessions"))
-      return json({ sessions: [session], pinned: [], pinnedTruncated: false, nextCursor: null });
+    if (path.endsWith("/sessions")) {
+      const params = new URL(request.url()).searchParams;
+      const archived = params.get("archiveStatus") === "archived";
+      const pinsOnly = params.get("pinsOnly") === "true";
+      return json({
+        sessions:
+          pinsOnly ||
+          archived ||
+          (params.has("parentSessionId") && params.get("parentSessionId") !== "null")
+            ? []
+            : [session],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: params.get("sortBy") ?? "updatedAt",
+        archiveStatus: params.get("archiveStatus") ?? "active",
+        ...(params.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(params.get("includeTotals") === "true"
+          ? {
+              totals: {
+                needsYouCount: archived && !pinsOnly ? 0 : 1,
+                groups:
+                  archived && !pinsOnly
+                    ? []
+                    : [
+                        {
+                          channelId: null,
+                          total: 1,
+                          attention: 0,
+                          attentionSince: null,
+                          failed: 0,
+                          active: 0,
+                          queued: 0,
+                          unread: 0,
+                          activeWork: 0,
+                        },
+                      ],
+              },
+            }
+          : {}),
+      });
+    }
     if (path.endsWith(`/sessions/${sessionId}`)) return json(session);
     if (
       request.method() === "GET" &&
@@ -542,7 +732,7 @@ async function installApi(
     }
     if (path.endsWith("/events/stream"))
       return route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" });
-    if (path.endsWith("/events")) return json([event]);
+    if (path.endsWith("/events")) return json(events);
     if (path.endsWith("/retry")) {
       retries.push(request.postDataJSON());
       return retries.length === 1
@@ -580,6 +770,33 @@ async function installApi(
     if (path.endsWith("/models") || path.endsWith("/model-catalog"))
       return json({
         models: [
+          // The unsupported lane's session model is absent from the catalog,
+          // exactly as for a model removed from it; other lanes list it.
+          ...(unsupported
+            ? []
+            : [
+                {
+                  id: "gpt-5.6-sol",
+                  label: "GPT-5.6 Sol",
+                  provider: "openai",
+                  providerLabel: "OpenAI",
+                  api: "responses",
+                  source: "opengeni",
+                  cost: "credits",
+                  credentialReadiness: {
+                    status: "ready",
+                    reason: null,
+                    basis: "configuration",
+                    checkedAt: null,
+                  },
+                  availability: {
+                    status: "available",
+                    selectable: true,
+                    reason: null,
+                    checkedAt: null,
+                  },
+                },
+              ]),
           {
             id: "supported-model",
             label: "Supported model",

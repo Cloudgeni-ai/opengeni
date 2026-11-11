@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  directRetainedProcessBackgroundCommand,
   directRetainedProcessMatchesBackend,
   retainedProcessBackgroundSettlement,
 } from "../src/sandbox/routing";
@@ -38,6 +39,21 @@ describe("managed session-group backend", () => {
 });
 
 describe("API-direct retained-process route identity", () => {
+  test("keeps inline synchronous filesystem processes out of session background commands", () => {
+    expect(
+      directRetainedProcessBackgroundCommand(
+        { id: "inline-process" },
+        "exec",
+        "synchronous_filesystem",
+      ),
+    ).toBeUndefined();
+
+    expect(directRetainedProcessBackgroundCommand({ id: "visible-process" }, "exec")).toEqual({
+      commandId: "visible-process",
+      command: "exec",
+    });
+  });
+
   test("accepts the default active pointer without misclassifying it as a home route", () => {
     const process = { id: "process-id", providerSessionId: 7 };
     const backend = {

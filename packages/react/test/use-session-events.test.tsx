@@ -20,16 +20,34 @@ import {
 import { buildTimeline, type TimelineItem } from "../src/timeline";
 import { timelineQuestionPlacement } from "../src/timeline/projection";
 import { TIMELINE_TURN_ANCHOR_EVENT_TYPES } from "../src/hooks/latest-question";
-import { SESSION_EVENT_TYPES } from "@opengeni/sdk";
+import {
+  SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES,
+  SESSION_EVENT_TYPES,
+  streamSessionEvents,
+  type SessionEventStreamTransport,
+} from "@opengeni/sdk";
 import {
   invokeOlderHistoryLoaderWithReceiptCapture,
   type OlderHistoryLoadReceipt,
 } from "../src/older-history";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
+// First paint stays inside the server's single-query page; scroll and
+// catch-up pages are larger.
+const SESSION_FIRST_WINDOW_PAGE_SIZE = 255;
 const SESSION_HISTORY_PAGE_SIZE = 1000;
+// Windowed history reads the conversation; a turn's steps load when opened.
+// These fakes have no listEventPage, so they cannot see the server announce
+// its conversation filter: tool calls are read and dropped by the reader.
+const CONVERSATION_READ = {
+  excludeTypes: [...SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES],
+  presentedToolCalls: "include",
+} as const;
 
 function event(
   sequence: number,
@@ -80,7 +98,7 @@ function listPage(store: SessionEvent[], options: ListOptions = {}): SessionEven
   if (options.before !== undefined) {
     const before = options.before;
     candidates = candidates.filter((item) => item.sequence < before);
-    return candidates.slice(-limit);
+    return options.direction === "after" ? candidates.slice(0, limit) : candidates.slice(-limit);
   }
   return options.direction === "before" ? candidates.slice(-limit) : candidates.slice(0, limit);
 }
@@ -201,7 +219,9 @@ describe("useSessionEvents", () => {
         },
       ];
       expect(
-        buildTimeline(store).some((item) => item.kind === "user-message" && item.id === "evt-1"),
+        buildTimeline(englishText, store).some(
+          (item) => item.kind === "user-message" && item.id === "evt-1",
+        ),
       ).toBe(true);
       const { client, listCalls } = scriptedClient({ store });
       const hook = await renderHook(
@@ -341,8 +361,15 @@ describe("useSessionEvents", () => {
           payloadMode: "full",
           mode: "forensic",
         },
-        { before: 9001, limit: 128, compact: true, payloadMode: "full" },
-        { after: 9000, limit: 128, compact: true, direction: "after", payloadMode: "full" },
+        { ...CONVERSATION_READ, before: 9001, limit: 128, compact: true, payloadMode: "full" },
+        {
+          ...CONVERSATION_READ,
+          after: 9000,
+          limit: 128,
+          compact: true,
+          direction: "after",
+          payloadMode: "full",
+        },
       ]);
       expect(hook.result.current.events.some((item) => item.sequence === 9000)).toBe(true);
       expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
@@ -855,8 +882,15 @@ describe("useSessionEvents", () => {
     await actRun(async () => expect(await hook.result.current.jumpToSequence(1000)).toBe(true));
     await flush(20);
     expect(listCalls.slice(reads)).toEqual([
-      { before: 1001, limit: 128, compact: true, payloadMode: "full" },
-      { after: 1000, limit: 128, compact: true, direction: "after", payloadMode: "full" },
+      { ...CONVERSATION_READ, before: 1001, limit: 128, compact: true, payloadMode: "full" },
+      {
+        ...CONVERSATION_READ,
+        after: 1000,
+        limit: 128,
+        compact: true,
+        direction: "after",
+        payloadMode: "full",
+      },
     ]);
     expect(hook.result.current.events.some((item) => item.sequence === 1000)).toBe(true);
     expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
@@ -1061,7 +1095,202 @@ describe("useSessionEvents", () => {
     await hook.unmount();
   });
 
-  test("a second older page survives the stream reconnect caused by the first", async () => {
+  test("paginating older history never reopens the live stream and keeps live events exact", async () => {
+    const store = Array.from({ length: 4_000 }, (_, i) => event(i + 1));
+    const live: SessionEvent[] = [];
+    let wakeLive: (() => void) | null = null;
+    const push = (item: SessionEvent) => {
+      store.push(item);
+      live.push(item);
+      wakeLive?.();
+    };
+    let releaseOlder: (() => void) | null = null;
+    const streamCalls: number[] = [];
+    const streamSignals: AbortSignal[] = [];
+    const states: string[] = [];
+    const client = fakeClient({
+      listEvents: async (_workspaceId, _sessionId, options = {}) => {
+        const page = listPage(store, options);
+        if (options.before !== undefined && options.before !== Number.MAX_SAFE_INTEGER) {
+          await new Promise<void>((resolve) => {
+            releaseOlder = resolve;
+          });
+        }
+        return page;
+      },
+      streamEvents: (_workspaceId, _sessionId, options = {}) => {
+        streamCalls.push(options.after ?? 0);
+        const signal = options.signal!;
+        streamSignals.push(signal);
+        let cursor = options.after ?? 0;
+        return (async function* () {
+          options.onStateChange?.("connecting");
+          options.onOpen?.();
+          options.onStateChange?.("live");
+          while (!signal.aborted) {
+            const next = live.find((item) => item.sequence > cursor);
+            if (next) {
+              cursor = next.sequence;
+              yield next;
+              continue;
+            }
+            await new Promise<void>((resolve) => {
+              wakeLive = resolve;
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+          }
+        })();
+      },
+    });
+    const hook = await renderHook(() => {
+      const result = useSessionEvents(SESSION_ID, {
+        client,
+        workspaceId: WORKSPACE_ID,
+      });
+      states.push(result.connectionState);
+      return result;
+    }, undefined);
+    await flush(20);
+    expect(streamCalls).toEqual([4_000]);
+    expect(hook.result.current.connectionState).toBe("live");
+    const statesAfterOpen = states.length;
+
+    for (let page = 0; page < 2; page += 1) {
+      let receipt!: ReturnType<typeof hook.result.current.loadOlder>;
+      await actRun(async () => {
+        receipt = hook.result.current.loadOlder();
+      });
+      await flush(5);
+      // A live event lands while the older page is in flight, and another
+      // after it is published: both must render once, in order.
+      const base = store.length;
+      await actRun(async () => push(event(base + 1)));
+      await flush(5);
+      await actRun(async () => {
+        releaseOlder?.();
+        await receipt;
+      });
+      await flush(5);
+      await actRun(async () => push(event(base + 2)));
+      await flush(20);
+      expect(receipt.committed).toBe(true);
+    }
+
+    const sequences = hook.result.current.events.map((item) => item.sequence);
+    expect(sequences.at(-1)).toBe(4_004);
+    expect(sequences[0]).toBeLessThan(4_000 - SESSION_FIRST_WINDOW_PAGE_SIZE + 1);
+    for (let index = 1; index < sequences.length; index += 1) {
+      expect(sequences[index]).toBe(sequences[index - 1]! + 1);
+    }
+    expect(streamCalls).toEqual([4_000]);
+    expect(streamSignals[0]!.aborted).toBe(false);
+    expect(states.slice(statesAfterOpen).every((state) => state === "live")).toBe(true);
+    expect(hook.result.current.hasNewer).toBe(false);
+    await hook.unmount();
+  });
+
+  test("a real SSE reconnect resumes from the last sequence without clearing, duplicating, or skipping rows", async () => {
+    const store = Array.from({ length: 1_500 }, (_, i) => event(i + 1));
+    const encoder = new TextEncoder();
+    const sse = (items: SessionEvent[]) =>
+      items
+        .map(
+          (item) => `id: ${item.sequence}\nevent: ${item.type}\ndata: ${JSON.stringify(item)}\n\n`,
+        )
+        .join("");
+    const opened: number[] = [];
+    let pushLive: ((items: SessionEvent[]) => void) | null = null;
+    const transport: SessionEventStreamTransport = {
+      openStream: async (after, signal) => {
+        opened.push(after);
+        if (opened.length === 1) {
+          // The first connection delivers two rows, then the server drops it.
+          const rows = [event(1_501), event(1_502)];
+          store.push(...rows);
+          let sent = false;
+          return new ReadableStream<Uint8Array>({
+            pull: (controller) => {
+              if (sent) {
+                controller.close();
+                return;
+              }
+              sent = true;
+              controller.enqueue(encoder.encode(sse(rows)));
+            },
+          });
+        }
+        // The replacement replays an overlap (already-seen rows) before new
+        // rows, then stays open for live delivery.
+        let controllerRef!: ReadableStreamDefaultController<Uint8Array>;
+        return new ReadableStream<Uint8Array>({
+          start: (controller) => {
+            controllerRef = controller;
+            controller.enqueue(encoder.encode(sse(store.filter((item) => item.sequence > 1_500))));
+            pushLive = (items) => {
+              store.push(...items);
+              controllerRef.enqueue(encoder.encode(sse(items)));
+            };
+            signal?.addEventListener(
+              "abort",
+              () => controllerRef.error(new DOMException("aborted", "AbortError")),
+              {
+                once: true,
+              },
+            );
+          },
+        });
+      },
+      listEvents: async (after, limit) =>
+        store.filter((item) => item.sequence > after).slice(0, limit),
+    };
+    const client = fakeClient({
+      listEvents: async (_workspaceId, _sessionId, options = {}) => listPage(store, options),
+      streamEvents: (_workspaceId, _sessionId, options = {}) =>
+        streamSessionEvents(transport, {
+          ...options,
+          reconnectDelayMs: 1,
+          maxReconnectDelayMs: 2,
+          reconnectJitterRatio: 0,
+        }),
+    });
+    const states: string[] = [];
+    const renderedCounts: number[] = [];
+    const hook = await renderHook(() => {
+      const result = useSessionEvents(SESSION_ID, {
+        client,
+        workspaceId: WORKSPACE_ID,
+      });
+      states.push(result.connectionState);
+      if (!result.initialLoading) renderedCounts.push(result.events.length);
+      return result;
+    }, undefined);
+    await flush(40);
+    expect(opened).toEqual([1_500, 1_502]);
+    expect(hook.result.current.connectionState).toBe("live");
+
+    await actRun(async () => pushLive?.([event(1_503), event(1_504)]));
+    await flush(20);
+
+    const sequences = hook.result.current.events.map((item) => item.sequence);
+    expect(sequences.at(-1)).toBe(1_504);
+    for (let index = 1; index < sequences.length; index += 1) {
+      expect(sequences[index]).toBe(sequences[index - 1]! + 1);
+    }
+    expect(hook.result.current.lastSequence).toBe(1_504);
+    // Rendered content never shrinks (no clear/flash back to an empty or
+    // shorter timeline) across the reconnect.
+    for (let index = 1; index < renderedCounts.length; index += 1) {
+      expect(renderedCounts[index]!).toBeGreaterThanOrEqual(renderedCounts[index - 1]!);
+    }
+    expect(renderedCounts.every((count) => count > 0)).toBe(true);
+    // The reconnect (opened twice above) never reports a fresh connect or idle.
+    const firstLive = states.indexOf("live");
+    expect(states.slice(firstLive)).not.toContain("connecting");
+    expect(states.slice(firstLive)).not.toContain("idle");
+    await hook.unmount();
+  });
+
+  test("a second older page loads while the first page's live stream stays open", async () => {
     const store = Array.from({ length: 4000 }, (_, i) => event(i + 1));
     let release!: () => void;
     const held = new Promise<void>((resolve) => {
@@ -1088,7 +1317,7 @@ describe("useSessionEvents", () => {
       second = hook.result.current.loadOlder();
     });
     await flush(20);
-    expect(streamCalls.length).toBeGreaterThan(initialStreams);
+    expect(streamCalls.length).toBe(initialStreams);
     expect(hook.result.current.loadingOlder).toBe(true);
     const previousOldest = hook.result.current.events[0]!.sequence;
     release();
@@ -1328,22 +1557,23 @@ describe("useSessionEvents", () => {
 
     expect(listCalls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
     ]);
-    expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-    expect(hook.result.current.events[0]?.sequence).toBe(201);
+    expect(hook.result.current.events).toHaveLength(SESSION_FIRST_WINDOW_PAGE_SIZE);
+    expect(hook.result.current.events[0]?.sequence).toBe(946);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(streamCalls).toEqual([1200]);
-    expect(lengths.filter((length) => length === SESSION_HISTORY_PAGE_SIZE)).toHaveLength(1);
+    expect(lengths.filter((length) => length === SESSION_FIRST_WINDOW_PAGE_SIZE)).toHaveLength(1);
 
     await hook.unmount();
   });
 
-  test("foreground resume replays tiny gaps, compacts small message sets, and reloads only complex backlogs", async () => {
+  test("foreground resume replays tiny gaps, appends missed conversation, and reloads only long backlogs", async () => {
     let visibility: DocumentVisibilityState = "visible";
     const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
     Object.defineProperty(document, "visibilityState", {
@@ -1366,7 +1596,7 @@ describe("useSessionEvents", () => {
       },
       listEvents: async (_workspaceId, _sessionId, options = {}) => {
         listCalls.push(options);
-        if (delayedOlder && options.before === 401) {
+        if (delayedOlder && options.before === 3_246) {
           const page = listPage(store, options);
           await delayedOlder;
           return page;
@@ -1420,12 +1650,9 @@ describe("useSessionEvents", () => {
         visibility = "visible";
         await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
         await actRun(async () => {
-          await Promise.resolve();
-          await Promise.resolve();
-          await Promise.resolve();
+          for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
           jest.advanceTimersByTime(20);
-          await Promise.resolve();
-          await Promise.resolve();
+          for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
         });
       };
 
@@ -1441,8 +1668,9 @@ describe("useSessionEvents", () => {
       await suspendAndResume();
       expect(listCalls).toEqual([
         {
+          ...CONVERSATION_READ,
           before: Number.MAX_SAFE_INTEGER,
-          limit: SESSION_HISTORY_PAGE_SIZE,
+          limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
           compact: true,
           payloadMode: "full",
         },
@@ -1450,56 +1678,94 @@ describe("useSessionEvents", () => {
       expect(streamCalls).toEqual([2, 2]);
       expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 3, 4]);
 
-      // A raw gap of 196 rows could still be one visible streaming answer. The
-      // compact probe proves that here, appends it once, and resumes at 200.
+      // A larger gap catches up the conversation up to the durable head (the
+      // steps written meanwhile are not replayed), appends it to the kept
+      // window, and resumes at the head.
       durableHead = 200;
       await suspendAndResume();
       expect(listCalls.at(-1)).toEqual({
+        ...CONVERSATION_READ,
         after: 4,
-        limit: 196,
+        before: 201,
+        limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         direction: "after",
         payloadMode: "full",
       });
       expect(streamCalls).toEqual([2, 2, 200]);
+      expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 3, 4, 5]);
       expect(hook.result.current.events.at(-1)).toMatchObject({
         sequence: 5,
         coveredThrough: 200,
       });
       expect(hook.result.current.lastSequence).toBe(200);
 
-      // A large raw gap skips the compact probe and reloads one latest tail.
-      // Keep enough history behind that tail for the in-flight older-page
-      // invalidation check below.
+      // Up to two pages of missed conversation are appended: the reader keeps
+      // the history already loaded instead of a replacement tail.
       store = Array.from({ length: 1_400 }, (_, index) => event(index + 1));
       durableHead = 1_400;
       await suspendAndResume();
-
-      expect(listCalls).toEqual([
+      expect(listCalls.slice(-2)).toEqual([
         {
-          before: Number.MAX_SAFE_INTEGER,
+          ...CONVERSATION_READ,
+          after: 200,
+          before: 1_401,
           limit: SESSION_HISTORY_PAGE_SIZE,
-          compact: true,
-          payloadMode: "full",
-        },
-        {
-          after: 4,
-          limit: 196,
           compact: true,
           direction: "after",
           payloadMode: "full",
         },
         {
-          before: Number.MAX_SAFE_INTEGER,
+          ...CONVERSATION_READ,
+          after: 1_200,
+          before: 1_401,
           limit: SESSION_HISTORY_PAGE_SIZE,
           compact: true,
+          direction: "after",
           payloadMode: "full",
         },
       ]);
       expect(streamCalls).toEqual([2, 2, 200, 1_400]);
-      expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-      expect(hook.result.current.events[0]?.sequence).toBe(401);
+      expect(hook.result.current.events[0]?.sequence).toBe(1);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(1_400);
+      expect(hook.result.current.events).toHaveLength(1_205);
+
+      // A longer backlog reloads one latest tail. Keep enough history behind
+      // that tail for the in-flight older-page invalidation check below.
+      store = Array.from({ length: 3_500 }, (_, index) => event(index + 1));
+      durableHead = 3_500;
+      await suspendAndResume();
+      expect(listCalls.slice(-3)).toEqual([
+        {
+          ...CONVERSATION_READ,
+          after: 1_400,
+          before: 3_501,
+          limit: SESSION_HISTORY_PAGE_SIZE,
+          compact: true,
+          direction: "after",
+          payloadMode: "full",
+        },
+        {
+          ...CONVERSATION_READ,
+          after: 2_400,
+          before: 3_501,
+          limit: SESSION_HISTORY_PAGE_SIZE,
+          compact: true,
+          direction: "after",
+          payloadMode: "full",
+        },
+        {
+          ...CONVERSATION_READ,
+          before: Number.MAX_SAFE_INTEGER,
+          limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
+          compact: true,
+          payloadMode: "full",
+        },
+      ]);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400, 3_500]);
+      expect(hook.result.current.events).toHaveLength(SESSION_FIRST_WINDOW_PAGE_SIZE);
+      expect(hook.result.current.events[0]?.sequence).toBe(3_246);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(3_500);
 
       let releaseOlder!: () => void;
       delayedOlder = new Promise<void>((resolve) => {
@@ -1511,8 +1777,7 @@ describe("useSessionEvents", () => {
       });
       expect(hook.result.current.loadingOlder).toBe(true);
 
-      // A gap beyond the bounded one-page probe budget skips the forward
-      // read entirely and goes straight to the latest compact tail.
+      // A gap beyond the catch-up budget reloads the latest compact tail.
       store = Array.from({ length: 6_000 }, (_, index) => event(index + 1));
       durableHead = 6_000;
       let releaseTail!: (events: SessionEvent[]) => void;
@@ -1522,8 +1787,8 @@ describe("useSessionEvents", () => {
       await suspendAndResume();
       // A foreground replacement is atomic: the prior complete tip remains
       // visible while the bounded latest page is still in flight.
-      expect(hook.result.current.events[0]?.sequence).toBe(401);
-      expect(hook.result.current.events.at(-1)?.sequence).toBe(1_400);
+      expect(hook.result.current.events[0]?.sequence).toBe(3_246);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(3_500);
       await actRun(() => releaseTail(listPage(store, listCalls.at(-1))));
       delayedTail = null;
       await actRun(async () => {
@@ -1532,43 +1797,63 @@ describe("useSessionEvents", () => {
         await Promise.resolve();
       });
       expect(listCalls.at(-1)).toEqual({
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       });
-      expect(listCalls.some((call) => call.after === 400)).toBe(false);
-      expect(streamCalls).toEqual([2, 2, 200, 1_400, 6_000]);
-      expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-      expect(hook.result.current.events[0]?.sequence).toBe(5_001);
+      expect(listCalls.some((call) => call.after === 2_500)).toBe(false);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400, 3_500, 6_000]);
+      expect(hook.result.current.events).toHaveLength(SESSION_FIRST_WINDOW_PAGE_SIZE);
+      expect(hook.result.current.events[0]?.sequence).toBe(5_746);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
 
       // Replacement retires navigation against the discarded window. The old
-      // page must not splice 1–400 onto 5001–6000, leaving an inaccessible gap.
+      // page must not splice 2246–3245 onto 5746–6000, leaving an inaccessible gap.
       expect(hook.result.current.loadingOlder).toBe(false);
       releaseOlder();
       await actRun(() => pendingOlder);
       expect(pendingOlder.committed).toBe(false);
-      expect(hook.result.current.events[0]?.sequence).toBe(5_001);
+      expect(hook.result.current.events[0]?.sequence).toBe(5_746);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
       expect(hook.result.current.hasOlder).toBe(true);
 
-      // The head read is only an optimization. A transient failure falls back
-      // to the SDK's exact cursor replay and keeps the existing timeline.
+      // The head read is only an optimization. A transient failure retries
+      // with backoff (the network often returns just after a wake) rather
+      // than replaying a backlog it could not size; one that keeps failing
+      // falls back to the SDK's exact cursor replay and keeps the timeline.
       store = Array.from({ length: 6_002 }, (_, index) => event(index + 1));
       durableHead = 6_002;
       failHeadRead = true;
+      const headReadsBefore = headReadCalls.length;
       await suspendAndResume();
+      expect(headReadCalls).toHaveLength(headReadsBefore + 1);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400, 3_500, 6_000]);
+      for (let step = 0; step < 40; step += 1) {
+        await actRun(async () => {
+          for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+          jest.advanceTimersByTime(500);
+          for (let tick = 0; tick < 200; tick += 1) await Promise.resolve();
+        });
+      }
+      // Five strict attempts (500 ms to 8 s apart), then one that replays
+      // whatever it finds.
+      expect(headReadCalls).toHaveLength(headReadsBefore + 6);
       expect(listCalls.at(-1)).toEqual({
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       });
-      expect(streamCalls).toEqual([2, 2, 200, 1_400, 6_000, 6_000]);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400, 3_500, 6_000, 6_000]);
       expect(hook.result.current.events.at(-2)?.sequence).toBe(6_001);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_002);
-      expect(headReadCalls).toHaveLength(5);
+      // One per foreground resume (six for the failing one), plus one for
+      // each freshly loaded window (the first open and the two reloads),
+      // which joins at the durable head.
+      expect(headReadCalls).toHaveLength(14);
       for (const options of headReadCalls) {
         expect(options.fresh).toBe(true);
         expect(options.signal).toBeDefined();
@@ -1748,7 +2033,7 @@ describe("useSessionEvents", () => {
         event(index + 301, "agent.message.delta", { text: "middle" }),
       ),
       event(500),
-      ...Array.from({ length: 900 }, (_, index) =>
+      ...Array.from({ length: 200 }, (_, index) =>
         event(index + 501, "agent.message.delta", { text: "tail" }),
       ),
     ];
@@ -1765,8 +2050,9 @@ describe("useSessionEvents", () => {
     // refetched with its own turn.
     expect(listCalls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
@@ -1781,6 +2067,7 @@ describe("useSessionEvents", () => {
     // start within the older fetch cap.
     expect(more).toBe(false);
     expect(listCalls[1]).toEqual({
+      ...CONVERSATION_READ,
       before: 500,
       limit: SESSION_HISTORY_PAGE_SIZE,
       compact: true,
@@ -1801,7 +2088,7 @@ describe("useSessionEvents", () => {
       event(1, "session.created", {}),
       ...Array.from({ length: 5999 }, (_, index) => event(index + 2)),
     ];
-    const initialOldest = store.length - SESSION_HISTORY_PAGE_SIZE + 1;
+    const initialOldest = store.length - SESSION_FIRST_WINDOW_PAGE_SIZE + 1;
     let releaseOlder: () => void = () => {
       throw new Error("older page was not requested");
     };
@@ -1845,7 +2132,7 @@ describe("useSessionEvents", () => {
       store.slice(initialOldest - 33).map((item) => item.sequence),
     );
     expect(new Set(hook.result.current.events.map((item) => item.sequence)).size).toBe(
-      SESSION_HISTORY_PAGE_SIZE + 32,
+      SESSION_FIRST_WINDOW_PAGE_SIZE + 32,
     );
     expect(hook.result.current.events[0]?.sequence).toBe(initialOldest - 32);
     expect(hook.result.current.hasOlder).toBe(true);
@@ -1926,19 +2213,21 @@ describe("useSessionEvents", () => {
 
     // This synthetic log has no turn boundary in either page, so the initial
     // read stops after one bounded boundary probe and remains explicitly older.
-    expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE * 2);
-    expect(hook.result.current.events[0]?.sequence).toBe(38_001);
+    expect(hook.result.current.events).toHaveLength(SESSION_FIRST_WINDOW_PAGE_SIZE * 2);
+    expect(hook.result.current.events[0]?.sequence).toBe(39_491);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(listCalls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
       {
-        before: 39_001,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        ...CONVERSATION_READ,
+        before: 39_746,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
@@ -1967,8 +2256,9 @@ describe("useSessionEvents", () => {
 
     expect(listCalls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
@@ -2019,14 +2309,33 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 4, 6, 8]);
     expect(calls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
+      {
+        ...CONVERSATION_READ,
+        before: 8,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
+      {
+        ...CONVERSATION_READ,
+        before: 6,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
-      { before: 8, limit: SESSION_HISTORY_PAGE_SIZE, compact: true, payloadMode: "full" },
-      { before: 6, limit: SESSION_HISTORY_PAGE_SIZE, compact: true, payloadMode: "full" },
-      { before: 4, limit: SESSION_HISTORY_PAGE_SIZE, compact: true, payloadMode: "full" },
+      {
+        ...CONVERSATION_READ,
+        before: 4,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
     ]);
     const agentText = hook.result.current.timeline
       .filter(
@@ -2041,7 +2350,7 @@ describe("useSessionEvents", () => {
         event(index + 2, "agent.message.delta", { text }),
       ),
     ];
-    const rawText = buildTimeline(rawEquivalent)
+    const rawText = buildTimeline(englishText, rawEquivalent)
       .filter(
         (item): item is Extract<TimelineItem, { kind: "agent-message" }> =>
           item.kind === "agent-message",
@@ -2065,14 +2374,15 @@ describe("useSessionEvents", () => {
 
     expect(listCalls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
     ]);
-    expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-    expect(hook.result.current.events[0]?.sequence).toBe(19_001);
+    expect(hook.result.current.events).toHaveLength(SESSION_FIRST_WINDOW_PAGE_SIZE);
+    expect(hook.result.current.events[0]?.sequence).toBe(19_746);
     expect(hook.result.current.hasOlder).toBe(true);
 
     await hook.unmount();
@@ -2352,6 +2662,7 @@ describe("useSessionEvents", () => {
     const throughLive = [...historical, event(SESSION_EVENT_BROWSER_MAX_COUNT + 52)];
     const listCalls: ListOptions[] = [];
     const streamCalls: number[] = [];
+    const streamSignals: AbortSignal[] = [];
     let connection = 0;
     const client = fakeClient({
       listEvents: async (_workspaceId, _sessionId, options = {}) => {
@@ -2361,6 +2672,7 @@ describe("useSessionEvents", () => {
       streamEvents: (_workspaceId, _sessionId, options = {}) => {
         const after = options.after ?? 0;
         streamCalls.push(after);
+        streamSignals.push(options.signal!);
         connection += 1;
         const source = connection === 1 ? historical : throughLive;
         return (async function* () {
@@ -2430,6 +2742,9 @@ describe("useSessionEvents", () => {
     // The backward page keeps the nearest 32 complete groups. Reopening live
     // SSE here would newest-bound the browser window and evict them again.
     expect(streamCalls).toEqual([0]);
+    // Leaving the live tip is the one prepend that closes the live iterator.
+    expect(streamSignals[0]!.aborted).toBe(true);
+    expect(hook.result.current.connectionState).toBe("idle");
     expect(hook.result.current.events[0]?.sequence).toBe(20);
     expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 19);
     expect(hook.result.current.lastSequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
@@ -2455,7 +2770,7 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    expect(hook.result.current.events[0]?.sequence).toBe(4_001);
+    expect(hook.result.current.events[0]?.sequence).toBe(4_746);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(hook.result.current.hasNewer).toBe(false);
     expect(streamCalls).toEqual([5_000]);
@@ -2466,12 +2781,14 @@ describe("useSessionEvents", () => {
     expect(jumped).toBe(true);
     expect(listCalls).toEqual([
       {
+        ...CONVERSATION_READ,
         before: Number.MAX_SAFE_INTEGER,
-        limit: SESSION_HISTORY_PAGE_SIZE,
+        limit: SESSION_FIRST_WINDOW_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       },
       {
+        ...CONVERSATION_READ,
         after: 0,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
@@ -2695,7 +3012,7 @@ describe("useSessionEvents", () => {
       listCalls.filter((call) => call.direction === "after").map((call) => call.after),
     ).toEqual([0, 10]);
     expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 11]);
-    expect(buildTimeline(hook.result.current.events)).toEqual(
+    expect(buildTimeline(englishText, hook.result.current.events)).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text: "abcd" })]),
     );
     expect(hook.result.current.hasNewer).toBe(true);
@@ -2707,7 +3024,7 @@ describe("useSessionEvents", () => {
     expect(
       listCalls.filter((call) => call.direction === "after").map((call) => call.after),
     ).toEqual([0, 10, 20, 30]);
-    expect(buildTimeline(hook.result.current.events)).toEqual(
+    expect(buildTimeline(englishText, hook.result.current.events)).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text: "abcdef" })]),
     );
     expect(hook.result.current.hasNewer).toBe(false);
@@ -2788,7 +3105,7 @@ describe("boundBrowserSessionEventWindow", () => {
     expect(window.events).toEqual(events);
     expect(window.events[1]).toBe(events[1]);
     expect(window.truncated).toBeFalse();
-    expect(buildTimeline(window.events)).toEqual(
+    expect(buildTimeline(englishText, window.events)).toEqual(
       expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text })]),
     );
   });

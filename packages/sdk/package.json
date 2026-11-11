@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/sdk",
-  "version": "7.4.0",
-  "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
+  "version": "6.14.0",
+  "description": "Framework-agnostic TypeScript SDK for the Opengeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -26,6 +26,30 @@
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
     },
+    "./timeline-order": {
+      "types": "./src/timeline-order.ts",
+      "default": "./src/timeline-order.ts"
+    },
+    "./learning-refusal": {
+      "types": "./src/learning-refusal.ts",
+      "default": "./src/learning-refusal.ts"
+    },
+    "./app-links": {
+      "types": "./src/app-links.ts",
+      "default": "./src/app-links.ts"
+    },
+    "./this-computer": {
+      "types": "./src/this-computer.ts",
+      "default": "./src/this-computer.ts"
+    },
+    "./desktop-bridge": {
+      "types": "./src/desktop-bridge.ts",
+      "default": "./src/desktop-bridge.ts"
+    },
+    "./office": {
+      "types": "./src/office/index.ts",
+      "default": "./src/office/index.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -46,6 +70,10 @@
       "types": "./src/site.ts",
       "default": "./src/site.ts"
     },
+    "./site-bridge-host": {
+      "types": "./src/site-bridge-host.ts",
+      "default": "./src/site-bridge-host.ts"
+    },
     "./github-repositories": {
       "types": "./src/github-repositories.ts",
       "default": "./src/github-repositories.ts"
@@ -58,9 +86,21 @@
       "types": "./src/usage-allowances.ts",
       "default": "./src/usage-allowances.ts"
     },
+    "./session-usage-limits": {
+      "types": "./src/session-usage-limits.ts",
+      "default": "./src/session-usage-limits.ts"
+    },
+    "./insights-usage": {
+      "types": "./src/insights-usage.ts",
+      "default": "./src/insights-usage.ts"
+    },
     "./workspace-integrations": {
       "types": "./src/workspace-integrations.ts",
       "default": "./src/workspace-integrations.ts"
+    },
+    "./external-vault-receiver": {
+      "types": "./src/external-vault-receiver.ts",
+      "default": "./src/external-vault-receiver.ts"
     },
     "./session-history-import": {
       "types": "./src/session-history-import.ts",
@@ -82,14 +122,6 @@
       "types": "./src/memory-slack.ts",
       "default": "./src/memory-slack.ts"
     },
-    "./automations": {
-      "types": "./src/automations.ts",
-      "default": "./src/automations.ts"
-    },
-    "./pr-review": {
-      "types": "./src/pr-review.ts",
-      "default": "./src/pr-review.ts"
-    },
     "./organization-integration-policy": {
       "types": "./src/organization-integration-policy.ts",
       "default": "./src/organization-integration-policy.ts"
@@ -105,6 +137,10 @@
     "./realtime": {
       "types": "./src/realtime.ts",
       "default": "./src/realtime.ts"
+    },
+    "./recordings": {
+      "types": "./src/recordings.ts",
+      "default": "./src/recordings.ts"
     },
     "./editable-artifacts": {
       "types": "./src/editable-artifacts.ts",
@@ -126,9 +162,21 @@
       "types": "./src/gateway-realtime-transport.ts",
       "default": "./src/gateway-realtime-transport.ts"
     },
+    "./realtime-websocket-transport": {
+      "types": "./src/realtime-websocket-transport.ts",
+      "default": "./src/realtime-websocket-transport.ts"
+    },
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
+    },
+    "./model-display": {
+      "types": "./src/model-display.ts",
+      "default": "./src/model-display.ts"
+    },
+    "./secret-use-approval": {
+      "types": "./src/secret-use-approval.ts",
+      "default": "./src/secret-use-approval.ts"
     },
     "./chat": {
       "types": "./src/chat/index.ts",
@@ -142,6 +190,10 @@
       "types": "./src/session-proxy.ts",
       "default": "./src/session-proxy.ts"
     },
+    "./tool-auth": {
+      "types": "./src/tool-auth.ts",
+      "default": "./src/tool-auth.ts"
+    },
     "./next": {
       "types": "./src/adapters/next.ts",
       "default": "./src/adapters/next.ts"
@@ -153,6 +205,15 @@
     "./hono": {
       "types": "./src/adapters/hono.ts",
       "default": "./src/adapters/hono.ts"
+    },
+    "./session-list-entries": {
+      "types": "./src/session-list-entries.ts",
+      "default": "./src/session-list-entries.ts"
+    },
+    "./package.json": "./package.json",
+    "./teams": {
+      "types": "./src/teams.ts",
+      "default": "./src/teams.ts"
     }
   },
   "publishConfig": {
@@ -160,7 +221,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/generate-site-browser-runtime.ts && bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
@@ -169,6 +230,7 @@
     "@opengeni/contracts": "workspace:*"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@opengeni/artifact-kernel-wasm-document": "workspace:*",
     "@opengeni/artifact-kernel-wasm-presentation": "workspace:*",
     "@opengeni/artifact-kernel-wasm-spreadsheet": "workspace:*",

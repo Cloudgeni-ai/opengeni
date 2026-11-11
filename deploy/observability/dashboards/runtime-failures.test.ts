@@ -14,12 +14,12 @@ describe("runtime failures dashboard", () => {
       "Probe age",
       "Worker restarts · 15m",
       "Recovery exhausted",
-      "Firing OpenGeni alerts",
+      "Firing Opengeni alerts",
       "Turn outcomes",
-      "Turn failure and recovery ratios",
+      "Platform failures, customer provider failures and recoveries",
       "MCP lifecycle operations",
       "MCP tool calls by outcome",
-      "MCP tool-call p95 by outcome",
+      "MCP tool-call p95 by outcome and tool",
       "Failed startup phases",
       "Logical sandbox provision failures",
       "Sandbox visibility-check failures",
@@ -27,6 +27,7 @@ describe("runtime failures dashboard", () => {
       "Core workspace and session read p95",
       "Durable append and live publish p99",
       "Model call outcomes",
+      "Provider invalid requests by path",
       "Incident delivery path",
     ]) {
       expect(titles).toContain(title);
@@ -47,6 +48,7 @@ describe("runtime failures dashboard", () => {
       "opengeni_session_event_append_seconds_bucket",
       "opengeni_session_event_publish_seconds_bucket",
       "opengeni_model_calls_total",
+      "opengeni_model_invalid_requests_total",
       "alertmanager_notifications_failed_total",
       "kube_deployment_status_replicas_available",
       "kube_cronjob_status_last_successful_time",
@@ -78,8 +80,10 @@ describe("runtime failures dashboard", () => {
     expect(scrapeHealth).not.toContain('environment="$environment"');
     expect(panels.get("Probe age")?.targets?.[0]?.expr).not.toContain("or vector(0)");
 
-    const ratio = panels.get("Turn failure and recovery ratios");
-    expect(ratio?.targets).toHaveLength(2);
+    const ratio = panels.get("Platform failures, customer provider failures and recoveries");
+    expect(ratio?.targets).toHaveLength(3);
+    expect(ratio?.targets?.[0]?.expr).toContain('failure_origin!="customer_provider"');
+    expect(ratio?.targets?.[2]?.expr).toContain('failure_origin="customer_provider"');
     for (const target of ratio?.targets ?? []) {
       expect(target.expr).toContain("or vector(0)");
       expect(target.expr).toContain("clamp_min");
@@ -133,8 +137,8 @@ describe("runtime failures dashboard", () => {
     );
     expect(variables.get("release")?.definition).not.toContain("environment=");
 
-    const alertTable = dashboard.panels.find((panel) => panel.title === "Firing OpenGeni alerts");
-    for (const panelTitle of ["Critical alerts", "Warnings", "Firing OpenGeni alerts"]) {
+    const alertTable = dashboard.panels.find((panel) => panel.title === "Firing Opengeni alerts");
+    for (const panelTitle of ["Critical alerts", "Warnings", "Firing Opengeni alerts"]) {
       const expression = dashboard.panels.find((panel) => panel.title === panelTitle)?.targets?.[0]
         ?.expr;
       expect(expression).toContain('namespace="$namespace"');

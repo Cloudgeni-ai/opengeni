@@ -1,3 +1,5 @@
+import * as primitives from "./primitives";
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 /**
@@ -8,13 +10,9 @@ import { z } from "zod";
 export const SKILL_USE_META_KEY = "opengeni/skillUse" as const;
 
 /** Where the Skill a read resolved to comes from. `personal` is a user-scope Skill. */
-export const SkillUseSource = z.enum([
-  "builtin",
-  "session",
-  "workspace",
-  "organization",
-  "personal",
-]);
+export const SkillUseSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["builtin", "session", "workspace", "organization", "personal"]),
+);
 export type SkillUseSource = z.infer<typeof SkillUseSource>;
 
 /**
@@ -23,7 +21,9 @@ export type SkillUseSource = z.infer<typeof SkillUseSource>;
  * repeat receipt. `refused` means the read returned an error instead of Skill
  * text; it has no result, so it appears only in metrics.
  */
-export const SkillReadKind = z.enum(["full", "already_in_context", "files", "list", "refused"]);
+export const SkillReadKind = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["full", "already_in_context", "files", "list", "refused"]),
+);
 export type SkillReadKind = z.infer<typeof SkillReadKind>;
 
 const skillUseFields = {
@@ -31,19 +31,16 @@ const skillUseFields = {
   source: SkillUseSource,
   label: z.string().min(1).max(128).optional(),
   /** Whole-artifact digest, for a Skill without a ledger revision. */
-  contentSha256: z
-    .string()
-    .regex(/^[0-9a-f]{64}$/u)
-    .optional(),
+  contentSha256: primitives.string.regex(/^[0-9a-f]{64}$/u).optional(),
   /** Ledger revision of a workspace, organization, or personal Skill. */
   revisionId: z.string().min(1).max(128).optional(),
   kind: SkillReadKind.exclude(["refused"]),
   /** UTF-8 bytes of the result text the read returned, before model tool-output truncation. */
-  bytes: z.number().int().nonnegative(),
+  bytes: primitives.nonnegativeInteger,
   /** The Skill appeared in the Skill index the model saw this turn. */
-  inIndex: z.boolean(),
+  inIndex: primitives.boolean,
   /** skill_search returned this Skill earlier in the same turn attempt. */
-  searchedThisTurn: z.boolean(),
+  searchedThisTurn: primitives.boolean,
 };
 const oneProvenance = (use: {
   contentSha256?: string | undefined;
@@ -59,13 +56,17 @@ const oneProvenanceMessage = {
  * built-in; user-authored Skills never set it. This is the writer's closed
  * shape: an unknown field fails the parse, so nothing else can be attached.
  */
-export const SkillUse = z.strictObject(skillUseFields).refine(oneProvenance, oneProvenanceMessage);
+export const SkillUse = /* @__PURE__ */ defineSchema(() =>
+  z.strictObject(skillUseFields).refine(oneProvenance, oneProvenanceMessage),
+);
 export type SkillUse = z.infer<typeof SkillUse>;
 
 // Stored events outlive the worker that wrote them. A reader drops fields a
 // newer writer added instead of dropping the whole fact, and what it returns
 // still holds only the known, content-free fields.
-const StoredSkillUse = z.object(skillUseFields).refine(oneProvenance, oneProvenanceMessage);
+const StoredSkillUse = /* @__PURE__ */ defineSchema(() =>
+  z.object(skillUseFields).refine(oneProvenance, oneProvenanceMessage),
+);
 
 /** The Skill-use fact on a tool result or its event projection, when present and valid. */
 export function skillUseFromToolOutput(output: unknown): SkillUse | null {

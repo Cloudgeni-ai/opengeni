@@ -2,12 +2,15 @@ export type ApiWebSocketConnection = Readonly<{
   attach(socket: ApiWebSocketLike): void;
   receive(message: string | Uint8Array | ArrayBuffer): void;
   transportClosed(): void;
+  /** A ping or pong arrived (connections that watch their peer's liveness). */
+  heard?(): void;
 }>;
 
 export type ApiWebSocketLike = Readonly<{
   data: ApiWebSocketConnection;
   send(data: Uint8Array, compress?: boolean): number;
   close(code?: number, reason?: string): void;
+  ping?(): number;
   readonly bufferedAmount?: number;
   getBufferedAmount?(): number;
 }>;

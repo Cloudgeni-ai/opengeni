@@ -1,7 +1,7 @@
-OpenGeni observability is installed in {{ .Release.Namespace }}.
+Opengeni observability is installed in {{ .Release.Namespace }}.
 
 Before expecting application targets or rules, include
-deploy/observability/opengeni.values.example.yaml in the next ordinary OpenGeni
+deploy/observability/opengeni.values.example.yaml in the next ordinary Opengeni
 application release. Do not use an observability-only action to reconcile a
 different application chart version or run application hooks.
 

@@ -1,10 +1,14 @@
 import { KnowledgeEntryListRequest, type KnowledgeEntryListResponse } from "@opengeni/contracts";
-import type { Settings } from "@opengeni/config";
+import {
+  sideFeatureProcessingResidency,
+  type Settings,
+  type SideFeatureResidencySettings,
+} from "@opengeni/config";
 import {
   applyCreditDebitAfterUse,
   checkWorkspaceAllowance,
   creditDebitAttributionForTurn,
-  getBillingBalance,
+  getSpendableCreditBalance,
   listKnowledgeEntries,
   recordUsageEvent,
   sumUsageQuantity,
@@ -16,6 +20,9 @@ import {
 import type { DocumentEmbedder } from "@opengeni/documents";
 import type { z } from "zod";
 import { documentEmbeddingCostMicros, paidDocumentEmbedding } from "../billing/limits";
+import { sideFeatureRegionRestrictedError } from "@opengeni/runtime";
+import { knowledgeEmbeddingTarget, sideFeatureAllowedForWorkspace } from "../side-feature-routes";
+import { workspaceCreditsDisabled } from "./workspace-credits";
 
 // Safety ceilings, not a commercial tariff. Paid queries have no durable
 // reusable vector cache, so each bounded request consumes the provider once.
@@ -29,8 +36,18 @@ const MAX_PAID_QUERY_MICROS_PER_MONTH = 1_000_000;
 export class KnowledgeVectorFundingError extends Error {
   readonly code = "knowledge_vector_funding_required";
   constructor() {
-    super("Knowledge vector search needs OpenGeni credits; keyword search remains available.");
+    super("Knowledge vector search needs credits; keyword search remains available.");
     this.name = "KnowledgeVectorFundingError";
+  }
+}
+
+export class KnowledgeVectorCreditsDisabledError extends Error {
+  readonly code = "knowledge_vector_credits_disabled";
+  constructor() {
+    super(
+      "Knowledge vector search uses credits, which are turned off in this workspace; keyword search remains available.",
+    );
+    this.name = "KnowledgeVectorCreditsDisabledError";
   }
 }
 
@@ -51,6 +68,13 @@ export async function searchKnowledgeEntries(
   input: z.input<typeof KnowledgeEntryListRequest>,
   embedder: () => DocumentEmbedder,
   settings?: Settings,
+  /**
+   * The residency settings (EU requirement and side-feature declarations)
+   * for the region check, when they differ from the metering `settings`: a
+   * caller reusing an earlier query embedding passes no metering settings
+   * but still needs the declarations.
+   */
+  residencySettings: SideFeatureResidencySettings | undefined = settings,
 ): Promise<KnowledgeEntryListResponse> {
   const request = KnowledgeEntryListRequest.parse(input);
   // Copy trusted actor fields before any provider/lock await. Request lifetime
@@ -81,7 +105,7 @@ export async function searchKnowledgeEntries(
   const keywordFallback = async (
     queryDb: Database,
     error: unknown,
-    fallbackReason: "awaiting_funding" | "quota" | "provider_unavailable" | "query_limit",
+    fallbackReason: NonNullable<KnowledgeEntryListResponse["fallbackReason"]>,
   ) => {
     if (request.mode === "vector") throw error;
     return {
@@ -90,8 +114,45 @@ export async function searchKnowledgeEntries(
       fallbackReason,
     };
   };
+  // The embedder is resolved once: the region check, the call and the
+  // recorded region all use this one provider. One that cannot be resolved
+  // (it throws, or a host without an embedder returns none) sends nothing;
+  // the provider path below falls back to keyword search as before.
+  let provider: DocumentEmbedder | null = null;
+  let resolveError: unknown = null;
+  try {
+    provider = (embedder() as DocumentEmbedder | null | undefined) ?? null;
+    if (!provider) resolveError = new Error("Knowledge query embedder is unavailable");
+  } catch (error) {
+    resolveError = error;
+  }
+  const sendsQuery = provider !== null && provider.local !== true;
+  // EU-only: the query is never sent to an embedding route without an EU
+  // residency record for the endpoint it calls; keyword search answers
+  // instead (vector mode refuses).
+  if (
+    provider &&
+    sendsQuery &&
+    !(await sideFeatureAllowedForWorkspace(
+      db,
+      residencySettings,
+      context,
+      knowledgeEmbeddingTarget(provider),
+    ))
+  ) {
+    return keywordFallback(
+      db,
+      sideFeatureRegionRestrictedError("knowledge_embeddings"),
+      "region_restricted",
+    );
+  }
   const bytes = Buffer.byteLength(request.query, "utf8");
   const paidSettings = settings && paidDocumentEmbedding(settings) ? settings : undefined;
+  // A workspace that turned Opengeni credits off is never debited; it keeps
+  // keyword search (and keyword pagination) instead of paid semantic
+  // retrieval. Nothing is charged here, so no account lock is needed.
+  if (paidSettings && (await workspaceCreditsDisabled(db, context.workspaceId)))
+    return keywordFallback(db, new KnowledgeVectorCreditsDisabledError(), "credits_disabled");
   // Paid cursors would re-embed and re-charge on each page. Until a durable
   // vector cache exists, require explicit keyword mode to paginate instead.
   if (paidSettings && request.cursor)
@@ -112,8 +173,16 @@ export async function searchKnowledgeEntries(
 
   const retrieveThenSettle = async (queryDb: Database) => {
     let embedding: { model: string; values: number[] };
+    // Where the query was embedded; nothing is sent anywhere by a local embedder.
+    const processingResidency =
+      provider && sendsQuery
+        ? sideFeatureProcessingResidency(
+            residencySettings ?? {},
+            knowledgeEmbeddingTarget(provider),
+          )
+        : undefined;
     try {
-      const provider = embedder();
+      if (!provider) throw resolveError;
       const values = await provider.embedQuery(request.query!);
       if (
         values.length !== provider.dimensions ||
@@ -141,6 +210,7 @@ export async function searchKnowledgeEntries(
         sourceResourceType: "knowledge_query",
         sourceResourceId: usageId,
         idempotencyKey: `knowledge.query_bytes:${usageId}`,
+        ...(processingResidency ? { processingResidency } : {}),
       });
       if (paidSettings && cost > 0)
         await recordUsageEvent(queryDb, {
@@ -152,6 +222,7 @@ export async function searchKnowledgeEntries(
           sourceResourceType: "knowledge_query",
           sourceResourceId: usageId,
           idempotencyKey: `knowledge.query_cost:${usageId}`,
+          ...(processingResidency ? { processingResidency } : {}),
           // Durable receipt inserted before the debit in this same transaction.
           // The service is the writer, not an inferred causal human.
           initiator: { kind: "service", subjectId: "worker:knowledge-query" },
@@ -190,7 +261,7 @@ export async function searchKnowledgeEntries(
     context.accountId,
     context.workspaceId,
     async (lockedDb) => {
-      const balance = await getBillingBalance(lockedDb, context.accountId);
+      const balance = await getSpendableCreditBalance(lockedDb, context.accountId);
       if (balance.balanceMicros <= 0)
         return keywordFallback(lockedDb, new KnowledgeVectorFundingError(), "awaiting_funding");
       const attribution =

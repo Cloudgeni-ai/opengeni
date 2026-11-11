@@ -1,5 +1,6 @@
 export { inlineHtmlDocument } from "./components/artifacts/inline-html-document";
 export { isRetainedImageContentType, useRetainedImageObjectUrl } from "./timeline/retained-image";
+export { PatchApplyCommand, isPatchFilename } from "./timeline/patch-apply-command";
 export {
   ArtifactBadge,
   ArtifactLabelsProvider,
@@ -20,6 +21,7 @@ export {
   type ArtifactLoadErrorView,
   ArtifactSandbox,
   type ArtifactSandboxProps,
+  type SiteLiveState,
   DeferredChatMedia,
   SiteView,
   type SiteViewProps,
@@ -121,6 +123,7 @@ export {
   type PresentationSlideProjection,
   type SpreadsheetArtifactSurfaceProps,
   type SpreadsheetCommit,
+  type SpreadsheetDimensionCommit,
   type SpreadsheetRangeCommit,
   type SpreadsheetGridProps,
   type SpreadsheetGridProjection,

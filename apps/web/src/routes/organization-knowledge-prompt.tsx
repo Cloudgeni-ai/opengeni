@@ -1,12 +1,15 @@
 import type { LatencyMode, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
+import { paymentSourceFor } from "@/lib/agent-brain-prompt-model";
 import { useNavigate } from "@tanstack/react-router";
 import { SparklesIcon } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, TextArea } from "@/components/ui/field";
-import { useAppContext } from "@/context";
+import { Button } from "@opengeni/react/ui/button";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, TextArea } from "@opengeni/react/ui/field";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type OrganizationKnowledgeModelSelection = {
   model: string;
@@ -15,29 +18,6 @@ type OrganizationKnowledgeModelSelection = {
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
 };
-
-function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
-  if (model.cost === "free") return "Free in this deployment";
-  if (model.cost === "credits") return "Opengeni credits";
-  if (model.cost === "workspace") return "Workspace AI Gateway";
-  if (model.cost === "subscription") {
-    return model.source === "supergrok" ? "SuperGrok subscription" : "Codex subscription";
-  }
-  if (model.source === "codex") return "Codex subscription";
-  if (model.source === "supergrok") return "SuperGrok subscription";
-  if (model.source === "workspace_gateway") return "Workspace AI Gateway";
-  if (model.source === "opengeni" || model.billing?.metering === "opengeni_credits") {
-    return "Opengeni credits";
-  }
-  if (model.billing?.upstreamPayer === "connected_subscription") {
-    return model.credentialSource?.kind === "connected_subscription" &&
-      model.credentialSource.provider === "xai"
-      ? "SuperGrok subscription"
-      : "Codex subscription";
-  }
-  if (model.billing?.upstreamPayer === "workspace") return "Workspace AI Gateway";
-  return "External provider";
-}
 
 /** Kept route-local so organization settings cannot re-bucket the session chunk graph. */
 function resolveOrganizationKnowledgeModel(
@@ -73,7 +53,7 @@ function resolveOrganizationKnowledgeModel(
 
   return {
     model: model.id,
-    label: model.label,
+    label: modelDisplayName(model),
     paymentSource: paymentSourceFor(model),
     reasoningEffort,
     latencyMode,
@@ -105,7 +85,7 @@ function useOrganizationKnowledgeCatalog(workspaceId: string): CatalogState & {
           setState({
             models: [],
             loading: false,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
           });
         }
       });

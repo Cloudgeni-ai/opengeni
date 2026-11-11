@@ -1,17 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
-  CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
   contractForProfile,
   deploymentProfiles,
+  CREDIT_MARGIN_BPS_PASSTHROUGH_ENV,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   JEV_CODE_SEARCH_PASSTHROUGH_ENV,
+  WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
-  MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
-  MODEL_CATALOG_MAINTENANCE_CUTOVER,
-  PERSONAL_CODEX_INHERITANCE_MAINTENANCE_CUTOVER,
-  SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
-  SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
   missingRuntimeEnvVars,
   parseDeploymentContract,
   preflightChecksFor,
@@ -21,6 +17,8 @@ import {
   SANDBOX_SURFACING_PASSTHROUGH_ENV,
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
+  SESSION_USAGE_LIMITS_PASSTHROUGH_ENV,
+  EVENT_TRIGGERS_PASSTHROUGH_ENV,
   MCP_OAUTH_PASSTHROUGH_ENV,
   API_REQUEST_SOURCE_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
@@ -41,6 +39,43 @@ const maintenanceImageDigests = {
 };
 
 describe("deployment contract", () => {
+  test("signup verification survives managed runtime rendering without exposing its secret in Helm values", () => {
+    const contract = contractForProfile("azure-existing-services", "managed-saas-staging");
+    const keys = [
+      "OPENGENI_SIGNUP_CHALLENGE_SITE_KEY",
+      "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY",
+      "OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES",
+    ];
+    const disabled = generateRuntimeArtifacts(contract, {}, {});
+    expect(disabled.runtimeEnv).toContain("OPENGENI_SIGNUP_CHALLENGE_ENABLED=false");
+    expect(disabled.requiredEnvVars).not.toContain(keys[1]);
+    const enabled = { OPENGENI_SIGNUP_CHALLENGE_ENABLED: "true" };
+    const missing = generateRuntimeArtifacts(contract, {}, enabled);
+    for (const key of keys) {
+      expect(requiredRuntimeEnvVars(contract, enabled)).toContain(key);
+      expect(missing.missingEnvVars).toContain(key);
+    }
+    const configured = generateRuntimeArtifacts(
+      contract,
+      {},
+      {
+        ...enabled,
+        OPENGENI_SIGNUP_CHALLENGE_SITE_KEY: "synthetic-public-key",
+        OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY: "synthetic-private-key",
+        OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES: "staging.example.test",
+      },
+    );
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY=synthetic-private-key",
+    );
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES=staging.example.test",
+    );
+    expect(configured.helmValuesYaml).not.toContain("synthetic-private-key");
+    expect(configured.summary).not.toHaveProperty("signupChallengeSecretKey");
+    for (const key of keys) expect(configured.missingEnvVars).not.toContain(key);
+  });
+
   test("ships valid built-in profiles", () => {
     for (const profile of Object.values(deploymentProfiles)) {
       expect(parseDeploymentContract(profile).profile).toBe(profile.profile);
@@ -597,145 +632,6 @@ describe("deployment contract", () => {
     expect(commands).not.toContain("opengeni-postgres-ca");
   });
 
-  test("drains applications for every documented maintenance cutover", () => {
-    for (const cutover of [
-      MODEL_CATALOG_MAINTENANCE_CUTOVER,
-      SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
-      SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
-      CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
-      MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
-      PERSONAL_CODEX_INHERITANCE_MAINTENANCE_CUTOVER,
-    ]) {
-      const plan = stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: cutover,
-        OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
-      });
-      const commands = plan.deployCommands.join("\n");
-
-      expect(
-        plan.deployCommands.filter(
-          (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
-        ),
-      ).toHaveLength(2);
-      const helmCommands = plan.deployCommands.filter(
-        (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
-      );
-      expect(helmCommands[0]).not.toContain("--atomic");
-      expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
-      expect(commands).toContain("--set migrations.enabled=false");
-      expect(commands).toContain("wait --for=delete pod");
-      expect(plan.notes.join("\n")).toContain(cutover);
-      expect(plan.notes.join("\n")).toContain("applications-disabled revision");
-      if (cutover === CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER) {
-        expect(plan.notes.join("\n")).toContain("migration 0403");
-      }
-      if (cutover === MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER) {
-        expect(plan.notes.join("\n")).toContain("migrations 0404 and 0405");
-      }
-      expect(() =>
-        stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-          OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: cutover,
-        }),
-      ).toThrow("OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true");
-    }
-
-    const rollingPlan = stackPlanFor(deploymentProfiles["gcp-managed"]);
-    expect(rollingPlan.deployCommands.join("\n")).not.toContain("--atomic");
-
-    expect(() =>
-      stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
-      }),
-    ).toThrow("OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true");
-    expect(() =>
-      stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: "unknown-maintenance-cutover",
-      }),
-    ).toThrow("unsupported OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER");
-  });
-
-  test("pins every non-managed Kubernetes image before a maintenance drain", () => {
-    for (const profile of ["single-node-kubernetes", "kubernetes-external"] as const) {
-      expect(() =>
-        stackPlanFor(deploymentProfiles[profile], "none", {
-          OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
-          OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
-        }),
-      ).toThrow("OPENGENI_API_IMAGE_DIGEST must be an exact sha256 digest");
-
-      const plan = stackPlanFor(deploymentProfiles[profile], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
-        OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
-        ...maintenanceImageDigests,
-      });
-      const helmCommands = plan.deployCommands.filter(
-        (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
-      );
-      expect(helmCommands).toHaveLength(2);
-      expect(helmCommands[0]).not.toContain("--atomic");
-      expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
-      for (const command of helmCommands) {
-        expect(command).toContain(
-          `--set-string api.image.digest=${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}`,
-        );
-        expect(command).toContain(
-          `--set-string worker.image.digest=${maintenanceImageDigests.OPENGENI_WORKER_IMAGE_DIGEST}`,
-        );
-        expect(command).toContain(
-          `--set-string web.image.digest=${maintenanceImageDigests.OPENGENI_WEB_IMAGE_DIGEST}`,
-        );
-        expect(command).toContain(
-          `--set-string migrations.image.digest=${maintenanceImageDigests.OPENGENI_MIGRATIONS_IMAGE_DIGEST}`,
-        );
-      }
-    }
-
-    expect(() =>
-      stackPlanFor(deploymentProfiles["kubernetes-external"], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
-        OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
-        ...testImageDigests,
-      }),
-    ).toThrow("OPENGENI_MIGRATIONS_IMAGE_DIGEST must equal OPENGENI_API_IMAGE_DIGEST");
-  });
-
-  test("binds a local Kubernetes maintenance drain and final upgrade to one built image set", () => {
-    const plan = stackPlanFor(deploymentProfiles["local-kubernetes"], "none", {
-      OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
-      OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
-    });
-    const commands = plan.deployCommands.join("\n");
-    const helmCommands = plan.deployCommands.filter(
-      (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
-    );
-
-    expect(commands).toContain("opengeni-api:local-k8s-maintenance-candidate");
-    expect(commands).toContain("docker image inspect --format '{{.Id}}'");
-    expect(commands).toContain("git hash-object --stdin");
-    expect(commands).toContain("maintenance-image-tag.env");
-    expect(commands).toContain(
-      'kind load docker-image "opengeni-api:$OPENGENI_LOCAL_K8S_IMAGE_TAG"',
-    );
-    expect(helmCommands).toHaveLength(2);
-    for (const command of helmCommands) {
-      expect(command).toContain(". .agent/generated/local-kubernetes/maintenance-image-tag.env");
-      for (const component of ["api", "worker", "web", "migrations"]) {
-        expect(command).toContain(
-          `--set-string ${component}.image.tag="$OPENGENI_LOCAL_K8S_IMAGE_TAG"`,
-        );
-      }
-    }
-    expect(helmCommands[0]).not.toContain("if ! helm status");
-    expect(helmCommands[0]).not.toContain("--atomic");
-    expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
-    expect(commands.indexOf("kind load docker-image")).toBeLessThan(
-      commands.indexOf("--set api.enabled=false"),
-    );
-    expect(commands.indexOf("wait --for=delete pod")).toBeLessThan(
-      commands.lastIndexOf("helm upgrade"),
-    );
-  });
-
   test("plans pinned private OpenSandbox only when a Kubernetes deployment selects it", () => {
     const contract = withSandboxBackend("opensandbox");
     const plan = stackPlanFor(contract);
@@ -951,6 +847,7 @@ describe("deployment contract", () => {
           '{"openrouter/nvidia/nemotron-3-super-120b-a12b:free":"Starter model."}',
         OPENGENI_OPENAI_API_KEY: "openai",
         OPENGENI_OPENROUTER_API_KEY: "openrouter",
+        OPENGENI_OPPER_API_KEY: "opper",
         OPENGENI_TEMPORAL_API_KEY: "temporal-api-key",
         OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: "cm9v\ndC1jYQ==",
       },
@@ -979,6 +876,7 @@ describe("deployment contract", () => {
       'OPENGENI_MODEL_NOTES_JSON={"openrouter/nvidia/nemotron-3-super-120b-a12b:free":"Starter model."}',
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OPENROUTER_API_KEY=openrouter");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_OPPER_API_KEY=opper");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_TLS_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_API_KEY=temporal-api-key");
     expect(artifacts.runtimeEnv).toContain(
@@ -1041,6 +939,13 @@ describe("deployment contract", () => {
     expect(contract.access.mode).toBe("externalGateway");
     expect(vars).not.toContain("OPENGENI_ACCESS_KEY");
     expect(vars).toContain("OPENGENI_BETTER_AUTH_SECRET");
+    expect(vars).toContain("OPENGENI_RESEND_API_KEY");
+    const emailDisabledVars = requiredRuntimeEnvVars(contract, {
+      OPENGENI_MANAGED_EMAIL_DELIVERY: "disabled",
+    });
+    expect(emailDisabledVars).toContain("OPENGENI_MANAGED_EMAIL_DELIVERY");
+    expect(emailDisabledVars).not.toContain("OPENGENI_RESEND_API_KEY");
+    expect(emailDisabledVars).not.toContain("OPENGENI_EMAIL_FROM");
     expect(vars).toContain("OPENGENI_STRIPE_WEBHOOK_SECRET");
     expect(vars).toContain("OPENGENI_STRIPE_CREDITS_PRODUCT_ID");
     expect(vars).toContain("OPENGENI_MODEL_PRICING_JSON");
@@ -1082,8 +987,17 @@ describe("deployment contract", () => {
         OPENGENI_SLACK_CLIENT_ID: "slack-staging-client",
         OPENGENI_SLACK_CLIENT_SECRET: "slack-staging-secret",
         OPENGENI_SLACK_SIGNING_SECRET: "slack-staging-signing-secret",
-        OPENGENI_SLACK_BOT_DISPLAY_NAME: "OpenGeni Staging",
+        OPENGENI_SLACK_BOT_DISPLAY_NAME: "Opengeni Staging",
         OPENGENI_SLACK_COMMAND: "/opengeni-staging",
+        OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS: "b2a93667-d2ce-4468-8b65-3c773b701ad7",
+        OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS: "00000000-0000-4000-8000-000000000001",
+        OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS:
+          "00000000-0000-4000-8000-000000000001:19:pilot@thread.tacv2",
+        OPENGENI_TEAMS_BOT_CLIENT_ID: "teams-pilot-client",
+        OPENGENI_TEAMS_BOT_CLIENT_SECRET: "teams-pilot-secret",
+        OPENGENI_TEAMS_BOT_TENANT_ID: "teams-home-tenant",
+        OPENGENI_TEAMS_APP_NAME: "Opengeni Assistant",
+
         OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "github-personal-staging",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET: "github-personal-secret",
@@ -1143,7 +1057,22 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_SLACK_SIGNING_SECRET=slack-staging-signing-secret",
     );
-    expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_BOT_DISPLAY_NAME=OpenGeni Staging");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_BOT_DISPLAY_NAME=Opengeni Staging");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS=00000000-0000-4000-8000-000000000001:19:pilot@thread.tacv2",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS=b2a93667-d2ce-4468-8b65-3c773b701ad7",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS=00000000-0000-4000-8000-000000000001",
+    );
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_CLIENT_SECRET=teams-pilot-secret");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_APP_NAME=Opengeni Assistant");
+
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_COMMAND=/opengeni-staging");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true");
     expect(artifacts.runtimeEnv).toContain(
@@ -1232,6 +1161,9 @@ describe("deployment contract", () => {
         OPENGENI_ANALYTICS_ENABLED: "true",
         OPENGENI_ANALYTICS_CONSENT_REQUIRED: "true",
         OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1",
+        OPENGENI_LEGAL_PRIVACY_POLICY_URL: "https://opengeni.ai/privacy",
+        OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms",
+        OPENGENI_SUPPORT_EMAIL: "support@opengeni.ai",
         OPENGENI_IMAGE_TAG: "release-prod",
         ...maintenanceImageDigests,
         OPENGENI_MODAL_APP_NAME: "opengeni-prod",
@@ -1248,7 +1180,7 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS=https://app.opengeni.ai",
     );
-    expect(artifacts.runtimeEnv).toContain("OPENGENI_EMAIL_FROM=OpenGeni <auth@mail.opengeni.ai>");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_EMAIL_FROM=Opengeni <auth@mail.opengeni.ai>");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_APP_SLUG=opengeni-ai");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_BILLING_MODE=stripe");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_ANALYTICS_ENABLED=true");
@@ -1258,6 +1190,13 @@ describe("deployment contract", () => {
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_WEB_ALLOWED_HOSTS: "app.opengeni.ai"');
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_ENABLED: "true"');
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1"');
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_LEGAL_PRIVACY_POLICY_URL=https://opengeni.ai/privacy",
+    );
+    expect(artifacts.helmValuesYaml).toContain(
+      'OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms"',
+    );
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_SUPPORT_EMAIL: "support@opengeni.ai"');
     expect(artifacts.helmValuesYaml).toContain('tag: "release-prod"');
     expect(artifacts.helmValuesYaml).toContain(
       `digest: "${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}"`,
@@ -1557,6 +1496,7 @@ describe("deployment contract", () => {
         "OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS",
         "OPENGENI_MODAL_SANDBOX_CPU",
         "OPENGENI_MODAL_SANDBOX_MEMORY_MIB",
+        "OPENGENI_MODAL_REGIONS",
         "OPENGENI_MODAL_WORKSPACE_PERSISTENCE",
         "OPENGENI_SANDBOX_ROTATION_LEAD_MS",
         "OPENGENI_SANDBOX_ROTATION_BATCH_SIZE",
@@ -1565,6 +1505,7 @@ describe("deployment contract", () => {
     expect(SANDBOX_LIFECYCLE_PASSTHROUGH_ENV).toEqual(
       expect.arrayContaining([
         "OPENGENI_SANDBOX_IDLE_GRACE_MS",
+        "OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS",
         "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS",
         "OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS",
         "OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS",
@@ -1747,7 +1688,6 @@ describe("deployment contract", () => {
     };
     const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
       OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED: "true",
-      OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true",
       OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED: "true",
       OPENGENI_WORK_DISCOVERY_ENABLED: "false",
       OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED: "false",
@@ -1755,9 +1695,6 @@ describe("deployment contract", () => {
       OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED: "true",
     });
     expect(configured.runtimeEnv).toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED=true");
-    expect(configured.runtimeEnv).not.toContain(
-      "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=true",
-    );
     expect(configured.runtimeEnv).toContain("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED=true");
     expect(configured.runtimeEnv).toContain("OPENGENI_WORK_DISCOVERY_ENABLED=false");
     expect(configured.runtimeEnv).toContain("OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED=false");
@@ -1768,23 +1705,58 @@ describe("deployment contract", () => {
       "OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED=true",
     );
     expect(configured.missingEnvVars).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED");
-    expect(configured.missingEnvVars).not.toContain(
-      "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED",
-    );
     const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
     expect(absent.runtimeEnv).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED=");
-    expect(absent.runtimeEnv).not.toContain(
-      "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=",
-    );
     expect(absent.runtimeEnv).not.toContain("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED=");
     expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_DISCOVERY_ENABLED=");
     expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED=");
     expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_DISCOVERY_HUMAN_ADVISORIES_ENABLED=");
     expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED=");
     expect(absent.missingEnvVars).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED");
-    expect(absent.missingEnvVars).not.toContain(
-      "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED",
+  });
+
+  test("renders the session usage limits producer flag only when configured", () => {
+    expect(SESSION_USAGE_LIMITS_PASSTHROUGH_ENV).toEqual(["OPENGENI_SESSION_USAGE_LIMITS_ENABLED"]);
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_SESSION_USAGE_LIMITS_ENABLED: "true",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED=true");
+    expect(configured.missingEnvVars).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED");
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED=");
+    expect(absent.missingEnvVars).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED");
+  });
+
+  test("renders the event triggers flag and webhook address only when configured", () => {
+    expect(EVENT_TRIGGERS_PASSTHROUGH_ENV).toEqual([
+      "OPENGENI_EVENT_TRIGGERS_ENABLED",
+      "OPENGENI_WEBHOOK_BASE_URL",
+      "OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH",
+    ]);
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_EVENT_TRIGGERS_ENABLED: "true",
+      OPENGENI_WEBHOOK_BASE_URL: "https://hooks.opengeni.example.com",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_EVENT_TRIGGERS_ENABLED=true");
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_WEBHOOK_BASE_URL=https://hooks.opengeni.example.com",
     );
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_EVENT_TRIGGERS_ENABLED=");
+    expect(absent.missingEnvVars).not.toContain("OPENGENI_EVENT_TRIGGERS_ENABLED");
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_WEBHOOK_BASE_URL=");
   });
 
   test("renders configured external browser providers without making them mandatory", () => {
@@ -1826,8 +1798,13 @@ describe("deployment contract", () => {
     }
   });
 
-  test("passes Jev code search settings through only when configured", () => {
+  test("passes shared decision and legacy code search settings through only when configured", () => {
     expect(JEV_CODE_SEARCH_PASSTHROUGH_ENV).toEqual([
+      "OPENGENI_DECISION_MODEL_PROVIDER",
+      "OPENGENI_DECISION_MODEL_ID",
+      "OPENGENI_DECISION_MODEL_API_KEY",
+      "OPENGENI_DECISION_MODEL_BASE_URL",
+      "OPENGENI_DECISION_MODEL_AUTH",
       "OPENGENI_JEV_API_KEY",
       "OPENGENI_JEV_BASE_URL",
       "OPENGENI_JEV_MODEL",
@@ -1842,10 +1819,23 @@ describe("deployment contract", () => {
         object_storage_azure_connection_string: { value: "x", sensitive: true },
         helm_set_values: { value: {} },
       },
-      { OPENGENI_JEV_API_KEY: "jev-key", OPENGENI_CODE_SEARCH_MODE: "opt_in" },
+      {
+        OPENGENI_JEV_API_KEY: "jev-key",
+        OPENGENI_CODE_SEARCH_MODE: "opt_in",
+        OPENGENI_DECISION_MODEL_PROVIDER: "openrouter",
+        OPENGENI_DECISION_MODEL_ID: "typesafe/jev-1.13",
+        OPENGENI_DECISION_MODEL_API_KEY: "decision-key",
+        OPENGENI_DECISION_MODEL_BASE_URL: "https://openrouter.ai/api/alpha",
+      },
     );
     expect(configured.runtimeEnv).toContain("OPENGENI_JEV_API_KEY=jev-key");
     expect(configured.runtimeEnv).toContain("OPENGENI_CODE_SEARCH_MODE=opt_in");
+    expect(configured.runtimeEnv).toContain("OPENGENI_DECISION_MODEL_PROVIDER=openrouter");
+    expect(configured.runtimeEnv).toContain("OPENGENI_DECISION_MODEL_ID=typesafe/jev-1.13");
+    expect(configured.runtimeEnv).toContain("OPENGENI_DECISION_MODEL_API_KEY=decision-key");
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_DECISION_MODEL_BASE_URL=https://openrouter.ai/api/alpha",
+    );
     const absent = generateRuntimeArtifacts(
       withSandboxBackend("docker"),
       {
@@ -1857,6 +1847,48 @@ describe("deployment contract", () => {
       {},
     );
     for (const key of JEV_CODE_SEARCH_PASSTHROUGH_ENV) {
+      expect(absent.runtimeEnv).not.toContain(`${key}=`);
+      expect(absent.missingEnvVars).not.toContain(key);
+    }
+  });
+
+  test("passes provider web search settings through only when configured", () => {
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_WEB_SEARCH_PROVIDER: "tinyfish,parallel",
+      OPENGENI_WEB_TINYFISH_API_KEY: "tinyfish-key",
+      OPENGENI_WEB_PARALLEL_API_KEY: "parallel-key",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_SEARCH_PROVIDER=tinyfish,parallel");
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_TINYFISH_API_KEY=tinyfish-key");
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_PARALLEL_API_KEY=parallel-key");
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
+      expect(absent.runtimeEnv).not.toContain(`${key}=`);
+      expect(absent.missingEnvVars).not.toContain(key);
+    }
+  });
+
+  test("passes the optional credit margin override through without making it required", () => {
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "0",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE=0");
+    expect(configured.summary.runtimeEnvKeys).toContain("OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE");
+
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    for (const key of CREDIT_MARGIN_BPS_PASSTHROUGH_ENV) {
       expect(absent.runtimeEnv).not.toContain(`${key}=`);
       expect(absent.missingEnvVars).not.toContain(key);
     }

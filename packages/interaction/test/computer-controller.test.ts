@@ -9,6 +9,7 @@ import {
   type ComputerTarget,
 } from "@opengeni/contracts";
 import {
+  COMPUTER_UNCONFIRMED_INPUT_TRACE,
   ComputerInteractionController,
   InteractionControllerError,
   recoverComputerOperationJournalRecord,
@@ -168,6 +169,29 @@ describe("Computer interaction contracts", () => {
 });
 
 describe("ComputerInteractionController", () => {
+  test("a receipt says the driver could not confirm the input, alongside any role stand-ins", async () => {
+    const standIn = { actionIndex: 0, requestedRole: "button", role: "link", name: "Continue" };
+    let traced: unknown[] = [];
+    const controller = new ComputerInteractionController({
+      computerSessionId,
+      controllerGeneration,
+      driver: driver(new Map([["window:42", target()]]), async (_command, trace) => {
+        for (const item of traced) trace?.record(item);
+        return observation(target());
+      }),
+    });
+    traced = [COMPUTER_UNCONFIRMED_INPUT_TRACE];
+    const unconfirmed = await controller.run(command(1));
+    expect(unconfirmed.unconfirmedInput).toBe(true);
+    expect(unconfirmed.roleStandIns).toBeUndefined();
+    traced = [standIn, COMPUTER_UNCONFIRMED_INPUT_TRACE];
+    const both = await controller.run(command(2));
+    expect(both.unconfirmedInput).toBe(true);
+    expect(both.roleStandIns).toEqual([standIn]);
+    traced = [];
+    expect((await controller.run(command(3))).unconfirmedInput).toBeUndefined();
+  });
+
   test("replays computer receipts through durable storage without repeating native input", async () => {
     const records = new Map<
       string,

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeniClient } from "../src/client";
+import { OpenGeniClient } from "../src/index";
+import { OpenGeniBrowserClient } from "../src/browser";
 
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
 const REVISION_A = "00000000-0000-4000-8000-000000000002";
@@ -43,9 +44,9 @@ describe("workspace instruction-policy SDK", () => {
       ).rejects.toMatchObject({ code: "network_error", outcomeUnknown: true });
     });
   }
-  test("maps the complete backend control surface to stable routes", async () => {
+  const instructionPolicyWireContract = async (Client: typeof OpenGeniBrowserClient) => {
     const requests: Request[] = [];
-    const client = new OpenGeniClient({
+    const client = new Client({
       baseUrl: "https://api.example.test",
       fetch: (async (input, init) => {
         const request = new Request(input, init);
@@ -172,5 +173,9 @@ describe("workspace instruction-policy SDK", () => {
       expectedActivationVersion: 2,
       reason: "Restore known-good policy",
     });
-  });
+  };
+  test.each([OpenGeniClient, OpenGeniBrowserClient])(
+    "%p preserves the complete instruction-policy wire contract",
+    instructionPolicyWireContract,
+  );
 });

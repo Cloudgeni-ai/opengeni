@@ -1,15 +1,15 @@
 # First-party MCP response contracts
 
-Audience: integrators and maintainers of the built-in OpenGeni MCP servers.
+Audience: integrators and maintainers of the built-in Opengeni MCP servers.
 
-OpenGeni's first-party MCP mutation tools return a compact, versioned receipt
+Opengeni's first-party MCP mutation tools return a compact, versioned receipt
 instead of returning the full entity they just created or changed. The caller
 already has the mutation arguments in its tool-call history; returning prompts,
 instructions, commands, evidence, secret values, or other request fields again
 wastes model context and duplicates sensitive data across storage and transport
 surfaces.
 
-This contract applies to the built-in OpenGeni MCP and docs MCP. It does not
+This contract applies to the built-in Opengeni MCP and docs MCP. It does not
 change REST response bodies. Codemode-proxied tools retain the result contract
 of their selected first-party, capability, or per-session provider.
 
@@ -145,7 +145,7 @@ unbounded.
 | `warnings` | Bounded operational warnings, never request or entity bodies. |
 | `facts` | At most 16 bounded scalar operation facts. Nested entities and arbitrary JSON are forbidden. |
 | `id`, `rootSessionId`, `nestedAgentDepth`, `effectiveMaxNestedAgentDepth` | Required only for `session_create`. These bounded top-level compatibility aliases preserve the generated session identity and immutable descendant-policy lineage without returning the full session. `id` is validated to equal `resource.id`. |
-| `updateId` | Required only for `session_steer`; a bounded compatibility alias validated to equal `resource.id`. |
+| `updateId` | Required only for an agent `session_steer` (a `session_system_update`); a bounded compatibility alias validated to equal `resource.id`. A sessionless steer returns a `session_turn` without it. |
 | `nextAction` | A safe explicit read/follow-up tool plus at most eight bounded scalar arguments. |
 
 The schema is intentionally strict and intrinsically bounded: resource strings,
@@ -203,20 +203,25 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `session_wait`, `command_wait` | Read/wait | Bounded durable state/event result; timeout is non-mutating and never cancels work |
 | First-party: `rig_propose_change`, `rig_verify`, `rig_promote` | Mutation | v1 receipt |
 | First-party: `session_create`, `session_send_message`, `session_pause`, `session_resume`, `session_steer`, `set_other_session_title` | Mutation | v1 receipt |
-| First-party: `variable_set_set_variable`, deprecated `environment_set_variable` | Mutation | v1 receipt; secret values are never returned |
+| First-party: `secret_save`, `secret_move`, `secret_delete` | Mutation | Item summary and ready references; secret values are never returned. The retired `variable_set_*` and `environment_*` tools are no longer registered. |
 | First-party: `knowledge_save` | Mutation | Bounded revision/publication receipt |
 | First-party: `files_get_download_url` | Read | Bounded access URL/result required to perform the read; not a redundant entity echo |
 | First-party: `github_repositories_list` | List | Existing bounded list/read result |
+| First-party: `github_repository_attach` | Mutation | Bounded attach result (status, repository, ref, mount path, message); attaches only a call a person approved |
 | First-party: `x_accounts_list`, `reddit_accounts_list`, `social_connections_list`, `social_posts_recent` | List | Existing bounded provider/account or aggregate list result |
 | First-party: `x_search_live`, `x_mentions_live`, `x_thread_fetch`, `reddit_search_live`, `reddit_mentions_live`, `reddit_thread_fetch` | Read/list | Existing bounded provider result; the exact connection must match the tool namespace |
 | First-party: `x_posts_sync`, `reddit_posts_sync` | Mutation | Existing bounded sync result; writes the durable social-post store and requires an exact provider-matching connection |
 | First-party: `social_daily_analysis_context` | Read | Existing bounded analysis input projection |
 | First-party: `scheduled_tasks_list` | List | Compact, offset-paginated list result; scheduled-task entity bodies are not returned |
 | First-party: `scheduled_task_runs_list` | List | Existing caller-limited run list; not a redundant mutation echo |
+| First-party: `event_sources_list` | List/read | Compact list of the event sources the caller can use; with `sourceId`, that source and its event types, plus a webhook's format (for its managers) and its last five deliveries |
+| First-party: `events_get` | Read | One stored event by id (data bounded at intake), or a run's event summaries, 50 per page with `nextOffset` |
+| First-party: `event_sources_create_webhook`, `event_sources_update` | Mutation | The source's id, name, preset, status and status reason, plus the address to give the sending app (`registerUrl`); never the signing secret |
+| First-party: `event_sources_delete` | Mutation | The deleted source's id |
 | First-party: `scheduled_tasks_get` | Read | Compact summary by default; optional explicitly bounded entity projection |
 | First-party: `knowledge_search`, `knowledge_prepare_save`, `knowledge_browse`, `knowledge_get` | List/read | Bounded canonical entry projection including publication status. A model call to `knowledge_search` or `knowledge_prepare_save` receives a compact copy without bookkeeping or repeated preview text; other callers receive the exact result ([details](knowledge.md#model-visible-discovery-results)) |
 | First-party: `sandboxes_list` | List | Existing fleet projection |
-| First-party: `rig_list`, `sessions_list`, `variable_set_list`, deprecated `environment_list` | List | Existing compact list projections; variable values are never returned |
+| First-party: `rig_list`, `sessions_list`, `secret_search` | List | Existing compact list projections; secret values are never returned |
 | First-party: `rig_get`, `session_get` | Read | Existing exact-ID, bounded detail projections |
 | First-party: `session_events` | List/read | Existing paginated and byte-bounded monitoring result |
 | First-party: `session_wait` | Read (blocking) | Byte-bounded per-target compact event summaries plus exact `latestSequence` cursors, own pending-update count, `waitedMs`, `timedOut` |
@@ -228,7 +233,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `sandbox_provision` | Action output | Essential provisioning or human enrollment result |
 | First-party: `github_connect_link` | Action output | Essential short-lived browser/configuration result |
 | First-party: `github_token` | Action output | Essential short-lived credential result; callers must handle it as a secret |
-| Codemode catalog tools (dynamic selected tool names) | Exact prepared-tool output | Preserve the exact executor result; Codemode adds no proxy/raw-transfer adaptation. Model-only projections (the 1 MiB spill and compact Knowledge discovery) never apply to Codemode |
+| Codemode catalog tools (dynamic selected tool names) | Exact prepared-tool output | Preserve the exact executor result; Codemode adds no proxy/raw-transfer adaptation. Model-only projections (the 1 MiB spill, compact Knowledge discovery and compact Gmail mail cards) never apply to Codemode |
 
 Reads, lists, and action outputs are not converted into receipts: their result
 contains information the caller did not already provide. This work removes
@@ -268,7 +273,7 @@ session orchestration remain available as bounded compatibility aliases:
 
 - `session_create` preserves `id`, `rootSessionId`, `nestedAgentDepth`, and
   `effectiveMaxNestedAgentDepth` at the top level;
-- `session_steer` preserves top-level `updateId`.
+- An agent `session_steer` preserves top-level `updateId`.
 
 The versioned compatibility path is:
 

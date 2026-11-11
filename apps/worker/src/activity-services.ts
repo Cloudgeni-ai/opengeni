@@ -1,22 +1,33 @@
 import {
   codeSearchDeploymentPolicy,
+  resolveWebSearchProvider,
   dbSearchPath,
   getSettings,
+  environmentsEncryptionKeyBytes,
   resolveNatsControlPlaneAuth,
 } from "@opengeni/config";
 import {
   configureChildLifecycleNotices,
   configureCodeSearchDeploymentPolicy,
   createDb,
+  databasePasswordFileOptions,
+  databasePoolOptions,
+  observeDatabaseCredentialEvents,
 } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
-import { resolveCatalogSettings } from "@opengeni/core";
+import {
+  createRemoteExternalVaultFactories,
+  installComputeAgentPlane,
+  resolveCatalogSettings,
+} from "@opengeni/core";
 import { createObjectStorage } from "@opengeni/storage";
 import type { ActivityDependencies, SharedActivityServices } from "./activities/types";
 import { observabilityEventBusOptions } from "./observability-metrics";
 import { buildPersonalGitHubGitCredentials } from "./personal-github-git-credentials";
-import { createStandaloneConnectionCredentialsPort } from "./pr-review-credentials";
+import { createStandaloneConnectionCredentialsPort } from "./standalone-git-credentials";
+import { loadOnePasswordVaultProvider } from "./onepassword-vault-provider";
+import { createNativeExternalVaultFactories } from "./external-vault-providers";
 
 /**
  * Build the dependency graph common to both worker roles exactly once.
@@ -42,6 +53,10 @@ export function createSharedActivityServices(
         : createDb(settings.databaseUrl, {
             ...(searchPath ? { searchPath } : {}),
             rlsStrategy: settings.rlsStrategy,
+            ...databasePoolOptions(settings),
+            // Runtime login only: the files rotate this URL's password in place.
+            ...databasePasswordFileOptions(settings),
+            onCredentialEvent: observeDatabaseCredentialEvents("worker-activities", observability),
           });
       const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
       const db = dependencies.db ?? dbClient!.db;
@@ -52,19 +67,29 @@ export function createSharedActivityServices(
       // Child, scheduled and automation sessions created here freeze their
       // code_search decision from the same deployment policy as the API.
       configureCodeSearchDeploymentPolicy(codeSearchDeploymentPolicy(settings));
+      // A named but unusable web search provider withholds the tools; say why.
+      const webSearchProvider = resolveWebSearchProvider(settings);
+      if (webSearchProvider.status === "invalid") {
+        observability.warn("web search provider is misconfigured; web_search stays off", {
+          reason: webSearchProvider.reason,
+        });
+      }
+      const bus =
+        dependencies.bus ??
+        (await createNatsEventBus(
+          settings.natsUrl,
+          controlPlaneAuth
+            ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
+            : undefined,
+          observabilityEventBusOptions(observability),
+        ));
+      // Compute sandboxes reach their agent over this process's bus and database.
+      installComputeAgentPlane({ db, bus, settings });
       return {
         settings: resolvedSettings,
         catalogSourceSettings: settings,
         db,
-        bus:
-          dependencies.bus ??
-          (await createNatsEventBus(
-            settings.natsUrl,
-            controlPlaneAuth
-              ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
-              : undefined,
-            observabilityEventBusOptions(observability),
-          )),
+        bus,
         objectStorage: dependencies.objectStorage ?? createObjectStorage(settings),
         observability,
         wakeSessionWorkflow: dependencies.wakeSessionWorkflow ?? null,
@@ -73,12 +98,27 @@ export function createSharedActivityServices(
         signalCodexCapacityWorkflow: dependencies.signalCodexCapacityWorkflow ?? null,
         startSandboxReaperWorkflow: dependencies.startSandboxReaperWorkflow ?? null,
         startVideoGenerationWorkflow: dependencies.startVideoGenerationWorkflow ?? null,
+        startRecordingWorkflow: dependencies.startRecordingWorkflow ?? null,
+        startRigProviderImageRefresh: dependencies.startRigProviderImageRefresh ?? null,
+        startSessionTitleWorkflow: environmentsEncryptionKeyBytes(settings)
+          ? (dependencies.startSessionTitleWorkflow ?? null)
+          : null,
         entitlements: dependencies.entitlements ?? null,
         connectionCredentials:
-          dependencies.connectionCredentials ??
-          createStandaloneConnectionCredentialsPort(settings, db),
+          dependencies.connectionCredentials ?? createStandaloneConnectionCredentialsPort(settings),
         personalGitHubCredentials:
           dependencies.personalGitHubCredentials ?? buildPersonalGitHubGitCredentials(db, settings),
+        onePasswordVaultProvider:
+          dependencies.onePasswordVaultProvider === undefined
+            ? loadOnePasswordVaultProvider
+            : dependencies.onePasswordVaultProvider,
+        externalVaultProviders:
+          dependencies.externalVaultProviders === undefined
+            ? {
+                ...createRemoteExternalVaultFactories(settings),
+                ...createNativeExternalVaultFactories(settings),
+              }
+            : dependencies.externalVaultProviders,
       };
     })();
     return await servicesPromise;

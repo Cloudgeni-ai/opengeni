@@ -4,22 +4,19 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { networkInterfaces } from "node:os";
-import { AgentBrowserDriver, AgentBrowserJsonRunner, BrowserSupervisor } from "../src";
+import {
+  AgentBrowserDriver,
+  BrowserSupervisor,
+  ExternalProviderCdpRunner,
+  ManagedBrowserRunner,
+} from "../src";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
 e2e("drives a Kernel-provisioned Chromium through the native CDP surface", async () => {
   const root = await mkdtemp("/tmp/ogb-kernel-e2e-");
-  const backingSocket = await mkdtemp("/tmp/ogkb-");
-  const providerSocket = await mkdtemp("/tmp/ogkp-");
-  const managedSocket = await mkdtemp("/tmp/ogkm-");
-  const backingRunner = await AgentBrowserJsonRunner.create({
-    namespace: `backing_${randomUUID().slice(0, 8)}`,
-    sessionName: "browser",
-    socketDirectory: backingSocket,
+  const backingRunner = await ManagedBrowserRunner.create({
     profileDirectory: join(root, "backing-profile"),
-    downloadDirectory: join(root, "backing-downloads"),
-    screenshotDirectory: join(root, "backing-screenshots"),
     headed: false,
   });
   const backingDriver = new AgentBrowserDriver({
@@ -120,21 +117,13 @@ e2e("drives a Kernel-provisioned Chromium through the native CDP surface", async
       },
     });
 
-    const providerRunner = await AgentBrowserJsonRunner.create({
-      namespace: `provider_${randomUUID().slice(0, 8)}`,
-      sessionName: "browser",
-      socketDirectory: providerSocket,
-      profileDirectory: join(root, "provider-profile"),
-      downloadDirectory: join(root, "provider-downloads"),
-      screenshotDirectory: join(root, "provider-screenshots"),
+    const providerRunner = new ExternalProviderCdpRunner({
+      providerId: "kernel",
+      apiKey: "kernel-private-e2e-key",
+      endpoint: `http://127.0.0.1:${server.port}`,
       headed: false,
-      provider: {
-        id: "kernel",
-        apiKey: "kernel-private-e2e-key",
-        endpoint: `http://127.0.0.1:${server.port}`,
-        timeoutSeconds: 417,
-        stealth: true,
-      },
+      timeoutSeconds: 417,
+      stealth: true,
     });
     providerDriver = new AgentBrowserDriver({
       browserSessionId: randomUUID(),
@@ -172,7 +161,6 @@ e2e("drives a Kernel-provisioned Chromium through the native CDP surface", async
 
     managedSupervisor = await BrowserSupervisor.open({
       rootDirectory: join(root, "managed-supervisor"),
-      socketRootDirectory: managedSocket,
     });
     const managedReference = {
       browserSessionId: randomUUID(),
@@ -251,9 +239,6 @@ e2e("drives a Kernel-provisioned Chromium through the native CDP surface", async
           await backingDriver.close();
         } finally {
           await rm(root, { recursive: true, force: true });
-          await rm(backingSocket, { recursive: true, force: true });
-          await rm(providerSocket, { recursive: true, force: true });
-          await rm(managedSocket, { recursive: true, force: true });
         }
       }
     }

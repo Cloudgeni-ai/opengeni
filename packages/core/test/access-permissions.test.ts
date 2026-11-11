@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import {
+  normalizePermission,
+  Permission,
+  signDelegatedAccessToken,
+  type AccessGrant,
+} from "@opengeni/contracts";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import {
   accountScopedApiKeyWorkspaceAuthority,
@@ -8,7 +13,15 @@ import {
   hasPermission,
   requireAccessContext,
   requireLiteralPermission,
+  requirePermission,
+  requireExplicitPermissionDelegation,
 } from "../src/access";
+import { connectSetupPermission } from "../src/application/connect-authority";
+import {
+  MISSING_PERMISSION_DETAIL_CODE,
+  MissingPermissionRefusal,
+  missingPermissionOf,
+} from "../src/access/permission-refusal";
 
 const grant = (permissions: AccessGrant["permissions"]): AccessGrant => ({
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -72,7 +85,20 @@ describe("literal high-trust permissions", () => {
     expect(hasPermission(admin.permissions, "secrets:read")).toBe(false);
     expect(hasLiteralPermission(admin.permissions, "secrets:read")).toBe(false);
     expect(() => requireLiteralPermission(admin, "secrets:read")).toThrow(
-      "missing literal permission: secrets:read",
+      "You don't have permission to read secret values.",
+    );
+  });
+  test("explicit policy admin remains literal across serialized grant boundaries", () => {
+    const admin: AccessGrant = JSON.parse(
+      JSON.stringify({ ...grant(["workspace:admin"]), permissionMode: "explicit" }),
+    );
+    expect(() => requirePermission(admin, "workspace:admin")).not.toThrow();
+    expect(hasPermission(admin.permissions, "sessions:control")).toBe(false);
+    expect(() => requirePermission(admin, "sessions:control")).toThrow(
+      "You don't have permission to control chats.",
+    );
+    expect(() => requireExplicitPermissionDelegation(admin, ["workspace:admin"])).toThrow(
+      "cannot delegate a legacy workspace-admin wildcard",
     );
   });
 
@@ -80,6 +106,62 @@ describe("literal high-trust permissions", () => {
     const explicit = grant(["workspace:admin", "secrets:read"]);
     expect(hasLiteralPermission(explicit.permissions, "secrets:read")).toBe(true);
     expect(() => requireLiteralPermission(explicit, "secrets:read")).not.toThrow();
+  });
+  test("explicit permission delegation cannot exceed its effective grant", () => {
+    const limited: AccessGrant = {
+      ...grant(["workspace:read", "members:manage"]),
+      permissionMode: "explicit",
+    };
+    expect(() => requireExplicitPermissionDelegation(limited, ["workspace:read"])).not.toThrow();
+    expect(() => requireExplicitPermissionDelegation(limited, ["sessions:control"])).toThrow(
+      "outside the organization key policy",
+    );
+    expect(
+      hasPermission([...limited.permissions], "sessions:control", limited.permissionMode),
+    ).toBe(false);
+  });
+
+  test("a deprecated permission name outside the policy is refused with its canonical name", () => {
+    const secrets: AccessGrant = {
+      ...grant(["workspace:read", "secrets:list", "secrets:use"]),
+      permissionMode: "explicit",
+    };
+    expect(() => requireExplicitPermissionDelegation(secrets, ["secrets:use"])).not.toThrow();
+    expect(() =>
+      requireExplicitPermissionDelegation(secrets, ["workspace:read", "variable-sets:use"]),
+    ).toThrow("variable-sets:use is a deprecated permission name; state secrets:use instead");
+    // A deprecated name whose canonical permission the policy lacks is simply outside it.
+    expect(() => requireExplicitPermissionDelegation(secrets, ["variable-sets:write"])).toThrow(
+      "cannot delegate a permission outside the organization key policy",
+    );
+    // A policy that stores the deprecated name itself still covers it.
+    const legacy: AccessGrant = {
+      ...grant(["workspace:read", "variable-sets:use"]),
+      permissionMode: "explicit",
+    };
+    expect(() => requireExplicitPermissionDelegation(legacy, ["variable-sets:use"])).not.toThrow();
+  });
+
+  test("a key holding exactly the canonical full set can delegate workspace:admin", () => {
+    const canonical = Permission.options.filter(
+      (permission) => normalizePermission(permission) === permission,
+    );
+    const full: AccessGrant = { ...grant(canonical), permissionMode: "explicit" };
+    expect(() => requireExplicitPermissionDelegation(full, ["workspace:admin"])).not.toThrow();
+    // Keys saved with the legacy variable-set names next to the canonical ones keep working.
+    const legacy: AccessGrant = {
+      ...grant([...Permission.options]),
+      permissionMode: "explicit",
+    };
+    expect(() => requireExplicitPermissionDelegation(legacy, ["workspace:admin"])).not.toThrow();
+    // A key missing any canonical permission still can't hand out the wildcard.
+    const partial: AccessGrant = {
+      ...grant(canonical.filter((permission) => permission !== "secrets:use")),
+      permissionMode: "explicit",
+    };
+    expect(() => requireExplicitPermissionDelegation(partial, ["workspace:admin"])).toThrow(
+      "cannot delegate a legacy workspace-admin wildcard",
+    );
   });
 
   test("variable-set capabilities do not imply one another", () => {
@@ -96,7 +178,10 @@ describe("literal high-trust permissions", () => {
     for (const permission of exact) {
       expect(hasPermission([permission], permission)).toBe(true);
       for (const other of exact) {
-        if (other !== permission) expect(hasPermission([permission], other)).toBe(false);
+        if (other === permission) continue;
+        // A legacy name grants its canonical secrets permission (Q-16, AX-6).
+        const aliased = normalizePermission(permission) === other;
+        expect(hasPermission([permission], other)).toBe(aliased);
       }
     }
     expect(hasPermission(["variable-sets:manage"], "variable-sets:write")).toBe(false);
@@ -150,5 +235,159 @@ describe("literal high-trust permissions", () => {
         effectiveMaxNestedAgentDepth: 3,
       },
     });
+  });
+});
+
+describe("secret permission aliases (AX-6)", () => {
+  test("legacy variable-set names grant their canonical secrets permission", () => {
+    const stored = Object.freeze([
+      "variable-sets:read",
+      "variable-sets:manage",
+      "environments:use",
+    ]) as unknown as AccessGrant["permissions"];
+    const before = JSON.stringify(stored);
+    for (const mode of [undefined, "explicit"] as const) {
+      expect(hasPermission(stored, "secrets:list", mode)).toBe(true);
+      expect(hasPermission(stored, "secrets:write", mode)).toBe(true);
+      expect(hasPermission(stored, "secrets:use", mode)).toBe(true);
+      // Plaintext read is never aliased, and legacy requirements stay exact.
+      expect(hasPermission(stored, "secrets:read", mode)).toBe(false);
+      expect(hasPermission(stored, "variable-sets:use", mode)).toBe(false);
+      expect(hasPermission(stored, "variable-sets:read", mode)).toBe(true);
+    }
+    // Aliases are read-time only: the stored array is untouched.
+    expect(JSON.stringify(stored)).toBe(before);
+  });
+
+  test("each alias maps to exactly one canonical permission", () => {
+    const cases: Array<[AccessGrant["permissions"][number], AccessGrant["permissions"][number]]> = [
+      ["variable-sets:list", "secrets:list"],
+      ["variable-sets:read", "secrets:list"],
+      ["variable-sets:write", "secrets:write"],
+      ["variable-sets:manage", "secrets:write"],
+      ["environments:manage", "secrets:write"],
+      ["variable-sets:attach", "secrets:use"],
+      ["variable-sets:use", "secrets:use"],
+      ["environments:use", "secrets:use"],
+    ];
+    for (const [legacy, canonical] of cases) {
+      expect(hasPermission([legacy], canonical, "explicit")).toBe(true);
+      for (const other of ["secrets:list", "secrets:write", "secrets:use"] as const) {
+        if (other !== canonical) expect(hasPermission([legacy], other, "explicit")).toBe(false);
+      }
+    }
+    expect(hasPermission(["secrets:use"], "secrets:use", "explicit")).toBe(true);
+    expect(hasPermission(["secrets:read"], "secrets:read")).toBe(true);
+    expect(hasPermission(["workspace:admin"], "secrets:read")).toBe(false);
+    expect(hasPermission(["workspace:admin"], "secrets:use")).toBe(true);
+  });
+});
+
+describe("personal integration setup permission", () => {
+  test("connections:write includes connections:personal; the narrow one grants nothing broader", () => {
+    expect(hasPermission(["connections:write"], "connections:personal")).toBe(true);
+    expect(hasPermission(["connections:write"], "connections:personal", "explicit")).toBe(true);
+    expect(hasPermission(["connections:personal"], "connections:personal", "explicit")).toBe(true);
+    for (const broader of ["connections:write", "connections:read", "capabilities:manage"] as const)
+      expect(hasPermission(["connections:personal"], broader, "explicit")).toBe(false);
+    expect(hasPermission(["connections:read"], "connections:personal", "explicit")).toBe(false);
+  });
+
+  test("an explicit key policy holding connections:write may delegate the narrow permission", () => {
+    expect(() =>
+      requireExplicitPermissionDelegation(
+        { ...grant(["connections:write"]), permissionMode: "explicit" },
+        ["connections:personal"],
+      ),
+    ).not.toThrow();
+    expect(() =>
+      requireExplicitPermissionDelegation(
+        { ...grant(["connections:personal"]), permissionMode: "explicit" },
+        ["connections:write"],
+      ),
+    ).toThrow();
+  });
+
+  test("only signing in to one's own account needs just the narrow permission", () => {
+    expect(connectSetupPermission({ providerId: "gmail", ownership: "personal" })).toBe(
+      "connections:personal",
+    );
+    expect(connectSetupPermission({ providerId: "mcp-oauth", ownership: "personal" })).toBe(
+      "connections:personal",
+    );
+    expect(connectSetupPermission({ providerId: "gmail", ownership: "workspace" })).toBe(
+      "connections:write",
+    );
+    expect(
+      connectSetupPermission({ providerId: "mcp-oauth", ownership: "personal", mcpSetup: {} }),
+    ).toBe("connections:write");
+    expect(
+      connectSetupPermission({
+        providerId: "gmail",
+        ownership: "personal",
+        installationTarget: { capabilityId: "mcp:gmail" },
+      }),
+    ).toBe("connections:write");
+    expect(connectSetupPermission({ providerId: "github-app", ownership: "personal" })).toBe(
+      "connections:write",
+    );
+  });
+
+  test("your own account of a reviewed integration definition needs just the narrow permission", () => {
+    expect(
+      connectSetupPermission({ providerId: "microsoft-outlook-mail", ownership: "personal" }),
+    ).toBe("connections:personal");
+    expect(
+      connectSetupPermission({
+        providerId: "microsoft-onedrive",
+        ownership: "personal",
+        installationTarget: { instanceKey: "account-1" },
+      }),
+    ).toBe("connections:personal");
+    expect(
+      connectSetupPermission({ providerId: "microsoft-outlook-mail", ownership: "workspace" }),
+    ).toBe("connections:write");
+    expect(
+      connectSetupPermission({
+        providerId: "microsoft-outlook-mail",
+        ownership: "personal",
+        source: { url: "https://example.com/openapi.json" },
+      }),
+    ).toBe("connections:write");
+    expect(
+      connectSetupPermission({ providerId: "custom-api-definition", ownership: "personal" }),
+    ).toBe("connections:write");
+  });
+});
+
+describe("missing permission refusals", () => {
+  test("say a plain sentence and keep the permission machine-readable", () => {
+    let thrown: unknown;
+    try {
+      requirePermission(grant(["workspace:read"]), "capabilities:manage");
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(MissingPermissionRefusal);
+    const refusal = thrown as MissingPermissionRefusal;
+    expect(refusal.status).toBe(403);
+    expect(refusal.message).toBe(
+      "You don't have permission to manage this workspace's tools and integrations.",
+    );
+    expect(refusal.details).toEqual({
+      code: MISSING_PERMISSION_DETAIL_CODE,
+      permission: "capabilities:manage",
+    });
+    expect(missingPermissionOf(refusal)).toBe("capabilities:manage");
+    expect(missingPermissionOf(new Error("missing permission: capabilities:manage"))).toBeNull();
+  });
+
+  test("every permission has a sentence that never names the raw permission", () => {
+    for (const permission of Permission.options) {
+      const message = new MissingPermissionRefusal(permission).message;
+      expect(message).toMatch(/^You don't have permission to [a-z].*\.$/u);
+      expect(message).not.toContain("missing permission");
+      expect(message).not.toContain(permission);
+    }
   });
 });

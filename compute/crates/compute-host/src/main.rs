@@ -1,0 +1,1118 @@
+//! `compute-host`: run the host agent, or talk to one.
+
+mod bench;
+mod fleet_cli;
+mod observing;
+mod policy;
+mod readying;
+
+use std::net::Ipv4Addr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, bail};
+use clap::{Args, Parser, Subcommand};
+use compute_core::Step;
+use compute_engine::MemoryProfile;
+use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
+use compute_host::client::Client;
+use compute_host::fleet::{FleetConfig, GuardConfig, Leased, Lossy, Prepared};
+use compute_host::net::{Ipv4Net, NetworkConfig};
+use compute_host::observe::StoreAlarms;
+use compute_host::observe::canary::{self, CanaryConfig};
+use compute_host::protocol::{
+    About, Id, ImageId, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
+    step_name,
+};
+use compute_host::{
+    BusyRule, Chunked, Directory, GuestChecks, GuestPort, HostAgent, HostConfig, Keep, NoStore,
+    PagerConfig, PoolConfig, Store, Threads, serve,
+};
+use tokio::signal::unix::SignalKind;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
+
+use crate::bench::{BenchArgs, bench, exec};
+use crate::policy::{
+    guarantee_vm_processors, host_policy, limit_vm_memory, memory_total_mib, processor_share,
+};
+
+/// How long a template's freshly booted guest may take to become ready.
+const TEMPLATE_READY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The agent's memory comes and goes in bursts: transfer buffers and
+/// compression contexts while sandboxes archive and wake, on hundreds of
+/// blocking threads at once. glibc keeps what each thread freed in that
+/// thread's arena; measured, an agent that had archived ten sandboxes kept
+/// about 750 MB it no longer used. jemalloc hands freed memory back after
+/// a short decay, from background threads while the agent is idle. It
+/// replaces `malloc` itself, so the C libraries linked in (zstd) use it
+/// too. Pagers run from this binary and use it as well.
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[derive(Parser)]
+#[command(about = "Run an Opengeni compute host agent, or talk to one")]
+struct Cli {
+    /// The agent's socket.
+    #[arg(long, global = true, default_value = "/run/compute-host.sock")]
+    socket: PathBuf,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the agent.
+    Serve(Box<ServeArgs>),
+    /// Create a sandbox.
+    Create(Box<CreateArgs>),
+    /// Delete a sandbox.
+    Remove { id: Id },
+    /// Put a sandbox at least as deep as a level now.
+    Sleep {
+        id: Id,
+        #[arg(value_parser = parse_level)]
+        level: LevelName,
+    },
+    /// Keep a sandbox awake for a named reason, waking it if it sleeps.
+    Hold {
+        id: Id,
+        /// The reason, such as `turn`.
+        name: String,
+        /// Let the hold lapse after this long unless held again.
+        #[arg(long, value_parser = parse_duration)]
+        ttl: Option<Duration>,
+    },
+    /// End a named hold.
+    Release { id: Id, name: String },
+    /// Show every sandbox and the host's step counters.
+    Status,
+    /// Run a shell script inside a sandbox, waking it first.
+    Exec {
+        id: Id,
+        script: String,
+        #[arg(long, default_value_t = 52)]
+        port: u32,
+    },
+    /// Create many sandboxes, let them sleep, then wake them all at once.
+    Bench(BenchArgs),
+    /// Build a sandbox image from an OCI image (ADR 19), and store it.
+    BuildImage(Box<compute_host::rootfs::BuildArgs>),
+    /// Run the guard of a host in a fleet: it stops the VMs when the
+    /// host's lease runs out, whatever happens to the agent. Run it as a
+    /// service of its own, before the agent.
+    Guard(fleet_cli::GuardArgs),
+    /// The guard service's stop hook on a machine the host shares (its
+    /// `ExecStopPost=`, ADR 26): unless the guard was handed over, kill
+    /// every VM, as a reset of the machine would, and restart the agent if
+    /// it runs.
+    GuardStopped(fleet_cli::GuardStoppedArgs),
+    /// Hand the guard over to the installed release's: mark the hand-over
+    /// and restart the guard's service. On a machine the host shares, the
+    /// guard's stop hook then leaves the VMs to the new guard (ADR 26).
+    HandOverGuard(fleet_cli::HandOverArgs),
+    /// Delete the chunks and manifests in object storage that no sandbox's
+    /// stored copy names any more, on any host. Run on a schedule, such as
+    /// daily; safe while agents archive. Without `--delete`, only reports.
+    Sweep {
+        /// The store, as `serve --store` takes it: `gs://bucket/prefix`.
+        #[arg(long)]
+        store: String,
+        #[arg(long)]
+        delete: bool,
+    },
+}
+
+/// The sandbox `create` asks for.
+#[derive(Args)]
+struct CreateArgs {
+    id: Id,
+    #[arg(long, default_value_t = 2)]
+    vcpus: u8,
+    #[arg(long, default_value_t = 1024)]
+    memory_mib: u32,
+    /// Memory it is guaranteed while it runs; defaults to all of it.
+    #[arg(long)]
+    memory_request_mib: Option<u32>,
+    /// Processor time it is guaranteed under contention, in thousandths
+    /// of a processor; defaults to a tenth of each of its processors.
+    #[arg(long)]
+    cpu_request_millis: Option<u32>,
+    /// Start from the recommended sleep settings instead of never
+    /// sleeping.
+    #[arg(long)]
+    recommended: bool,
+    /// A sleep rule such as `pause=10s`, `save=30s`, `archive=2m`,
+    /// `drop=1h`, `evict=3d` or `forget=30d`, or `rule=never` to turn
+    /// one off. Repeatable; later rules override earlier ones.
+    #[arg(long = "sleep", value_parser = parse_rule)]
+    sleep: Vec<(SleepRuleName, Option<u64>)>,
+    /// Let memory pressure compress the sandbox's memory while paused.
+    #[arg(long)]
+    compress: Option<bool>,
+    /// The image its disk starts as (ADR 19), by the id `build-image`
+    /// printed; defaults to the host's base image.
+    #[arg(long)]
+    image: Option<ImageId>,
+}
+
+impl CreateArgs {
+    /// The sandbox it asks for.
+    fn config(self) -> SandboxConfig {
+        let mut settings = if self.recommended {
+            SleepConfig::RECOMMENDED
+        } else {
+            SleepConfig::default()
+        };
+        for (rule, after_ms) in self.sleep {
+            rule.set(&mut settings, after_ms);
+        }
+        if let Some(compress) = self.compress {
+            settings.compress = compress;
+        }
+        SandboxConfig {
+            disk_mib: None,
+            reach: Vec::new(),
+            image: self.image,
+            vcpus: self.vcpus,
+            memory_mib: self.memory_mib,
+            memory_request_mib: self.memory_request_mib,
+            cpu_request_millis: self.cpu_request_millis,
+            sleep: settings,
+            link: None,
+        }
+    }
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    /// Directory for sandbox state.
+    #[arg(long)]
+    root: PathBuf,
+    #[arg(long)]
+    firecracker: PathBuf,
+    /// An older Firecracker binary kept after an upgrade, so that memory
+    /// images it made still wake with their programs. Repeatable; each
+    /// file must be named `firecracker`.
+    #[arg(long = "retained-firecracker")]
+    retained_firecracker: Vec<PathBuf>,
+    /// Firecracker's jailer, from the same release.
+    #[arg(long)]
+    jailer: PathBuf,
+    /// User id of the first sandbox; each sandbox's VMM runs as its own
+    /// user and group from here up.
+    #[arg(long, default_value_t = 1 << 30, value_parser = clap::value_parser!(u32).range(1..))]
+    first_uid: u32,
+    /// A host-wide lock file: only one agent may manage VMs, users and
+    /// networks on a host, whatever state root it uses.
+    #[arg(long, default_value = "/run/opengeni-compute.lock")]
+    host_lock: PathBuf,
+    #[arg(long)]
+    kernel: PathBuf,
+    /// Root disk image new sandboxes start from.
+    #[arg(long)]
+    base_image: PathBuf,
+    /// The guest programs (a bundle's `guest/`) to build the sandbox images
+    /// the control service asks for with; without them the host builds
+    /// none.
+    #[arg(long)]
+    guest: Option<PathBuf>,
+    /// The user name for registries' token services in those builds, with
+    /// the token in `REGISTRY_TOKEN`; without a token, pulls are anonymous.
+    #[arg(long)]
+    registry_user: Option<String>,
+    /// Parent cgroup for VMs.
+    #[arg(long, default_value = "/sys/fs/cgroup/compute")]
+    cgroup: PathBuf,
+    /// The program VMs' memory pagers run as, given `pager` as its first
+    /// argument. Defaults to this agent's own binary.
+    #[arg(long)]
+    pager: Option<PathBuf>,
+    /// How long after a wake each pager records the order the guest
+    /// touches memory in, for the next wake to prefetch.
+    #[arg(long, default_value_t = 120_000)]
+    pager_record_ms: u64,
+    /// The guest kernel's command line. The engine adds the clock source and
+    /// the free-page reporting order for the host's memory profile unless
+    /// this names them. The agent adds `init=/opengeni/init`, the init every
+    /// image has, so a sandbox whose packages replaced `/sbin/init` still
+    /// boots.
+    #[arg(
+        long,
+        default_value = "console=ttyS0 reboot=k panic=1 quiet loglevel=1"
+    )]
+    boot_args: String,
+    /// Where archived sandboxes go, which enables the archived and remote
+    /// levels: a directory, or object storage as `gs://bucket/prefix`,
+    /// `az://container/prefix` or `s3://bucket/prefix`, with credentials
+    /// from the environment or the machine's own identity.
+    #[arg(long)]
+    store: Option<String>,
+    /// A step concurrency limit such as `restore=32`; repeatable.
+    #[arg(long = "limit", value_parser = parse_limit)]
+    limits: Vec<(Step, u32)>,
+    /// Host memory the sandboxes may use at most, on a host that shares
+    /// its memory with VMs or services beside compute: the capacity, the
+    /// watermarks and the most the VMs may ever hold together come from
+    /// it in place of the host's memory, so they never take what the
+    /// others were promised. Defaults to `COMPUTE_MEMORY_TOTAL_MIB` where
+    /// that is set and not empty (a fleet host's `host.env`, which a
+    /// shared machine must set it in: ADR 26), else all of the host's
+    /// memory.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    memory_total_mib: Option<u64>,
+    /// Push idle sandboxes deeper when available memory drops below this,
+    /// then ask sandboxes in use above their request to give memory back.
+    /// Given with `--memory-high-mib` or not at all. Defaults on 4 KiB
+    /// pages to a thirty-second of the host's memory, at least 512 MiB;
+    /// with huge pages there is no relief from pressure unless both are
+    /// given.
+    #[arg(long)]
+    memory_low_mib: Option<u64>,
+    /// ...until expected available memory reaches this. Defaults to twice
+    /// the low watermark.
+    #[arg(long)]
+    memory_high_mib: Option<u64>,
+    /// Guest memory this host promises its sandboxes at once: a wake beyond
+    /// it may end idle VMs that are already saved, otherwise it is refused
+    /// at once as host full.
+    /// Defaults to the huge-page pool with huge pages, otherwise to the
+    /// host's memory less `--memory-headroom-mib`.
+    #[arg(long)]
+    memory_capacity_mib: Option<u64>,
+    /// Host memory kept back from sandboxes for the agent, VMMs, pagers and
+    /// the page cache when the capacity comes from the host's memory.
+    /// Defaults to a sixteenth of it, at least 1 GiB.
+    #[arg(long)]
+    memory_headroom_mib: Option<u64>,
+    /// Memory kept free for wakes ahead of time by pushing idle sandboxes
+    /// deeper in the background. Defaults to a sixteenth of the capacity.
+    #[arg(long)]
+    memory_buffer_mib: Option<u64>,
+    /// Processor time, in millicores, this host guarantees its sandboxes
+    /// at once: every sandbox awake or waking reserves its CPU request
+    /// from it, and a wake that does not fit is refused at once as host
+    /// full. Above it the host overcommits: requests then hold only in
+    /// proportion. Kept as given, whatever the VMs' group gets. Defaults
+    /// to the processors the VMs may run on, a thousand per processor,
+    /// less `--cpu-headroom-millis`, and no more than the VMs' group gets
+    /// with every group beside and above it busy, read again every few
+    /// seconds.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    cpu_capacity_millis: Option<u64>,
+    /// Processor time, in millicores, kept back from sandboxes for the
+    /// agent, its pagers and the rest of the host when the capacity comes
+    /// from the processors. Defaults to a sixteenth of them, at least 500.
+    #[arg(long)]
+    cpu_headroom_millis: Option<u64>,
+    /// Local disk never booked for saves: room for records, logs and
+    /// anything else written beside them. Every VM not saved yet books
+    /// what its next save may write; a wake that would book more than is
+    /// left beyond this is refused as host full. Defaults to a twentieth
+    /// of the filesystem holding the state root, at least 1 GiB.
+    #[arg(long)]
+    disk_reserve_mib: Option<u64>,
+    /// Inodes never booked for saves. Defaults to a twentieth of the
+    /// filesystem's, at least 1024.
+    #[arg(long)]
+    disk_reserve_inodes: Option<u64>,
+    /// A port guests may connect to on this host, as `PORT=HOST:PORT`, with
+    /// `,wake` appended to wake a sleeping sandbox when data arrives for it.
+    /// Repeatable.
+    #[arg(long = "guest-port")]
+    guest_ports: Vec<GuestPort>,
+    /// Seconds a stream into a sandbox (a terminal, a preview, a forwarded
+    /// port) may stay silent both ways and still keep it awake.
+    #[arg(long, default_value_t = HostConfig::STREAM_IDLE.as_secs())]
+    stream_idle_secs: u64,
+    /// Guest vsock port to tell about each restore from a memory image, so
+    /// the guest can set its clock, reconnect and learn its sandbox id.
+    /// Every guest must listen on it: the agent also connects to it to
+    /// find guests that stopped while their VMs run on (a power-off, a
+    /// halt, a hung kernel), and ends the VM of one that takes no
+    /// connection for five checks thirty seconds apart, as if it crashed;
+    /// one whose kernel said on its console that it halted, at its first.
+    #[arg(long)]
+    restore_notice_port: Option<u32>,
+    /// Keep warm templates: a guest vsock port that accepts connections
+    /// once a freshly booted guest is ready for work. New sandboxes then
+    /// start from a saved, booted guest of their shape instead of booting.
+    /// Needs `--restore-notice-port`: a sandbox started from a template is
+    /// used only once its guest has acknowledged which sandbox it is.
+    #[arg(long, requires = "restore_notice_port")]
+    template_ready_port: Option<u32>,
+    /// A shape, as `VCPUSxMEMORY_MIB[:READY]` such as `2x1024` or
+    /// `1x512:16`, whose template is built as soon as the agent starts;
+    /// other shapes get one on first use. `:READY` also keeps that many
+    /// sandboxes of the shape restored, warm and paused, so a create of it
+    /// only claims one. Repeatable. Needs `--template-ready-port`.
+    #[arg(long = "template", requires = "template_ready_port")]
+    templates: Vec<Keep>,
+    /// How long a shape may go unused (no create) before its template and
+    /// ready sandboxes are given up, until its next create.
+    #[arg(long, default_value_t = PoolConfig::UNUSED_AFTER.as_secs())]
+    template_unused_secs: u64,
+    /// How guest memory is backed and saved: `bare-metal` (4 KiB pages,
+    /// dirty-page tracking, compression allowed) or `nested` (2 MiB pages
+    /// from the host's reserved huge-page pool, resident-page saves, no
+    /// compression). By default `nested` when this host is itself a VM (its
+    /// CPU reports the hypervisor flag) and `bare-metal` otherwise. Nested
+    /// hosts need the pool reserved first, for example through
+    /// `/proc/sys/vm/nr_hugepages`.
+    #[arg(long)]
+    memory_profile: Option<MemoryProfile>,
+    /// Give every sandbox a network: its own namespace, a fixed guest
+    /// address, internet access through NAT, and nothing else.
+    #[arg(long)]
+    network: bool,
+    /// Addresses for the host's links to sandbox namespaces, two per
+    /// sandbox. Must not be used for anything else.
+    #[arg(long, default_value = "198.18.0.0/15")]
+    network_pool: Ipv4Net,
+    /// A destination beyond the internet that sandboxes may open TCP
+    /// connections to, and its ports: `DESTINATION:PORTS`, the destination
+    /// a DNS name, an address or `address/prefix`, the ports a list such as
+    /// `443,9443-9445`. The host resolves a name when the agent starts, and
+    /// sandboxes' name server answers it with those addresses. Nothing else
+    /// on the host's local or overlay network is reachable, and never the
+    /// host, metadata services or other sandboxes. Repeatable.
+    #[arg(long = "reach")]
+    reach: Vec<compute_host::net::Reach>,
+    /// A destination, as for `--reach`, that only the sandboxes that ask
+    /// for it by name may open: `NAME=DESTINATION:PORTS`, such as
+    /// `previews=k3s.internal:6443`. Entries with one name make one offer
+    /// of all their destinations; a sandbox's create lists the names it
+    /// asks for in its `reach`, and the host opens and answers them in its
+    /// namespace alone. In a fleet, the host tells the control service
+    /// its offers' names, and only such sandboxes are placed on it for
+    /// them. Needs `--network`. Repeatable.
+    #[arg(long = "offer", requires = "network")]
+    offers: Vec<compute_host::net::Offer>,
+    /// Another range sandboxes may not reach, such as the host's public
+    /// address where the cloud maps it onto a private one. Repeatable.
+    #[arg(long = "block")]
+    blocked: Vec<Ipv4Net>,
+    /// A name server the host asks for sandboxes, tried in order;
+    /// repeatable. Use public ones: whatever names it knows, sandboxes can
+    /// look up.
+    #[arg(long = "dns", default_values_t = [Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)])]
+    dns: Vec<Ipv4Addr>,
+    /// A running sandbox whose VM uses at least this percent of one
+    /// processor counts as busy and stays awake; 0 ignores processor use.
+    #[arg(long, default_value_t = BusyRule::DEFAULT.cpu_percent)]
+    busy_cpu_percent: u32,
+    /// A running sandbox whose VM moves at least this many KiB a second
+    /// through its disk and network counts as busy and stays awake; 0
+    /// ignores traffic.
+    #[arg(long, default_value_t = BusyRule::DEFAULT.io_bytes_per_second >> 10)]
+    busy_io_kib: u64,
+    /// ...averaged over this long.
+    #[arg(long, default_value = "5s", value_parser = parse_duration)]
+    busy_window: Duration,
+    /// This host cannot compress paused VMs' memory, for example because
+    /// guest memory uses huge pages. The `nested` memory profile implies it.
+    #[arg(long)]
+    no_compress: bool,
+    /// Async worker threads. Defaults to a quarter of the host's
+    /// processors, from 2 to 8.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    worker_threads: Option<u32>,
+    /// Most threads for blocking work such as file copies and
+    /// compression. Defaults to 64 more than `--compress-threads`.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    blocking_threads: Option<u32>,
+    /// Most chunks compressed at once for object storage, each holding a
+    /// processor. Defaults to a quarter of the host's processors, from 2
+    /// to 8.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    compress_threads: Option<u32>,
+    #[command(flatten)]
+    fleet: fleet_cli::FleetArgs,
+    #[command(flatten)]
+    observe: observing::ObserveArgs,
+}
+
+impl ServeArgs {
+    /// The thread counts asked for, the host's defaults otherwise.
+    fn threads(&self) -> Threads {
+        let defaults = Threads::for_host();
+        let get = |asked: Option<u32>, default: usize| {
+            asked.map_or(default, |asked| usize::try_from(asked).unwrap_or(default))
+        };
+        let compress = get(self.compress_threads, defaults.compress);
+        Threads {
+            workers: get(self.worker_threads, defaults.workers),
+            blocking: get(self.blocking_threads, compress + 64),
+            compress,
+        }
+    }
+
+    /// The sandboxes' network, if the host makes one, taking its settings.
+    fn take_network(&mut self) -> Option<NetworkConfig> {
+        self.network.then(|| NetworkConfig {
+            pool: self.network_pool,
+            reach: std::mem::take(&mut self.reach),
+            offers: std::mem::take(&mut self.offers),
+            blocked: std::mem::take(&mut self.blocked),
+            dns: std::mem::take(&mut self.dns),
+        })
+    }
+}
+
+/// One rule of [`SleepConfig`], named as on the command line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SleepRuleName {
+    Pause,
+    Save,
+    Archive,
+    Drop,
+    Evict,
+    Forget,
+}
+
+impl SleepRuleName {
+    fn set(self, config: &mut SleepConfig, after_ms: Option<u64>) {
+        let field = match self {
+            Self::Pause => &mut config.pause_after_ms,
+            Self::Save => &mut config.save_after_ms,
+            Self::Archive => &mut config.archive_after_ms,
+            Self::Drop => &mut config.drop_after_ms,
+            Self::Evict => &mut config.evict_after_ms,
+            Self::Forget => &mut config.forget_after_ms,
+        };
+        *field = after_ms;
+    }
+}
+
+fn parse_duration(text: &str) -> Result<Duration, String> {
+    let split = text
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let value: f64 = number.parse().map_err(|_| format!("bad duration {text}"))?;
+    let seconds = match unit {
+        "ms" => value / 1000.0,
+        "" | "s" => value,
+        "m" => value * 60.0,
+        "h" => value * 3600.0,
+        "d" => value * 86_400.0,
+        _ => return Err(format!("bad duration unit in {text}; use ms, s, m, h or d")),
+    };
+    Duration::try_from_secs_f64(seconds).map_err(|error| error.to_string())
+}
+
+fn parse_level(text: &str) -> Result<LevelName, String> {
+    serde_json::from_value(serde_json::Value::String(text.into()))
+        .map_err(|_| format!("unknown level {text}"))
+}
+
+fn parse_rule(text: &str) -> Result<(SleepRuleName, Option<u64>), String> {
+    let (name, after) = text
+        .split_once('=')
+        .ok_or_else(|| format!("expected rule=duration, got {text}"))?;
+    let rule = match name {
+        "pause" => SleepRuleName::Pause,
+        "save" => SleepRuleName::Save,
+        "archive" => SleepRuleName::Archive,
+        "drop" => SleepRuleName::Drop,
+        "evict" => SleepRuleName::Evict,
+        "forget" => SleepRuleName::Forget,
+        _ => {
+            return Err(format!(
+                "unknown sleep rule {name}; use pause, save, archive, drop, evict or forget"
+            ));
+        }
+    };
+    if after == "never" {
+        return Ok((rule, None));
+    }
+    Ok((rule, Some(millis(parse_duration(after)?))))
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn parse_limit(text: &str) -> Result<(Step, u32), String> {
+    let (name, limit) = text
+        .split_once('=')
+        .ok_or_else(|| format!("expected step=limit, got {text}"))?;
+    let step = Step::ALL
+        .into_iter()
+        .find(|step| step_name(*step) == name)
+        .ok_or_else(|| format!("unknown step {name}"))?;
+    let limit = limit.parse().map_err(|_| format!("bad limit {limit}"))?;
+    Ok((step, limit))
+}
+
+/// Runs as a VM's memory pager when the first argument is `pager` (the
+/// agent starts its pagers from its own binary; see
+/// [`compute_host::PagerConfig`]), and as the agent or its client
+/// otherwise.
+fn main() -> std::process::ExitCode {
+    let mut args = std::env::args_os().skip(1);
+    #[cfg(target_os = "linux")]
+    if args.next().is_some_and(|first| first == "pager") {
+        return compute_pager::linux::serve::main(args);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = args.next();
+    let cli = Cli::parse();
+    let threads = match &cli.command {
+        Command::Serve(args) => args.threads(),
+        _ => Threads::for_host(),
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads.workers)
+        .max_blocking_threads(threads.blocking)
+        .enable_all()
+        .build();
+    let result = runtime
+        .map_err(anyhow::Error::from)
+        .and_then(|runtime| run_to_end(runtime, agent_main(cli)));
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Runs `command` on `runtime` to its end, then stops the runtime
+/// without waiting for work still on its blocking threads, such as a
+/// template's disk copy: the process exits and ends it, as a crash
+/// would, which costs the agent nothing (ADR 10). Waiting would hold the
+/// process up after its lease's renewals have stopped, and the next
+/// agent's start with them. A client command has awaited all it needs.
+fn run_to_end<T>(runtime: tokio::runtime::Runtime, command: impl Future<Output = T>) -> T {
+    let output = runtime.block_on(command);
+    runtime.shutdown_background();
+    output
+}
+
+/// Runs the guard (`compute-host guard`) until it stops; `log` is the
+/// log it says what it does in, written without waiting.
+async fn guard(config: GuardConfig, log: Option<&Lossy>) -> anyhow::Result<()> {
+    // On a thread of its own: the guard takes over the watchdog and feeds
+    // it while its pages are brought in.
+    std::thread::Builder::new()
+        .name("guard-lock".into())
+        .spawn(|| {
+            if let Err(error) = compute_host::fleet::keep_resident() {
+                tracing::error!(
+                    %error,
+                    "the guard could not lock itself in memory: a host short of memory may stall it until the watchdog resets the machine"
+                );
+            }
+        })?;
+    // Asked to stop, the guard stops at its first step that may feed the
+    // watchdog (see `run_guard`), not where the signal finds it.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(SignalKind::interrupt())?;
+    let asked = Arc::clone(&stop);
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+        asked.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let guarded =
+        tokio::task::spawn_blocking(move || compute_host::fleet::run_guard(&config, &stop)).await?;
+    // What it last said, unless the journal has stalled: the next guard has
+    // to feed the watchdog in time.
+    if let Some(log) = log {
+        let _ = log.flush_within(compute_host::fleet::GUARD_STEP);
+    }
+    guarded
+}
+
+async fn agent_main(cli: Cli) -> anyhow::Result<()> {
+    // The guard and the agent must never wait on the journal (see
+    // `fleet::Lossy`): a guard waiting there resets the machine, and an
+    // agent's threads waiting there hold up its lease's renewals.
+    let log = match &cli.command {
+        Command::Guard(_) => Some(Lossy::new(std::io::stderr())?),
+        Command::Serve(_) => Some(Lossy::with_room(std::io::stderr(), AGENT_LOG_ROOM)?),
+        _ => None,
+    };
+    let writer = match &log {
+        Some(log) => BoxMakeWriter::new(log.clone()),
+        None => BoxMakeWriter::new(std::io::stderr),
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .with_writer(writer)
+        .init();
+    let client = Client::new(&cli.socket);
+    match cli.command {
+        Command::Serve(args) => {
+            let served = Box::pin(run_serve(*args, cli.socket)).await;
+            // What it said last, often why it stopped, unless the journal
+            // has stalled.
+            if let Some(log) = &log {
+                let _ = log.flush_within(FLUSH_WITHIN);
+            }
+            served
+        }
+        Command::Create(args) => {
+            let id = args.id;
+            let config = args.config();
+            expect_done(client.call(&Request::Create { id, config }).await?)
+        }
+        Command::Remove { id } => expect_done(
+            client
+                .call(&Request::Remove {
+                    id,
+                    generation: None,
+                })
+                .await?,
+        ),
+        Command::Sleep { id, level } => expect_done(
+            client
+                .call(&Request::Sleep {
+                    id,
+                    generation: None,
+                    level,
+                })
+                .await?,
+        ),
+        Command::Hold { id, name, ttl } => expect_done(
+            client
+                .call(&Request::Hold {
+                    id,
+                    generation: None,
+                    hold: name,
+                    ttl_ms: ttl.map(millis),
+                    priority: PriorityName::Interactive,
+                })
+                .await?,
+        ),
+        Command::Release { id, name } => expect_done(
+            client
+                .call(&Request::Release {
+                    id,
+                    generation: None,
+                    hold: name,
+                })
+                .await?,
+        ),
+        Command::Status => {
+            let reply = client.call(&Request::Status).await?;
+            println!("{}", serde_json::to_string_pretty(&reply)?);
+            Ok(())
+        }
+        Command::Exec { id, script, port } => exec(&client, id, port, &script).await,
+        Command::Bench(args) => bench(&client, &args).await,
+        Command::BuildImage(args) => compute_host::rootfs::build(*args).await,
+        Command::Guard(args) => guard(args.config(), log.as_ref()).await,
+        Command::GuardStopped(args) => {
+            let hook = args.hook();
+            tokio::task::spawn_blocking(move || compute_host::fleet::guard_stopped(&hook)).await?
+        }
+        Command::HandOverGuard(args) => {
+            tokio::task::spawn_blocking(move || args.hand_over()).await?
+        }
+        Command::Sweep { store, delete } => {
+            let chunked = Chunked::from_url(&store)?
+                .with_context(|| format!("{store} is not an object storage URL"))?;
+            // A sweep fences every pointer, on condition: the store must
+            // enforce conditions. A fleet's sweep runs from its control
+            // service, which keeps the pointers.
+            chunked
+                .check_pointers()
+                .await
+                .with_context(|| format!("{store} cannot keep pointers"))?;
+            let report = chunked.sweep(delete).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+    }
+}
+
+fn expect_done(reply: Reply) -> anyhow::Result<()> {
+    match reply {
+        Reply::Done => Ok(()),
+        other => bail!("{other:?}"),
+    }
+}
+
+/// What this agent runs, as status reports it, so a measurement can say
+/// what it measured. The engine adds its runtime.
+fn describe(memory_profile: MemoryProfile, base_image: &std::path::Path) -> About {
+    let build = std::fs::File::open("/proc/self/exe")
+        .and_then(|exe| {
+            let mut hasher = blake3::Hasher::new();
+            std::io::copy(&mut std::io::BufReader::new(exe), &mut hasher)?;
+            Ok(hasher.finalize().to_hex()[..16].to_owned())
+        })
+        .unwrap_or_else(|error| format!("unknown ({error})"));
+    let base_image = match std::fs::metadata(base_image) {
+        Ok(found) => {
+            let changed = found
+                .modified()
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |since| since.as_secs());
+            format!(
+                "{} ({} bytes, changed at {changed} s past the epoch)",
+                base_image.display(),
+                found.len()
+            )
+        }
+        Err(error) => format!("{} ({error})", base_image.display()),
+    };
+    About {
+        build,
+        runtime: String::new(),
+        memory_profile: memory_profile.to_string(),
+        base_image,
+        // The agent says, once it knows its store and state root.
+        checkpoints: false,
+    }
+}
+
+/// The ready pool and templates, if `--template-ready-port` turns them on.
+fn pool_config(args: &ServeArgs) -> Option<PoolConfig> {
+    args.template_ready_port.map(|ready_port| PoolConfig {
+        ready_port,
+        shapes: args.templates.iter().map(|keep| keep.shape).collect(),
+        depends_on: vec![args.firecracker.clone(), args.jailer.clone()],
+        ready_timeout: TEMPLATE_READY_TIMEOUT,
+        ready: args
+            .templates
+            .iter()
+            .filter(|keep| keep.ready > 0)
+            .map(|keep| (keep.shape, keep.ready))
+            .collect(),
+        unused_after: Duration::from_secs(args.template_unused_secs),
+    })
+}
+
+/// When a running sandbox counts as busy, if the host was told.
+fn busy_rule(args: &ServeArgs) -> Option<BusyRule> {
+    (args.busy_cpu_percent > 0 || args.busy_io_kib > 0).then_some(BusyRule {
+        cpu_percent: args.busy_cpu_percent,
+        io_bytes_per_second: args.busy_io_kib.saturating_mul(1024),
+        window: args.busy_window,
+    })
+}
+
+async fn run_serve(mut args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
+    let network = args.take_network();
+    let pool = pool_config(&args);
+    let busy = busy_rule(&args);
+    let threads = args.threads();
+    tracing::info!(?threads, "thread counts");
+    let memory_profile = args.memory_profile.map_or_else(chosen_memory_profile, Ok)?;
+    let sample_every = Duration::from_secs(1);
+    args.memory_total_mib = memory_total_mib(
+        args.memory_total_mib,
+        std::env::var("COMPUTE_MEMORY_TOTAL_MIB").ok().as_deref(),
+    )?;
+    let mut policy = host_policy(&args, memory_profile, sample_every)?;
+    let share = processor_share(&args, &policy);
+    let engine = Firecracker::new(FirecrackerConfig {
+        firecracker: args.firecracker,
+        retained: args.retained_firecracker,
+        jailer: args.jailer,
+        cgroup_parent: args.cgroup.clone(),
+    })
+    .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
+    .with_memory_profile(memory_profile)
+    .with_context(|| format!("memory profile {memory_profile}"))?;
+    let engine = limit_vm_memory(engine, memory_profile, &policy, args.memory_total_mib)?;
+    let processor_share = guarantee_vm_processors(share, &mut policy)?;
+    readying::ready(memory_profile, memory_profile.compress && !args.no_compress)?;
+    let about = describe(memory_profile, &args.base_image);
+    let prepare =
+        compute_host::rootfs::PrepareConfig::of(&args.root, args.guest, args.registry_user)?;
+    // Only a host with a store to keep them builds images.
+    let guest = prepare
+        .as_ref()
+        .filter(|_| args.store.is_some())
+        .map(|config| config.guest_digest.clone());
+    let fleet = fleet_of(
+        &args.fleet,
+        &args.root,
+        &engine,
+        memory_profile,
+        &policy,
+        network.as_ref(),
+        guest,
+    )?;
+    let prepared = compute_host::fleet::prepare_guarded(fleet.as_ref()).await?;
+    // A host in a fleet keeps agent links for the sandboxes that run
+    // Opengeni's agent; its tokens come from the control service.
+    let agent_link = fleet.as_ref().map(FleetConfig::agent_links).transpose()?;
+    let observer = args.observe.observer(&about, fleet.as_ref())?;
+    let canary = args.observe.canary(&args.root, args.store.is_some())?;
+    // The canary makes sandboxes of its own, which a fleet's service would
+    // not know of: the host would drop them when it registers.
+    anyhow::ensure!(
+        fleet.is_none() || canary.is_none(),
+        "the canary runs on a host outside a fleet; a host in a fleet takes its sandboxes from \
+         the control service only"
+    );
+    let config = HostConfig {
+        root: args.root,
+        kernel: args.kernel,
+        boot_args: args.boot_args,
+        base_image: args.base_image,
+        policy,
+        sample_every,
+        first_wake_within: HostConfig::FIRST_WAKE_WITHIN,
+        disk_reading: None,
+        stream_idle: Duration::from_secs(args.stream_idle_secs),
+        hand_off_unwakeable: HostConfig::HAND_OFF_UNWAKEABLE,
+        guest_ports: args.guest_ports,
+        restore_notice_port: args.restore_notice_port,
+        guest_checks: GuestChecks::DEFAULT,
+        first_uid: args.first_uid,
+        host_lock: Some(args.host_lock),
+        pool,
+        network,
+        busy,
+        can_compress: !args.no_compress,
+        // The running binary even once an upgrade has replaced its file,
+        // so a pager always speaks its agent's protocol.
+        pager: PagerConfig {
+            program: args
+                .pager
+                .unwrap_or_else(|| PathBuf::from("/proc/self/exe")),
+            record_for: Duration::from_millis(args.pager_record_ms),
+        },
+        about,
+        observer: observer.clone(),
+        summary_every: HostConfig::SUMMARY_EVERY,
+        recovery_retry: HostConfig::RECOVERY_RETRY,
+        lease: prepared.as_ref().map(|prepared| prepared.gate.clone()),
+        guard_freezes: fleet
+            .as_ref()
+            .map(|fleet| compute_host::fleet::Freezes::beside(&fleet.guard_lock)),
+        agent_link,
+        processor_share,
+        prepare,
+    };
+    // Boxed: the agent and everything it was given are large.
+    Box::pin(run_with_store(
+        config,
+        engine,
+        args.store,
+        threads,
+        socket,
+        canary,
+        fleet.zip(prepared),
+    ))
+    .await
+}
+
+/// The fleet this host joins, if any, told what the host is: its shape,
+/// what it offers sandboxes and, when it builds images, its guest programs.
+fn fleet_of(
+    fleet: &fleet_cli::FleetArgs,
+    root: &std::path::Path,
+    engine: &Firecracker,
+    memory_profile: MemoryProfile,
+    policy: &compute_core::HostPolicy,
+    network: Option<&NetworkConfig>,
+    guest: Option<String>,
+) -> anyhow::Result<Option<FleetConfig>> {
+    fleet.config(&fleet_cli::Described {
+        root,
+        memory_profile: memory_profile.to_string(),
+        cpu_template: compute_engine::Engine::runtime(engine).to_owned(),
+        memory_bytes: policy
+            .admission
+            .as_ref()
+            .map_or(0, |admission| admission.budget),
+        cpu_millis: policy
+            .cpu_budget
+            .context("a serving host guarantees processor time")?,
+        offers: network.map_or_else(Vec::new, NetworkConfig::offer_names),
+        guest,
+    })
+}
+
+/// The memory profile the CPU's hypervisor flag calls for, when the
+/// operator names none.
+fn chosen_memory_profile() -> anyhow::Result<MemoryProfile> {
+    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").context("reading /proc/cpuinfo")?;
+    let profile = MemoryProfile::for_cpuinfo(&cpuinfo);
+    tracing::info!(%profile, "memory profile chosen from the CPU's hypervisor flag");
+    Ok(profile)
+}
+
+/// Runs the agent on the store `store` names: none, a bucket or a
+/// directory. A host in a fleet needs a bucket, and archives there only
+/// while it holds its lease.
+async fn run_with_store(
+    config: HostConfig,
+    engine: Firecracker,
+    store: Option<String>,
+    threads: Threads,
+    socket: PathBuf,
+    canary: Option<CanaryConfig>,
+    fleet: Option<(FleetConfig, Prepared)>,
+) -> anyhow::Result<()> {
+    let Some(store) = store else {
+        anyhow::ensure!(
+            fleet.is_none(),
+            "a host in a fleet needs a store in object storage"
+        );
+        return run_agent(config, engine, NoStore, socket, canary, None).await;
+    };
+    if let Some(chunked) = Chunked::from_url(&store)? {
+        let chunked = chunked
+            .with_compress_threads(threads.compress)
+            .with_watch(Arc::new(StoreAlarms(config.observer.clone())));
+        if let Some((fleet, prepared)) = fleet {
+            // The control service keeps a fleet's pointers (ADR 25), and
+            // what the host stores is named by the fleet's clock it tells.
+            let pointers = fleet.pointers(&prepared.gate)?;
+            let clock = pointers.clock();
+            let leased = Leased::new(
+                chunked.with_pointers(Arc::new(pointers)).with_clock(clock),
+                prepared.gate.clone(),
+            );
+            return run_agent(
+                config,
+                engine,
+                leased,
+                socket,
+                canary,
+                Some((fleet, prepared)),
+            )
+            .await;
+        }
+        chunked
+            .check_pointers()
+            .await
+            .with_context(|| format!("{store} cannot keep this host's pointers"))?;
+        return run_agent(config, engine, chunked, socket, canary, None).await;
+    }
+    anyhow::ensure!(
+        fleet.is_none(),
+        "a host in a fleet needs a store in object storage, which other hosts can reach"
+    );
+    // Fine for tests and a single machine, but an archive there does not
+    // survive losing this host.
+    tracing::warn!(%store, "archives go to a directory on this host, not off it");
+    run_agent(config, engine, Directory::new(store), socket, canary, None).await
+}
+
+async fn run_agent<S: Store>(
+    config: HostConfig,
+    engine: Firecracker,
+    store: S,
+    socket: PathBuf,
+    canary: Option<CanaryConfig>,
+    fleet: Option<(FleetConfig, Prepared)>,
+) -> anyhow::Result<()> {
+    let observer = config.observer.clone();
+    let links = config.agent_link.clone();
+    // On a host in a fleet the lease is renewed from before this run takes
+    // back what the previous one left until this one exits.
+    let ((handle, agent), mut joined) = if let Some((fleet, prepared)) = fleet {
+        // Boxed: it holds the agent's start, and this future lives long.
+        let (started, joined) =
+            Box::pin(fleet.start(prepared, HostAgent::start(config, engine, store))).await?;
+        (started, Some(joined))
+    } else {
+        (HostAgent::start(config, engine, store).await?, None)
+    };
+    // On a host in a fleet only the service creates, adopts and hands off
+    // sandboxes; the socket serves the host's own tools the rest.
+    let local = if joined.is_some() {
+        handle.local_to_fleet()
+    } else {
+        handle.clone()
+    };
+    if let Some(canary) = canary {
+        tokio::spawn(canary::run(handle.clone(), canary));
+    }
+    let in_fleet = async {
+        match &mut joined {
+            Some(joined) => joined.run().await,
+            None => std::future::pending().await,
+        }
+    };
+    let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
+    let result = tokio::select! {
+        result = serve(local, &socket) => result.context("serving"),
+        result = tokio::signal::ctrl_c() => result.map_err(Into::into),
+        _ = terminate.recv() => Ok(()),
+        result = agent => result.map_err(Into::into),
+        result = in_fleet => result.context("in the fleet"),
+    };
+    let stopping = async {
+        // Stopped by a signal, the agent did not get to it: the agent
+        // links' sessions are on disk before the next agent reads them.
+        if let Some(links) = links {
+            links.shutdown().await;
+        }
+        // What happened last, often why it stopped, still reaches the
+        // collector; a collector that is away does not hold the stop up
+        // long.
+        if tokio::time::timeout(FLUSH_WITHIN, observer.flush())
+            .await
+            .is_err()
+        {
+            tracing::warn!("stopping before every event reached the collector");
+        }
+    };
+    // The lease is renewed until the process exits, so the next agent
+    // finds as much of its term left as the restart allows.
+    match joined {
+        Some(joined) => joined.stopping(stopping).await,
+        None => stopping.await,
+    }
+    result
+}
+
+/// How long a stopping agent waits for its last events to be exported,
+/// and its last log lines to be written.
+const FLUSH_WITHIN: Duration = Duration::from_secs(5);
+
+/// How many of the agent's log lines may wait for the journal before
+/// more are dropped: a busy agent says hundreds a second, and a journal
+/// stalls for seconds behind a busy disk.
+const AGENT_LOG_ROOM: usize = 16_384;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Work left on a blocking thread when the command ends does not hold
+    /// the process up: an agent's lease is no longer renewed by then.
+    #[test]
+    fn the_runtime_stops_without_waiting_for_blocking_work() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let began = std::time::Instant::now();
+        let output = run_to_end(runtime, async {
+            let (started, running) = std::sync::mpsc::channel();
+            drop(tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                std::thread::sleep(Duration::from_secs(5));
+            }));
+            running.recv().unwrap();
+            7
+        });
+        assert_eq!(output, 7);
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "waited {:?} for blocking work",
+            began.elapsed()
+        );
+    }
+}

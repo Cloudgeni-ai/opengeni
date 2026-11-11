@@ -10,6 +10,9 @@ import {
   type TimelineSearchTarget,
 } from "../src/components/timeline-search";
 import { flush, registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -112,7 +115,7 @@ describe("exact timeline search", () => {
   });
 
   test("completed source identity survives a first-delta renderer id", () => {
-    const items = buildTimeline([
+    const items = buildTimeline(englishText, [
       event(1, "user.message", "Question"),
       event(2, "agent.message.delta", "Answer"),
       event(3, "agent.message.completed", "Answer"),

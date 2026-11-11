@@ -1,5 +1,8 @@
-import { getSessionRootId, resolvePrReviewGitCredential } from "@opengeni/db";
-import { prReviewRegistrationIdFromCredentialBinding } from "@opengeni/core";
+import { getSessionRootId } from "@opengeni/db";
+import {
+  assertTokenRepositoriesAttached,
+  attachedRepositoryResources,
+} from "./session-repository-authority";
 import {
   materializeRunCredentials,
   repositoryHasExplicitGitConnection,
@@ -14,6 +17,8 @@ import {
   type CodemodeTokenWriterSession,
   RunMcpCredentials,
   selectedSessionRemoteMcpTargets,
+  softRunCredentialWriteFailure,
+  type SoftSetupFailure,
 } from "@opengeni/runtime";
 import { codemodeWorkspaceUrl, type Settings } from "@opengeni/config";
 import {
@@ -25,7 +30,7 @@ import {
   sandboxEnvironmentForRun,
   type GitHubTokenMintAuthorization,
   type MintedRunGitCredentials,
-  type loadWorkspaceEnvironmentForRunWithCredentials,
+  type MintedSandboxCodemodeToken,
 } from "../environment";
 import type { mergeResourceRefs } from "../common";
 import type { withFirstPartyTools } from "../goals";
@@ -48,8 +53,14 @@ import {
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { type ResumedTurnSandbox } from "../../sandbox-resume";
 import { lazyProvisionEnabled } from "../../sandbox-routing";
-import { recordTurnSandboxEstablishPolicy } from "../../observability-metrics";
-import { sandboxRunAs } from "@opengeni/runtime";
+import {
+  recordTurnSandboxEstablishPolicy,
+  measureTurnStartupPhase,
+} from "../../observability-metrics";
+import {
+  withSandboxStartupPhases,
+  type sandboxStartupPhaseObserver,
+} from "./sandbox-startup-phase";
 
 import {
   assertGitHubResourcesRemainAuthorized,
@@ -65,6 +76,7 @@ import {
   sandboxSettingsForRoute,
 } from "./sandbox-route";
 import type { ClaimTurnOk } from "./claim";
+import { turnCredentialRestriction } from "./credential-restriction";
 import type { GovernanceModelOk } from "./governance-model";
 import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type {
@@ -91,9 +103,9 @@ export type PrepareRunCredentialsDeps = {
   sandboxRuntime: SandboxTurnRuntime;
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
+  turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   runSettings: GovernanceModelOk["runSettings"];
-  workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
   turnResources: ReturnType<typeof mergeResourceRefs>;
   requiredGeneratedVideoFiles: Array<{
     operationId: string;
@@ -109,12 +121,56 @@ export type PrepareRunCredentialsDeps = {
   groupBoxBackend: Settings["sandboxBackend"];
   sandboxCreationBackend: Settings["sandboxBackend"];
   effectiveRunCredentialBackend: Settings["sandboxBackend"];
-  sandboxWorkspaceEnvironmentValues: Record<string, string>;
   connectionScope: { accountId: string; workspaceId: string };
   runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
 };
 
+/**
+ * Write a turn's run credential files. The first write of an attempt
+ * (`initial`) into a box whose own disk is full, over quota or read-only does
+ * not fail the turn: every earlier generation and staging folder is cleared
+ * instead (deleting needs no free space), so no older credentials stay active
+ * that this turn no longer grants, and the soft failure is returned for the
+ * model's notice. A clear that also fails, a renewal write, and any other
+ * failure throw the write's error.
+ */
+export async function writeRunCredentialFilesSoftly(input: {
+  initial: boolean;
+  write: () => Promise<void>;
+  clear: () => Promise<void>;
+}): Promise<SoftSetupFailure | null> {
+  try {
+    await input.write();
+    return null;
+  } catch (error) {
+    const failure = input.initial ? softRunCredentialWriteFailure(error) : null;
+    if (!failure) throw error;
+    try {
+      await input.clear();
+    } catch {
+      throw error;
+    }
+    return failure;
+  }
+}
+
 export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
+  return withSandboxStartupPhases(
+    {
+      observability: deps.observability,
+      provider: deps.turnExecutionPolicy.providerId,
+      backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
+      publish: deps.eventing.publish,
+      publishInBackground: deps.eventing.publishInBackground,
+    },
+    (measure) => prepareRunCredentialsObserved(deps, measure),
+  );
+}
+
+async function prepareRunCredentialsObserved(
+  deps: PrepareRunCredentialsDeps,
+  measure: ReturnType<typeof sandboxStartupPhaseObserver>,
+) {
   const {
     input,
     settings,
@@ -129,9 +185,9 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     sandboxState,
     turn,
     session,
+    turnExecutionPolicy,
     fileAuthoritySubjectId,
     runSettings,
-    workspaceVariableSet,
     turnResources,
     requiredGeneratedVideoFiles,
     machinePrimary,
@@ -139,7 +195,6 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     groupBoxBackend,
     sandboxCreationBackend,
     effectiveRunCredentialBackend,
-    sandboxWorkspaceEnvironmentValues,
     connectionScope,
     runWorkspaceMutationForSandbox,
   } = deps;
@@ -169,26 +224,29 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     effectiveRunCredentialBackend === "none" || effectiveRunCredentialBackend === "selfhosted"
       ? null
       : await waitForTurnOperation(
-          bindRunCredentialResolver({
-            db,
-            settings: accountRoutes.settings,
-            initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
-            connectionCredentials: connectionCredentials ?? null,
-            localMcpServerIds: deps.localMcpServerIds ?? [],
-            effectiveTools: accountRoutes.tools,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            session,
-            turn,
-            attemptId: input.attemptId,
-            effectiveSandboxBackend: effectiveRunCredentialBackend,
-            variableSet: workspaceVariableSet
-              ? {
-                  id: workspaceVariableSet.id,
-                  name: workspaceVariableSet.name,
-                }
-              : null,
-          }),
+          measureTurnStartupPhase(
+            observability,
+            {
+              phase: "run_credential_binding",
+              provider: turnExecutionPolicy.providerId,
+              backend: effectiveRunCredentialBackend,
+            },
+            () =>
+              bindRunCredentialResolver({
+                db,
+                settings: accountRoutes.settings,
+                initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
+                connectionCredentials: connectionCredentials ?? null,
+                localMcpServerIds: deps.localMcpServerIds ?? [],
+                effectiveTools: accountRoutes.tools,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                session,
+                turn,
+                attemptId: input.attemptId,
+                effectiveSandboxBackend: effectiveRunCredentialBackend,
+              }),
+          ),
           cancellationSignal,
           undefined,
         );
@@ -215,13 +273,15 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   // discovery; a lazy sandbox materializes the latest resolved material only
   // inside its first-operation single-flight.
   const initialRunCredentialMaterial = runCredentialResolver
-    ? await waitForTurnOperation(
-        runCredentialResolver.resolve({
-          purpose: "provision",
-          forceRefresh: false,
-        }),
-        cancellationSignal,
-        undefined,
+    ? await measure("credential_resolution", () =>
+        waitForTurnOperation(
+          runCredentialResolver.resolve({
+            purpose: "provision",
+            forceRefresh: false,
+          }),
+          cancellationSignal,
+          undefined,
+        ),
       )
     : null;
   const runMcpCredentials = new RunMcpCredentials(
@@ -248,35 +308,14 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     ? runCredentialModelNote(initialRunCredentialMaterial)
     : undefined;
   throwIfTurnOperationCancelled(cancellationSignal);
+  // Session membership is live repository authority. The first, lazy and
+  // renewed mints (every Git provider) narrow to the repositories still
+  // attached, so removing one repository mid-turn re-mints a token without
+  // it; the mint guard below fails closed if a removed repository still
+  // reaches a GitHub App token request.
+  const liveSession = { db, workspaceId: input.workspaceId, sessionId: input.sessionId };
   const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
-    const registrationId = prReviewRegistrationIdFromCredentialBinding(
-      selection.credentialBindingId,
-    );
-    if (registrationId) {
-      await resolvePrReviewGitCredential(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        registrationId,
-        provider: "github",
-        sessionId: input.sessionId,
-        rootSessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: turn.executionGeneration,
-        repositoryRefs: selection.repositoryRefs.map((reference) => ({
-          uri: reference.uri,
-          ...(reference.expectedCommitSha !== undefined
-            ? { expectedCommitSha: reference.expectedCommitSha }
-            : {}),
-          ...(reference.repositoryId !== undefined ? { repositoryId: reference.repositoryId } : {}),
-          ...(reference.installationId !== undefined
-            ? { installationId: reference.installationId }
-            : {}),
-          ...(reference.projectId !== undefined ? { projectId: reference.projectId } : {}),
-        })),
-      });
-      return;
-    }
+    await assertTokenRepositoriesAttached(liveSession, selection.repositoryRefs);
     await assertGitHubTokenMintSelectionAuthorized(
       db,
       input.workspaceId,
@@ -346,11 +385,13 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
           turn,
         })
       : undefined;
+  const credentialRestriction = turnCredentialRestriction(turnExecutionPolicy, session.metadata);
   const codemodeAuthority = {
     sessionId: input.sessionId,
     turnId: turn.id,
     attemptId: input.attemptId,
     executionGeneration: turn.executionGeneration,
+    ...(credentialRestriction ? { credentialRestriction } : {}),
   };
   const sandboxArtifactRuntime = sandboxArtifactRuntimeAdmission(
     settings,
@@ -365,27 +406,26 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     gitCredentialBindings: sandboxGitCredentialBindings,
     codemodeToken: sandboxCodemodeToken,
     codemodeTokenExpiresAt: sandboxCodemodeTokenExpiresAt,
-  } = await waitForTurnOperation(
-    sandboxEnvironmentForRun(
-      sandboxEnvironmentSettings,
-      platformGitResources,
-      // Rig default sets merged BELOW the session set (session wins); rig-less
-      // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).
-      sandboxWorkspaceEnvironmentValues,
-      {
-        skipGitHubToken: activeSandboxBackend === "selfhosted",
-        codemodeDelivery: activeSandboxBackend === "selfhosted" ? "transient_exec" : "managed_file",
-        deferGitHubToken: activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
-        scope: connectionScope,
-        ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-        gitCredentials: connectionCredentials?.gitCredentials,
-        personalGitHubCredentials: personalGitHubCredentials ?? undefined,
-        authorizeGitHubTokenMint,
-        codemodeAuthority,
-      },
+  } = await measure("credential_mint", () =>
+    waitForTurnOperation(
+      attachedRepositoryResources(liveSession, platformGitResources).then((resources) =>
+        sandboxEnvironmentForRun(sandboxEnvironmentSettings, resources, {
+          skipGitHubToken: activeSandboxBackend === "selfhosted",
+          codemodeDelivery:
+            activeSandboxBackend === "selfhosted" ? "transient_exec" : "managed_file",
+          deferGitHubToken:
+            activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
+          scope: connectionScope,
+          ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+          gitCredentials: connectionCredentials?.gitCredentials,
+          personalGitHubCredentials: personalGitHubCredentials ?? undefined,
+          authorizeGitHubTokenMint,
+          codemodeAuthority,
+        }),
+      ),
+      cancellationSignal,
+      undefined,
     ),
-    cancellationSignal,
-    undefined,
   );
   // Reserved, image-owned paths win over workspace/session variables. The
   // exact same merged object feeds both box manifest and agent declaration,
@@ -398,8 +438,12 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   // in this attempt. SelfhostedSession snapshots it into each exact exec
   // request; it never enters the manifest, argv, filesystem, RunState, or
   // serialized session state. Managed renewal updates the same cell so a
-  // later mid-turn swap sees the fresh bearer too.
-  const codemodeTokenState = sandboxCodemodeToken ? { token: sandboxCodemodeToken } : undefined;
+  // later mid-turn swap sees the fresh bearer too. The cell always holds the
+  // newest bearer this attempt minted, with its signed expiry.
+  const codemodeTokenState =
+    sandboxCodemodeToken && sandboxCodemodeTokenExpiresAt
+      ? { token: sandboxCodemodeToken, expiresAt: sandboxCodemodeTokenExpiresAt }
+      : undefined;
   const transientCodemodeEnvironment = codemodeTokenState
     ? (): Readonly<Record<string, string>> => ({
         OPENGENI_CODEMODE_URL: codemodeWorkspaceUrl(runSettings, input.workspaceId),
@@ -429,13 +473,28 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       return Promise.resolve(undefined);
     }
     runGitCredentialsMint ??= waitForTurnOperation(
-      mintRunGitCredentials(runSettings, platformGitResources, {
-        scope: connectionScope,
-        ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-        gitCredentials: connectionCredentials?.gitCredentials,
-        personalGitHubCredentials: personalGitHubCredentials ?? undefined,
-        authorizeGitHubTokenMint,
-      }),
+      measureTurnStartupPhase(
+        observability,
+        {
+          phase: "run_git_credential_mint",
+          provider: turnExecutionPolicy.providerId,
+          backend: effectiveRunCredentialBackend,
+        },
+        async () => {
+          const minted = await mintRunGitCredentials(
+            runSettings,
+            await attachedRepositoryResources(liveSession, platformGitResources),
+            {
+              scope: connectionScope,
+              ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+              gitCredentials: connectionCredentials?.gitCredentials,
+              personalGitHubCredentials: personalGitHubCredentials ?? undefined,
+              authorizeGitHubTokenMint,
+            },
+          );
+          return minted;
+        },
+      ),
       cancellationSignal,
       undefined,
     );
@@ -463,7 +522,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
         mint: async () => {
           const binding = await mintRunGitCredentialBinding(
             runSettings,
-            platformGitResources,
+            await attachedRepositoryResources(liveSession, platformGitResources),
             initialBinding.provider,
             initialBinding.credentialBindingId,
             {
@@ -490,7 +549,6 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
           if (!pendingBinding) {
             throw new Error("credential renewal produced no binding token");
           }
-          const runAs = sandboxRunAs(runSettings);
           const targetSandbox = sandboxState.resolvedSandbox ?? initialSandbox;
           if (!targetSandbox) {
             throw new Error("Git credential renewal has no exact sandbox lease target");
@@ -500,7 +558,6 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
             "gitCredentialRenewal",
             async () =>
               await refreshGitCredentialBindingTokenFiles(tokenSession, [pendingBinding!], {
-                ...(runAs ? { runAs } : {}),
                 ...(eventing.toolCancellationFenceRef.current
                   ? {
                       commandRunner:
@@ -546,28 +603,64 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     renewals.gitCredentialRenewals = controllers;
   };
 
-  const attachCodemodeTokenRenewal = async (
-    tokenSession?: CodemodeTokenWriterSession,
-    initialExpiresAt = sandboxCodemodeTokenExpiresAt,
-    initialSandbox?: ResumedTurnSandbox,
-  ): Promise<void> => {
-    if (!codemodeTokenState || !initialExpiresAt) return;
+  const mintCodemodeToken = async (): Promise<MintedSandboxCodemodeToken | undefined> =>
+    await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority);
+  const rememberCodemodeToken = (material: MintedSandboxCodemodeToken): void => {
+    if (!codemodeTokenState) return;
+    if (material.expiresAt.getTime() < codemodeTokenState.expiresAt.getTime()) return;
+    codemodeTokenState.token = material.token;
+    codemodeTokenState.expiresAt = material.expiresAt;
+  };
+  const stopCodemodeTokenRenewal = async (): Promise<void> => {
     const previous = renewals.codemodeTokenRenewal;
     renewals.codemodeTokenRenewal = null;
     await previous?.stop();
-    if (renewals.codemodeTokenRenewalClosed) return;
+  };
 
-    const mint = async () => {
-      const material = await mintSandboxCodemodeToken(
-        runSettings,
-        connectionScope,
-        codemodeAuthority,
-      );
-      return material;
-    };
-    const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
+  /**
+   * Choose the bearer a managed setup is about to write into the box's token
+   * file: the newest one this attempt holds, freshly minted when it is close
+   * to expiry. Renewal stops first so it cannot overwrite the file with a
+   * different bearer while the setup runs; the caller restarts it with
+   * `attachCodemodeTokenRenewal(session, seed, sandbox)` once the setup has
+   * written this exact bearer. Connected Machines receive the bearer per exec,
+   * never as a file, so they get no seed.
+   */
+  const prepareCodemodeTokenSeed = async (): Promise<MintedSandboxCodemodeToken | undefined> => {
+    if (!codemodeTokenState || activeSandboxBackend === "selfhosted") return undefined;
+    await stopCodemodeTokenRenewal();
+    if (codemodeTokenState.expiresAt.getTime() <= Date.now() + CODEMODE_TOKEN_EXPIRY_LEAD_MS) {
+      const fresh = await mintCodemodeToken();
+      if (!fresh) {
+        throw new Error("Codemode token mint became unavailable during sandbox setup");
+      }
+      rememberCodemodeToken(fresh);
+    }
+    return { token: codemodeTokenState.token, expiresAt: codemodeTokenState.expiresAt };
+  };
+
+  /**
+   * Keep the attempt's Codemode bearer alive for the whole attempt. `seeded` is
+   * the bearer the caller just delivered (the token file's current content for
+   * a managed box); it defaults to the one minted at attempt start, which every
+   * agent-built seed carries. Renewal replaces it before it expires.
+   */
+  const attachCodemodeTokenRenewal = async (
+    tokenSession?: CodemodeTokenWriterSession,
+    seeded: MintedSandboxCodemodeToken | undefined = sandboxCodemodeToken &&
+    sandboxCodemodeTokenExpiresAt
+      ? { token: sandboxCodemodeToken, expiresAt: sandboxCodemodeTokenExpiresAt }
+      : undefined,
+    initialSandbox?: ResumedTurnSandbox,
+  ): Promise<void> => {
+    if (!codemodeTokenState || !seeded) return;
+    await stopCodemodeTokenRenewal();
+    if (renewals.codemodeTokenRenewalClosed) return;
+    rememberCodemodeToken(seeded);
+
+    const mint = mintCodemodeToken;
+    const write = async (material: MintedSandboxCodemodeToken) => {
       if (tokenSession) {
-        const runAs = sandboxRunAs(runSettings);
         const targetSandbox = sandboxState.resolvedSandbox ?? initialSandbox;
         if (!targetSandbox) {
           throw new Error("Codemode token renewal has no exact sandbox lease target");
@@ -577,7 +670,6 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
           "codemodeTokenRenewal",
           async () =>
             await refreshCodemodeTokenFile(tokenSession, material.token, {
-              ...(runAs ? { runAs } : {}),
               ...(sandboxCodemodeTokenFile
                 ? {
                     tokenFile: sandboxCodemodeTokenFile,
@@ -594,9 +686,9 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
             }),
         );
       }
-      codemodeTokenState.token = material.token;
+      rememberCodemodeToken(material);
     };
-    let renewalExpiresAt = initialExpiresAt;
+    let renewalExpiresAt = seeded.expiresAt;
     if (renewalExpiresAt.getTime() <= Date.now() + CODEMODE_TOKEN_EXPIRY_LEAD_MS) {
       const fresh = await mint();
       if (!fresh) {
@@ -647,12 +739,12 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     credentialSession: RunCredentialCommandSession | undefined,
     initialMaterial: NormalizedRunCredentialMaterial | null,
     initialSandbox?: ResumedTurnSandbox,
-  ): Promise<void> => {
-    if (!runCredentialResolver) return;
+  ): Promise<SoftSetupFailure | null> => {
+    if (!runCredentialResolver) return null;
     const previous = renewals.runCredentialRenewal;
     renewals.runCredentialRenewal = null;
     await previous?.stop();
-    if (renewals.runCredentialRenewalClosed) return;
+    if (renewals.runCredentialRenewalClosed) return null;
     renewals.runCredentialSession = credentialSession ?? null;
     initialMaterial = currentRunCredentialMaterial;
 
@@ -679,9 +771,13 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
               : undefined,
           ),
       );
-      return;
+      return null;
     }
-    if (!initialMaterial) return;
+    if (!initialMaterial) return null;
+    // The first write into a box whose own disk is full (or read-only) does
+    // not fail the turn: the model is told and can free space, and renewal
+    // writes the files again (sandbox-setup-soft-failure.ts).
+    let softFailure: SoftSetupFailure | null = null;
 
     const write = async (
       material: NormalizedRunCredentialMaterial | null,
@@ -707,31 +803,50 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
         return;
       }
 
-      if (credentialSession)
-        await runWorkspaceMutationForSandbox(
-          requireTargetSandbox(),
-          "runCredentialMaterialization",
-          async () =>
-            await materializeRunCredentials(credentialSession, material, {
-              sessionId: input.sessionId,
-              attemptId: input.attemptId,
-              executionGeneration: attempt.executionGeneration,
-              ...(pruneOtherAttempts ? { pruneOtherAttempts: true } : {}),
-              ...(!pruneOtherAttempts ? { pruneSupersededGenerations: true } : {}),
-              ...(material.authNeeded.length > 0 &&
-              Object.keys(material.environment).length === 0 &&
-              material.files.length === 0
-                ? { prunePreviousGenerations: true }
-                : {}),
-              ...(eventing.toolCancellationFenceRef.current
-                ? {
-                    commandRunner: eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                      eventing.toolCancellationFenceRef.current,
-                    ),
-                  }
-                : {}),
-            }),
-        );
+      if (credentialSession) {
+        const commandRunner = eventing.toolCancellationFenceRef.current
+          ? eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
+              eventing.toolCancellationFenceRef.current,
+            )
+          : undefined;
+        const failure = await writeRunCredentialFilesSoftly({
+          initial: pruneOtherAttempts,
+          write: async () =>
+            await runWorkspaceMutationForSandbox(
+              requireTargetSandbox(),
+              "runCredentialMaterialization",
+              async () =>
+                await materializeRunCredentials(credentialSession, material, {
+                  sessionId: input.sessionId,
+                  attemptId: input.attemptId,
+                  executionGeneration: attempt.executionGeneration,
+                  ...(pruneOtherAttempts ? { pruneOtherAttempts: true } : {}),
+                  ...(!pruneOtherAttempts ? { pruneSupersededGenerations: true } : {}),
+                  ...(material.authNeeded.length > 0 &&
+                  Object.keys(material.environment).length === 0 &&
+                  material.files.length === 0
+                    ? { prunePreviousGenerations: true }
+                    : {}),
+                  ...(commandRunner ? { commandRunner } : {}),
+                }),
+            ),
+          clear: async () =>
+            await runWorkspaceMutationForSandbox(
+              requireTargetSandbox(),
+              "runCredentialClear",
+              async () =>
+                await clearRunCredentials(credentialSession, input.sessionId, commandRunner),
+            ),
+        });
+        if (failure) {
+          softFailure = failure;
+          observability.warn("Run credential files could not be written; the turn continues", {
+            sessionId: input.sessionId,
+            turnId: attempt.turnId,
+            cause: failure.cause.kind,
+          });
+        }
+      }
       throwIfTurnOperationCancelled(cancellationSignal);
       applyMcpCredentials();
       currentRunCredentialMaterial = material;
@@ -747,7 +862,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     // refreshes are renewals, not fresh provisions that degrade to empty
     // auth-needed state on a provider transport failure.
     await write(initialMaterial, true);
-    if (renewals.runCredentialRenewalClosed) return;
+    if (renewals.runCredentialRenewalClosed) return softFailure;
     const controller = startRunCredentialRenewalLoop({
       initialExpiresAt: runCredentialRenewalExpiry(initialMaterial),
       resolve: async () =>
@@ -781,7 +896,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     });
     if (renewals.runCredentialRenewalClosed) {
       await controller.stop();
-      return;
+      return softFailure;
     }
     renewals.runCredentialRenewal = controller;
     const initialExpiryMs = runCredentialRenewalExpiry(initialMaterial)?.getTime() ?? null;
@@ -789,6 +904,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       await controller.refreshNow();
       throwIfTurnOperationCancelled(cancellationSignal);
     }
+    return softFailure;
   };
 
   // Remote MCP-only turns may never establish a sandbox. Start the same
@@ -820,6 +936,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     initialGitCredentials,
     startRunGitCredentialsMint,
     attachGitCredentialRenewal,
+    prepareCodemodeTokenSeed,
     attachCodemodeTokenRenewal,
     attachRunCredentialRenewal,
   };

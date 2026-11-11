@@ -6,7 +6,6 @@ import {
 
 import { runBoundedXaiOperation } from "./bounded-operation";
 import {
-  XAI_CLIENT_VERSION,
   XAI_DEVICE_AUTHORIZATION_URL,
   XAI_DEVICE_CODE_GRANT_TYPE,
   XAI_OAUTH_CLIENT_ID,
@@ -15,6 +14,7 @@ import {
   XAI_TOKEN_URL,
   XAI_USERINFO_URL,
 } from "./constants";
+import { currentXaiClientVersion } from "./client-version";
 import {
   XaiSubscriptionError,
   XaiSubscriptionReloginRequired,
@@ -68,8 +68,8 @@ function oauthHeaders(): Headers {
   return new Headers({
     accept: "application/json",
     "content-type": "application/x-www-form-urlencoded",
-    "user-agent": `opengeni/${XAI_CLIENT_VERSION}`,
-    "x-grok-client-version": XAI_CLIENT_VERSION,
+    "user-agent": `opengeni/${currentXaiClientVersion()}`,
+    "x-grok-client-version": currentXaiClientVersion(),
     "x-grok-client-surface": "headless",
   });
 }
@@ -290,8 +290,8 @@ export async function fetchXaiVerifiedIdentity(
   const headers = new Headers({
     accept: "application/json",
     authorization: `Bearer ${accessToken}`,
-    "user-agent": `opengeni/${XAI_CLIENT_VERSION}`,
-    "x-grok-client-version": XAI_CLIENT_VERSION,
+    "user-agent": `opengeni/${currentXaiClientVersion()}`,
+    "x-grok-client-version": currentXaiClientVersion(),
   });
   const { response, body } = await boundedFetchJson(
     "userinfo request",

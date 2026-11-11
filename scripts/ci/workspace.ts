@@ -7,6 +7,7 @@ import {
   workspacePackages,
   type WorkspacePackage,
 } from "../publishable-workspaces";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type WorkspaceGraph = {
   packages: WorkspacePackage[];
@@ -20,6 +21,7 @@ export const UNIT_TEST_PATTERN = /(?:^|\/)\S+\.test\.tsx?$/;
 export const INTEGRATION_TEST_PATTERN = /(?:^|\/)\S+\.integration\.ts$/;
 export const E2E_TEST_PATTERN = /(?:^|\/)\S+\.e2e\.ts$/;
 export const INTEGRATION_SHARD_PROFILE = "scripts/ci/integration-shard-profile.json";
+export const E2E_SHARD_PROFILE = "scripts/ci/e2e-shard-profile.json";
 const TEST_SOURCE_DIRECTORIES = ["apps", "examples", "packages", "scripts", "test"];
 
 export type ShardWeightResolution = {
@@ -30,10 +32,16 @@ export type ShardWeightResolution = {
 };
 
 export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
+  "apps/worker/test/skill-checkout-synchronous-live.e2e.ts":
+    "is retained for explicitly pinned sandbox Skill checkout, execution, and publish acceptance using a deterministic adapter or existing Codex credentials",
   "apps/api/test/native-report-delivery.test.ts":
+    "requires a verified native runtime and real PostgreSQL and is owned by the required package-contracts gate",
+  "apps/api/test/native-spreadsheet-transaction-order.test.ts":
     "requires a verified native runtime and real PostgreSQL and is owned by the required package-contracts gate",
   "test/integration/workspace-capture.integration.ts":
     "requires an already-running real dev stack and is owned by the live workspace-capture gate",
+  "test/e2e/secrets-gate.e2e.ts":
+    "requires an already-running localstack (and Gateway credits for real-model scenarios) and is owned by the secrets full-stack gate",
   "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts":
     "requires cross-browser artifact evidence and is owned by the curated browser-acceptance gate",
   "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts":
@@ -182,11 +190,14 @@ export function transitiveDependencies(
 
 export function typecheckProjects(graph = createWorkspaceGraph()): string[] {
   const projects = [
+    "scripts/batcher",
     "scripts/ci",
     "scripts/operator",
     "scripts/public-api",
     "scripts/release",
     "scripts/agent-behavior-eval",
+    "scripts/integration-eval",
+    "scripts/verify",
   ].filter((directory) => existsSync(join(directory, "tsconfig.json")));
   for (const pkg of graph.packages) {
     if (existsSync(join(pkg.dir, "tsconfig.json"))) projects.push(normalizePath(pkg.dir));
@@ -286,6 +297,21 @@ export function integrationShardWeights(
   root = process.cwd(),
   profilePath = join(root, INTEGRATION_SHARD_PROFILE),
 ): ShardWeightResolution {
+  return testShardWeights(root, "integration", profilePath);
+}
+
+export function e2eShardWeights(
+  root = process.cwd(),
+  profilePath = join(root, E2E_SHARD_PROFILE),
+): ShardWeightResolution {
+  return testShardWeights(root, "e2e", profilePath);
+}
+
+function testShardWeights(
+  root: string,
+  tier: "integration" | "e2e",
+  profilePath: string,
+): ShardWeightResolution {
   try {
     const bytes = readFileSync(profilePath);
     const parsed = JSON.parse(bytes.toString("utf8")) as {
@@ -299,14 +325,12 @@ export function integrationShardWeights(
         bunVersionFileSha256?: unknown;
         serviceImagesPath?: unknown;
         serviceImagesSha256?: unknown;
+        dependencyLockSha256?: unknown;
+        browserRunnerSha256?: unknown;
       };
       entries?: Record<string, { sha256?: unknown; planningWeight?: unknown }>;
     };
-    if (
-      parsed.schemaVersion !== 1 ||
-      parsed.tier !== "integration" ||
-      parsed.units !== "milliseconds"
-    ) {
+    if (parsed.schemaVersion !== 1 || parsed.tier !== tier || parsed.units !== "milliseconds") {
       throw new Error("unsupported schema, tier, or units");
     }
     const environment = parsed.environment;
@@ -314,56 +338,106 @@ export function integrationShardWeights(
       !environment ||
       environment.platform !== process.platform ||
       environment.architecture !== process.arch ||
-      environment.bunVersion !== Bun.version ||
-      typeof environment.bunVersionFileSha256 !== "string" ||
-      typeof environment.serviceImagesPath !== "string" ||
-      typeof environment.serviceImagesSha256 !== "string"
+      typeof environment.bunVersion !== "string" ||
+      typeof environment.bunVersionFileSha256 !== "string"
     ) {
-      throw new Error("profile environment or toolchain does not match this runner");
+      throw new Error("profile environment does not match this runner's platform");
     }
     const hashFile = (path: string): string =>
       createHash("sha256")
         .update(readFileSync(join(root, path)))
         .digest("hex");
-    if (hashFile(".bun-version") !== environment.bunVersionFileSha256) {
-      throw new Error("profile Bun version file fence is stale");
-    }
-    if (hashFile(environment.serviceImagesPath) !== environment.serviceImagesSha256) {
-      throw new Error("profile service-image fence is stale");
+    // A toolchain, dependency or runner change shifts file times a little. It
+    // never makes them worse estimates than source size, and falling back to
+    // source size puts the slowest suites together and overruns the shard
+    // deadline. Plan with the measured times and report what drifted; a
+    // refreshed profile restores exact evidence.
+    const drift: string[] = [];
+    if (environment.bunVersion !== Bun.version) drift.push("Bun runtime");
+    if (hashFile(".bun-version") !== environment.bunVersionFileSha256) drift.push("Bun pin");
+    if (tier === "integration") {
+      if (
+        typeof environment.serviceImagesPath !== "string" ||
+        typeof environment.serviceImagesSha256 !== "string"
+      ) {
+        throw new Error("profile service-image fence is missing");
+      }
+      if (hashFile(environment.serviceImagesPath) !== environment.serviceImagesSha256) {
+        drift.push("service images");
+      }
+    } else {
+      if (
+        typeof environment.dependencyLockSha256 !== "string" ||
+        typeof environment.browserRunnerSha256 !== "string"
+      ) {
+        throw new Error("profile dependency or browser runner fence is missing");
+      }
+      if (hashFile("bun.lock") !== environment.dependencyLockSha256) drift.push("dependency lock");
+      if (hashFile("scripts/run-browser-e2e.ts") !== environment.browserRunnerSha256) {
+        drift.push("browser runner");
+      }
     }
     if (!parsed.entries || Array.isArray(parsed.entries))
       throw new Error("entries must be an object");
-    const discovered = discoverTestFiles(root).integration;
-    const paths = Object.keys(parsed.entries).sort();
-    if (JSON.stringify(paths) !== JSON.stringify(discovered)) {
-      throw new Error("profile file set does not exactly match discovered integration tests");
-    }
-    const weights = new Map<string, number>();
-    for (const path of paths) {
-      const entry = parsed.entries[path];
+    for (const [path, entry] of Object.entries(parsed.entries)) {
       if (!entry || typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) {
         throw new Error(`invalid content hash for ${path}`);
       }
       if (!Number.isSafeInteger(entry.planningWeight) || Number(entry.planningWeight) < 1) {
         throw new Error(`invalid planning weight for ${path}`);
       }
+    }
+    // Ordinary test edits must not discard every other file's timing either. A
+    // changed file keeps its last measured time (its closest estimate); a new
+    // file is estimated from its size at the profile's median milliseconds per
+    // byte.
+    const discovered = discoverTestFiles(root)[tier];
+    const sizeOf = (path: string) => Math.max(1, statSync(join(root, path)).size);
+    const weights = new Map<string, number>();
+    const changed: string[] = [];
+    const added: string[] = [];
+    const millisecondsPerByte: number[] = [];
+    for (const path of discovered) {
+      const entry = parsed.entries[path];
+      if (!entry) {
+        added.push(path);
+        continue;
+      }
       const actual = createHash("sha256")
         .update(readFileSync(join(root, path)))
         .digest("hex");
-      if (actual !== entry.sha256) throw new Error(`stale content hash for ${path}`);
-      weights.set(path, Number(entry.planningWeight));
+      const weight = Number(entry.planningWeight);
+      if (actual === entry.sha256) millisecondsPerByte.push(weight / sizeOf(path));
+      else changed.push(path);
+      weights.set(path, weight);
     }
+    if (discovered.length > 0 && weights.size === 0) {
+      throw new Error(`profile has no entry for any discovered ${tier} test`);
+    }
+    if (added.length > 0) {
+      if (millisecondsPerByte.length === 0) {
+        throw new Error(`profile has no current entry to estimate new ${tier} tests from`);
+      }
+      millisecondsPerByte.sort((left, right) => left - right);
+      const median = millisecondsPerByte[Math.floor((millisecondsPerByte.length - 1) / 2)]!;
+      for (const path of added) weights.set(path, Math.max(1, Math.round(median * sizeOf(path))));
+    }
+    const estimated =
+      changed.length + added.length > 0
+        ? `; estimated ${changed.length} changed file(s) from their last timing and ${added.length} new file(s) from size`
+        : "";
+    const drifted = drift.length > 0 ? `; measured before a ${drift.join(", ")} change` : "";
     return {
       mode: "profile",
       weights,
-      reason: "content-fenced integration planning profile",
+      reason: `content-fenced ${tier} planning profile${estimated}${drifted}`,
       profileSha256: createHash("sha256").update(bytes).digest("hex"),
     };
   } catch (error) {
     return {
       mode: "source-bytes",
       weights: null,
-      reason: error instanceof Error ? error.message : String(error),
+      reason: errorMessage(error),
       profileSha256: null,
     };
   }

@@ -3,7 +3,9 @@ import {
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
   defaultRepositoryMountPath,
+  GitHubRepositoryUnavailableError,
   mergeResourceRefs as mergeContractResourceRefs,
+  mergeToolRefEager,
   mergeToolRefs,
   normalizeRepositorySubpath,
   normalizeRepositoryTransportUri,
@@ -16,11 +18,12 @@ import {
   stableJson,
   type RepositoryResourceRef,
   type ResourceRef,
+  type ScheduledTaskToolPolicy,
   type ToolRef,
   type WorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
 import {
-  areGitHubRepositoriesAllowedForWorkspace,
+  listAllowedGitHubRepositoryIdsForWorkspace,
   requireFileForSubject,
   withSessionRlsActorContext,
   type SessionRlsActorContext,
@@ -57,7 +60,12 @@ export function validateToolRefs(tools: ToolRef[], settings: McpSettings): ToolR
       kind: "mcp",
       id: tool.id,
       ...(optional ? { optional: true } : {}),
-      ...(tool.eager === true ? { eager: true } : {}),
+      ...(tool.eager === true
+        ? { eager: true }
+        : Array.isArray(tool.eager) && tool.eager.length > 0
+          ? { eager: [...new Set(tool.eager)] }
+          : {}),
+      ...(tool.allowedTools !== undefined ? { allowedTools: [...new Set(tool.allowedTools)] } : {}),
     });
   }
   return mergeToolRefs([], out);
@@ -121,6 +129,32 @@ export function withWorkspaceDefaultMcpTools(
   );
 }
 
+/**
+ * The tools a run of a schedule that starts its own session gets now. A
+ * schedule that follows the workspace defaults gets the defaults as they are
+ * at this moment (never a copy saved earlier), minus the connectors a person
+ * turned off, plus its own tools. Without a policy it gets exactly its tools.
+ * The Opengeni carrier is never excluded.
+ */
+export function scheduledTaskRunTools(input: {
+  agentConfig: { tools: ToolRef[]; toolPolicy?: ScheduledTaskToolPolicy | undefined };
+  settings: McpSettings;
+  runtimeSettings: McpSettings;
+  workspaceDefaults: WorkspaceSessionToolDefaults | null;
+}): ToolRef[] {
+  const policy = input.agentConfig.toolPolicy;
+  if (!policy) return [...input.agentConfig.tools];
+  const excluded = new Set(policy.excludedMcpServerIds);
+  const kept = (tool: ToolRef) =>
+    tool.kind !== "mcp" || tool.id === "opengeni" || !excluded.has(tool.id);
+  return withWorkspaceDefaultMcpTools(
+    input.agentConfig.tools.filter(kept),
+    input.settings,
+    input.runtimeSettings,
+    input.workspaceDefaults,
+  ).filter(kept);
+}
+
 /** Drop stored refs that are no longer present in the current runtime registry. */
 export function availableToolRefs(tools: ToolRef[], settings: McpSettings): ToolRef[] {
   const available = new Set(settings.mcpServers.map((server) => server.id));
@@ -133,8 +167,18 @@ export function assertToolRefsSubset(
   allowed: ToolRef[],
   message = "requested tools exceed the session tool policy",
 ): void {
-  const allowedIds = new Set(allowed.map((tool) => `${tool.kind}:${tool.id}`));
-  const widened = requested.find((tool) => !allowedIds.has(`${tool.kind}:${tool.id}`));
+  const allowedById = new Map(
+    mergeToolRefs([], allowed).map((tool) => [`${tool.kind}:${tool.id}`, tool]),
+  );
+  const widened = requested.find((tool) => {
+    const ceiling = allowedById.get(`${tool.kind}:${tool.id}`);
+    return (
+      !ceiling ||
+      (ceiling.allowedTools !== undefined &&
+        (tool.allowedTools === undefined ||
+          tool.allowedTools.some((name) => !ceiling.allowedTools!.includes(name))))
+    );
+  });
   if (widened) {
     throw new HTTPException(403, { message: `${message}: ${widened.id}` });
   }
@@ -307,7 +351,8 @@ export function personalGitHubRepositoryResources(
     if (!isPersonalGitHubRepositoryCandidate(resource)) {
       if (resource.kind === "repository" && resource.connectionType === "github_personal") {
         throw new HTTPException(422, {
-          message: "personal GitHub repository resources require the dedicated GitHub provider",
+          message:
+            'personal GitHub repository resources require the dedicated GitHub provider: provider "github", credentialBindingId, repositoryId and access from the person\'s Your GitHub repository list. A session or schedule an agent creates can name just uri, ref and connectionType when its turn holds Your GitHub access.',
         });
       }
       continue;
@@ -421,23 +466,72 @@ export async function validateGitHubRepositorySelection(
     return;
   }
   const selections = gitHubRepositorySelections(resources);
+  const unavailableRepositoryIds = new Set<string>();
   for (const installationId of installationIds) {
     const repositoryIds = selections
       .filter((selection) => selection.installationId === installationId)
       .map((selection) => selection.repositoryId);
-    if (
-      !(await areGitHubRepositoriesAllowedForWorkspace(
-        db,
-        workspaceId,
-        installationId,
-        repositoryIds,
-      ))
-    ) {
-      throw new HTTPException(422, {
-        message:
-          "GitHub App repository resources must be authorized for a GitHub App installation linked to this workspace",
-      });
+    const allowed = new Set(
+      await listAllowedGitHubRepositoryIdsForWorkspace(db, workspaceId, installationId, [
+        ...new Set(repositoryIds),
+      ]),
+    );
+    for (const repositoryId of repositoryIds) {
+      if (!allowed.has(repositoryId)) {
+        unavailableRepositoryIds.add(`${installationId}:${repositoryId}`);
+      }
     }
+  }
+  if (unavailableRepositoryIds.size > 0) {
+    // Name what lost access so the person can remove it or restore it; the
+    // message keeps its historical text.
+    const cause = new GitHubRepositoryUnavailableError(
+      unavailableGitHubRepositoryNames(resources, unavailableRepositoryIds),
+    );
+    throw new HTTPException(422, { message: cause.message, cause });
+  }
+}
+
+/** `owner/name` of each refused repository, in request order, without duplicates. */
+function unavailableGitHubRepositoryNames(
+  resources: ResourceRef[],
+  unavailable: ReadonlySet<string>,
+): string[] {
+  const names = new Set<string>();
+  for (const resource of resources) {
+    const [selection] = gitHubRepositorySelections([resource]);
+    if (!selection || !unavailable.has(`${selection.installationId}:${selection.repositoryId}`)) {
+      continue;
+    }
+    names.add(githubRepositoryDisplayName(resource));
+  }
+  return [...names];
+}
+
+function githubRepositoryDisplayName(resource: ResourceRef): string {
+  if (resource.kind !== "repository") return "";
+  try {
+    const path = new URL(resource.uri).pathname.replace(/\.git$/u, "");
+    const [owner, name] = path.split("/").filter(Boolean);
+    if (owner && name) return `${owner}/${name}`;
+  } catch {
+    // Not a URL: fall back to the stored identity below.
+  }
+  return resource.uri;
+}
+
+/**
+ * An automatically attached (`optional: true`) GitHub App repository. A
+ * session keeps these across turns; when one loses access the worker drops it
+ * for the turn and reports it as skipped instead of failing the turn.
+ */
+export function isOptionalGitHubAppRepositoryResource(resource: ResourceRef): boolean {
+  if (resource.kind !== "repository" || resource.optional !== true) return false;
+  try {
+    return gitHubRepositorySelections([resource]).length === 1;
+  } catch {
+    // A malformed selection is not exempt: the strict check refuses it.
+    return false;
   }
 }
 
@@ -511,4 +605,4 @@ function positiveInteger(value: unknown): number | null {
   return null;
 }
 
-export { mergeToolRefs, stableJson };
+export { mergeToolRefEager, mergeToolRefs, stableJson };

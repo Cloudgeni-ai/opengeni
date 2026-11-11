@@ -17,7 +17,7 @@ export {
   type ArtifactLoadErrorKind,
   type ArtifactLoadErrorView,
 } from "./artifact-chrome";
-export { ArtifactSandbox, type ArtifactSandboxProps } from "./artifact-sandbox";
+export { ArtifactSandbox, type ArtifactSandboxProps, type SiteLiveState } from "./artifact-sandbox";
 export { DeferredChatMedia } from "./deferred-chat-media";
 export {
   ChatInteractiveBlock,
@@ -58,6 +58,7 @@ export {
   SpreadsheetProjectionGrid,
   type SpreadsheetArtifactSurfaceProps,
   type SpreadsheetCommit,
+  type SpreadsheetDimensionCommit,
   type SpreadsheetRangeCommit,
   type SpreadsheetGridProps,
   type SpreadsheetGridProjection,

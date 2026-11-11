@@ -24,6 +24,31 @@ the viewer and query and expires after one hour. A bounded scan through denied
 candidates can return an empty page with `nextCursor`; that is not the end of the
 listing.
 
+Pins are persisted, workspace-shared discovery metadata for every catalog kind.
+`client.updateArtifactPin(workspaceId, kind, artifactId, pinned)` idempotently sets
+the pin through `PUT /v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin`
+with `{ pinned: boolean }`, returning only `{ kind, artifactId, pinned }`. Await
+that response, then refresh the catalog from its first page. `ArtifactCatalogItem.pinned`
+is optional for compatibility with older servers; absence means unpinned.
+
+Normal kind, status, title and source-session filters still apply. Pins sort
+**globally first**, before the selected sort and `kind:id` tie-breaker, including
+subsequent pages and the bounded published-file branch. Pin changes, like title
+changes, can move items across a live cursor; refresh to restart traversal.
+Legacy unpinned cursor frontiers remain accepted by the new API.
+
+Pinning and unpinning require `artifacts:publish` plus the target's existing
+`artifacts:read` or `files:read` authority. Editable targets pass the read-only
+application seam, and private files remain owner-filtered. Missing, hidden,
+foreign-workspace and kind-mismatched targets are not pin-mutable. A pin never
+grants content access or exposes otherwise unreadable items or provenance.
+Migration `0610_artifact_catalog_pins.sql` adds only private FORCE-RLS metadata
+and fixed-search-path, tenant-scoped EXECUTE capabilities; runtime roles get no
+direct pin-table privileges. The original publication capability is unchanged
+so pre-pin binaries retain their schema/runtime-posture contract during rollout.
+Pin endpoints and pin-aware continuation requests must reach upgraded API
+instances; older instances remain safe but cannot serve this additive feature.
+
 The web console keeps loaded catalog views in memory per client, credential
 generation, workspace, and filters, so switching tabs or returning to the page
 renders at once. A view older than 30 seconds, or one a session's tool output has
@@ -44,6 +69,12 @@ authoritative. Source-session links are exposed only when that session is
 readable. Content is loaded through the existing authenticated artifact APIs;
 catalog results contain no storage credentials or temporary download URLs.
 
+Editable catalog projection uses the optional application `readArtifacts` seam
+in windows of eight. Core still authorizes each item, then the PostgreSQL store
+reads their metadata in one tenant-scoped statement and checks each authorization
+revision. Stale items reauthorize through the ordinary single-read retry path.
+Embedding applications or stores without the batch seam retain single reads.
+
 Images and other files need `files:read`; Sites, documents, spreadsheets, and
 presentations need `artifacts:read`. A viewer holding only one of the two gets
 the other kinds silently omitted from the catalog, so the console names the
@@ -60,6 +91,107 @@ caller's own, and are reversible: archive keeps the source and full version
 history, restore republishes an archived Site, and rollback restores an earlier
 version without discarding the current one.
 
+Sites are shared work too. Since migration 0865 anyone with `artifacts:publish`
+who can see a Site manages it like its owner: Site Data and Site SQL,
+publication settings, abuse reports, and taking it down or restoring it. Only an
+administrator lifts an administrator's takedown, raises resource limits, or
+grants a Site assistant extra workspace tools, and only the owner changes who
+can see a Site (the whole workspace or "Only me"): from the Site page, with
+`PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/visibility`,
+or through an agent turn acting for them with `sandbox_file_publish` and the
+Site's `artifactId`, as for a file. The Site keeps its link.
+
+## Who can open a file
+
+Files have the same two audiences as Sites and chats: **Only me**
+(`visibility: "private"`, only its owner can open it) or **Workspace**
+(`"workspace"`). A new file follows the chat it comes from, on every path an
+agent makes files through (`sandbox_file_publish`, uploads, browser downloads,
+generated images and videos): Only me in an Only me chat, otherwise the
+workspace. A person's own upload is shared unless they choose Only me. An
+explicit choice wins on the owner's behalf: `visibility` on
+`sandbox_file_publish`, or `scope` on `POST /files/uploads`. A Personal
+workspace follows the same rule; its Workspace audience is only its owner.
+
+The owner changes one finished file with
+`PUT /v1/workspaces/:workspaceId/files/:fileId/visibility` and
+`{ visibility }` (`client.updateFileVisibility`), from the file's page or its
+Artifacts menu, or through their agent with `sandbox_file_publish` and an
+`artifactId`. Only a private owner can share a file, only its owner
+(`FileAsset.ownerSubjectId`) can limit it again, and the `files` trigger
+enforces exactly these two transitions. Each change records a
+`file.visibility.changed` audit event. Session screenshots and saved tool
+output keep their chat's audience. Existing private files stay private.
+
+### Where an Only me file works
+
+An Only me file works in the workspace that stores it and in its owner's
+Personal workspace, plus the other workspaces of the organization its owner
+turns it on in. It stays Only me in each: only its owner, and agent turns they
+start, can list, open or attach it there. `FileAsset.reachWorkspaceIds` lists
+those other workspaces (`null` for all of them); it is returned only for Only me
+files. New Only me files start with none; files from before migration
+`1186_only_me_reach.sql` keep `null`, so they still work everywhere they did.
+
+The owner changes it from the workspace that stores the file, with
+`PUT /v1/workspaces/:workspaceId/files/:fileId/reach` and
+`{ reachWorkspaceIds }` (`client.updateFileReach`), or from **Available in…**
+in the file page's audience menu while the file is Only me. Every id must be
+one of the owner's workspaces in the organization (`400` otherwise); the
+Personal workspace is always included and is dropped from the list. Anyone else
+gets `404`, as for a file that does not exist, and so does a request from a
+workspace that doesn't store the file; a Workspace file gets `409`. Each change
+records a `file.reach.changed` audit event. The same rule applies to Only me
+meetings ([recordings.md](recordings.md)).
+
+Publish and upload results include `access: { visibility, whoCanOpen }`, one
+plain sentence telling the agent who can open the file before it shares a
+link. `ArtifactCatalogItem.visibility` and `ownedByViewer` drive the Only me
+marker and the owner's share action in the library.
+
+A person who opens someone else's Only me file gets `403` with
+`{ available: false, reason: "private" }` and is asked to have its owner share
+it; nothing about the file's name or owner is returned. A file that does not
+exist is still `404`. Migration `0854_file_visibility.sql` is rolling.
+
+## Who can open a document, spreadsheet or presentation
+
+Documents, spreadsheets and presentations have the same two audiences:
+**Only me** (`visibility: "private"`) or **Workspace** (`"workspace"`). A new
+one follows where it is made: Only me when an agent makes it in an Only me
+chat, or imports it from an Only me file; otherwise the workspace. A person
+creating one from the app gets the workspace unless they ask for Only me with
+`visibility` on `POST /editable-artifacts` or `POST /editable-artifacts/imports`.
+Its owner is the person it was made for: the signed-in person, the person whose
+turn made it, or, for a run without a person in an Only me chat (such as a
+meeting summary), the chat's owner. Sites made in an Only me chat follow the
+same rule. Every document that existed before audiences stays shared with the
+workspace and has no owner, so nobody can limit it.
+
+An Only me one opens only for its owner: the owner themselves, or an agent
+turn acting for them or running in their own Only me chat. Colleagues,
+workspace administrators, keys and services cannot read, edit, export or open
+a live session on it, and the artifact library does not list it for them.
+This is decided once, in `opengeni_private.authorize_editable_artifact_actor`,
+which every read, edit, export, live session and catalog projection already
+uses. Opening someone else's Only me document answers like a document that
+does not exist.
+
+A file an agent exports from an Only me document is an Only me file for the
+document's owner, even when the export runs in a chat shared with the
+workspace. Exports of a shared document follow their chat, like every file an
+agent makes.
+
+Only the owner changes the audience, from the app:
+`PUT /v1/workspaces/:workspaceId/editable-artifacts/:artifactId/visibility`
+with `{ visibility }` (`client.updateEditableArtifactVisibility`), or the
+document's Artifacts menu. Agents cannot change it. Limiting to Only me needs
+Only me to be allowed for the owner, as for chats and Sites. A change advances
+the artifact's authorization revision, so open live sessions are decided again
+and anyone who lost access is closed out. Responses and catalog items carry
+`visibility` and `ownedByViewer`. Migration `1160_editable_artifact_audience.sql`
+is rolling.
+
 ## Presentation and version semantics
 
 The workspace library opens as a preview gallery: cards with a thumbnail, the
@@ -74,6 +206,50 @@ switches to flat rows and is remembered in the browser
 search, and a Filter menu for archived items and sorting. The session panel
 uses the same catalog with a source-session filter. Both open the existing
 type-specific viewers. Published files use `/workspaces/:workspaceId/artifacts/files/:artifactId`.
+
+In the session panel a plain click on an image or file opens the artifact
+viewer (`artifact-viewer.tsx`): one window-sized dialog that steps through
+exactly the artifacts the panel lists, in its order, so search, filters and
+sorting carry over. Previous/Next in its header, Left/Right, or a touch swipe
+step without wrapping; the header shows "3 of 23", the title, Download for
+images and the row's ⋯ menu (whose Open still opens the artifact in the panel);
+Escape closes it. Neighbouring images preload through the retained-image
+cache. Sites, documents, spreadsheets and presentations keep opening in the
+panel on click, and show their embedded preview when the viewer steps onto
+them, where arrow keys stay with the content. The workspace library keeps its
+URL-based browsing on artifact pages (below). Chat images keep the timeline
+lightbox, which already pages through every image in the conversation.
+The viewer follows the list as it changes: an artifact that leaves it (archived
+or deleted) closes the viewer, and pinning one moves it to the top of the list,
+so its position number changes.
+
+Images in the viewer and in the chat lightbox share one zoom surface
+(`components/zoom-pan-image.tsx`, geometry in `lib/zoom-pan.ts`). An image
+opens fitted to the window, enlarged up to 2x when it is small. Cmd/Ctrl + plus
+and minus, Cmd/Ctrl + wheel, a trackpad or touch pinch and the −/+ buttons zoom
+around the pointer (or the centre) from actual size or the fitted size,
+whichever is smaller, up to 800%, with the percentage between the buttons;
+Cmd/Ctrl + 0 or Fit fits again, and a click
+toggles fitted and actual size at the click point. A zoomed image pans by
+dragging or scrolling. The image is laid out at its zoomed pixel size on whole
+pixels, and from 200% its pixels are drawn crisply rather than smoothed. Each
+step to another image starts fitted. While an image is on screen the zoom keys
+are claimed before the browser or the desktop app's View menu sees them, so
+they zoom the image rather than the window; elsewhere window zoom is unchanged.
+
+Workspace-library tabs, search, sorting and archive filters travel in the URL
+when opening a viewer. The Artifacts back link and browser Back return to that
+same query, with the library's scroll position and loaded pages restored in the
+current browser app session. Gallery/List remains the remembered browser choice.
+Previous/Next and Left/Right browse that filtered catalog order without wrapping;
+Next loads another catalog page when needed. Sibling navigation replaces the
+viewer history entry, so browser Back still returns directly to the library.
+Cold-cache viewers load cursor pages until the current artifact is found or the
+catalog ends. Returning libraries wait for retained pages and successful loads
+before restoring their saved scroll position.
+Shortcuts leave editors, dialogs, menus and embedded content alone. Direct links
+without library context and embedded session viewers do not acquire a workspace
+browsing sequence. A full reload preserves URL filters, not in-memory positions.
 
 Images load from retained storage, not the compute filesystem. Image publication
 results are primary chat output and reuse the retained-image viewer/lightbox.

@@ -2,9 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 
 import {
-  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+  MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+  MICROSOFT_TEAMS_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+  MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+  MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION,
 } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import {
@@ -12,6 +15,7 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   signDelegatedAccessToken,
+  type Permission,
 } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
@@ -19,28 +23,30 @@ import {
   createOrganizationApiKey,
   deleteWorkspace,
   listConnectionsMetadata,
+  listInstalledApiIntegrations,
   loadConnectionCredentialForBroker,
+  uninstallApiIntegration,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { createSignedState, readSignedState } from "@opengeni/github";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 
 import { createApp } from "../src/app";
 import { requireAccessGrantAuthorization } from "@opengeni/core";
 import { requireWorkspaceToolGatewayAuthorization } from "../src/workspace-tool-gateway";
+import {
+  setCuratedConnectFinishRetryDelays,
+  stopCuratedConnectFinishRetries,
+} from "../src/integrations/curated-connect-finish";
 
 const DELEGATION_SECRET = "api-integration-provider-oauth-delegation";
 const STATE_SECRET = "api-integration-provider-oauth-state";
 const EDGE_ACCESS_KEY = "api-integration-provider-oauth-edge";
-const GOOGLE_CLIENT_ID = "google-provider-client.apps.googleusercontent.com";
-const GOOGLE_CLIENT_SECRET = "google-provider-client-secret";
 const MICROSOFT_CLIENT_ID = "microsoft-provider-client";
+const MICROSOFT_CLIENT_SECRET = "microsoft-provider-client-secret";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -49,6 +55,9 @@ let settings: Settings;
 const workspaceIds: string[] = [];
 
 beforeAll(async () => {
+  // Callbacks that fall back keep trying in the background; tests that rely
+  // on the fallback state turn that on only where they exercise it.
+  setCuratedConnectFinishRetryDelays([]);
   const adminUrl = process.env.OPENGENI_API_INTEGRATION_PROVIDER_OAUTH_TEST_POSTGRES_ADMIN_URL;
   const appUrl = process.env.OPENGENI_API_INTEGRATION_PROVIDER_OAUTH_TEST_POSTGRES_APP_URL;
   if ((adminUrl && !appUrl) || (!adminUrl && appUrl)) {
@@ -84,18 +93,19 @@ beforeAll(async () => {
     integrationsStateSecret: STATE_SECRET,
     publicBaseUrl: "http://127.0.0.1:8000",
     webBaseUrl: "http://127.0.0.1:3000",
-    googleDriveClientId: GOOGLE_CLIENT_ID,
-    googleDriveClientSecret: GOOGLE_CLIENT_SECRET,
     integrationsOauthClientsJson: JSON.stringify({
       "https://login.microsoftonline.com/common/v2.0": {
         clientId: MICROSOFT_CLIENT_ID,
-        tokenEndpointAuthMethod: "none",
+        clientSecret: MICROSOFT_CLIENT_SECRET,
+        tokenEndpointAuthMethod: "client_secret_post",
       },
     }),
   }) as Settings;
 }, 180_000);
 
 afterAll(async () => {
+  stopCuratedConnectFinishRetries();
+  setCuratedConnectFinishRetryDelays(null);
   for (const workspaceId of workspaceIds) {
     await deleteWorkspace(client.db, workspaceId).catch(() => undefined);
   }
@@ -122,12 +132,13 @@ async function freshWorkspace() {
 async function bearer(
   workspace: Awaited<ReturnType<typeof freshWorkspace>>,
   principalKind: "human_session" | "service" = "human_session",
+  permissions: Permission[] = ["connections:read", "connections:write", "workspace:read"],
 ): Promise<string> {
   return `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId: workspace.accountId,
     workspaceId: workspace.workspaceId,
     subjectId: workspace.subjectId,
-    permissions: ["connections:read", "connections:write", "workspace:read"],
+    permissions,
     principalKind,
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   })}`;
@@ -139,16 +150,16 @@ type TokenPlan = {
 };
 
 function providerFixture() {
-  let sourceTitle = "Drive fixture";
-  let beforeGoogleTokenReply: (() => Promise<void>) | undefined;
-  const googlePlans: TokenPlan[] = [];
+  let sourceTitle = "OneDrive fixture";
+  let sourceAvailable = true;
+  let onSourceRead: (() => Promise<void>) | undefined;
+  let beforeTokenReply: (() => Promise<void>) | undefined;
   const microsoftPlans: TokenPlan[] = [];
   const tokenRequests: Array<{
-    family: "google" | "microsoft";
+    family: "microsoft";
     body: URLSearchParams;
     authorization: string | null;
   }> = [];
-  let googlePrincipalId = "google-principal-1";
   let microsoftPrincipalId = "microsoft-principal-1";
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
@@ -163,64 +174,37 @@ function providerFixture() {
           },
         },
       });
-    if (url.href === GOOGLE_DRIVE_INTEGRATION_DEFINITION.source.url) {
+    if (url.href === MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.source.url) {
+      await onSourceRead?.();
+      if (!sourceAvailable) return new Response("unavailable", { status: 503 });
       return Response.json({
-        name: "drive",
-        version: "v3",
-        title: sourceTitle,
-        rootUrl: "https://www.googleapis.com/",
-        servicePath: "drive/v3/",
-        resources: {
-          files: {
-            methods: {
-              list: {
-                id: "drive.files.list",
-                path: "files",
-                httpMethod: "GET",
-                description: "List files",
-                response: { $ref: "FileList" },
-              },
-              get: {
-                id: "drive.files.get",
-                path: "files/{fileId}",
-                httpMethod: "GET",
-                description: "Get file",
-                parameters: { fileId: { type: "string", required: true, location: "path" } },
-                response: { $ref: "File" },
-              },
+        openapi: "3.0.3",
+        info: { title: sourceTitle, version: "1" },
+        servers: [{ url: "https://graph.microsoft.com/v1.0" }],
+        paths: {
+          "/me/drive/root/children": {
+            get: { operationId: "listFiles", responses: { "200": { description: "Files" } } },
+          },
+          "/me/joinedTeams": {
+            get: { operationId: "listJoinedTeams", responses: { "200": { description: "Teams" } } },
+          },
+          "/me/drive/items/{itemId}": {
+            get: {
+              operationId: "getFile",
+              parameters: [
+                { name: "itemId", in: "path", required: true, schema: { type: "string" } },
+              ],
+              responses: { "200": { description: "File" } },
             },
           },
         },
-        schemas: {
-          File: { type: "object", properties: { id: { type: "string" } } },
-          FileList: {
-            type: "object",
-            properties: { files: { type: "array", items: { $ref: "File" } } },
-          },
-        },
       });
     }
-    if (url.href === GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.tokenUrl) {
-      await beforeGoogleTokenReply?.();
-      const body = requestBody(init?.body);
-      tokenRequests.push({
-        family: "google",
-        body,
-        authorization: new Headers(init?.headers).get("authorization"),
-      });
-      const plan = googlePlans.shift() ?? {
-        scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-        refreshToken: "google-refresh-token",
-      };
-      return Response.json({
-        access_token: `google-access-${tokenRequests.length}`,
-        ...(plan.refreshToken ? { refresh_token: plan.refreshToken } : {}),
-        token_type: "Bearer",
-        expires_in: 3600,
-        scope: plan.scopes.join(" "),
-      });
-    }
-    if (url.href === MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.tokenUrl) {
+    if (
+      url.href === MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.tokenUrl ||
+      url.href === MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.tokenUrl
+    ) {
+      await beforeTokenReply?.();
       const body = requestBody(init?.body);
       tokenRequests.push({
         family: "microsoft",
@@ -228,7 +212,7 @@ function providerFixture() {
         authorization: new Headers(init?.headers).get("authorization"),
       });
       const plan = microsoftPlans.shift() ?? {
-        scopes: [...MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.scopes],
+        scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
         refreshToken: "microsoft-refresh-token",
       };
       return Response.json({
@@ -237,13 +221,6 @@ function providerFixture() {
         token_type: "Bearer",
         expires_in: 3600,
         scope: plan.scopes.join(" "),
-      });
-    }
-    if (url.href === "https://openidconnect.googleapis.com/v1/userinfo") {
-      return Response.json({
-        sub: googlePrincipalId,
-        email: "google.user@example.com",
-        name: "Google User",
       });
     }
     if (url.origin === "https://graph.microsoft.com" && url.pathname === "/v1.0/me") {
@@ -261,15 +238,19 @@ function providerFixture() {
     setSourceTitle(value: string) {
       sourceTitle = value;
     },
-    setBeforeGoogleTokenReply(hook: (() => Promise<void>) | undefined) {
-      beforeGoogleTokenReply = hook;
+    /** The provider's API description cannot be read (the callback then saves only the account). */
+    setSourceAvailable(value: boolean) {
+      sourceAvailable = value;
     },
-    googlePlans,
+    /** Runs whenever the provider's API description is read. */
+    setOnSourceRead(hook: (() => Promise<void>) | undefined) {
+      onSourceRead = hook;
+    },
+    setBeforeTokenReply(hook: (() => Promise<void>) | undefined) {
+      beforeTokenReply = hook;
+    },
     microsoftPlans,
     tokenRequests,
-    setGooglePrincipalId(value: string) {
-      googlePrincipalId = value;
-    },
     setMicrosoftPrincipalId(value: string) {
       microsoftPrincipalId = value;
     },
@@ -352,6 +333,99 @@ async function callback(
 }
 
 describe("API Integration provider OAuth", () => {
+  test("Teams OAuth and generic Connect honor the exact workspace rollout before consent and callback", async () => {
+    if (!available) throw new Error("Teams rollout acceptance requires PostgreSQL");
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const previousEnabled = settings.microsoftTeamsToolsEnabled;
+    const previousWorkspaces = settings.microsoftTeamsAllowedWorkspaceIds;
+    try {
+      settings.microsoftTeamsToolsEnabled = false;
+      settings.microsoftTeamsAllowedWorkspaceIds = [];
+      expect(
+        (
+          await start(fixture, workspace, {
+            definitionId: "microsoft-teams",
+            ownership: "workspace",
+          })
+        ).response.status,
+      ).toBe(404);
+      const generic = await testApp(fixture).request(
+        `/v1/workspaces/${workspace.workspaceId}/connect/attempts`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace),
+            "content-type": "application/json",
+            "x-opengeni-access-key": EDGE_ACCESS_KEY,
+            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+          },
+          body: JSON.stringify({
+            providerId: "microsoft-teams",
+            ownership: "workspace",
+            returnUrl: `http://127.0.0.1:3000/workspaces/${workspace.workspaceId}/plugins`,
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        },
+      );
+      expect(generic.status).toBe(404);
+      settings.microsoftTeamsAllowedWorkspaceIds = [workspace.workspaceId];
+      const enabled = await start(fixture, workspace, {
+        definitionId: "microsoft-teams",
+        ownership: "workspace",
+      });
+      expect(enabled.response.status).toBe(200);
+      const url = new URL(enabled.authorizationUrl);
+      expect(url.pathname).toBe("/organizations/oauth2/v2.0/authorize");
+      expect(url.searchParams.get("scope")).toContain("ChatMessage.Send");
+      settings.microsoftTeamsAllowedWorkspaceIds = [];
+      const settled = await callback(fixture, url.searchParams.get("state")!);
+      expect(settled.status).toBe(302);
+      expect(settled.headers.get("location")).toContain("state_invalid");
+      expect(fixture.tokenRequests).toHaveLength(0);
+      expect(await listConnectionsMetadata(client.db, workspace.workspaceId, null)).toHaveLength(0);
+      // A new, enabled consent completes through the organizational token endpoint
+      // and persists only the Teams workload grant under the normal broker role.
+      settings.microsoftTeamsAllowedWorkspaceIds = [workspace.workspaceId];
+      fixture.microsoftPlans.push({
+        scopes: [...MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "teams-fixture-refresh",
+      });
+      const retry = await start(fixture, workspace, {
+        definitionId: "microsoft-teams",
+        ownership: "workspace",
+      });
+      expect(retry.response.status).toBe(200);
+      const completed = await callback(
+        fixture,
+        new URL(retry.authorizationUrl).searchParams.get("state")!,
+      );
+      expect(completed.status).toBe(302);
+      expect(
+        new URL(completed.headers.get("location")!).searchParams.get("integration_oauth"),
+      ).toBe("success");
+      const connections = await listConnectionsMetadata(client.db, workspace.workspaceId, null);
+      expect(connections).toHaveLength(1);
+      expect(connections[0]).toMatchObject({
+        subjectId: null,
+        providerDomain: "graph.microsoft.com",
+        kind: "oauth2",
+        status: "active",
+        metadata: {
+          credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+          authorizedDefinitionIds: ["microsoft-teams"],
+        },
+      });
+      expect([...connections[0]!.grantedScopes].sort()).toEqual(
+        [...MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.scopes].sort(),
+      );
+      expect(fixture.tokenRequests).toHaveLength(1);
+    } finally {
+      settings.microsoftTeamsToolsEnabled = previousEnabled;
+      settings.microsoftTeamsAllowedWorkspaceIds = previousWorkspaces;
+    }
+  });
+
   test("external curated OAuth encrypts actor context and refuses key revocation during exchange", async () => {
     if (!available) throw new Error("External OAuth acceptance requires PostgreSQL");
     const workspace = await freshWorkspace();
@@ -424,7 +498,7 @@ describe("API Integration provider OAuth", () => {
           method: "POST",
           headers,
           body: JSON.stringify({
-            definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+            definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
             ownership: "workspace",
           }),
         },
@@ -447,7 +521,7 @@ describe("API Integration provider OAuth", () => {
     expect(catalogResponse.status).toBe(200);
     expect(
       (await catalogResponse.json()).find(
-        (provider: { id: string }) => provider.id === GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        (provider: { id: string }) => provider.id === MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ),
     ).toMatchObject({ readiness: "available", setup: ["oauth"] });
     const serviceCatalog = await app.request(
@@ -466,8 +540,6 @@ describe("API Integration provider OAuth", () => {
     for (const suffix of [
       "connections/slack-bot/install",
       "connections/fiken/oauth/start",
-      "connections/google-drive/install",
-      "connections/atlassian/install",
       "connections/github/oauth/start",
       "connections/example/github/reconnect",
     ]) {
@@ -484,7 +556,7 @@ describe("API Integration provider OAuth", () => {
     const signed = readSignedState(firstState, STATE_SECRET) as Record<string, unknown>;
     expect(typeof signed.encryptedExternalContinuation).toBe("string");
     expect(JSON.stringify(signed)).not.toContain(reference.externalId);
-    fixture.setBeforeGoogleTokenReply(async () => {
+    fixture.setBeforeTokenReply(async () => {
       await shared!.admin`update api_keys set revoked_at = now() where id = ${key.id}`;
     });
     const denied = await callback(fixture, firstState);
@@ -494,7 +566,7 @@ describe("API Integration provider OAuth", () => {
     expect(
       await listConnectionsMetadata(client.db, workspace.workspaceId, external.subjectId),
     ).toEqual([]);
-    fixture.setBeforeGoogleTokenReply(undefined);
+    fixture.setBeforeTokenReply(undefined);
     await shared!.admin`update api_keys set revoked_at = null where id = ${key.id}`;
     const returnUrl = "https://HOST.example:443/finish?opaque=%2f&literal=%2520#unchanged";
     const customBase = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
@@ -554,7 +626,7 @@ describe("API Integration provider OAuth", () => {
     });
     expect(await (await customAdvance(installCustom)).json()).toEqual(customInstalled);
     const beginPayload = {
-      providerId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "workspace",
       returnUrl,
       idempotencyKey: crypto.randomUUID(),
@@ -572,7 +644,11 @@ describe("API Integration provider OAuth", () => {
     expect(replayBegin.status).toBe(200);
     expect(await replayBegin.json()).toEqual(attempt);
     const secondState = new URL(attempt.nextAction.url).searchParams.get("state")!;
+    // The reviewed tools cannot be read during the callback: it saves the
+    // account and leaves the install step to the app, as before.
+    fixture.setSourceAvailable(false);
     const completed = await callback(fixture, secondState);
+    fixture.setSourceAvailable(true);
     expect(completed.headers.get("location")).toBe(returnUrl);
     const exchanges = fixture.tokenRequests.length;
     expect((await callback(fixture, secondState)).headers.get("location")).toBe(returnUrl);
@@ -619,7 +695,7 @@ describe("API Integration provider OAuth", () => {
       action: { ...installInput.action, operationIds: ["not-reviewed"] },
     });
     expect(invalidSelection.status).toBe(409);
-    fixture.setSourceTitle("Updated Drive fixture");
+    fixture.setSourceTitle("Updated OneDrive fixture");
     const changedResponse = await advance(installInput);
     expect(changedResponse.status).toBe(200);
     const changed = await changedResponse.json();
@@ -674,7 +750,7 @@ describe("API Integration provider OAuth", () => {
     const accounts = await accountsResponse.json();
     expect(accounts).toHaveLength(1);
     expect(accounts[0]).toMatchObject({
-      providerId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "workspace",
       status: "connected",
     });
@@ -707,47 +783,44 @@ describe("API Integration provider OAuth", () => {
       version: accounts[0].version,
     });
   });
-  test("connects a Google definition with signed PKCE state and no callback perimeter credential", async () => {
+  test("connects a OneDrive definition with signed PKCE state and no callback perimeter credential", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
-    fixture.googlePlans.push({
-      scopes: [
-        "openid",
-        "https://www.googleapis.com/auth/userinfo.email",
-        "https://www.googleapis.com/auth/userinfo.profile",
-        "https://www.googleapis.com/auth/drive",
-      ],
-      refreshToken: "google-refresh-token",
+    fixture.microsoftPlans.push({
+      scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "microsoft-refresh-token",
     });
     const started = await start(fixture, workspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
     });
     expect(started.response.status).toBe(200);
     const authorizationUrl = new URL(started.authorizationUrl);
-    expect(authorizationUrl.origin).toBe("https://accounts.google.com");
+    expect(authorizationUrl.origin).toBe("https://login.microsoftonline.com");
     expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual(
-      GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes,
+      MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes,
     );
-    expect(authorizationUrl.searchParams.get("access_type")).toBe("offline");
-    expect(authorizationUrl.searchParams.get("prompt")).toBe("consent select_account");
+    expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toContain("offline_access");
+    expect(authorizationUrl.searchParams.get("prompt")).toBe("select_account");
     expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
     expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
-      "http://127.0.0.1:8000/v1/integrations/oauth/callback",
+      "http://127.0.0.1:8000/v1/integrations/provider-oauth/callback",
     );
     const state = authorizationUrl.searchParams.get("state")!;
     const connected = await callback(
       fixture,
       state,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(connected.status).toBe(302);
     const location = new URL(connected.headers.get("location")!);
     expect(location.origin).toBe("http://127.0.0.1:3000");
     expect(location.searchParams.get("integration_oauth")).toBe("success");
-    expect(location.searchParams.get("definitionId")).toBe(GOOGLE_DRIVE_INTEGRATION_DEFINITION.id);
+    expect(location.searchParams.get("definitionId")).toBe(
+      MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+    );
 
     const connections = await listConnectionsMetadata(
       client.db,
@@ -758,25 +831,20 @@ describe("API Integration provider OAuth", () => {
     const connection = connections[0]!;
     expect(connection).toMatchObject({
       subjectId: workspace.subjectId,
-      providerDomain: "www.googleapis.com",
+      providerDomain: "graph.microsoft.com",
       kind: "oauth2",
       status: "active",
-      grantedScopes: [
-        "openid",
-        "https://www.googleapis.com/auth/userinfo.email",
-        "https://www.googleapis.com/auth/userinfo.profile",
-        "https://www.googleapis.com/auth/drive",
-      ],
+      grantedScopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
       metadata: {
         credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
-        providerFamily: "google",
-        providerPrincipalId: "google-principal-1",
-        providerEmail: "google.user@example.com",
-        authorizedDefinitionIds: [GOOGLE_DRIVE_INTEGRATION_DEFINITION.id],
+        providerFamily: "microsoft",
+        providerPrincipalId: "microsoft-principal-1",
+        providerEmail: "microsoft.user@example.com",
+        authorizedDefinitionIds: [MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id],
       },
     });
-    expect(JSON.stringify(connection)).not.toContain("google-access");
-    expect(JSON.stringify(connection)).not.toContain("google-refresh-token");
+    expect(JSON.stringify(connection)).not.toContain("microsoft-access");
+    expect(JSON.stringify(connection)).not.toContain("microsoft-refresh-token");
     const credential = await loadConnectionCredentialForBroker(client.db, settings, {
       workspaceId: workspace.workspaceId,
       connectionId: connection.id,
@@ -786,12 +854,12 @@ describe("API Integration provider OAuth", () => {
       allowSubjectOwned: true,
     });
     expect(credential?.credential).toMatchObject({
-      refresh_token: "google-refresh-token",
-      client_id: GOOGLE_CLIENT_ID,
-      client_secret: GOOGLE_CLIENT_SECRET,
-      token_endpoint: GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.tokenUrl,
+      refresh_token: "microsoft-refresh-token",
+      client_id: MICROSOFT_CLIENT_ID,
+      client_secret: MICROSOFT_CLIENT_SECRET,
+      token_endpoint: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.tokenUrl,
     });
-    expect(fixture.tokenRequests[0]?.body.get("client_secret")).toBe(GOOGLE_CLIENT_SECRET);
+    expect(fixture.tokenRequests[0]?.body.get("client_secret")).toBe(MICROSOFT_CLIENT_SECRET);
 
     const genericPatch = await testApp(fixture).request(
       `/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`,
@@ -941,23 +1009,23 @@ describe("API Integration provider OAuth", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
-    fixture.googlePlans.push(
+    fixture.microsoftPlans.push(
       {
-        scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-        refreshToken: "google-refresh-a",
+        scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "microsoft-refresh-a",
       },
       {
-        scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-        refreshToken: "google-refresh-b",
+        scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "microsoft-refresh-b",
       },
     );
     const [left, right] = await Promise.all([
       start(fixture, workspace, {
-        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
         ownership: "personal",
       }),
       start(fixture, workspace, {
-        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
         ownership: "personal",
       }),
     ]);
@@ -972,17 +1040,17 @@ describe("API Integration provider OAuth", () => {
     ).toEqual(["success", "success"]);
     const connections = (
       await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
-    ).filter((connection) => connection.providerDomain === "www.googleapis.com");
+    ).filter((connection) => connection.providerDomain === "graph.microsoft.com");
     expect(connections).toHaveLength(1);
 
     const insufficientWorkspace = await freshWorkspace();
     const insufficient = providerFixture();
-    insufficient.googlePlans.push({
+    insufficient.microsoftPlans.push({
       scopes: ["openid", "email", "profile"],
       refreshToken: "must-not-persist",
     });
     const insufficientStart = await start(insufficient, insufficientWorkspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
     });
     const denied = await callback(
@@ -1009,7 +1077,7 @@ describe("API Integration provider OAuth", () => {
     // workspace-shared. Both Definitions are exercised, because the Microsoft
     // family is where the widening would actually hurt.
     for (const definition of [
-      GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+      MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
       MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
     ]) {
       const workspace = await freshWorkspace();
@@ -1027,12 +1095,12 @@ describe("API Integration provider OAuth", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
-    fixture.googlePlans.push({
-      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-      refreshToken: "google-refresh-token",
+    fixture.microsoftPlans.push({
+      scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "microsoft-refresh-token",
     });
     const started = await start(fixture, workspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "workspace",
     });
     expect(started.response.status).toBe(200);
@@ -1040,14 +1108,14 @@ describe("API Integration provider OAuth", () => {
       fixture,
       new URL(started.authorizationUrl).searchParams.get("state")!,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     const location = new URL(connected.headers.get("location")!);
     expect(location.searchParams.get("integration_oauth")).toBe("success");
     expect(location.searchParams.get("ownership")).toBe("workspace");
     const connections = (
       await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
-    ).filter((connection) => connection.providerDomain === "www.googleapis.com");
+    ).filter((connection) => connection.providerDomain === "graph.microsoft.com");
     expect(connections).toHaveLength(1);
     expect(connections[0]!.subjectId).toBeNull();
   }, 60_000);
@@ -1056,23 +1124,23 @@ describe("API Integration provider OAuth", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
-    fixture.googlePlans.push({
-      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-      refreshToken: "google-refresh-token",
+    fixture.microsoftPlans.push({
+      scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "microsoft-refresh-token",
     });
     // Mint the exact state an older deployment would have signed: personal
     // ownership with no `personalOwnerVerified` claim. This is the rolling-
     // deploy window the callback fence exists to close - the start route is
     // already fenced, so nothing else can produce this shape.
     const legacyState = await legacyProviderOAuthState(workspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
     });
     const refused = await callback(
       fixture,
       legacyState,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     const location = new URL(refused.headers.get("location")!);
     expect(location.searchParams.get("integration_oauth")).toBe("error");
@@ -1084,7 +1152,7 @@ describe("API Integration provider OAuth", () => {
     // The same state shape with the claim present is accepted, so the fence is
     // the claim and not some unrelated rejection of a hand-minted state.
     const verifiedState = await legacyProviderOAuthState(workspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
       personalOwnerVerified: true,
     });
@@ -1092,7 +1160,7 @@ describe("API Integration provider OAuth", () => {
       fixture,
       verifiedState,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(new URL(accepted.headers.get("location")!).searchParams.get("integration_oauth")).toBe(
       "success",
@@ -1110,16 +1178,16 @@ describe("API Integration provider OAuth", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
-    fixture.googlePlans.push({
-      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-      refreshToken: "google-refresh-token",
+    fixture.microsoftPlans.push({
+      scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "microsoft-refresh-token",
     });
 
     // FORGERY: splice the claim into the base64 payload of a legacy state
     // without re-signing. The claim rides inside the HMAC-signed payload, so
     // this invalidates the signature rather than granting personal ownership.
     const legacyState = await legacyProviderOAuthState(workspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
     });
     const [encoded, signature] = legacyState.split(".", 2);
@@ -1133,7 +1201,7 @@ describe("API Integration provider OAuth", () => {
       fixture,
       forged,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(new URL(forgedResult.headers.get("location")!).searchParams.get("reason")).toBe(
       "state_invalid",
@@ -1145,7 +1213,7 @@ describe("API Integration provider OAuth", () => {
     // fully consistent state; this proves the callback's mismatch check, not
     // isolation from a signing-secret holder.
     const verified = await legacyProviderOAuthState(workspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
       personalOwnerVerified: true,
     });
@@ -1158,7 +1226,7 @@ describe("API Integration provider OAuth", () => {
       fixture,
       swapped,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(new URL(swappedResult.headers.get("location")!).searchParams.get("reason")).toBe(
       "state_invalid",
@@ -1170,7 +1238,7 @@ describe("API Integration provider OAuth", () => {
       fixture,
       verified,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(new URL(accepted.headers.get("location")!).searchParams.get("integration_oauth")).toBe(
       "success",
@@ -1179,7 +1247,7 @@ describe("API Integration provider OAuth", () => {
       fixture,
       verified,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(new URL(replayed.headers.get("location")!).searchParams.get("reason")).toBe(
       "state_replayed",
@@ -1189,6 +1257,566 @@ describe("API Integration provider OAuth", () => {
     ).toHaveLength(1);
   }, 60_000);
 
+  test("a person installs a reviewed definition for their own account without integration management", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const app = testApp(fixture);
+    // A person who may connect their own accounts, but not manage integrations.
+    const headers = {
+      authorization: await bearer(workspace),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    // Begin and sign in. The callback finishes setup by itself when the
+    // person who started it could have installed the tools.
+    const connect = async (
+      input: Record<string, unknown>,
+      requestHeaders: Record<string, string> = headers,
+    ) => {
+      fixture.microsoftPlans.push({
+        scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "microsoft-refresh-token",
+      });
+      const begun = await app.request(base, {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify({
+          providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+          returnUrl: "https://host.example/chat",
+          idempotencyKey: crypto.randomUUID(),
+          ...input,
+        }),
+      });
+      if (begun.status !== 200) throw new Error(`begin failed: ${await begun.text()}`);
+      const attempt = await begun.json();
+      const state = new URL(attempt.nextAction.url).searchParams.get("state")!;
+      await callback(fixture, state);
+      const current = await (
+        await app.request(`${base}/${attempt.id}`, { headers: requestHeaders })
+      ).json();
+      return { attempt, current };
+    };
+    // The manual step the app takes when the callback could not finish.
+    const previewAndInstall = async (
+      attempt: { id: string },
+      requestHeaders: Record<string, string> = headers,
+    ) => {
+      const advance = (body: unknown) =>
+        app.request(`${base}/${attempt.id}/advance`, {
+          method: "POST",
+          headers: requestHeaders,
+          body: JSON.stringify(body),
+        });
+      const preview = await (
+        await advance({
+          expectedRevision: 2,
+          idempotencyKey: crypto.randomUUID(),
+          action: { type: "retry" },
+        })
+      ).json();
+      if (preview.state !== "preview")
+        throw new Error(`preview failed: ${JSON.stringify(preview)}`);
+      return advance({
+        expectedRevision: preview.revision,
+        idempotencyKey: crypto.randomUUID(),
+        action: {
+          type: "install",
+          previewId: preview.nextAction.previewId,
+          contentHash: preview.nextAction.contentHash,
+          operationIds: preview.nextAction.operations.map(
+            (operation: { id: string }) => operation.id,
+          ),
+        },
+      });
+    };
+    const instances = () =>
+      listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId);
+
+    // Their own account, in a fresh instance named after the attempt.
+    const own = await connect({ ownership: "personal" });
+    expect(own.attempt.installationTarget).toEqual({
+      instanceKey: `account-${own.attempt.id}`,
+      displayName: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.name,
+    });
+    expect(own.current).toMatchObject({
+      revision: 2,
+      state: "complete",
+      credentialsCommitted: true,
+      integrationInstalled: true,
+    });
+
+    // The narrow "connect my own account" permission alone is enough too
+    // (the per-user embed default: no connections:read or connections:write).
+    const narrowHeaders = {
+      ...headers,
+      authorization: await bearer(workspace, "human_session", [
+        "connections:personal",
+        "workspace:read",
+      ]),
+    };
+    const narrow = await connect({ ownership: "personal" }, narrowHeaders);
+    expect(narrow.current).toMatchObject({ state: "complete", integrationInstalled: true });
+    // ...but never a workspace account.
+    fixture.microsoftPlans.length = 0;
+    const narrowShared = await app.request(base, {
+      method: "POST",
+      headers: narrowHeaders,
+      body: JSON.stringify({
+        providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+        ownership: "workspace",
+        returnUrl: "https://host.example/chat",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(narrowShared.status).toBe(403);
+
+    // A member (connections:write) adds a workspace account integration too.
+    const before = new Set((await instances()).map((instance) => instance.instanceKey));
+    const workspaceOwned = await connect({ ownership: "workspace" });
+    expect(workspaceOwned.current).toMatchObject({
+      state: "complete",
+      integrationInstalled: true,
+    });
+    // ...but a member's add is create only: binding an instance that is
+    // already set up (here the workspace one) stays integration management.
+    // The callback cannot finish it and keeps the account; the manual install
+    // is refused.
+    const sharedInstance = (await instances()).find(
+      (instance) => !before.has(instance.instanceKey),
+    );
+    expect(sharedInstance).toBeDefined();
+    const rebind = await connect({
+      ownership: "personal",
+      installationTarget: {
+        instanceKey: sharedInstance!.instanceKey,
+        displayName: "OneDrive",
+      },
+    });
+    expect(rebind.current).toMatchObject({
+      state: "connected_but_incomplete",
+      credentialsCommitted: true,
+      integrationInstalled: false,
+    });
+    const rebound = await previewAndInstall(rebind.attempt);
+    expect(rebound.status).toBe(403);
+    expect(await rebound.text()).toContain("Only an admin can change it");
+    expect(
+      (await instances()).find((instance) => instance.instanceKey === sharedInstance!.instanceKey)
+        ?.connectionRef?.connectionId,
+    ).toBe(sharedInstance!.connectionRef?.connectionId);
+
+    // Binding an instance this account is not already bound to is adding an
+    // integration, which the narrow "connect my own account" permission is not:
+    // the callback never finishes it with the person's wider membership rights.
+    const other = await connect(
+      {
+        ownership: "personal",
+        installationTarget: { instanceKey: "account-someone-else", displayName: "OneDrive" },
+      },
+      narrowHeaders,
+    );
+    expect(other.current).toMatchObject({
+      state: "connected_but_incomplete",
+      integrationInstalled: false,
+    });
+    expect(
+      (await instances()).some((instance) => instance.instanceKey === "account-someone-else"),
+    ).toBe(false);
+    const otherInstall = await previewAndInstall(other.attempt, narrowHeaders);
+    expect(otherInstall.status).toBe(403);
+    expect(await otherInstall.text()).toContain("connections:write");
+  }, 60_000);
+
+  test("a built-in integration finishes setup in its callback, with no step left for the app", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const app = testApp(fixture);
+    const headers = {
+      authorization: await bearer(workspace),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const begun = await app.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+        ownership: "personal",
+        returnUrl: "https://host.example/capabilities",
+        idempotencyKey: crypto.randomUUID(),
+        installationTarget: { instanceKey: "account-sharepoint", displayName: "OneDrive" },
+      }),
+    });
+    expect(begun.status).toBe(200);
+    const attempt = await begun.json();
+    expect(attempt.state).toBe("requires_user_action");
+    // The person signs in and the browser comes back; the app that started
+    // setup is gone (dialog closed, page reloaded, desktop app quit). Nothing
+    // but the provider's redirect reaches the API.
+    const state = new URL(attempt.nextAction.url).searchParams.get("state")!;
+    const returned = await callback(fixture, state);
+    expect(returned.status).toBe(302);
+    expect(returned.headers.get("location")).toBe("https://host.example/capabilities");
+
+    const current = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
+    expect(current).toMatchObject({
+      id: attempt.id,
+      revision: 2,
+      state: "complete",
+      credentialsCommitted: true,
+      integrationInstalled: true,
+      nextAction: { type: "none" },
+      account: { ownership: "personal", status: "connected", label: "Microsoft User" },
+    });
+    expect(current.error).toBeUndefined();
+    const installed = (await instances()).find(
+      (instance) => instance.instanceKey === "account-sharepoint",
+    );
+    expect(installed).toMatchObject({
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+      displayName: "OneDrive",
+      connectionRef: { connectionId: current.account.id },
+    });
+    // Every reviewed tool, exactly as the app's automatic install chose.
+    expect(installed!.allowedTools).toHaveLength(2);
+    // Nothing is pending for the app to resume.
+    const pending = await (await app.request(base, { headers })).json();
+    expect(JSON.stringify(pending)).not.toContain(attempt.id);
+    // A replayed callback changes nothing.
+    expect((await callback(fixture, state)).headers.get("location")).toBe(
+      "https://host.example/capabilities",
+    );
+    expect(await (await app.request(`${base}/${attempt.id}`, { headers })).json()).toEqual(current);
+    expect(fixture.tokenRequests).toHaveLength(1);
+
+    function instances() {
+      return listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId);
+    }
+  }, 60_000);
+
+  async function beginBuiltIn(
+    fixture: ReturnType<typeof providerFixture>,
+    workspace: Awaited<ReturnType<typeof freshWorkspace>>,
+    instanceKey: string,
+    definition: { id: string; name: string } = MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+  ) {
+    const app = testApp(fixture);
+    const headers = {
+      authorization: await bearer(workspace),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const begun = await app.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: definition.id,
+        ownership: "personal",
+        returnUrl: "https://host.example/capabilities",
+        idempotencyKey: crypto.randomUUID(),
+        installationTarget: {
+          instanceKey,
+          displayName:
+            definition.id === MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id
+              ? "OneDrive"
+              : definition.name,
+        },
+      }),
+    });
+    expect(begun.status).toBe(200);
+    const attempt = await begun.json();
+    const state = new URL(attempt.nextAction.url).searchParams.get("state")!;
+    const read = async (id = attempt.id) =>
+      await (await app.request(`${base}/${id}`, { headers })).json();
+    const installedFor = async () =>
+      (
+        await listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId)
+      ).find((instance) => instance.instanceKey === instanceKey);
+    return { app, headers, base, attempt, state, read, installedFor };
+  }
+
+  test("the callback reads the reviewed tools before its commit, holding no lock", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const setup = await beginBuiltIn(fixture, workspace, "account-before-commit");
+    // While the provider's API description is read (a network call that can
+    // take seconds), nothing may hold the attempt row or any other lock the
+    // commit takes: another transaction locks it without waiting. The read
+    // runs alongside the code exchange, whose own short transactions may
+    // still be settling, so the read waits until they are done; a transaction
+    // held across the read would never be done while the read is pending.
+    const lockedDuringRead: boolean[] = [];
+    fixture.setOnSourceRead(async () => {
+      const lockedNow = () =>
+        shared!.admin
+          .begin(async (sql) => {
+            await sql`select id from connect_attempts where id = ${setup.attempt.id}::uuid for update nowait`;
+            const open = await sql`select count(*)::int as count from pg_stat_activity
+              where datname = current_database() and pid <> pg_backend_pid()
+                and state like 'idle in transaction%'`;
+            return open[0]!.count > 0;
+          })
+          .catch(() => true);
+      let locked = await lockedNow();
+      for (let check = 0; locked && check < 60; check += 1) {
+        await Bun.sleep(50);
+        locked = await lockedNow();
+      }
+      lockedDuringRead.push(locked);
+    });
+    expect((await callback(fixture, setup.state)).status).toBe(302);
+    fixture.setOnSourceRead(undefined);
+    expect(lockedDuringRead).toEqual([false]);
+    expect(await setup.read()).toMatchObject({ state: "complete", integrationInstalled: true });
+  }, 60_000);
+
+  test("when the callback cannot read the tools, the server keeps trying and finishes alone", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const setup = await beginBuiltIn(fixture, workspace, "account-retried");
+    setCuratedConnectFinishRetryDelays([25, 25, 25, 25, 25, 25, 25, 25]);
+    try {
+      // The provider's description is down while the person signs in.
+      fixture.setSourceAvailable(false);
+      expect((await callback(fixture, setup.state)).status).toBe(302);
+      expect(await setup.read()).toMatchObject({ state: "connected_but_incomplete" });
+      expect(await setup.installedFor()).toBeUndefined();
+      // It comes back. Nobody opens the app; the server finishes on its own.
+      fixture.setSourceAvailable(true);
+      let current = await setup.read();
+      for (let wait = 0; wait < 100 && current.state !== "complete"; wait += 1) {
+        await Bun.sleep(50);
+        current = await setup.read();
+      }
+      expect(current).toMatchObject({
+        revision: 3,
+        state: "complete",
+        credentialsCommitted: true,
+        integrationInstalled: true,
+        nextAction: { type: "none" },
+      });
+      expect(await setup.installedFor()).toMatchObject({
+        definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+        connectionRef: { connectionId: current.account.id },
+      });
+    } finally {
+      fixture.setSourceAvailable(true);
+      stopCuratedConnectFinishRetries();
+      setCuratedConnectFinishRetryDelays([]);
+    }
+  }, 60_000);
+
+  test("a setup left with a saved account and no tools finishes when Capabilities opens, even after it expired", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const setup = await beginBuiltIn(fixture, workspace, "account-left-behind");
+    // Before this release: the account was saved and the person closed the
+    // dialog on "Finishing setup…", so its tools were never added. Its
+    // attempt has since passed its short expiry.
+    fixture.setSourceAvailable(false);
+    expect((await callback(fixture, setup.state)).status).toBe(302);
+    fixture.setSourceAvailable(true);
+    expect(await setup.read()).toMatchObject({ state: "connected_but_incomplete" });
+    const expiresAt = new Date(Date.now() - 60_000).toISOString();
+    // Time passes (the origin guard keeps the deadline fixed for the app).
+    await shared!.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`update connect_attempts set expires_at = ${expiresAt}::timestamptz,
+        projection = jsonb_set(projection, '{expiresAt}', to_jsonb(${expiresAt}::text))
+        where id = ${setup.attempt.id}::uuid`;
+    });
+    // Reading it now (as a reopened app would) marks it expired.
+    expect(await setup.read()).toMatchObject({ state: "expired", credentialsCommitted: true });
+    expect(await setup.installedFor()).toBeUndefined();
+    const finish = (authorization = setup.headers.authorization) =>
+      setup.app.request(`${setup.base}/finish`, {
+        method: "POST",
+        headers: { ...setup.headers, authorization },
+      });
+
+    // Someone without the right to add their own accounts finishes nothing.
+    const readOnly = await finish(
+      await bearer(workspace, "human_session", ["connections:read", "workspace:read"]),
+    );
+    expect(readOnly.status).toBe(200);
+    expect(await readOnly.json()).toEqual([]);
+    expect(await setup.installedFor()).toBeUndefined();
+
+    // The person opens Capabilities: the setup finishes with no dialog.
+    const opened = await finish();
+    expect(opened.status).toBe(200);
+    const completed = await opened.json();
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({
+      id: setup.attempt.id,
+      revision: 4,
+      state: "complete",
+      integrationInstalled: true,
+      installationTarget: { instanceKey: "account-left-behind", displayName: "OneDrive" },
+    });
+    const installed = await setup.installedFor();
+    expect(installed).toMatchObject({
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+      connectionRef: { connectionId: completed[0].account.id },
+    });
+    expect(installed!.allowedTools).toHaveLength(2);
+    // Opening it again finds nothing left to do.
+    expect(await (await finish()).json()).toEqual([]);
+  }, 60_000);
+
+  test("finishing later never brings back an account the person removed", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const setup = await beginBuiltIn(fixture, workspace, "account-removed");
+    fixture.setSourceAvailable(false);
+    expect((await callback(fixture, setup.state)).status).toBe(302);
+    fixture.setSourceAvailable(true);
+    const left = await setup.read();
+    const removed = await setup.app.request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${left.account.id}`,
+      { method: "DELETE", headers: setup.headers },
+    );
+    expect(removed.status).toBeLessThan(300);
+    const opened = await setup.app.request(`${setup.base}/finish`, {
+      method: "POST",
+      headers: setup.headers,
+    });
+    expect(await opened.json()).toEqual([]);
+    expect(await setup.installedFor()).toBeUndefined();
+  }, 60_000);
+
+  test("a leftover for an integration since withdrawn from the workspace stays unfinished", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const previousEnabled = settings.microsoftTeamsToolsEnabled;
+    const previousWorkspaces = settings.microsoftTeamsAllowedWorkspaceIds;
+    try {
+      // Offered to this workspace only.
+      settings.microsoftTeamsToolsEnabled = false;
+      settings.microsoftTeamsAllowedWorkspaceIds = [workspace.workspaceId];
+      const setup = await beginBuiltIn(
+        fixture,
+        workspace,
+        "teams-withdrawn",
+        MICROSOFT_TEAMS_INTEGRATION_DEFINITION,
+      );
+      fixture.microsoftPlans.push({
+        scopes: [...MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "teams-refresh-token",
+      });
+      fixture.setSourceAvailable(false);
+      expect((await callback(fixture, setup.state)).status).toBe(302);
+      fixture.setSourceAvailable(true);
+      expect(await setup.read()).toMatchObject({ state: "connected_but_incomplete" });
+      const finish = () =>
+        setup.app.request(`${setup.base}/finish`, { method: "POST", headers: setup.headers });
+      // Teams is withdrawn from this workspace before Capabilities opens.
+      settings.microsoftTeamsAllowedWorkspaceIds = [];
+      const opened = await finish();
+      expect(opened.status).toBe(200);
+      expect(await opened.json()).toEqual([]);
+      expect(await setup.installedFor()).toBeUndefined();
+      // Offered here again, the same leftover finishes.
+      settings.microsoftTeamsAllowedWorkspaceIds = [workspace.workspaceId];
+      expect(await (await finish()).json()).toMatchObject([
+        { id: setup.attempt.id, state: "complete", integrationInstalled: true },
+      ]);
+      expect(await setup.installedFor()).toMatchObject({
+        definitionId: MICROSOFT_TEAMS_INTEGRATION_DEFINITION.id,
+      });
+    } finally {
+      settings.microsoftTeamsToolsEnabled = previousEnabled;
+      settings.microsoftTeamsAllowedWorkspaceIds = previousWorkspaces;
+    }
+  }, 60_000);
+
+  test("an older leftover never brings back tools the person removed after connecting the account again", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    // The first setup saved the account but not its tools.
+    const first = await beginBuiltIn(fixture, workspace, "account-first");
+    fixture.setSourceAvailable(false);
+    expect((await callback(fixture, first.state)).status).toBe(302);
+    fixture.setSourceAvailable(true);
+    const left = await first.read();
+    expect(left).toMatchObject({ state: "connected_but_incomplete" });
+    // The person connects the same account again, which finishes...
+    const second = await beginBuiltIn(fixture, workspace, "account-second");
+    expect((await callback(fixture, second.state)).status).toBe(302);
+    const done = await second.read();
+    expect(done).toMatchObject({ state: "complete", integrationInstalled: true });
+    expect(done.account.id).toBe(left.account.id);
+    // ...and then removes its tools.
+    const installed = (await second.installedFor())!;
+    await uninstallApiIntegration(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: workspace.subjectId,
+      capabilityId: installed.capabilityId,
+      instanceKey: installed.instanceKey,
+      expectedInstallationVersion: installed.installationVersion,
+      expectedInstanceVersion: installed.instanceVersion,
+    });
+    const opened = await first.app.request(`${first.base}/finish`, {
+      method: "POST",
+      headers: first.headers,
+    });
+    expect(await opened.json()).toEqual([]);
+    expect(await first.installedFor()).toBeUndefined();
+    expect(
+      (
+        await listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId)
+      ).filter((instance) => instance.connectionRef?.connectionId === left.account.id),
+    ).toEqual([]);
+  }, 60_000);
+
+  test("two finishes at once add one account's tools once", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    // Two setups of the same account were each left without tools (say, a
+    // second sign-in from another tab whose callback also could not read them).
+    const first = await beginBuiltIn(fixture, workspace, "account-tab-one");
+    const second = await beginBuiltIn(fixture, workspace, "account-tab-two");
+    fixture.setSourceAvailable(false);
+    expect((await callback(fixture, first.state)).status).toBe(302);
+    expect((await callback(fixture, second.state)).status).toBe(302);
+    fixture.setSourceAvailable(true);
+    const connectionId = (await first.read()).account.id;
+    expect((await second.read()).account.id).toBe(connectionId);
+    // Capabilities and a chat card open together.
+    const results = await Promise.all(
+      [first, second].map(async (setup) =>
+        (
+          await setup.app.request(`${setup.base}/finish`, {
+            method: "POST",
+            headers: setup.headers,
+          })
+        ).json(),
+      ),
+    );
+    expect(results.flat()).toHaveLength(1);
+    const bound = (
+      await listInstalledApiIntegrations(client.db, workspace.workspaceId, workspace.subjectId)
+    ).filter((instance) => instance.connectionRef?.connectionId === connectionId);
+    expect(bound).toHaveLength(1);
+    expect(bound[0]!.instanceKey).toBe("account-tab-two");
+  }, 60_000);
+
   test("a non-human principal cannot request personal ownership", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1196,7 +1824,7 @@ describe("API Integration provider OAuth", () => {
     const refused = await start(
       fixture,
       workspace,
-      { definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id, ownership: "personal" },
+      { definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id, ownership: "personal" },
       "service",
     );
     expect(refused.response.status).toBe(422);
@@ -1209,14 +1837,14 @@ describe("API Integration provider OAuth", () => {
 
     // The same principal may still create the documented workspace-owned
     // Connection, so this narrows rather than blocking the flow outright.
-    fixture.googlePlans.push({
-      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-      refreshToken: "google-refresh-token",
+    fixture.microsoftPlans.push({
+      scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "microsoft-refresh-token",
     });
     const allowed = await start(
       fixture,
       workspace,
-      { definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id, ownership: "workspace" },
+      { definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id, ownership: "workspace" },
       "service",
     );
     expect(allowed.response.status).toBe(200);
@@ -1224,7 +1852,7 @@ describe("API Integration provider OAuth", () => {
       fixture,
       new URL(allowed.authorizationUrl).searchParams.get("state")!,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(new URL(connected.headers.get("location")!).searchParams.get("integration_oauth")).toBe(
       "success",
@@ -1237,4 +1865,175 @@ describe("API Integration provider OAuth", () => {
     expect(connections).toHaveLength(1);
     expect(connections[0]!.subjectId).toBeNull();
   }, 60_000);
+
+  // What Microsoft sends back when an organization's consent policy stopped the
+  // person: each leaves the attempt with the administrator's approval link and
+  // returns the browser to the app that started it.
+  const consentCallbacks = [
+    {
+      name: "consent missing (AADSTS65001)",
+      error: "access_denied",
+      description:
+        "AADSTS65001: The user or administrator has not consented to use the application.",
+      state: "failed",
+      code: "admin_consent_required",
+    },
+    {
+      name: "only an administrator may grant it (AADSTS90094)",
+      error: "access_denied",
+      description: "AADSTS90094: The grant requires admin permission.",
+      state: "failed",
+      code: "admin_consent_required",
+    },
+    {
+      name: "an administrator has to approve the request (AADSTS90093)",
+      error: "access_denied",
+      description: "AADSTS90093: Calling principal cannot consent due to lack of permissions.",
+      state: "failed",
+      code: "admin_consent_required",
+    },
+    {
+      name: "consent_required",
+      error: "consent_required",
+      description: undefined,
+      state: "failed",
+      code: "admin_consent_required",
+    },
+    {
+      name: "left the approval page (AADSTS65004)",
+      error: "access_denied",
+      description: "AADSTS65004: User declined to consent to access the app.",
+      state: "cancelled",
+      code: "provider_denied",
+    },
+    {
+      name: "access_denied without a description",
+      error: "access_denied",
+      description: undefined,
+      state: "cancelled",
+      code: "provider_denied",
+    },
+    {
+      name: "another provider error",
+      error: "server_error",
+      description: "AADSTS50000: There was an error issuing a token.",
+      state: "failed",
+      code: "provider_denied",
+    },
+  ] as const;
+
+  for (const definition of [
+    MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+    MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+  ]) {
+    test(`a ${definition.id} sign-in that returns a consent error carries the approval link`, async () => {
+      if (!available) return;
+      const workspace = await freshWorkspace();
+      const fixture = providerFixture();
+      const app = testApp(fixture);
+      const headers = {
+        authorization: await bearer(workspace),
+        "content-type": "application/json",
+        "x-opengeni-access-key": EDGE_ACCESS_KEY,
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      };
+      const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+      for (const returned of consentCallbacks) {
+        const begun = await app.request(base, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            providerId: definition.id,
+            ownership: "personal",
+            returnUrl: "https://host.example/capabilities",
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        });
+        expect(begun.status).toBe(200);
+        const attempt = await begun.json();
+        const signIn = new URL(attempt.nextAction.url);
+        // The sign-in step already carries the organization's approval link,
+        // for a person who never comes back from Microsoft's approval page.
+        const offered = new URL(attempt.nextAction.organizationApprovalUrl);
+        const query = new URLSearchParams({
+          error: returned.error,
+          state: signIn.searchParams.get("state")!,
+        });
+        if (returned.description) query.set("error_description", returned.description);
+        const response = await app.request(`/v1/integrations/provider-oauth/callback?${query}`);
+        expect(response.status, returned.name).toBe(302);
+        expect(response.headers.get("location"), returned.name).toBe(
+          "https://host.example/capabilities",
+        );
+
+        const current = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
+        expect(current, returned.name).toMatchObject({
+          state: returned.state,
+          nextAction: { type: "none" },
+          credentialsCommitted: false,
+          error: { code: returned.code, retryable: true },
+        });
+        const link = new URL(
+          /https:\/\/login\.microsoftonline\.com\/\S+?(?=\s|$)/.exec(current.error.message)![0],
+        );
+        expect(link.pathname, returned.name).toBe("/organizations/v2.0/adminconsent");
+        expect(link.searchParams.get("client_id")).toBe(MICROSOFT_CLIENT_ID);
+        expect(link.searchParams.get("redirect_uri")).toBe(signIn.searchParams.get("redirect_uri"));
+        expect(link.searchParams.get("state")).toBe("microsoft_admin_consent");
+        expect(link.searchParams.get("scope")).not.toContain("offline_access");
+        // One approval covers every Microsoft service of the app in this
+        // workspace, so adding Calendar after Mail needs no second approval.
+        const approved = link.searchParams.get("scope")!.split(" ");
+        for (const service of [
+          MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+          MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+          MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+        ])
+          for (const scope of service.authentication.scopes)
+            if (scope !== "offline_access")
+              expect(approved, returned.name).toContain(`https://graph.microsoft.com/${scope}`);
+        // Teams is not offered in this workspace, so IT isn't asked for it.
+        const offeredServices = [
+          MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+          MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+          MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,
+          MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+          MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION,
+        ].flatMap((service) => service.authentication.scopes);
+        const teamsOnly = MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.scopes.filter(
+          (scope) => !offeredServices.includes(scope),
+        );
+        expect(teamsOnly.length).toBeGreaterThan(0);
+        for (const scope of teamsOnly)
+          expect(approved).not.toContain(`https://graph.microsoft.com/${scope}`);
+        expect(link.toString(), returned.name).toBe(offered.toString());
+        // The approval link never carries the sign-in's signed state.
+        expect(current.error.message).not.toContain(signIn.searchParams.get("state")!);
+      }
+      expect(fixture.tokenRequests).toHaveLength(0);
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+      ).toEqual([]);
+    }, 60_000);
+  }
+
+  test("an administrator returning from the approval link sees whether it was approved", async () => {
+    if (!available) return;
+    const app = testApp(providerFixture());
+    for (const path of [
+      "/v1/integrations/provider-oauth/callback",
+      "/v1/integrations/oauth/callback",
+    ]) {
+      const approved = await app.request(
+        `${path}?admin_consent=True&tenant=tenant-1&state=microsoft_admin_consent`,
+      );
+      expect(approved.status, path).toBe(200);
+      expect(await approved.text()).toContain("Approved");
+      const refused = await app.request(
+        `${path}?error=access_denied&error_description=AADSTS65004&state=microsoft_admin_consent`,
+      );
+      expect(refused.status, path).toBe(400);
+      expect(await refused.text()).toContain("Not approved");
+    }
+  });
 });

@@ -8,6 +8,7 @@ import {
   assertScoped,
   buildCompiledCss,
   buildEffectiveTokensCss,
+  flattenLayers,
 } from "../scripts/build-compiled-css";
 
 const packageRoot = join(import.meta.dir, "..");
@@ -167,6 +168,22 @@ describe("compiled CSS contract", () => {
       font: "inherit",
     });
   });
+  test("lets unlayered component rules beat the layered base reset, as in the browser", () => {
+    const reset = compiled.indexOf(".og-root :where(li, p, blockquote");
+    expect(reset).toBeGreaterThan(-1);
+    expect(reset).toBeLessThan(compiled.indexOf(".og-session-capability-copy"));
+
+    const root = parse(
+      "@layer theme, base, utilities;\n.card p { padding: 1px }\n@layer utilities { .u { color: red } }\n@layer base { p { padding: 0 } }\n.after { color: blue }",
+    );
+    flattenLayers(root);
+    expect(root.nodes.map((node) => (node as { selector?: string }).selector)).toEqual([
+      "p",
+      ".u",
+      ".card p",
+      ".after",
+    ]);
+  });
 
   test("ships effective derived tokens through the Tailwind source bridge", () => {
     expect(sourceBridge).toContain('@import "./tokens.css";\n@import "./effective-tokens.css";');
@@ -208,11 +225,46 @@ describe("compiled CSS contract", () => {
     });
     expect([...foundDirectives]).toEqual([]);
     expect(Buffer.byteLength(compiled)).toBeGreaterThan(120_000);
-    expect(Buffer.byteLength(compiled)).toBeLessThan(256_000);
+    // A tripwire for accidental bloat (unscoped sources, whole palettes, prose
+    // words turned into utilities), not a feature budget. The builder already
+    // excludes non-class sources; real UI growth raises this deliberately (the
+    // web app's UI primitives moved into src/ui: ~404 KB; the session app in
+    // src/app with its token bridge: ~475 KB; the plain connect, This computer
+    // and capability-card stylesheets its components import: ~573 KB; ordinary
+    // feature growth since then, with main within a few hundred bytes of the
+    // old limit so any styled fix tripped it: ~600 KB).
+    expect(Buffer.byteLength(compiled)).toBeLessThan(680_000);
+  });
+
+  test("never treats a root named inside :not() as scoping a host-page rule", () => {
+    expect(() => assertScoped("button:not(.og-root textarea) { outline: 0 }")).toThrow();
+    expect(() =>
+      assertScoped(":where(.og-root) button:not(.og-root textarea) { outline: 0 }"),
+    ).not.toThrow();
+    // The shipped focus ring names a root only inside :not(), so it is scoped
+    // like any host-page selector (root ancestor or root itself).
+    expect(compiled).toContain(":where(.og-root) :where(");
+    expect(() => assertScoped(compiled)).not.toThrow();
+  });
+
+  test("nests only leading-& selectors so host bundlers lower them without :is()", () => {
+    // Every utility sits under the scoped list `:where(.og-root).x, :where(.og-root) .x`.
+    // A nested selector that puts `&` after other parts (`tr:last-child>&`) can only
+    // be flattened with `:is()`, which Vite/esbuild warn about for default targets.
+    const trailing: string[] = [];
+    parsed.walkRules((rule) => {
+      if (rule.parent?.type !== "rule") return;
+      for (const selector of rule.selectors) {
+        // Tailwind's own `:where(& > …)` / `:is(& > …)` already carry the pseudo-class.
+        const trimmed = selector.trim().replace(/^:(?:where|is)\(/u, "");
+        if (trimmed.includes("&") && !trimmed.startsWith("&")) trailing.push(selector.trim());
+      }
+    });
+    expect(trailing).toEqual([]);
   });
 
   test("contains representative utilities for roots and descendants", () => {
-    for (const utility of ["fixed", "flex", "bg-og-surface-1", "rounded-og-lg"]) {
+    for (const utility of ["fixed", "flex", "bg-og-surface-1", "rounded-og-lg", "py-8"]) {
       const selectors = selectorsForUtility(utility);
       expect(selectors.some((selector) => selectorHasDirectRootUtility(selector, utility))).toBe(
         true,

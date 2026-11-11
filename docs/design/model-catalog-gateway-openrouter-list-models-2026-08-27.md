@@ -10,7 +10,7 @@ billing, and matching HTTP/UI/SDK lifecycle. Statements below that previously
 excluded workspace OpenRouter are superseded by this revision.
 
 Implementation correction on 2026-08-28: migration 0389 is maintenance-only.
-Although its tables are additive, it changes OpenGeni's exact runtime-posture
+Although its tables are additive, it changes Opengeni's exact runtime-posture
 table/grant contract, so already-running pre-0389 processes become unready after
 commit. The rolling-migration requirements in the original specification are
 superseded by the drained procedure in `docs/deployment.md`.
@@ -25,7 +25,7 @@ part of the supplied specification.
 ## 1. Goal
 
 One supported-catalog source (code/env, or one deployment DB row), workspace-admin custom AI
-Gateway and OpenRouter slugs, a deployment-managed OpenRouter `:free` rail on OpenGeni's key, a
+Gateway and OpenRouter slugs, a deployment-managed OpenRouter `:free` rail on Opengeni's key, a
 separate workspace-managed OpenRouter rail, and an agent tool that returns one text list of models
 this workspace can use right now, with optional free-text notes per ID.
 Catalog membership, enablement, and billing stay three systems.
@@ -98,9 +98,9 @@ These were wrong or missing in earlier drafts and are now decisions.
   async overlay, `resolveCatalogSettings(db, envSettings)`, used at every catalog/admission site.
   Do not make `getSettings()` read Postgres. Missing one site means the API can show a model the
   worker cannot resolve.
-- `projectClientModel` would label OpenRouter as OpenGeni. Today anything with
+- `projectClientModel` would label OpenRouter as Opengeni. Today anything with
   `credentialSource.kind === "deployment"` and `mechanism === "api_key"` becomes
-  `source: "opengeni"` and provider `OpenGeni`. OpenRouter must omit the optional legacy closed
+  `source: "opengeni"` and provider `Opengeni`. OpenRouter must omit the optional legacy closed
   `source` field for same-major compatibility while exposing provider `openrouter` and its own
   provider label. The picker rail stays External through existing billing
   (`metering: external`, `upstreamPayer: deployment`). Extend `ClientModel.source`.
@@ -122,7 +122,7 @@ These were wrong or missing in earlier drafts and are now decisions.
   `parseModelProvidersJson`. Host JSON that uses ID `openrouter` or a reserved Gateway ID fails
   boot. The internal resolved kind is code-only; `registryBilling` and
   `registryCredentialSource` handle it exhaustively and never default.
-- Starter `:free` slugs must be tool-capable. OpenGeni turns need function calling. Ship one or two
+- Starter `:free` slugs must be tool-capable. Opengeni turns need function calling. Ship one or two
   reviewed instruct `:free` IDs with capabilities that include tools. If a working slug cannot be
   named at implementation time, ship the rail with an empty model table (key set, zero models)
   instead of a text-only model. Tests pin the constant, not live OpenRouter.
@@ -447,7 +447,7 @@ Do not ship OpenRouter as API-key credits. Do not ship database mode without fai
 - AC32: The database document contains slugs and notes, never the key.
 - AC33: `projectClientModel` exposes provider `openrouter` for deployment rows and
   `workspace-openrouter` for workspace rows, never `opengeni`; both use the public OpenRouter
-  source classification and never use provider label `OpenGeni`.
+  source classification and never use provider label `Opengeni`.
 - AC34: `getSettings()` does not query the catalog table. Database mode uses
   `resolveCatalogSettings`.
 - AC35: Cost `free` applies exactly to product IDs the deployment billing policy marks free,
@@ -516,7 +516,7 @@ Connect Gateway, add a known slug, select it under Your Gateway, and perform one
 | Risk | Mitigation |
 | --- | --- |
 | Billing on the document | `z.never()` plus AC1 |
-| OpenRouter shown as OpenGeni | AC33 |
+| OpenRouter shown as Opengeni | AC33 |
 | `getSettings()` gains a DB read | AC34 |
 | Overlay miss causes API/worker disagreement | Section 6 call-site list plus claim test |
 | Custom still throws at the fence | AC11 |
@@ -703,7 +703,7 @@ A final symbol audit should cover every source caller of `configuredModels`,
 - Workspace Gateway connection storage, encryption, readiness, and the Settings card already
   exist.
 - The picker already has an External billing rail.
-- External-metered usage already avoids OpenGeni credit debit.
+- External-metered usage already avoids Opengeni credit debit.
 - Chromium and the repository's Playwright dependency make desktop/narrow visual QA feasible after
   dependency installation and stack startup.
 - GitHub CLI authentication is available for eventual branch/PR delivery.

@@ -1,13 +1,15 @@
 import {
   agentConfigDeploymentPolicy,
-  allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   type Settings,
 } from "@opengeni/config";
 import {
   AgentConfigError,
   agentConfigFirstPartyMcpTools,
   agentConfigToolRefs,
+  FIRST_PARTY_MCP_TOOL_NAMES,
   legacyEffectiveAgentCapabilities,
+  mergeToolRefEager,
   resolveAgentConfig,
   resolveWorkspaceAgentDefaults,
   resolveWorkspaceAgentHumanInputEnabled,
@@ -22,6 +24,75 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
+
+/**
+ * Creation only: save the normal eager selection; never rewrite an existing session.
+ * The Docs fallback applies only when the configured `docs` server offers
+ * `knowledge_search` (the built-in one does); a deployment may define its own
+ * `docs` server with different tools.
+ */
+export function newSessionKnowledgeSearchTools(
+  tools: ToolRef[],
+  config: ResolvedAgentConfig | null,
+  firstPartyMcpTools: readonly FirstPartyMcpToolName[],
+  mcpServers: readonly { id: string; allowedTools?: readonly string[] | undefined }[],
+): ToolRef[] {
+  if (!config?.capabilities.knowledge) return tools;
+  const canSearch = (tool: ToolRef) =>
+    tool.kind === "mcp" &&
+    (tool.allowedTools === undefined || tool.allowedTools.includes("knowledge_search"));
+  const docsServerSearches =
+    mcpServers
+      .find((server) => server.id === "docs")
+      ?.allowedTools?.includes("knowledge_search") === true;
+  const serverId =
+    firstPartyMcpTools.includes("knowledge_search") &&
+    tools.some((tool) => tool.id === "opengeni" && canSearch(tool))
+      ? "opengeni"
+      : docsServerSearches && tools.some((tool) => tool.id === "docs" && canSearch(tool))
+        ? "docs"
+        : null;
+  if (!serverId) return tools;
+  return tools.map((tool) =>
+    tool.id === serverId && canSearch(tool)
+      ? { ...tool, eager: mergeToolRefEager(tool.eager, ["knowledge_search"]) }
+      : tool,
+  );
+}
+
+/**
+ * Creation only: the tools a new session's opening context is for
+ * (`modelContextTools`, such as the tool that reaches a workbook the person is
+ * writing from, or an application's tools for the record a chat opens on),
+ * frozen in the initial turn so its first model step loads them as a search by
+ * name would. A first-party name counts only inside the session's own
+ * first-party selection. Any other name counts only when the session selects
+ * another MCP server; the first turn then loads it only if one of those
+ * servers authorizes a tool by that name (see LazyToolRuntime.openingToolLoad).
+ * So this never adds a tool or permission, and the session's tools stay
+ * exactly as selected: the first request's tool block is the same as any other
+ * chat's.
+ */
+export function newSessionOpeningTools(
+  tools: ToolRef[],
+  firstPartyMcpTools: readonly FirstPartyMcpToolName[],
+  modelContextTools: readonly string[] | undefined,
+): string[] {
+  const opengeni = tools.find((tool) => tool.kind === "mcp" && tool.id === "opengeni");
+  const otherServers = tools.some((tool) => tool.kind === "mcp" && tool.id !== "opengeni");
+  const firstParty = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
+  return [
+    ...new Set(
+      (modelContextTools ?? []).filter((name) =>
+        firstParty.has(name)
+          ? opengeni?.kind === "mcp" &&
+            firstPartyMcpTools.includes(name as FirstPartyMcpToolName) &&
+            (opengeni.allowedTools === undefined || opengeni.allowedTools.includes(name))
+          : otherServers,
+      ),
+    ),
+  ];
+}
 
 /**
  * Run an agent-config resolution step and surface its typed failure as a 422
@@ -48,7 +119,7 @@ export function legacySessionAgentCapabilities(
   defaultServerIds?: Iterable<string>,
 ): ResolvedAgentCapabilities {
   return legacyEffectiveAgentCapabilities({
-    firstPartyMcpTools: allowedFirstPartyMcpToolsForSession(settings, session.firstPartyMcpTools),
+    firstPartyMcpTools: resolveSessionFirstPartyMcpTools(settings, session, workspaceSettings),
     tools: session.tools,
     toolPolicy: session.toolPolicy,
     humanInputEnabled: resolveWorkspaceAgentHumanInputEnabled(workspaceSettings),
@@ -145,49 +216,4 @@ export function applySessionAgentConfigWriteThrough(input: {
     });
     return { firstPartyMcpTools, tools: refs.tools, toolPolicy: refs.toolPolicy };
   });
-}
-
-/**
- * Stored `agent` inputs (scheduled tasks, automation templates, workspace
- * defaults) are admitted only with the admission switch on: pre-0542 workers
- * would ignore them.
- */
-export function requireAgentConfigAdmission(
-  settings: Pick<Settings, "agentConfigAdmissionEnabled">,
-  agent: unknown,
-): void {
-  if (agent !== undefined && settings.agentConfigAdmissionEnabled !== true) {
-    throw new HTTPException(422, {
-      message: "agent configuration is not enabled on this deployment",
-      cause: new AgentConfigError(
-        "agent_config_not_enabled",
-        "agent configuration is not enabled on this deployment",
-      ),
-    });
-  }
-}
-
-/** The `agent` object of a scheduled-task create/update payload, if any. */
-export function scheduledTaskAgentInput(payload: unknown): unknown {
-  if (!payload || typeof payload !== "object") return undefined;
-  const agentConfig = (payload as { agentConfig?: unknown }).agentConfig;
-  if (!agentConfig || typeof agentConfig !== "object") return undefined;
-  return (agentConfig as { agent?: unknown }).agent;
-}
-
-/**
- * Whether a create could resolve a non-null configuration at all. False means
- * exact legacy without reading the workspace (admission off, default switch
- * off, no request `agent`, no configured parent), so legacy creators keep
- * their historical reads.
- */
-export function agentConfigMayResolve(
-  settings: Pick<Settings, "agentConfigAdmissionEnabled" | "agentConfigDefaultForNewSessions">,
-  request: unknown,
-): boolean {
-  return (
-    request !== undefined ||
-    settings.agentConfigAdmissionEnabled === true ||
-    settings.agentConfigDefaultForNewSessions === true
-  );
 }

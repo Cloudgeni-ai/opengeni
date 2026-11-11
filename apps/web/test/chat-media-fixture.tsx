@@ -6,10 +6,10 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { createRoot } from "react-dom/client";
-import { ChatInteractiveBlock } from "../src/components/artifacts/chat-interactive-block";
-import { InlineChatImage } from "../src/components/artifacts/inline-chat-image";
+import { ChatInteractiveBlock } from "@opengeni/react/app/components/artifacts/chat-interactive-block";
+import { InlineChatImage } from "@opengeni/react/app/components/artifacts/inline-chat-image";
 import { mediaFixture, workspaceId, siteId, imageId } from "./chat-media-context-fixture";
-import { consoleLinkResolver } from "../src/lib/session-artifact-navigation";
+import { consoleLinkResolver } from "@opengeni/react/app/lib/session-artifact-navigation";
 import "../src/styles.css";
 
 declare global {

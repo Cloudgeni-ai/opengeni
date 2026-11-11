@@ -1,12 +1,12 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { FileTextIcon, UploadIcon, XIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { FormDialog, FormPage } from "@/components/ui/form-dialog";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu } from "@/components/ui/select-menu";
+import { Button } from "@opengeni/react/ui/button";
+import { Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
 
 import {
   ENTRY_TYPES,

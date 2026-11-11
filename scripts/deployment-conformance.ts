@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { errorMessage } from "@opengeni/contracts/values";
 
 interface Args {
   baseUrl: string;
@@ -182,7 +183,7 @@ if (args.skipAgent) {
         `session ${toolSessionId} with selected MCP tool ended with status ${status}${turnFailureSuffix(events)}`,
       );
     }
-    return `session ${toolSessionId} reached idle with OpenGeni MCP selected`;
+    return `session ${toolSessionId} reached idle with Opengeni MCP selected`;
   });
 
   if (args.skipScheduledTasks) {
@@ -295,7 +296,7 @@ const ok = !results.some((result) => result.status === "failed");
 if (args.json) {
   console.log(JSON.stringify({ ok, results }, null, 2));
 } else {
-  console.log("OpenGeni deployment conformance");
+  console.log("Opengeni deployment conformance");
   for (const result of results) {
     console.log(`  - ${result.id}: ${result.status} - ${result.detail}`);
   }
@@ -716,8 +717,4 @@ function skipped(id: string, detail: string): CheckResult {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

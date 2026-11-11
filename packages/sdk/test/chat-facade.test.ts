@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  OpenGeni,
+  Opengeni,
   CHAT_SESSION_NAMESPACE,
   chatIdempotencyKey,
   chatIdentityName,
@@ -16,6 +18,9 @@ import { collect, WORKSPACE_ID } from "./helpers";
 const UUID_V5 = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 describe("chat identities", () => {
+  test("current brand facade preserves the established SDK constructor", () => {
+    expect(Opengeni).toBe(OpenGeni);
+  });
   test("uuidV5 matches the RFC 4122 DNS example", async () => {
     await expect(uuidV5("hello.example.com", "6ba7b810-9dad-11d1-80b4-00c04fd430c8")).resolves.toBe(
       "fdda765f-fc57-5604-a269-52a7df8164ec",

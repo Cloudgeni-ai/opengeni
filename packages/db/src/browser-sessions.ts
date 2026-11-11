@@ -23,7 +23,7 @@ import {
   type NetworkRouteConfiguration as NetworkRouteConfigurationValue,
   type NetworkRouteConsistency as NetworkRouteConsistencyValue,
 } from "@opengeni/contracts";
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, ne, notInArray, sql } from "drizzle-orm";
 import { attachedDeviceGenerationMatches } from "./attached-browser-devices";
 import { type Database, withRlsContext } from "./database";
 import {
@@ -39,6 +39,10 @@ import {
   type BrowserStateArtifactCommitInput,
 } from "./browser-state-artifacts";
 import * as schema from "./schema";
+import {
+  browserDeadlineCheckpoint,
+  type BrowserDeadlineCheckpointTarget,
+} from "./browser-deadline-checkpoints";
 
 type BrowserSessionRow = typeof schema.browserSessions.$inferSelect;
 type BrowserAssociationRow = typeof schema.browserSessionAssociations.$inferSelect;
@@ -144,6 +148,11 @@ export class BrowserSessionStateError extends Error {
   readonly name = "BrowserSessionStateError";
 }
 
+/** A capacity save's candidate no longer qualifies; nothing was written. */
+export class BrowserCapacitySuspendClaimRejectedError extends Error {
+  readonly name = "BrowserCapacitySuspendClaimRejectedError";
+}
+
 export type PrepareBrowserSessionCreateInput = {
   accountId: string;
   workspaceId: string;
@@ -162,6 +171,9 @@ export type PrepareBrowserSessionCreateInput = {
   linkedComputerSessionId?: string | null;
   resolveDefaultRevision?: boolean;
   capabilities?: BrowserSessionCapabilitiesValue;
+  /** Workspace storing an attached-device placement's Chrome profile, where
+   *  its machine is enrolled. Defaults to this workspace. */
+  attachedDeviceWorkspaceId?: string | null;
 };
 
 export type PrepareBrowserSessionEndInput = {
@@ -180,6 +192,18 @@ export type PrepareBrowserSessionLifecycleInput = Omit<
   "expectedLifecycle" | "expectedControllerGeneration" | "expectedFailureCode"
 >;
 
+/**
+ * What a capacity save claims: the browser it picked as idle, exactly as it
+ * was picked. Under the browser's row lock the save goes ahead only while the
+ * browser is still active on that controller, still unused since the cutoff,
+ * and has no operation in flight.
+ */
+export type BrowserCapacitySuspendClaim = {
+  idleBefore: Date;
+  placementInstanceId: string;
+  controllerGeneration: string;
+};
+
 export type BrowserPrivateCheckpointAuthority = {
   artifactId: string;
   sourceBrowserSessionId: string;
@@ -191,6 +215,8 @@ export type BrowserPrivateCheckpointAuthority = {
   manifestDigest: string;
   sizeBytes: number;
   materialization: BrowserRevisionMaterializationValue;
+  /** When this checkpoint was taken. */
+  createdAt: string;
 };
 
 /** Internal executor view of one BrowserSession. Plaintext controller
@@ -200,6 +226,9 @@ export type BrowserSessionControlRecord = {
   session: BrowserSession;
   tokenGeneration: number;
   sourceSessionId: string;
+  /** Workspace storing an attached-device placement's Chrome profile, which
+   *  can be another workspace than the session's; null otherwise. */
+  deviceWorkspaceId: string | null;
   /** Placement hosting browserd. It equals the logical sandbox placement for
    * managed browsers and remains the source home sandbox for remote browsers. */
   controllerHostSandboxGroupId: string | null;
@@ -304,6 +333,7 @@ function browserSessionFromRows(
     engine: row.engine,
     engineVersion: row.engineVersion,
     headless: row.headless,
+    ...(row.display === "window" || row.display === "offscreen" ? { display: row.display } : {}),
     identityId: row.identityId,
     baseRevisionId: row.baseRevisionId,
     networkRouteId: row.networkRouteId,
@@ -468,9 +498,84 @@ async function replayedMutation(
   });
 }
 
+/** Lifecycles that never return to use; `includeTerminal: false` omits them in SQL. */
+const TERMINAL_INTERACTION_LIFECYCLES = ["ended", "failed"] as const;
+
+/**
+ * Saveable browsers on one controller, least recently used first, that a full
+ * controller may suspend to make room for a new browser. Only active browsers
+ * with a private checkpoint, bound to this exact placement instance, unused
+ * since `idleBefore` and with no lifecycle operation in flight qualify.
+ */
+export async function listBrowserCapacitySuspendCandidates(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    placement: InteractionPlacement;
+    placementInstanceId: string;
+    excludeBrowserSessionId: string;
+    idleBefore: Date;
+    limit: number;
+  },
+): Promise<string[]> {
+  const placementFilter =
+    input.placement.kind === "connected_machine"
+      ? and(
+          eq(schema.browserSessions.placementKind, "connected_machine"),
+          eq(schema.browserSessions.connectedSandboxId, input.placement.sandboxId),
+        )
+      : input.placement.kind === "sandbox_group"
+        ? and(
+            eq(schema.browserSessions.placementKind, "sandbox_group"),
+            eq(schema.browserSessions.sandboxGroupId, input.placement.sandboxGroupId),
+          )
+        : null;
+  if (!placementFilter) return [];
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select({ id: schema.browserSessions.id })
+        .from(schema.browserSessions)
+        .where(
+          and(
+            eq(schema.browserSessions.workspaceId, input.workspaceId),
+            eq(schema.browserSessions.lifecycle, "active"),
+            placementFilter,
+            eq(schema.browserSessions.placementInstanceId, input.placementInstanceId),
+            sql`${schema.browserSessions.controllerGeneration} is not null`,
+            sql`(${schema.browserSessions.capabilities} ->> 'privateCheckpoint') = 'true'`,
+            lt(schema.browserSessions.lastUsedAt, input.idleBefore),
+            ne(schema.browserSessions.id, input.excludeBrowserSessionId),
+            sql`not exists (
+              select 1 from ${schema.interactionOperations}
+              where ${schema.interactionOperations.workspaceId} = ${input.workspaceId}
+                and ${schema.interactionOperations.resourceKind} = 'browser_session'
+                and ${schema.interactionOperations.resourceId} = ${schema.browserSessions.id}
+                and ${schema.interactionOperations.state} in ('prepared', 'dispatched')
+            )`,
+          ),
+        )
+        .orderBy(schema.browserSessions.lastUsedAt, schema.browserSessions.id)
+        .limit(input.limit);
+      return rows.map((row) => row.id);
+    },
+    CONSISTENT_READ,
+  );
+}
+
 export async function listBrowserSessions(
   db: Database,
-  input: { accountId: string; workspaceId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    /** Only sessions with any association to this agent session. */
+    associatedSessionId?: string;
+    /** Defaults to true (complete history). */
+    includeTerminal?: boolean;
+  },
 ): Promise<BrowserSessionListResponseValue> {
   return await withRlsContext(
     db,
@@ -479,7 +584,22 @@ export async function listBrowserSessions(
       const rows = await scopedDb
         .select()
         .from(schema.browserSessions)
-        .where(eq(schema.browserSessions.workspaceId, input.workspaceId))
+        .where(
+          and(
+            eq(schema.browserSessions.workspaceId, input.workspaceId),
+            input.includeTerminal === false
+              ? notInArray(schema.browserSessions.lifecycle, [...TERMINAL_INTERACTION_LIFECYCLES])
+              : undefined,
+            input.associatedSessionId
+              ? sql`exists (
+                  select 1 from ${schema.browserSessionAssociations}
+                  where ${schema.browserSessionAssociations.workspaceId} = ${input.workspaceId}
+                    and ${schema.browserSessionAssociations.browserSessionId} = ${schema.browserSessions.id}
+                    and ${schema.browserSessionAssociations.sessionId} = ${input.associatedSessionId}
+                )`
+              : undefined,
+          ),
+        )
         .orderBy(desc(schema.browserSessions.lastUsedAt), desc(schema.browserSessions.id));
       const associations = await loadAssociations(
         scopedDb,
@@ -501,6 +621,90 @@ export async function listBrowserSessions(
     },
     CONSISTENT_READ,
   );
+}
+
+function liveConnectedMachineBrowserFilter(input: { workspaceId: string; enrollmentId: string }) {
+  return and(
+    eq(schema.browserSessions.workspaceId, input.workspaceId),
+    eq(schema.browserSessions.placementKind, "connected_machine"),
+    eq(schema.sandboxes.enrollmentId, input.enrollmentId),
+    inArray(schema.browserSessions.lifecycle, [
+      "starting",
+      "active",
+      "suspending",
+      "suspended",
+      "restoring",
+      "repair_required",
+      "ending",
+    ]),
+    sql`(${schema.browserSessions.lifecycle} <> 'suspended' or ${schema.browserSessions.controllerGeneration} is not null)`,
+  );
+}
+
+/** Managed browsers that may still have a live browser process on one
+ * Connected Machine: every non-terminal browser except a saved one whose
+ * controller binding was already released (its process is gone). */
+export async function countLiveConnectedMachineBrowsers(
+  db: Database,
+  input: { accountId: string; workspaceId: string; enrollmentId: string },
+): Promise<number> {
+  return (await connectedMachineBrowserUse(db, input)).live;
+}
+
+/** Statuses of a session whose turn is underway: working, about to start,
+ * recovering, or paused mid-turn for a person or for capacity. Its open
+ * browsers may be in use. */
+const BROWSER_USING_SESSION_STATUSES = [
+  "queued",
+  "running",
+  "recovering",
+  "requires_action",
+  "waiting_capacity",
+] as const;
+
+/** The live managed browsers on one Connected Machine (see
+ * countLiveConnectedMachineBrowsers), and how many of them a working session
+ * may be using now: a session associated with the browser (the one that
+ * opened it, or one that attached to it) has a turn underway, or waits for
+ * input within its turn and will continue it. A live browser no such
+ * session holds is open but idle. Counts the machine's browsers in this
+ * workspace only. */
+export async function connectedMachineBrowserUse(
+  db: Database,
+  input: { accountId: string; workspaceId: string; enrollmentId: string },
+): Promise<{ live: number; inUse: number }> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        live: sql<number>`count(*)::int`,
+        inUse: sql<number>`(count(*) filter (where exists (
+          select 1
+          from ${schema.browserSessionAssociations} association
+          join ${schema.sessions} session
+            on session.workspace_id = association.workspace_id
+           and session.id = association.session_id
+          where association.workspace_id = ${schema.browserSessions.workspaceId}
+            and association.browser_session_id = ${schema.browserSessions.id}
+            and (
+              session.status in (${sql.join(
+                BROWSER_USING_SESSION_STATUSES.map((status) => sql`${status}`),
+                sql`, `,
+              )})
+              or (session.input_wait_turn_id is not null and session.input_wait_until > now())
+            )
+        )))::int`,
+      })
+      .from(schema.browserSessions)
+      .innerJoin(
+        schema.sandboxes,
+        and(
+          eq(schema.sandboxes.workspaceId, schema.browserSessions.workspaceId),
+          eq(schema.sandboxes.id, schema.browserSessions.connectedSandboxId),
+        ),
+      )
+      .where(liveConnectedMachineBrowserFilter(input));
+    return { live: row?.live ?? 0, inUse: row?.inUse ?? 0 };
+  });
 }
 
 export async function getBrowserSession(
@@ -611,6 +815,7 @@ export async function getBrowserPrivateCheckpointAuthority(
         manifestDigest: artifact.manifestDigest,
         sizeBytes: safeInteger(artifact.sizeBytes, "browser checkpoint artifact size"),
         materialization: BrowserRevisionMaterialization.parse(artifact.materialization),
+        createdAt: artifact.createdAt.toISOString(),
       };
     },
     CONSISTENT_READ,
@@ -670,6 +875,7 @@ async function controlRecordFromRows(
     session: browserSessionFromRows(row, associations),
     tokenGeneration: row.tokenGeneration,
     sourceSessionId: createdAssociations[0]!.sessionId,
+    deviceWorkspaceId: row.deviceId ? (row.deviceWorkspaceId ?? row.workspaceId) : null,
     controllerHostSandboxGroupId: row.controllerHostSandboxGroupId,
     createOperationId: row.createOperationId,
     networkRouteAuthority: networkRouteAuthorityFromRow(row),
@@ -786,7 +992,11 @@ export async function prepareBrowserSessionCreate(
           });
         }
 
-        const placementColumns = placementToColumns(input.placement);
+        const placementColumns = placementToColumns(
+          input.placement,
+          input.workspaceId,
+          input.attachedDeviceWorkspaceId,
+        );
         const controllerHostSandboxGroupId =
           input.placement.kind === "sandbox_group"
             ? input.placement.sandboxGroupId
@@ -1125,11 +1335,16 @@ async function resolveCreateIdentitySelection(
   return { identityId: identity.id, baseRevisionId: baseRevisionId ?? null };
 }
 
-function placementToColumns(placement: InteractionPlacement): {
+function placementToColumns(
+  placement: InteractionPlacement,
+  workspaceId: string,
+  attachedDeviceWorkspaceId: string | null | undefined,
+): {
   placementKind: BrowserSessionRow["placementKind"];
   sandboxGroupId: string | null;
   connectedSandboxId: string | null;
   deviceId: string | null;
+  deviceWorkspaceId: string | null;
   externalProviderId: string | null;
   externalPlacementId: string | null;
 } {
@@ -1138,9 +1353,35 @@ function placementToColumns(placement: InteractionPlacement): {
     sandboxGroupId: placement.kind === "sandbox_group" ? placement.sandboxGroupId : null,
     connectedSandboxId: placement.kind === "connected_machine" ? placement.sandboxId : null,
     deviceId: placement.kind === "attached_device" ? placement.deviceId : null,
+    deviceWorkspaceId:
+      placement.kind === "attached_device" ? (attachedDeviceWorkspaceId ?? workspaceId) : null,
     externalProviderId: placement.kind === "external_provider" ? placement.providerId : null,
     externalPlacementId: placement.kind === "external_provider" ? placement.placementId : null,
   };
+}
+
+async function assertDeadlineCheckpointAuthority(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    operationId: string;
+    browserSessionId: string;
+    controllerGeneration: string;
+    deadlineTarget?: BrowserDeadlineCheckpointTarget;
+  },
+): Promise<void> {
+  const target = input.deadlineTarget;
+  if (!target) return;
+  if (
+    target.accountId !== input.accountId ||
+    target.workspaceId !== input.workspaceId ||
+    target.browserSessionId !== input.browserSessionId ||
+    target.controllerGeneration !== input.controllerGeneration ||
+    (await browserDeadlineCheckpoint(db, target))?.operationId !== input.operationId
+  ) {
+    throw new BrowserSessionOperationConflictError("Browser deadline checkpoint authority changed");
+  }
 }
 
 export async function dispatchBrowserSessionOperation(
@@ -1153,6 +1394,7 @@ export async function dispatchBrowserSessionOperation(
     controllerGeneration: string;
     controller?: InteractionControllerBinding;
     stateUpload?: { objectKey: string; cleanupAfter: Date };
+    deadlineTarget?: BrowserDeadlineCheckpointTarget;
   },
 ): Promise<InteractionLifecycleOperationReceiptValue> {
   const controller = input.controller ? InteractionControllerBinding.parse(input.controller) : null;
@@ -1167,6 +1409,7 @@ export async function dispatchBrowserSessionOperation(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        await assertDeadlineCheckpointAuthority(tx, input);
         await lockOperation(tx, input.workspaceId, input.operationId);
         const operation = await loadOperation(tx, input.workspaceId, input.operationId);
         assertOperationResource(operation, input.browserSessionId);
@@ -1263,6 +1506,8 @@ export async function dispatchBrowserSessionOperation(
         }
         return operationReceipt(operation!, true);
       }),
+    undefined,
+    input.deadlineTarget ? "none" : "shared",
   );
 }
 
@@ -1308,6 +1553,8 @@ export async function activateBrowserSession(
     browserSessionId: string;
     controller: InteractionControllerBinding;
     engineVersion: string | null;
+    /** How the controller launched this headed browser, when it reports it. */
+    display?: "window" | "offscreen" | null;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
   return await withRlsContext(
@@ -1365,6 +1612,7 @@ export async function activateBrowserSession(
             controllerGeneration: input.controller.controllerGeneration,
             placementInstanceId: input.controller.placementInstanceId,
             engineVersion: input.engineVersion,
+            display: input.display ?? null,
             controllerHeartbeatAt: now,
             lastUsedAt: now,
             failureCode: null,
@@ -1411,6 +1659,7 @@ export async function failBrowserSessionOperation(
     operationId: string;
     browserSessionId: string;
     state?: "failed" | "outcome_unknown";
+    onlyIfPreparedCreate?: boolean;
     error: InteractionErrorValue;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
@@ -1427,7 +1676,11 @@ export async function failBrowserSessionOperation(
         if (
           operation!.state === "completed" ||
           operation!.state === "failed" ||
-          operation!.state === "outcome_unknown"
+          operation!.state === "outcome_unknown" ||
+          (input.onlyIfPreparedCreate &&
+            (operation!.kind !== "create" ||
+              operation!.state !== "prepared" ||
+              operation!.controllerGeneration !== null))
         ) {
           return await replayedMutation(tx, input.workspaceId, operation!, {
             kind: operation!.kind,
@@ -1488,12 +1741,52 @@ export async function failBrowserSessionOperation(
 
 export async function prepareBrowserSessionSuspend(
   db: Database,
-  input: PrepareBrowserSessionLifecycleInput,
+  input: PrepareBrowserSessionLifecycleInput & {
+    /** Set for a capacity save; see {@link BrowserCapacitySuspendClaim}. A
+     * browser that no longer qualifies, including one already suspended by
+     * another save, is refused with BrowserCapacitySuspendClaimRejectedError. */
+    capacityClaim?: BrowserCapacitySuspendClaim;
+  },
 ): Promise<BrowserSessionMutationResponseValue> {
+  const claim = input.capacityClaim;
   return await prepareBrowserSessionLifecycleTransition(db, input, {
     kind: "suspend",
     terminalLifecycle: "suspended",
     targetLifecycle: "suspending",
+    ...(claim
+      ? {
+          claim: async (tx: Database, row: BrowserSessionRow) => {
+            if (
+              row.lifecycle !== "active" ||
+              row.placementInstanceId !== claim.placementInstanceId ||
+              row.controllerGeneration !== claim.controllerGeneration ||
+              !row.lastUsedAt ||
+              row.lastUsedAt.getTime() >= claim.idleBefore.getTime()
+            ) {
+              throw new BrowserCapacitySuspendClaimRejectedError(
+                "BrowserSession is no longer idle on this controller",
+              );
+            }
+            const [inFlight] = await tx
+              .select({ operationId: schema.interactionOperations.operationId })
+              .from(schema.interactionOperations)
+              .where(
+                and(
+                  eq(schema.interactionOperations.workspaceId, row.workspaceId),
+                  eq(schema.interactionOperations.resourceKind, "browser_session"),
+                  eq(schema.interactionOperations.resourceId, row.id),
+                  inArray(schema.interactionOperations.state, ["prepared", "dispatched"]),
+                ),
+              )
+              .limit(1);
+            if (inFlight) {
+              throw new BrowserCapacitySuspendClaimRejectedError(
+                "BrowserSession has an operation in flight",
+              );
+            }
+          },
+        }
+      : {}),
     assertReady: (row) => {
       if (row.lifecycle !== "active" || !controllerFromRow(row)) {
         throw new BrowserSessionStateError("Only an active BrowserSession can be suspended");
@@ -1553,8 +1846,8 @@ async function failPreparedBrowserSessionTransition(
     workspaceId: string;
     operationId: string;
     browserSessionId: string;
-    kind: "suspend" | "end";
-    transitionalLifecycle: "suspending" | "ending";
+    kind: "suspend" | "resume" | "end";
+    transitionalLifecycle: "suspending" | "restoring" | "ending";
     restoreLifecycle: BrowserSessionRow["lifecycle"];
     restoreFailureCode?: string | null;
     expectedControllerGeneration?: string | null;
@@ -1662,6 +1955,24 @@ export async function prepareBrowserSessionResume(
   });
 }
 
+async function linkedComputerIsLive(
+  tx: Database,
+  workspaceId: string,
+  computerSessionId: string,
+): Promise<boolean> {
+  const [computer] = await tx
+    .select({ lifecycle: schema.computerSessions.lifecycle })
+    .from(schema.computerSessions)
+    .where(
+      and(
+        eq(schema.computerSessions.workspaceId, workspaceId),
+        eq(schema.computerSessions.id, computerSessionId),
+      ),
+    )
+    .limit(1);
+  return computer !== undefined && !["ended", "failed", "lost"].includes(computer.lifecycle);
+}
+
 async function prepareBrowserSessionLifecycleTransition(
   db: Database,
   input: PrepareBrowserSessionLifecycleInput,
@@ -1670,6 +1981,8 @@ async function prepareBrowserSessionLifecycleTransition(
     terminalLifecycle: "suspended" | "active";
     targetLifecycle: "suspending" | "restoring";
     assertReady: (row: BrowserSessionRow) => void;
+    /** Checked under the row lock before anything is written. */
+    claim?: (tx: Database, row: BrowserSessionRow) => Promise<void>;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
   const digest = lifecycleRequestDigest(
@@ -1705,9 +2018,19 @@ async function prepareBrowserSessionLifecycleTransition(
             });
           }
 
+          if (transition.claim) await transition.claim(tx, row);
           const terminal = row.lifecycle === transition.terminalLifecycle;
           if (!terminal) transition.assertReady(row);
           const now = new Date();
+          // A saved browser outlives the desktop it was shown on: that desktop
+          // stops with its box (idle release, provider deadline). Resume
+          // restores the profile on its own display instead of failing on a
+          // dead link.
+          const unlinkStoppedComputer =
+            !terminal &&
+            transition.kind === "resume" &&
+            row.linkedComputerSessionId !== null &&
+            !(await linkedComputerIsLive(tx, input.workspaceId, row.linkedComputerSessionId));
           const [operation] = await tx
             .insert(schema.interactionOperations)
             .values({
@@ -1739,6 +2062,7 @@ async function prepareBrowserSessionLifecycleTransition(
                           networkRouteAuthorityDigest: null,
                         }
                       : {}),
+                    ...(unlinkStoppedComputer ? { linkedComputerSessionId: null } : {}),
                     updatedAt: now,
                   })
                   .where(
@@ -1781,6 +2105,7 @@ export async function commitBrowserSessionSuspension(
     browserSessionId: string;
     controllerGeneration: string;
     artifact: BrowserStateArtifactCommitInput;
+    deadlineTarget?: BrowserDeadlineCheckpointTarget;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
   let artifact: BrowserStateArtifactCommitInput;
@@ -1797,6 +2122,7 @@ export async function commitBrowserSessionSuspension(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        await assertDeadlineCheckpointAuthority(tx, input);
         await lockOperation(tx, input.workspaceId, input.operationId);
         const operation = await loadOperation(tx, input.workspaceId, input.operationId);
         assertOperationResource(operation, input.browserSessionId, "suspend");
@@ -1920,6 +2246,8 @@ export async function commitBrowserSessionSuspension(
           operation: operationReceipt(operationRow, false),
         });
       }),
+    undefined,
+    input.deadlineTarget ? "none" : "shared",
   );
 }
 
@@ -1981,6 +2309,311 @@ export async function clearSuspendedBrowserSessionController(
   );
 }
 
+export type ExpiredBrowserSessionResume = {
+  /** Generation owning the retained working copy. For an expired resume this
+   * is its retained binding, which must be ended before settling. */
+  controllerGeneration: string | null;
+  /** Whether the browser may be returned to suspended on its durable state
+   * when its working copy cannot be continued. Only an expired resume, whose
+   * durable state is unchanged, may; a browser lost to a controller restart
+   * ran past its checkpoint and stays lost rather than silently reverting. */
+  settleable: boolean;
+};
+
+/** A lost browser whose working copy its controller may still hold: an expired
+ * resume, or a browser whose suspension found its controller restarted (see
+ * `retainedWorkingCopyLoss`). Losses of create or end transitions, and
+ * anything with a newer lifecycle operation, are excluded. */
+export async function getExpiredBrowserSessionResume(
+  db: Database,
+  input: { accountId: string; workspaceId: string; browserSessionId: string },
+): Promise<ExpiredBrowserSessionResume | null> {
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const row = await loadBrowserSessionRow(tx, input.workspaceId, input.browserSessionId);
+      if (!row) throw new BrowserSessionNotFoundError("BrowserSession not found");
+      return await retainedWorkingCopyLoss(tx, row);
+    }, CONSISTENT_READ),
+  );
+}
+
+/** Controller authority of an in-flight continuation of an expired resume.
+ * That continuation has no dispatched operation of its own (its operation is
+ * recorded only once the controller adopts the working copy), so its authority
+ * is the expired resume itself: the browser is still lost from that resume and
+ * still bound to the same retained controller generation. */
+export async function touchExpiredBrowserSessionResume(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    browserSessionId: string;
+    controllerGeneration: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const row = await loadBrowserSessionRow(tx, input.workspaceId, input.browserSessionId);
+      if (!row) return false;
+      const loss = await retainedWorkingCopyLoss(tx, row);
+      return loss !== null && loss.controllerGeneration === input.controllerGeneration;
+    }, CONSISTENT_READ),
+  );
+}
+
+/** Return an expired resume to an ordinary suspended browser once its retained
+ * controller generation was ended. The next resume restores the same durable
+ * state under a fresh controller generation; nothing durable is deleted. */
+export async function settleExpiredBrowserSessionResume(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    browserSessionId: string;
+    expectedControllerGeneration: string | null;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
+      const row = await loadBrowserSessionRow(tx, input.workspaceId, input.browserSessionId);
+      if (!row) throw new BrowserSessionNotFoundError("BrowserSession not found");
+      if (row.lifecycle === "suspended" && row.controllerGeneration === null) return false;
+      const loss = await retainedWorkingCopyLoss(tx, row);
+      if (!loss?.settleable) {
+        // The same refusal resume preparation gives every other lost browser.
+        throw new BrowserSessionStateError("Only a suspended BrowserSession can be resumed");
+      }
+      if (row.controllerGeneration !== input.expectedControllerGeneration) {
+        throw new BrowserSessionOperationConflictError(
+          "BrowserSession controller authority changed",
+        );
+      }
+      const [settled] = await tx
+        .update(schema.browserSessions)
+        .set({
+          lifecycle: "suspended",
+          failureCode: null,
+          controllerId: null,
+          controllerGeneration: null,
+          placementInstanceId: null,
+          controllerHeartbeatAt: null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.browserSessions.workspaceId, input.workspaceId),
+            eq(schema.browserSessions.id, input.browserSessionId),
+            eq(schema.browserSessions.lifecycle, "lost"),
+            eq(schema.browserSessions.failureCode, CONTROLLER_TRANSITION_EXPIRED),
+            input.expectedControllerGeneration === null
+              ? isNull(schema.browserSessions.controllerGeneration)
+              : eq(schema.browserSessions.controllerGeneration, input.expectedControllerGeneration),
+          ),
+        )
+        .returning({ id: schema.browserSessions.id });
+      if (!settled) throw new Error("BrowserSession expired resume settlement was lost");
+      await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+      return true;
+    }),
+  );
+}
+
+const CONTROLLER_TRANSITION_EXPIRED = "controller_transition_expired";
+const CONTROLLER_RESOURCE_MISSING = "controller_resource_missing";
+
+/** Continue an expired resume on its retained controller generation after that
+ * controller re-adopted the generation's own working copy. The browser keeps
+ * its record, history and working profile; nothing is restored or discarded.
+ * The new resume operation completes on that generation, and the expired one
+ * stays settled as `outcome_unknown`. */
+export async function continueExpiredBrowserSessionResume(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    browserSessionId: string;
+    operationId: string;
+    actorSubjectId: string;
+    controller: InteractionControllerBinding;
+    /** How the controller relaunched this headed browser, when it reports it. */
+    display?: "window" | "offscreen" | null;
+  },
+): Promise<BrowserSessionMutationResponseValue> {
+  const digest = lifecycleRequestDigest(input.browserSessionId, "resume", input.actorSubjectId);
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
+      const existing = await loadOperation(tx, input.workspaceId, input.operationId);
+      if (existing) {
+        return await replayedMutation(tx, input.workspaceId, existing, {
+          kind: "resume",
+          digest,
+        });
+      }
+      const row = await loadBrowserSessionRow(tx, input.workspaceId, input.browserSessionId);
+      if (!row) throw new BrowserSessionNotFoundError("BrowserSession not found");
+      const loss = await retainedWorkingCopyLoss(tx, row);
+      if (!loss) {
+        throw new BrowserSessionStateError("Only a suspended BrowserSession can be resumed");
+      }
+      // A retained binding must match exactly. A restarted controller's binding
+      // was cleared, so the continuing controller must hold the generation of
+      // the failed suspension that owns the working copy.
+      if (
+        row.controllerGeneration === null
+          ? input.controller.controllerGeneration !== loss.controllerGeneration
+          : row.controllerGeneration !== input.controller.controllerGeneration ||
+            row.controllerId !== input.controller.controllerId ||
+            row.placementInstanceId !== input.controller.placementInstanceId
+      ) {
+        throw new BrowserSessionOperationConflictError(
+          "BrowserSession controller authority changed",
+        );
+      }
+      const now = new Date();
+      const [operationRow] = await tx
+        .insert(schema.interactionOperations)
+        .values({
+          operationId: input.operationId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          resourceKind: "browser_session",
+          resourceId: input.browserSessionId,
+          kind: "resume",
+          requestDigest: digest,
+          state: "completed",
+          actorSubjectId: input.actorSubjectId,
+          controllerGeneration: input.controller.controllerGeneration,
+          dispatchedAt: now,
+          settledAt: now,
+        })
+        .returning();
+      if (!operationRow) throw new Error("BrowserSession resume continuation insert was lost");
+      const [sessionRow] = await tx
+        .update(schema.browserSessions)
+        .set({
+          lifecycle: "active",
+          failureCode: null,
+          controllerId: input.controller.controllerId,
+          controllerGeneration: input.controller.controllerGeneration,
+          placementInstanceId: input.controller.placementInstanceId,
+          display: input.display ?? null,
+          controllerHeartbeatAt: now,
+          lastUsedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.browserSessions.workspaceId, input.workspaceId),
+            eq(schema.browserSessions.id, input.browserSessionId),
+            eq(schema.browserSessions.lifecycle, "lost"),
+            eq(schema.browserSessions.failureCode, row.failureCode!),
+            row.controllerGeneration === null
+              ? isNull(schema.browserSessions.controllerGeneration)
+              : eq(
+                  schema.browserSessions.controllerGeneration,
+                  input.controller.controllerGeneration,
+                ),
+          ),
+        )
+        .returning();
+      if (!sessionRow) throw new Error("BrowserSession resume continuation was lost");
+      const associations = await loadAssociations(tx, input.workspaceId, [input.browserSessionId]);
+      await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+      return BrowserSessionMutationResponse.parse({
+        session: browserSessionFromRows(sessionRow, associations),
+        operation: operationReceipt(operationRow, false),
+      });
+    }),
+  );
+}
+
+async function loadBrowserSessionRow(
+  tx: Database,
+  workspaceId: string,
+  browserSessionId: string,
+): Promise<BrowserSessionRow | undefined> {
+  const [row] = await tx
+    .select()
+    .from(schema.browserSessions)
+    .where(
+      and(
+        eq(schema.browserSessions.workspaceId, workspaceId),
+        eq(schema.browserSessions.id, browserSessionId),
+      ),
+    )
+    .limit(1);
+  return row;
+}
+
+/** A lost browser whose controller may still hold its own working copy:
+ *
+ * - an expired resume (`controller_transition_expired`, latest operation an
+ *   unknown-outcome resume). It never became active again, so its durable
+ *   state is unchanged and settling it back to suspended loses nothing;
+ * - a browser whose suspension found its controller had restarted and
+ *   forgotten it (`controller_resource_missing`, latest operation a failed
+ *   suspend). Its working copy is newer than any checkpoint, so it may only
+ *   be continued from that copy, never silently returned to an older one.
+ *
+ * `controllerGeneration` is the generation that owns the working copy: the
+ * retained binding, or for a restarted controller whose binding was cleared,
+ * the generation of the failed suspension. */
+type RetainedWorkingCopyLoss = { controllerGeneration: string | null; settleable: boolean };
+
+async function retainedWorkingCopyLoss(
+  tx: Database,
+  row: BrowserSessionRow,
+): Promise<RetainedWorkingCopyLoss | null> {
+  if (
+    row.lifecycle !== "lost" ||
+    (row.failureCode !== CONTROLLER_TRANSITION_EXPIRED &&
+      row.failureCode !== CONTROLLER_RESOURCE_MISSING) ||
+    row.driverId === EPHEMERAL_CHROMIUM_DRIVER_ID ||
+    // Settling an expired resume restores its durable state, so it needs one.
+    (row.failureCode === CONTROLLER_TRANSITION_EXPIRED &&
+      !row.privateCheckpointArtifactId &&
+      !row.baseRevisionId)
+  ) {
+    return null;
+  }
+  const [latest] = await tx
+    .select({
+      kind: schema.interactionOperations.kind,
+      state: schema.interactionOperations.state,
+      controllerGeneration: schema.interactionOperations.controllerGeneration,
+    })
+    .from(schema.interactionOperations)
+    .where(
+      and(
+        eq(schema.interactionOperations.workspaceId, row.workspaceId),
+        eq(schema.interactionOperations.resourceKind, "browser_session"),
+        eq(schema.interactionOperations.resourceId, row.id),
+      ),
+    )
+    .orderBy(desc(schema.interactionOperations.createdAt))
+    .limit(1);
+  if (
+    !latest ||
+    (row.controllerGeneration !== null && latest.controllerGeneration !== row.controllerGeneration)
+  ) {
+    return null;
+  }
+  if (row.failureCode === CONTROLLER_TRANSITION_EXPIRED) {
+    return latest.kind === "resume" && latest.state === "outcome_unknown"
+      ? { controllerGeneration: row.controllerGeneration, settleable: true }
+      : null;
+  }
+  return latest.kind === "suspend" && latest.state === "failed" && latest.controllerGeneration
+    ? { controllerGeneration: latest.controllerGeneration, settleable: false }
+    : null;
+}
+
 export async function failBrowserSessionSuspension(
   db: Database,
   input: {
@@ -2024,6 +2657,10 @@ export async function failBrowserSessionResume(
   });
 }
 
+/** Return a browser to suspended when its resume fails before controller
+ * dispatch. Returns null once the operation was dispatched or settled, so the
+ * caller's original error stands and the dispatched path keeps its own
+ * settlement. */
 export async function failBrowserSessionResumePreparation(
   db: Database,
   input: {
@@ -2033,15 +2670,12 @@ export async function failBrowserSessionResumePreparation(
     browserSessionId: string;
     error: InteractionErrorValue;
   },
-): Promise<BrowserSessionMutationResponseValue> {
-  return await failBrowserSessionTransition(db, {
+): Promise<BrowserSessionMutationResponseValue | null> {
+  return await failPreparedBrowserSessionTransition(db, {
     ...input,
-    controllerGeneration: null,
     kind: "resume",
-    expectedLifecycle: "restoring",
-    resultLifecycle: "suspended",
-    state: "failed",
-    clearController: true,
+    transitionalLifecycle: "restoring",
+    restoreLifecycle: "suspended",
   });
 }
 
@@ -2100,7 +2734,7 @@ async function failBrowserSessionTransition(
                   controllerHeartbeatAt: null,
                 }
               : {}),
-            failureCode: input.resultLifecycle === "lost" ? "controller_resource_missing" : null,
+            failureCode: input.resultLifecycle === "lost" ? CONTROLLER_RESOURCE_MISSING : null,
             updatedAt: now,
           })
           .where(
@@ -2356,6 +2990,47 @@ export async function completeBrowserSessionEnd(
   );
 }
 
+/** Record the display a controller reports after relaunching an active
+ * browser in place (recovery of a lost controller). Only the generation that
+ * relaunched it may write, so a newer generation's value is never overwritten.
+ * Returns whether the stored value changed. */
+export async function recordBrowserSessionDisplay(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    browserSessionId: string;
+    controllerGeneration: string;
+    display: "window" | "offscreen" | null;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
+        const [updated] = await tx
+          .update(schema.browserSessions)
+          .set({ display: input.display, updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.browserSessions.workspaceId, input.workspaceId),
+              eq(schema.browserSessions.id, input.browserSessionId),
+              eq(schema.browserSessions.lifecycle, "active"),
+              eq(schema.browserSessions.controllerGeneration, input.controllerGeneration),
+              sql`${schema.browserSessions.display} is distinct from ${input.display}`,
+            ),
+          )
+          .returning({ id: schema.browserSessions.id });
+        if (!updated) return false;
+        await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+        return true;
+      }),
+  );
+}
+
 export async function touchBrowserSessionController(
   db: Database,
   input: {
@@ -2387,7 +3062,9 @@ export async function touchBrowserSessionController(
         if (observed.placementKind === "attached_device") {
           if (!observed.deviceId || !observed.placementInstanceId) return false;
           const current = await attachedDeviceGenerationMatches(tx, {
+            accountId: input.accountId,
             workspaceId: input.workspaceId,
+            deviceWorkspaceId: observed.deviceWorkspaceId ?? input.workspaceId,
             deviceId: observed.deviceId,
             placementInstanceId: observed.placementInstanceId,
           });

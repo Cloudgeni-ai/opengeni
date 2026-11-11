@@ -17,12 +17,9 @@ import {
   getOrganizationIntegrationPolicy,
   updateOrganizationIntegrationPolicy,
 } from "@opengeni/sdk/organization-integration-policy";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { registerOrganizationIntegrationPolicyRoutes } from "../src/routes/organization-integration-policy";
 import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";
@@ -92,6 +89,7 @@ test("organization server configuration is workspace-independent, fenced and can
   expect(await getOrganizationIntegrationPolicy(client, account!.id)).toEqual({
     mode: "unrestricted",
     allowedIntegrationKeys: [],
+    personalIntegrationSetup: "members",
     revision: 0,
   });
   const workspace = await createWorkspace(db.db, {
@@ -132,6 +130,7 @@ test("organization server configuration is workspace-independent, fenced and can
   expect(await updateOrganizationIntegrationPolicy(client, account!.id, request)).toEqual({
     mode: "restricted",
     allowedIntegrationKeys: [],
+    personalIntegrationSetup: "members",
     revision: 1,
   });
   const replayBegin = await begin();
@@ -158,6 +157,7 @@ test("organization server configuration is workspace-independent, fenced and can
   expect(await updateOrganizationIntegrationPolicy(client, account!.id, request)).toEqual({
     mode: "restricted",
     allowedIntegrationKeys: [],
+    personalIntegrationSetup: "members",
     revision: 1,
   });
   await expect(

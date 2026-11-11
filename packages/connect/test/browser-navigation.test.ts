@@ -1,5 +1,68 @@
 import { expect, test } from "bun:test";
-import { createBrowserConnectNavigation, reserveBrowserConnectNavigation } from "../src";
+import {
+  authorizeConnectAttempt,
+  createBrowserConnectNavigation,
+  reserveBrowserConnectNavigation,
+  type ConnectAttempt,
+} from "../src";
+
+for (const reserved of [false, true]) {
+  test(`${reserved ? "reserved" : "direct"} popup keeps polling when COOP severs its window reference`, async () => {
+    let detached = false;
+    const browser = {
+      open: () => ({
+        opener: {} as unknown,
+        get closed() {
+          return detached;
+        },
+        location: {
+          replace() {
+            detached = true;
+          },
+        },
+        close() {},
+      }),
+      location: { assign() {} },
+    };
+    const navigation = reserved
+      ? reserveBrowserConnectNavigation(browser).navigation
+      : createBrowserConnectNavigation(browser);
+    const attempt: ConnectAttempt = {
+      id: "attempt",
+      workspaceId: "workspace",
+      providerId: "provider",
+      ownership: "workspace",
+      revision: 1,
+      state: "requires_user_action",
+      credentialsCommitted: false,
+      integrationInstalled: false,
+      completionRequirement: "connection",
+      nextAction: { type: "authorize", url: "https://provider.example/authorize" },
+      expiresAt: "2030-01-01T00:00:00Z",
+    };
+    let reads = 0;
+    const result = await authorizeConnectAttempt(
+      {
+        get: async () =>
+          ++reads < 4
+            ? attempt
+            : {
+                ...attempt,
+                revision: 2,
+                state: "complete",
+                credentialsCommitted: true,
+                nextAction: { type: "none" },
+              },
+      },
+      attempt,
+      navigation,
+      { mode: "popup", timeoutMs: 5_000 },
+    );
+    expect(detached).toBe(true);
+    expect(reads).toBe(4);
+    expect(result?.state).toBe("complete");
+  });
+}
 
 test("reserves an isolated popup before discovery and navigates without another click", async () => {
   const destinations: string[] = [];
@@ -173,3 +236,32 @@ test("redirect rejects credentials and retains an allowed URL unchanged", () => 
   navigation.redirect("https://provider.example?state=%2f#done");
   expect(destination).toBe("https://provider.example?state=%2f#done");
 });
+
+for (const reserved of [false, true]) {
+  test(`${reserved ? "reserved" : "direct"} popup tells whether its window is still open and can ask it forward`, () => {
+    const provider = {
+      opener: {} as unknown,
+      closed: false,
+      focused: 0,
+      location: { replace() {} },
+      close() {},
+      focus() {
+        provider.focused += 1;
+      },
+    };
+    const browser = { open: () => provider, location: { assign() {} } };
+    const navigation = reserved
+      ? reserveBrowserConnectNavigation(browser).navigation
+      : createBrowserConnectNavigation(browser);
+    const popup = navigation.openPopup("https://provider.example/authorize")!;
+    // A window on the provider's site ignores close(): it is still open.
+    popup.close();
+    expect(popup.isOpen?.()).toBe(true);
+    popup.focus?.();
+    expect(provider.focused).toBe(1);
+    // The handle still reports no `closed`: COOP can make it read true early.
+    expect("closed" in popup).toBe(false);
+    provider.closed = true;
+    expect(popup.isOpen?.()).toBe(false);
+  });
+}

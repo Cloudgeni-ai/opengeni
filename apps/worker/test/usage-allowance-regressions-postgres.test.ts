@@ -1,15 +1,10 @@
 import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { tool } from "@openai/agents";
 import * as opengeniDb from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  ScriptedModel,
-  functionCall,
-  assistantMessage,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { ScriptedModel, functionCall, assistantMessage } from "@opengeni/testing/scripted-model";
 import {
   bootstrapWorkspace,
   checkWorkspaceAllowance,
@@ -135,10 +130,10 @@ test.each(["unfinished_debit", "settled_debit_delayed_admission"] as const)(
       began();
       await released;
     };
-    const originalDebit = opengeniDb.applyCreditDebitUpToBalance;
+    const originalDebit = opengeniDb.applyCreditDebitAfterUse;
     const debit =
       delayBoundary === "unfinished_debit"
-        ? spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(async (db, input) => {
+        ? spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async (db, input) => {
             if (input.metadata?.sessionId === session.id) await holdOnce();
             return originalDebit(db, input);
           })

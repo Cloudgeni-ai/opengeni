@@ -3,24 +3,29 @@
 > **Point-in-time design record.** Written against `main` at `9e21a09c` on
 > September 1, 2026 and resolved on September 3, 2026. Code wins where the
 > implementation later differs.
+>
+> **Partly superseded** by [published-sites-2026-10-14.md](published-sites-2026-10-14.md):
+> Sites can now be published on their own hostname under a configurable
+> wildcard Sites domain, served by a gateway that keeps the opaque-origin
+> frame and bridge described here.
 
 # Workspace HTML Sites
 
 ## Purpose
 
-OpenGeni should let an agent build a normal interactive web application, publish
-it as a Workspace HTML artifact, and let that application use OpenGeni's typed
+Opengeni should let an agent build a normal interactive web application, publish
+it as a Workspace HTML artifact, and let that application use Opengeni's typed
 frontend SDK, React components, and tool system.
 
 This is not a second application platform. The intended product is a normal
-web application embedded in the existing OpenGeni application.
+web application embedded in the existing Opengeni application.
 
 ## Settled product model
 
 ### The Site is a normal Bun web application
 
 The authoring agent writes an ordinary Bun, TypeScript, and React project. Bun
-owns development serving and the final browser bundle. OpenGeni does not need a
+owns development serving and the final browser bundle. Opengeni does not need a
 special Site build service, bespoke build command, user-facing Site CLI, or
 separate deployment format.
 
@@ -28,17 +33,17 @@ The Site-building Skill should teach the agent to:
 
 1. create an ordinary Bun + React application;
 2. run it from the sandbox with Bun's normal development workflow;
-3. open the sandbox-local URL with OpenGeni's existing Codemode browser tools;
+3. open the sandbox-local URL with Opengeni's existing Codemode browser tools;
 4. inspect, interact with, screenshot, and improve the application;
 5. use Bun's normal HTML build to produce one self-contained HTML file; and
 6. publish that file with the existing Workspace Artifact tools.
 
-The exact Bun command is authoring guidance in the Skill, not an OpenGeni
+The exact Bun command is authoring guidance in the Skill, not an Opengeni
 runtime abstraction.
 
 ### Existing Workspace HTML artifacts remain the publish format
 
-OpenGeni already stores immutable, versioned HTML artifact content in object
+Opengeni already stores immutable, versioned HTML artifact content in object
 storage and renders exact HTML in an opaque-origin sandboxed iframe. Sites
 should build on that existing artifact and renderer instead of introducing a
 second host, wildcard domain, container deployment, or Site-specific storage
@@ -47,7 +52,7 @@ model.
 Artifact HTML is publisher-controlled active content. The opaque origin blocks
 parent DOM, cookie, and storage access, but the current renderer deliberately
 allows scripts, external resources, forms, popups, and outbound network
-requests. Opening an artifact therefore must not disclose an OpenGeni
+requests. Opening an artifact therefore must not disclose an Opengeni
 credential or grant broader API authority. Publishing an immutable Site version
 with requested tool identities explicitly authorizes that active version to
 invoke those identities without per-call prompts, subject to the current
@@ -58,15 +63,15 @@ version retains its complete traversal-free source bundle and exact requested
 tool identities beside that HTML, so `Edit with Geni` can restore the ordinary
 Bun project without changing the runtime format.
 
-### The agent should use the typed OpenGeni SDK
+### The agent should use the typed Opengeni SDK
 
-The Site-building Skill should prefer OpenGeni's typed SDK over handwritten
+The Site-building Skill should prefer Opengeni's typed SDK over handwritten
 REST calls. Typed methods, request contracts, event streaming, reconnect,
 replay, and error handling are easier for an agent to use correctly than raw
 URLs and ad hoc response types.
 
 The `browser` in `@opengeni/sdk/browser` means **browser-compatible package
-entrypoint**. It does not mean OpenGeni Browser/Computer automation and does not
+entrypoint**. It does not mean Opengeni Browser/Computer automation and does not
 imply that the Site is controlling a browser. Its purpose is to keep Node-only,
 operator-only, or otherwise inappropriate package surfaces out of the browser
 bundle.
@@ -89,10 +94,10 @@ navigation creates a new document and revokes the old bootstrap plus every
 derived tool-call port. The same lazy `client.tools` proxy is available to
 ordinary SDK/browser consumers through a workspace-bound HTTP adapter.
 
-### The agent should use OpenGeni's styled React UI by default
+### The agent should use Opengeni's styled React UI by default
 
-When a Site contains an OpenGeni agent experience, the Skill should default to
-the packaged OpenGeni React components rather than asking the agent to rebuild a
+When a Site contains an Opengeni agent experience, the Skill should default to
+the packaged Opengeni React components rather than asking the agent to rebuild a
 chat UI from raw hooks.
 
 The default composition should use the existing provider, timeline, composer,
@@ -212,9 +217,9 @@ gateway. That gateway rebuilds the enabled first-party and integration catalog,
 resolves personal/workspace connection authority through the existing broker,
 validates the catalog digest and input, and invokes the same executor as model
 and Codemode calls. The active immutable version's retained tool identities are
-the Site's direct-call allowlist. Calls within that live intersection execute
-without a confirmation dialog or approval capability, including tools whose
-ordinary current-human catalog policy is `human`.
+the Site's direct-call allowlist. Calls within that live intersection that do
+not need approval execute directly. A call that needs approval is confirmed by
+the viewer in the Opengeni frame (see "Host-native consent" below).
 
 This avoids version-scoped bearer issuance entirely. Membership, permission,
 connection, logout, and catalog changes are observed by the parent's ordinary
@@ -229,7 +234,7 @@ credential exists.
 - A Site-specific AI API such as `site.ai.start` or `site.ai.send`.
 - A second session/event model.
 - A Site-specific tool registry or provider wrappers.
-- A bespoke Site build service or required OpenGeni build command.
+- A bespoke Site build service or required Opengeni build command.
 - A user-facing Site deployment CLI.
 - A second React component system for agent sessions.
 - A general-purpose authenticated `fetch` bridge. The parent exposes only the
@@ -280,7 +285,7 @@ extraction and an additional public adapter, not a replacement tool platform.
   versioning, rollback, and exact `srcDoc` rendering in an opaque-origin iframe.
   The current HTML limit is 4 MiB of UTF-8. Scripts and network requests work,
   so opaque-origin isolation is not credential containment; the current artifact
-  runtime contract correctly gives artifact code no OpenGeni credentials.
+  runtime contract correctly gives artifact code no Opengeni credentials.
 - Runtime MCP preparation already discovers configured capability and API
   integration servers, resolves credentials, freezes tool definitions, applies
   allowlists, and creates `PrefixedMcpServer` instances.
@@ -297,7 +302,7 @@ extraction and an additional public adapter, not a replacement tool platform.
   one agent attempt.
 - The API already permits cross-origin bearer requests with `Authorization`
   through public CORS. It also has a standard authenticated MCP-over-HTTP route,
-  but that route currently registers OpenGeni's first-party tools rather than
+  but that route currently registers Opengeni's first-party tools rather than
   the complete set of configured external integrations.
 
 ### Implemented additions
@@ -311,7 +316,7 @@ extraction and an additional public adapter, not a replacement tool platform.
    path to an opaque canonical `{serverId, toolName}` identity; the path is never
    authority.
 3. Add one authenticated backend surface that lists and calls the same prepared
-   tools OpenGeni already gives an agent. It must assemble configured external
+   tools Opengeni already gives an agent. It must assemble configured external
    integrations as well as first-party tools and call the existing executor,
    not duplicate provider implementations.
 4. Add an explicit immutable requested-tool allowlist plus parent mediation.
@@ -350,10 +355,10 @@ or React session implementation is required.
    requested canonical identities together.
 
 The product runtime packages this guidance as the native tool-bound
-`opengeni-sites` Skill. A create-only Site session admits it when
+`sites` Skill. A create-only Site session admits it when
 `artifacts_create` is present; an edit session admits it only when both
 `artifacts_get_source` and `artifacts_publish` are present. The authoritative source is
-`packages/runtime/src/bundled_site_skills/opengeni-sites`; it is shipped with the
+`packages/runtime/src/bundled_site_skills/sites`; it is shipped with the
 runtime and is not exposed through repository-local `.agents/skills`. Connected Machine attempts keep the same frozen Site tool surface,
 but do not advertise this worker-bundled filesystem Skill until its files have
 an explicit machine-delivery path.
@@ -374,10 +379,12 @@ catalog changed after the Site was built.
    digest, canonical identity, and arguments over the transferred port.
 4. The parent rejects identities outside the immutable requested set and sends
    the call through the authenticated workspace HTTP adapter.
-5. The parent dispatches an allowed call directly without a confirmation dialog
-   or approval capability. The API verifies that the artifact is active, the
-   version is still current, and the exact identity remains in that version's
-   retained requested-tool set.
+5. The parent dispatches an allowed call. The API verifies that the artifact is
+   active, the version is still current, and the identity (or the canonical
+   connector identity it was routed from) remains in that version's retained
+   requested-tool set. When the call needs approval, an account choice or a
+   connection, the API refuses it with a typed 409 and the parent asks the
+   viewer (see "Host-native consent").
 6. The API rebuilds the current-human gateway from live enabled first-party and
    integration servers, validates digest/input/authorization, resolves current
    connections, and calls the same executor closures as model and Codemode.
@@ -424,3 +431,61 @@ catalog changed after the Site was built.
 - Version provenance retains the exact source session/turn/attempt, but list
   responses redact it and detail links are projected only when the viewer can
   read the source session.
+
+## Host-native consent (2026-10)
+
+"Pressing Send is consent." A Site call that needs approval is confirmed by the
+person viewing the Site, in the Opengeni frame around it. Site code never
+renders, answers or skips that confirmation.
+
+- **Viewer's own account.** A Site version may declare a canonical connector
+  identity (`{ serverId: "gmail", toolName: "send_message" }`). It resolves per
+  viewer to that viewer's own account routes (`site-tool-routing.ts`). A
+  declared account route is honoured exactly for its owner; for anyone else it
+  maps only through a canonical identity the same version declares for that
+  tool. Another member's personal connection is never used. A viewer with
+  several accounts picks one in the confirmation; a viewer with none gets the
+  existing connect card.
+- **Confirmation.** `tools/invoke` answers 409 with `details.code`
+  `tool_gateway_approval_required`, `site_tool_account_required` or
+  `site_tool_connection_required`. The parent bridge (`createSiteToolBridge`
+  with `confirmToolCall`) reads `POST tools/site-consent` (the viewer's own
+  accounts, or what to connect), shows the native dialog (title, From, To,
+  Cc, Bcc, Subject; Send or Confirm; Cancel; "Always allow for this Site"),
+  mints `POST tools/target-approvals` for the chosen route and retries the same
+  operation id with that single-use token. Cancel runs nothing. Site HTTP
+  forwarding cannot reach either endpoint, and Site-supplied approval tokens
+  are stripped.
+- **What the dialog shows comes from the provider.** `site-consent` with the
+  call's exact `arguments` returns the provider's own review on the selected
+  route (the same `reviewContext` agent approvals use). For Gmail that is the
+  message as it would be sent, read from a raw message, a draft or a reply, so
+  Site code cannot hide recipients behind `raw` or `draftId`. Picking another
+  account reads it again. A provider that cannot read what the call would do
+  refuses with 422 `site_tool_review_unavailable`. Without a provider review the
+  rows come from the arguments the tool receives. Send is disabled briefly after
+  the dialog opens and focus starts on Cancel, so a Site cannot time a call
+  into a person's keystroke or click; at most eight questions wait at once.
+- **Connections that need attention.** An approval preflight that finds the
+  connection missing, inactive or needing reconnection answers 409
+  `tool_connection_needs_attention`; nothing reaches the provider. A connector
+  without a connect card tells the Site to connect it in Opengeni.
+- **Always allow for this Site.** A personal row in `site_tool_allowances`
+  (FORCE RLS on its own subject) keyed by person, Site artifact, canonical
+  connector, tool and connection. It applies only to calls from that Site,
+  survives later versions of the Site, never changes the connection-wide tool
+  permission that also governs agents, and never overrides Block. On a tool
+  that needs no approval it only remembers the chosen account. Only a person
+  in an Opengeni frame (a signed-in session, or a product embedding Opengeni
+  for that person) can record one; service keys and external actors cannot.
+  There is no per-Site "forget" control yet: setting the connection's tool to
+  Block, or disconnecting, stops it.
+- **Connection preflight.** Every connection-backed server in the current-human
+  gateway gets a side-effect-free approval preflight: one non-refreshing,
+  non-recording credential lookup of the exact connection. Built-in bridges such
+  as Gmail therefore stay listed and confirmable instead of being hidden.
+- **Published hostnames.** A published page has no Opengeni frame and shares an
+  origin with its tool endpoint, so an in-page dialog could be spoofed by the
+  page itself. A call there that would need consent, an account choice or a
+  connection answers 409 `site_tool_consent_requires_opengeni` ("Open this Site
+  in Opengeni to confirm this action."). Existing allowances still apply there.

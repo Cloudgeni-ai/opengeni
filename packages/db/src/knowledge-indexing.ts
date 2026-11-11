@@ -11,6 +11,14 @@ export {
   creditDebitAttributionForTurn,
   currentCreditDebitAttribution,
   withCreditDebitAttribution,
+  ambientBillingOrigin,
+  billingOriginOverride,
+  manualScheduledTaskRunBillingOrigin,
+  markScheduledTaskApiBilled,
+  readScheduledTaskBillingOrigin,
+  readSessionBillingOrigin,
+  readTurnBillingOrigin,
+  withBillingOriginOverride,
 } from "./credit-debit-attribution";
 
 const Claim = z.object({

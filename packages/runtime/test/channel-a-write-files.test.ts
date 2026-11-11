@@ -28,6 +28,7 @@ import {
   parseWriteFilesOutput,
   WRITE_FILES_COMMAND_MAX_BYTES,
 } from "../src/sandbox/write-files-script";
+import { synchronousNativeOutputFixture } from "./synchronous-output-fixture";
 
 setDefaultTimeout(30_000);
 
@@ -361,6 +362,8 @@ describe("fsWriteFiles", () => {
 
   test("a failed or short write removes its own file so a repeat finishes the tree", async () => {
     const { root, outside } = workspace();
+    const originalBase64 = Bun.which("base64");
+    if (!originalBase64) throw new Error("The write-failure fixture requires base64 on PATH");
     // A base64 that stops early, as a full disk would. It fails on its third
     // call so two files are complete before the batch stops.
     const bin = join(outside, "bin");
@@ -368,7 +371,7 @@ describe("fsWriteFiles", () => {
     const counter = join(outside, "calls");
     writeFileSync(
       join(bin, "base64"),
-      `#!/bin/sh\nn=$(($(cat "${counter}" 2>/dev/null || echo 0) + 1))\necho "$n" > "${counter}"\nif [ "$n" = "$OG_FAIL_AT" ]; then head -c 3; exit "$OG_FAIL_STATUS"; fi\nexec /usr/bin/base64 "$@"\n`,
+      `#!/bin/sh\nn=$(($(cat "${counter}" 2>/dev/null || echo 0) + 1))\necho "$n" > "${counter}"\nif [ "$n" = "$OG_FAIL_AT" ]; then head -c 3; exit "$OG_FAIL_STATUS"; fi\nexec "$OG_REAL_BASE64" "$@"\n`,
       { mode: 0o755 },
     );
     let failure: { at: string; status: string } | null = null;
@@ -379,6 +382,7 @@ describe("fsWriteFiles", () => {
             PATH: `${bin}:${process.env.PATH}`,
             OG_FAIL_AT: failure.at,
             OG_FAIL_STATUS: failure.status,
+            OG_REAL_BASE64: originalBase64,
           }
         : { ...process.env },
     );
@@ -450,19 +454,27 @@ describe("fsWriteFiles", () => {
     expect(admissions).toBe(2);
   });
 
-  test("works through a banner-only command surface such as Modal's", async () => {
+  test("works through a command-only facade with trusted separate receipts", async () => {
     const { root } = workspace();
     const { session: shell } = shellSession(root);
+    const pages = new Map<unknown, ReturnType<typeof synchronousNativeOutputFixture>>();
     const session: ChannelASession = {
+      getSynchronousCommandOutput: (raw) =>
+        pages.get(raw)?.getSynchronousCommandOutput(raw) ?? null,
       execCommand: async (args) => {
         const result = await shell.exec!(args);
-        return [
-          "Chunk ID: banner",
+        const raw = [
+          `Chunk ID: ${crypto.randomUUID()}`,
           "Wall time: 0.0100 seconds",
           `Process exited with code ${result.exitCode}`,
           "Output:",
           `${result.stdout}${result.stderr}`,
         ].join("\n");
+        // Capture the actual host streams before the presentation merges them.
+        const output = synchronousNativeOutputFixture();
+        output.record(raw, result.stdout, result.stderr, result.exitCode);
+        pages.set(raw, output);
+        return raw;
       },
     };
     const result = await service(session).fsWriteFiles({ directory: "demo", files: skillFiles });

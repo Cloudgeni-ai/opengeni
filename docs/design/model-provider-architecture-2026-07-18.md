@@ -18,7 +18,7 @@
 
 ## Context
 
-OpenGeni already has useful multi-provider and per-turn seams:
+Opengeni already has useful multi-provider and per-turn seams:
 
 - deployment-configured OpenAI/Azure models and extra OpenAI-compatible registry
   providers are projected by `configuredModels()`;
@@ -44,7 +44,7 @@ Those seams are not yet one explicit product contract:
    `codex-subscription`.
 3. Billing ownership is derived from Codex-specific routing state rather than a
    model/provider contract. A future externally billed provider could therefore
-   be charged as OpenGeni-managed usage.
+   be charged as Opengeni-managed usage.
 4. Reasoning and hosted web search are booleans. The catalog cannot express
    supported reasoning levels, a required/default reasoning mode, function
    calling, structured output, latency/priority modes, streaming transport, or
@@ -176,7 +176,7 @@ migration or rewrite of historical policy rows is required.
 
 Existing definitions remain compatible: absent `upstreamModelId` means `id`,
 absent aliases means `[]`, existing API-key providers map to deployment
-`api_key` credentials/OpenGeni metering, and Codex maps to
+`api_key` credentials/Opengeni metering, and Codex maps to
 connected-subscription credentials/external metering. The built-in Azure path
 maps to deployment `api_key` when `azureOpenaiApiKey` is configured and to
 deployment `azure_ad_bearer` when the existing `azureOpenaiAdToken` bearer path
@@ -258,7 +258,7 @@ tier, or wire API. Each definition carries explicit evidence-backed metadata:
 ```ts
 type CapabilityStateV1 = {
   upstream: "supported" | "unsupported" | "unknown";
-  runnable: boolean; // supported by this OpenGeni adapter and lifecycle
+  runnable: boolean; // supported by this Opengeni adapter and lifecycle
 };
 
 type ModelCapabilitiesV1 = {
@@ -291,7 +291,7 @@ type ModelCapabilitiesV1 = {
 ```
 
 `runnable: false` is load-bearing. Provider documentation can prove a feature
-exists while OpenGeni lacks request plumbing, lifecycle recovery, or accurate
+exists while Opengeni lacks request plumbing, lifecycle recovery, or accurate
 billing for it. Such a feature may be displayed as unavailable evidence but must
 not be selectable or sent upstream.
 
@@ -495,7 +495,7 @@ upstream model:   grok-4.5
 base URL:         https://api.x.ai/v1
 wire API:         responses (chat is also provider-supported)
 credential:       deployment API key
-billing:          deployment upstream / OpenGeni metering
+billing:          deployment upstream / Opengeni metering
 context:          500,000 tokens
 ```
 
@@ -595,7 +595,7 @@ The implementation must prove:
   access after alias removal;
 - BYOK is not accidentally enabled by generic provider configuration;
 - connected-subscription billing remains external and deployment-key billing
-  remains OpenGeni-metered in managed mode;
+  remains Opengeni-metered in managed mode;
 - an explicit per-turn switch is turn-local, an omitted follow-up uses session
   preference, and goal/child semantics match this ADR;
 - approval resume, capacity wait, and worker recovery retain the same V1 policy;

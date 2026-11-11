@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { stableJson } from "@opengeni/contracts";
-import { and, asc, eq, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import {
   setSubjectRlsContext,
@@ -12,6 +12,7 @@ import {
 import {
   IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
+  IntegrationChangeRequiresAdminError,
   listIntegrationFacetBindingOwners,
   listIntegrationFacetBindingOwnersForBindings,
   removeIntegrationFacetBindingOwner,
@@ -20,11 +21,15 @@ import {
 } from "./integration-bindings";
 import * as schema from "./schema";
 
-export type IntegrationFacetKind =
-  | "knowledge_source"
-  | "inbound_trigger"
-  | "delivery_destination"
-  | "identity_link";
+export type IntegrationFacetKind = "inbound_trigger" | "delivery_destination" | "identity_link";
+
+// Only these kinds are listed or configurable. Any other stored definition
+// (such as a removed Knowledge source facet) is hidden rather than an error.
+const INTEGRATION_FACET_KINDS: IntegrationFacetKind[] = [
+  "inbound_trigger",
+  "delivery_destination",
+  "identity_link",
+];
 
 export type IntegrationFacetBindingSummary = {
   id: string;
@@ -43,6 +48,8 @@ export type IntegrationFacetBindingSummary = {
   updatedAt: string;
   directlyOwned: boolean;
   owners: IntegrationFacetBindingOwner[];
+  /** Whether the viewer may remove it; set only by {@link listIntegrationInstanceFacets}. */
+  canRemove?: boolean;
 };
 
 export type IntegrationFacetDefinitionSummary = {
@@ -192,6 +199,11 @@ export async function listIntegrationInstanceFacets(
   subjectId: string,
   capabilityId: string,
   instanceKey: string,
+  /**
+   * Decides each configured facet's `canRemove` from who added it. Omitted,
+   * the list leaves `canRemove` out.
+   */
+  removableBy?: (installerSubjectId: string) => boolean,
 ): Promise<IntegrationInstanceFacets> {
   return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const context = await loadIntegrationInstanceContext(
@@ -220,6 +232,7 @@ export async function listIntegrationInstanceFacets(
         lastErrorCode: schema.integrationFacetBindings.lastErrorCode,
         createdAt: schema.integrationFacetBindings.createdAt,
         updatedAt: schema.integrationFacetBindings.updatedAt,
+        createdBySubjectId: schema.integrationFacetBindings.createdBySubjectId,
       })
       .from(schema.integrationFacetDefinitions)
       .leftJoin(
@@ -239,7 +252,7 @@ export async function listIntegrationInstanceFacets(
       .where(
         and(
           eq(schema.integrationFacetDefinitions.integrationFacetId, context.integrationFacetId),
-          ne(schema.integrationFacetDefinitions.kind, "tools"),
+          inArray(schema.integrationFacetDefinitions.kind, INTEGRATION_FACET_KINDS),
         ),
       )
       .orderBy(
@@ -263,26 +276,29 @@ export async function listIntegrationInstanceFacets(
           capabilities: row.capabilities,
         },
         binding: row.bindingId
-          ? bindingSummary(
-              {
-                id: row.bindingId,
-                facetKey: row.facetKey,
-                kind: row.kind,
-                bindingKey: row.bindingKey!,
-                displayName: row.displayName!,
-                connectionId: row.connectionId ?? null,
-                status: row.status!,
-                config: row.config!,
-                cursor: row.cursor!,
-                version: row.version!,
-                lastSuccessAt: row.lastSuccessAt ?? null,
-                lastErrorCode: row.lastErrorCode ?? null,
-                createdAt: row.createdAt!,
-                updatedAt: row.updatedAt!,
-              },
-              ownersByBindingId.get(row.bindingId) ?? [],
-              { capabilityId, instanceKey, facetKey: row.facetKey },
-            )
+          ? {
+              ...bindingSummary(
+                {
+                  id: row.bindingId,
+                  facetKey: row.facetKey,
+                  kind: row.kind,
+                  bindingKey: row.bindingKey!,
+                  displayName: row.displayName!,
+                  connectionId: row.connectionId ?? null,
+                  status: row.status!,
+                  config: row.config!,
+                  cursor: row.cursor!,
+                  version: row.version!,
+                  lastSuccessAt: row.lastSuccessAt ?? null,
+                  lastErrorCode: row.lastErrorCode ?? null,
+                  createdAt: row.createdAt!,
+                  updatedAt: row.updatedAt!,
+                },
+                ownersByBindingId.get(row.bindingId) ?? [],
+                { capabilityId, instanceKey, facetKey: row.facetKey },
+              ),
+              ...(removableBy ? { canRemove: removableBy(row.createdBySubjectId!) } : {}),
+            }
           : null,
       })),
     };
@@ -453,6 +469,11 @@ export async function removeIntegrationFacet(
     facetKey: string;
     expectedVersion: number;
     idempotencyKey: string;
+    /**
+     * A member's removal: only a facet this subject added. One an admin or
+     * another person added throws {@link IntegrationChangeRequiresAdminError}.
+     */
+    memberRemoval?: boolean;
   },
 ): Promise<IntegrationFacetRemovalResult> {
   const requestDigest = sha256(
@@ -479,6 +500,10 @@ export async function removeIntegrationFacet(
         remainingOwners: [],
       };
     }
+    if (input.memberRemoval && binding.createdBySubjectId !== input.subjectId)
+      throw new IntegrationChangeRequiresAdminError(
+        "Only an admin can remove a source or setting someone else added.",
+      );
     if (binding.version !== input.expectedVersion) {
       throw new IntegrationFacetBindingVersionConflictError(
         input.instanceKey,
@@ -845,7 +870,7 @@ async function requireFacetDefinition(
       and(
         eq(schema.integrationFacetDefinitions.integrationFacetId, context.integrationFacetId),
         eq(schema.integrationFacetDefinitions.facetKey, facetKey),
-        ne(schema.integrationFacetDefinitions.kind, "tools"),
+        inArray(schema.integrationFacetDefinitions.kind, INTEGRATION_FACET_KINDS),
       ),
     )
     .limit(1);
@@ -996,7 +1021,6 @@ function bindingSummary(
 
 function facetKind(value: string): IntegrationFacetKind {
   if (
-    value !== "knowledge_source" &&
     value !== "inbound_trigger" &&
     value !== "delivery_destination" &&
     value !== "identity_link"

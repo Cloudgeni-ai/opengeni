@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CONTRACT, directTreeManifest, verifySourceAdmission } from "./check-source-admission.mjs";
+import {
+  CONTRACT,
+  directTreeManifest,
+  verifyHistoricalSourceAdmission,
+  verifySourceAdmission,
+} from "./check-source-admission.mjs";
 
 const repositoryRoot = join(import.meta.dir, "..");
 const workflowPath = join(repositoryRoot, CONTRACT.workflowPath);
@@ -23,6 +28,7 @@ const staleMergeBaseTreeSha = "5".repeat(40);
 const advancedMainSha = "9".repeat(40);
 
 type FixtureOptions = {
+  merged?: boolean;
   apiBaseSha?: string;
   apiHeadSha?: string;
   comparisonBaseSha?: string;
@@ -128,7 +134,8 @@ function fixture(options: FixtureOptions = {}) {
   function pull(head = apiHeadSha, headRepository = "contributor/opengeni") {
     return {
       number: pullNumber,
-      state: "open",
+      state: options.merged ? "closed" : "open",
+      merged: options.merged ?? false,
       base: {
         ref: CONTRACT.admissionBaseBranch,
         sha: apiBaseSha,
@@ -228,6 +235,17 @@ function fixture(options: FixtureOptions = {}) {
       value = rows;
     } else if (path === `/repos/${CONTRACT.repository}/git/trees/${patchBaseTreeSha}?recursive=1`) {
       value = baseTree;
+    } else if (
+      path === `/repos/${CONTRACT.repository}/git/trees/${eventBaseCommitTreeSha}?recursive=1`
+    ) {
+      value = {
+        sha: eventBaseCommitTreeSha,
+        truncated: false,
+        tree: [
+          ...baseTree.tree,
+          { path: "unrelated.md", mode: "100644", type: "blob", sha: "f".repeat(40) },
+        ],
+      };
     } else if (path === `/repos/${CONTRACT.repository}/git/trees/${headTreeSha}?recursive=1`) {
       value = headTree;
     } else {
@@ -248,6 +266,58 @@ function fixture(options: FixtureOptions = {}) {
     logger: { log: (line: string) => logs.push(line) },
   };
 }
+
+describe("historical source admission", () => {
+  const verify = (api: ReturnType<typeof fixture>) =>
+    verifyHistoricalSourceAdmission({
+      number: pullNumber,
+      baseSha,
+      headSha,
+      headRef: "hotfix/source-admission",
+      headRepository: "contributor/opengeni",
+      token: "test-token",
+      fetchImpl: api.fetchImpl,
+      logger: api.logger,
+    });
+
+  test("keeps the provider base identity when it is also the patch base", async () => {
+    const result = await verify(fixture({ merged: true }));
+    expect(result.baseSha).toBe(baseSha);
+    expect(result.patchBaseSha).toBe(baseSha);
+    expect(result.baseTreeSha).toBe(baseTreeSha);
+  });
+
+  test("compares a merged PR against its merge base after unrelated base movement", async () => {
+    const api = fixture({ merged: true, comparisonMergeBaseSha: staleMergeBaseSha });
+    const result = await verify(api);
+    expect(result.baseSha).toBe(baseSha);
+    expect(result.patchBaseSha).toBe(staleMergeBaseSha);
+    expect(result.baseTreeSha).toBe(staleMergeBaseTreeSha);
+    expect(result.manifest.map((entry: { path: string }) => entry.path)).toEqual([
+      "README.md",
+      CONTRACT.helperPath,
+    ]);
+    expect(api.methods.every((method) => method === "GET")).toBe(true);
+  });
+
+  test("still rejects incomplete file projections on a moved base", async () => {
+    await expect(
+      verify(
+        fixture({
+          merged: true,
+          comparisonMergeBaseSha: staleMergeBaseSha,
+          fileRows: [{ filename: "README.md", status: "modified" }],
+        }),
+      ),
+    ).rejects.toThrow("provider file projection differs from the direct tree delta");
+  });
+
+  test("still rejects a changed head during historical verification", async () => {
+    await expect(
+      verify(fixture({ merged: true, terminalHeadSha: "a".repeat(40) })),
+    ).rejects.toThrow();
+  });
+});
 
 describe("source admission", () => {
   test("admits one immutable head and emits a deterministic merge-base manifest", async () => {

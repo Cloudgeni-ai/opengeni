@@ -1,8 +1,11 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import {
   configuredBundledSkillNames,
   loadConfiguredBundledSkills,
 } from "../src/activities/agent-turn/skill-selection";
+import { formatSkillCatalog } from "@opengeni/runtime";
+import { readSkillFiles } from "@opengeni/runtime/skill-library";
 
 test("bundled selection uses configured names, not prepared schemas or optional export tools", () => {
   const context = {
@@ -18,16 +21,15 @@ test("bundled selection uses configured names, not prepared schemas or optional 
   expect(configuredBundledSkillNames(context)).toEqual([
     "opengeni-help",
     "opengeni-client",
-    "opengeni-visualize",
+    "visualize",
     "document-parsing",
-    "opengeni-skills",
-    "opengeni-projects",
-    "opengeni-documents",
-    "opengeni-spreadsheets",
-    "opengeni-presentations",
+    "skill-management",
+    "documents",
+    "spreadsheets",
+    "presentations",
   ]);
   expect(loadConfiguredBundledSkills(context).map((entry) => entry.id)).toContain(
-    "builtin:opengeni-documents",
+    "builtin:documents",
   );
 });
 
@@ -37,21 +39,19 @@ test("Sites, video and artifact defaults have independent inclusion conditions",
   ).toEqual([
     "opengeni-help",
     "opengeni-client",
-    "opengeni-visualize",
+    "visualize",
     "document-parsing",
-    "opengeni-skills",
-    "opengeni-projects",
+    "skill-management",
   ]);
   expect(
     configuredBundledSkillNames({ firstPartyTools: [], videoGenerationEnabled: true }),
   ).toEqual([
     "opengeni-help",
     "opengeni-client",
-    "opengeni-visualize",
+    "visualize",
     "document-parsing",
-    "opengeni-skills",
-    "opengeni-projects",
-    "opengeni-video-generation",
+    "skill-management",
+    "video-generation",
   ]);
   expect(
     configuredBundledSkillNames({
@@ -61,11 +61,10 @@ test("Sites, video and artifact defaults have independent inclusion conditions",
   ).toEqual([
     "opengeni-help",
     "opengeni-client",
-    "opengeni-visualize",
+    "visualize",
     "document-parsing",
-    "opengeni-skills",
-    "opengeni-projects",
-    "opengeni-sites",
+    "skill-management",
+    "sites",
   ]);
   expect(
     configuredBundledSkillNames({
@@ -75,10 +74,9 @@ test("Sites, video and artifact defaults have independent inclusion conditions",
   ).toEqual([
     "opengeni-help",
     "opengeni-client",
-    "opengeni-visualize",
+    "visualize",
     "document-parsing",
-    "opengeni-skills",
-    "opengeni-projects",
+    "skill-management",
   ]);
 });
 
@@ -95,19 +93,173 @@ test("host selection narrows every bundled source without forcing unavailable wo
   expect(loadConfiguredBundledSkills({ ...context, bundledSkillIds: [] })).toEqual([]);
   const selected = loadConfiguredBundledSkills({
     ...context,
-    bundledSkillIds: ["builtin:opengeni-documents"],
+    bundledSkillIds: ["builtin:documents"],
   });
-  expect(selected.map((entry) => entry.id)).toEqual(["builtin:opengeni-documents"]);
+  expect(selected.map((entry) => entry.id)).toEqual(["builtin:documents"]);
   expect(selected[0]!.artifact.files.some((file) => file.path === "SKILL.md")).toBe(true);
   expect(
     configuredBundledSkillNames({
       firstPartyTools: [],
       videoGenerationEnabled: false,
-      bundledSkillIds: [
-        "builtin:opengeni-documents",
-        "builtin:opengeni-sites",
-        "builtin:opengeni-video-generation",
-      ],
+      bundledSkillIds: ["builtin:documents", "builtin:sites", "builtin:video-generation"],
     }),
   ).toEqual([]);
+});
+
+test("project guidance appears only where the session can list projects", () => {
+  const context = { videoGenerationEnabled: false };
+  const withProjects = loadConfiguredBundledSkills({
+    ...context,
+    firstPartyTools: ["project_list", "project_create", "session_set_project"],
+  });
+  expect(withProjects.map((entry) => entry.id)).toContain("builtin:projects");
+  for (const configuration of [
+    { ...context, firstPartyTools: [] },
+    { ...context, firstPartyTools: ["project_create", "session_set_project"] },
+    {
+      ...context,
+      firstPartyTools: ["project_list"],
+      bundledSkillIds: ["builtin:opengeni-help" as const],
+    },
+  ])
+    expect(loadConfiguredBundledSkills(configuration).map((entry) => entry.id)).not.toContain(
+      "builtin:projects",
+    );
+});
+
+test("schedule creation discovers readable guidance without optional dependencies or lazy setup", () => {
+  const context = {
+    firstPartyTools: ["scheduled_tasks_create"],
+    videoGenerationEnabled: false,
+    get attemptToolCatalog(): never {
+      throw new Error("must not inspect lazy catalog");
+    },
+    get sandboxBackend(): never {
+      throw new Error("must not establish compute");
+    },
+  };
+  const skills = loadConfiguredBundledSkills(context);
+  const selected = skills.find((entry) => entry.id === "builtin:schedules")!;
+  expect(selected).toBeDefined();
+  const catalog = formatSkillCatalog(
+    skills.map(({ id, artifact }) => ({
+      id,
+      name: artifact.name,
+      description: artifact.description!,
+    })),
+  );
+  expect(catalog).toContain('{"name":"schedules"');
+  expect(catalog).not.toContain("## Discover what the task needs");
+  const content = readSkillFiles(selected.artifact.files).files[0]!.content;
+  for (const tool of [
+    "scheduled_tasks_list",
+    "github_repositories_list",
+    "secret_search",
+    "capability_catalog_search",
+    "scheduled_tasks_create",
+  ])
+    expect(content).toContain(tool);
+});
+
+test("schedule guidance respects the configured workflow and host exclusions", () => {
+  const context = { firstPartyTools: ["scheduled_tasks_create"], videoGenerationEnabled: false };
+  for (const configuration of [
+    { ...context, bundledSkillIds: [] },
+    { ...context, bundledSkillIds: ["builtin:opengeni-help" as const] },
+    { ...context, firstPartyTools: ["scheduled_tasks_list"] },
+    { ...context, firstPartyTools: [], bundledSkillIds: ["builtin:schedules" as const] },
+  ]) {
+    expect(configuredBundledSkillNames(configuration)).not.toContain("schedules");
+    expect(loadConfiguredBundledSkills(configuration).map((entry) => entry.id)).not.toContain(
+      "builtin:schedules",
+    );
+  }
+  expect(
+    loadConfiguredBundledSkills({
+      ...context,
+      bundledSkillIds: ["builtin:schedules"],
+    }).map((entry) => entry.id),
+  ).toEqual(["builtin:schedules"]);
+});
+
+test("event-trigger guidance appears only where the session can set up event triggers", () => {
+  const context = { videoGenerationEnabled: false };
+  const withEvents = loadConfiguredBundledSkills({
+    ...context,
+    firstPartyTools: ["scheduled_tasks_create", "event_sources_list", "events_get"],
+  });
+  const selected = withEvents.find((entry) => entry.id === "builtin:event-triggers")!;
+  expect(selected).toBeDefined();
+  expect(withEvents.map((entry) => entry.id)).toContain("builtin:schedules");
+  const content = readSkillFiles(selected.artifact.files).files[0]!.content;
+  for (const tool of ["event_sources_list", "events_get", "scheduled_tasks_create", "once"])
+    expect(content).toContain(tool);
+  for (const configuration of [
+    { ...context, firstPartyTools: ["scheduled_tasks_create"] },
+    { ...context, firstPartyTools: ["event_sources_list", "events_get"] },
+    {
+      ...context,
+      firstPartyTools: ["scheduled_tasks_create", "event_sources_list"],
+      bundledSkillIds: ["builtin:schedules" as const],
+    },
+  ])
+    expect(loadConfiguredBundledSkills(configuration).map((entry) => entry.id)).not.toContain(
+      "builtin:event-triggers",
+    );
+});
+
+test("secrets guidance follows the selected secret_search tool and host selection", () => {
+  const context = { firstPartyTools: ["secret_search"], videoGenerationEnabled: false };
+  expect(configuredBundledSkillNames(context)).toContain("secrets");
+  const selected = loadConfiguredBundledSkills(context).find(
+    (entry) => entry.id === "builtin:secrets",
+  )!;
+  expect(selected).toBeDefined();
+  const paths = selected.artifact.files.map((file) => file.path).sort();
+  expect(paths).toEqual([
+    "SKILL.md",
+    "references/2fa-enrollment.md",
+    "references/account-creation.md",
+    "references/api-keys.md",
+    "references/ask-card.md",
+    "references/codemode-and-scripts.md",
+    "references/login-playbook.md",
+    "references/troubleshooting.md",
+  ]);
+  // Capability off: the capability gate removes every secret_* tool first.
+  for (const configuration of [
+    { ...context, firstPartyTools: [] },
+    { ...context, firstPartyTools: ["secret_save", "secret_get"] },
+    { ...context, bundledSkillIds: [] },
+    { ...context, bundledSkillIds: ["builtin:opengeni-help" as const] },
+  ]) {
+    expect(configuredBundledSkillNames(configuration)).not.toContain("secrets");
+    expect(loadConfiguredBundledSkills(configuration).map((entry) => entry.id)).not.toContain(
+      "builtin:secrets",
+    );
+  }
+  expect(
+    loadConfiguredBundledSkills({
+      ...context,
+      bundledSkillIds: ["builtin:secrets"],
+    }).map((entry) => entry.id),
+  ).toEqual(["builtin:secrets"]);
+});
+
+test("empty or unavailable bundled selections do not read bundled files", () => {
+  const reads = spyOn(fs, "readFileSync");
+  try {
+    for (const bundledSkillIds of [[], ["builtin:video-generation"]] as const) {
+      expect(
+        loadConfiguredBundledSkills({
+          firstPartyTools: [],
+          videoGenerationEnabled: false,
+          bundledSkillIds,
+        }),
+      ).toEqual([]);
+    }
+    expect(reads.mock.calls.filter(([path]) => String(path).includes("bundled_"))).toEqual([]);
+  } finally {
+    reads.mockRestore();
+  }
 });

@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
 import {
+  assertAnthropicApiKey,
   assertClaudeWorkspaceCredential,
   prepareClaudeSubscriptionCredential,
   prepareClaudeWorkspaceCredential,
 } from "../src/claude-workspace-connection";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 const identity = { accountUuid: "11111111-1111-4111-8111-111111111111", deviceId: "a".repeat(64) };
 const connection = (role: "anthropic" | "claude_subscription") => ({
@@ -34,10 +35,10 @@ test("subscription is disabled by deployment flag while API keys remain availabl
       { claudeSubscriptionEnabled: true },
       connection("claude_subscription"),
     ),
-  ).not.toThrow();
+  ).toThrow("individual Claude subscription accounts");
 });
 test("Claude credentials cannot enter the model lane under a personal owner or different endpoint", () => {
-  for (const role of ["anthropic", "claude_subscription"] as const) {
+  for (const role of ["anthropic"] as const) {
     for (const change of [
       { subjectId: "person" },
       { providerDomain: "evil.example" },
@@ -72,6 +73,70 @@ test("other providers remain outside Claude-specific validation", () => {
     ),
   ).not.toThrow();
 });
+const body = "AbC_dEf-123";
+test.each([
+  ["Console API key", `sk-ant-api03-${body}`, `sk-ant-api03-${body}`],
+  ["personal key", `sk-ant-usr-${body}`, `sk-ant-usr-${body}`],
+  ["service-account key", `sk-ant-svc-${body}`, `sk-ant-svc-${body}`],
+  ["future key kind", `sk-ant-xyz09-${body}`, `sk-ant-xyz09-${body}`],
+  ["key without a kind", `sk-ant-${body}`, `sk-ant-${body}`],
+  ["trailing newline", `sk-ant-usr-${body}\n`, `sk-ant-usr-${body}`],
+  [
+    "line break inside",
+    `  sk-ant-api03-${body.slice(0, 5)}\r\n${body.slice(5)}  `,
+    `sk-ant-api03-${body}`,
+  ],
+  ["env-file quotes", `"sk-ant-svc-${body}"`, `sk-ant-svc-${body}`],
+  ["invisible characters", `\uFEFFsk-ant-usr-${body}\u200B`, `sk-ant-usr-${body}`],
+  ["direction mark", `\u200Esk-ant-usr-${body}`, `sk-ant-usr-${body}`],
+  ["smart quotes", `\u201Csk-ant-svc-${body}\u201D`, `sk-ant-svc-${body}`],
+  ["env-file line", `ANTHROPIC_API_KEY="sk-ant-usr-${body}"`, `sk-ant-usr-${body}`],
+  ["exported env line", `export ANTHROPIC_API_KEY = sk-ant-usr-${body}\n`, `sk-ant-usr-${body}`],
+  [
+    "invisible character before env line",
+    `\u200BANTHROPIC_API_KEY=sk-ant-usr-${body}`,
+    `sk-ant-usr-${body}`,
+  ],
+  ["one-sided quote", `"sk-ant-usr-${body}`, `sk-ant-usr-${body}`],
+  ["YAML line", `anthropic_api_key: 'sk-ant-svc-${body}'`, `sk-ant-svc-${body}`],
+  ["header line", `x-api-key: sk-ant-usr-${body}`, `sk-ant-usr-${body}`],
+  ["bearer prefix", `Bearer sk-ant-api03-${body}`, `sk-ant-api03-${body}`],
+] as const)("Anthropic API key accepted: %s", (_label, pasted, stored) => {
+  expect(assertAnthropicApiKey(pasted)).toBe(stored);
+  expect(() =>
+    assertClaudeWorkspaceCredential(
+      { claudeSubscriptionEnabled: false },
+      { ...connection("anthropic"), credential: { apiKey: pasted } },
+    ),
+  ).not.toThrow();
+  expect(
+    prepareClaudeWorkspaceCredential(
+      testSettings(),
+      "one",
+      { credentialRole: "anthropic" },
+      { apiKey: pasted },
+    ),
+  ).toEqual({ apiKey: stored });
+});
+test.each([
+  ["empty", "", "Enter an Anthropic API key."],
+  ["whitespace only", " \n ", "Enter an Anthropic API key."],
+  ["quotes only", '""', "Enter an Anthropic API key."],
+  ["setup token", " sk-ant-oat01-token\n", "Use Claude subscription for setup tokens"],
+  ["setup token in smart quotes", "\u201Csk-ant-oat01-token\u201D", "Use Claude subscription"],
+  ["setup token, upper case", "SK-ANT-OAT01-token", "Use Claude subscription for setup tokens"],
+  ["OAuth refresh token", "sk-ant-ort01-token", "Use Claude subscription for setup tokens"],
+  ["Admin API key", "sk-ant-admin01-key", "Admin API key, which can't run models"],
+  ["masked copy", "sk-ant-usr-AbC…xyz", "doesn't look like a complete Anthropic API key"],
+] as const)("Anthropic API key refused: %s", (_label, refused, message) => {
+  expect(() => assertAnthropicApiKey(refused)).toThrow(message);
+  expect(() =>
+    assertClaudeWorkspaceCredential(
+      { claudeSubscriptionEnabled: false },
+      { ...connection("anthropic"), credential: { apiKey: refused } },
+    ),
+  ).toThrow(message);
+});
 test("token-only setup creates an encrypted-bundle identity stable across retries and replacement", () => {
   const settings = testSettings({
     claudeSubscriptionEnabled: true,
@@ -98,18 +163,14 @@ test("token-only setup creates an encrypted-bundle identity stable across retrie
       prepareClaudeSubscriptionCredential(settings, "organization:one", "sk-ant-oat01-token"),
     ).identity,
   ).not.toEqual(bundle.identity);
-  const payload = prepareClaudeWorkspaceCredential(
-    settings,
-    "one",
-    { credentialRole: "claude_subscription" },
-    { apiKey: "sk-ant-oat01-token" },
-  );
   expect(() =>
-    assertClaudeWorkspaceCredential(settings, {
-      ...connection("claude_subscription"),
-      credential: payload,
-    }),
-  ).not.toThrow();
+    prepareClaudeWorkspaceCredential(
+      settings,
+      "one",
+      { credentialRole: "claude_subscription" },
+      { apiKey: "sk-ant-oat01-token" },
+    ),
+  ).toThrow("individual Claude subscription accounts");
 });
 test("legacy explicit identity remains valid and API keys are unchanged", () => {
   const settings = testSettings({
@@ -117,14 +178,14 @@ test("legacy explicit identity remains valid and API keys are unchanged", () => 
     environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
   });
   const credential = connection("claude_subscription").credential;
-  expect(
+  expect(() =>
     prepareClaudeWorkspaceCredential(
       settings,
       "one",
       { credentialRole: "claude_subscription" },
       credential,
     ),
-  ).toEqual(credential);
+  ).toThrow("individual Claude subscription accounts");
   expect(
     JSON.parse(
       prepareClaudeSubscriptionCredential(

@@ -1,0 +1,69 @@
+:root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #182944; background: #edf4f6; line-height: 1.55; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input, textarea, select { font: inherit; }
+button { border: 1px solid #086f76; border-radius: 6px; padding: .7rem 1rem; background: #086f76; color: white; cursor: pointer; }
+button:disabled { opacity: .6; cursor: not-allowed; }
+button:hover:not(:disabled) { background: #075960; }
+:focus-visible { outline: 3px solid #dd9f24; outline-offset: 3px; }
+.desk { max-width: 1400px; min-height: 100dvh; margin: auto; display: grid; grid-template-columns: 260px 1fr; }
+.sidebar { background: #182944; color: #fff; padding: 38px 24px; display: flex; flex-direction: column; min-width: 0; }
+.brand { font: 2.7rem Georgia, serif; color: inherit; text-decoration: none; }
+.brand span { display: block; font: 1rem -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #c6dce4; margin-top: 4px; }
+.welcome { font: 1.6rem/1.3 Georgia, serif; margin: 42px 0 28px; }
+.new-chat { background: #fff; color: #182944; border-color: #fff; margin-bottom: 24px; }
+.new-chat:hover:not(:disabled) { background: #dcebf0; }
+nav { display: grid; gap: 8px; }
+.chat-link { text-align: left; background: transparent; border-color: transparent; color: #dcebf0; overflow-wrap: anywhere; }
+.chat-link.selected { background: #2e465e; border-color: #668090; }
+.sidebar-note { margin-top: auto; padding-top: 36px; font-size: .85rem; color: #c6dce4; }
+main { background: #fff; min-width: 0; display: flex; flex-direction: column; padding: 32px 48px 16px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #d4e1e6; padding-bottom: 24px; }
+h1 { font: 1.8rem Georgia, serif; margin: 0 0 6px; }
+.topbar p { margin: 0; color: #52677d; }
+.connection { color: #086f76; font-size: .85rem; flex-shrink: 0; }
+.conversation-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 28px 0 8px; }
+h2 { font-size: 1.1rem; margin: 0; }
+.session-status { font-size: .8rem; color: #52677d; }
+.timeline { flex: 1; min-height: 310px; padding: 12px 0 24px; }
+.message { max-width: 72ch; margin: 0 0 28px; }
+.message h3 { color: #52677d; font-size: .85rem; margin: 0 0 6px; font-weight: 600; }
+.message p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.message.user { background: #edf4f6; padding: 16px 20px; border-radius: 8px; margin-left: auto; }
+.message.assistant { padding: 0 20px; border-left: 3px solid #086f76; }
+.empty { padding: 56px 0; max-width: 60ch; }
+.empty h2, .empty h3 { font: 1.9rem Georgia, serif; }
+.empty p { color: #52677d; }
+.composer { border-top: 1px solid #d4e1e6; padding-top: 20px; }
+.composer label { display: block; font-size: .9rem; margin-bottom: 8px; }
+.composer div { display: flex; align-items: end; gap: 12px; }
+textarea, input, select { background: #fff; color: #182944; border: 1px solid #8a9eaf; border-radius: 6px; padding: 10px; width: 100%; }
+textarea { flex: 1; resize: vertical; min-width: 0; }
+.secondary { background: #fff; color: #086f76; }
+.secondary:hover:not(:disabled) { background: #edf4f6; }
+.small { padding: .4rem .7rem; font-size: .85rem; }
+.actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.decision { border: 1px solid #9dbec5; background: #f3f8f9; padding: 20px; border-radius: 8px; margin-bottom: 24px; }
+.decision h3 { margin-top: 0; font-size: 1rem; }
+fieldset { border: 0; padding: 0; margin: 0 0 18px; }
+legend { margin-bottom: 8px; font-weight: 600; }
+.decision label { display: block; margin-top: 10px; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.notice { border-left: 3px solid #bc7716; background: #fff7e9; padding: 12px 16px; margin: 16px 0; }
+.notice p { margin: 0 0 10px; }
+.streaming { font-size: .85rem; color: #52677d; }
+footer { color: #52677d; font-size: .8rem; text-align: right; padding-top: 24px; }
+@media (max-width: 760px) {
+  .desk { grid-template-columns: 1fr; }
+  .sidebar { padding: 16px 20px; }
+  .brand { font-size: 1.8rem; }
+  .welcome, .sidebar-note { display: none; }
+  .new-chat { margin: 16px 0 8px; }
+  nav { display: flex; overflow-x: auto; }
+  .chat-link { flex: 0 0 200px; font-size: .85rem; }
+  main { padding: 24px 20px 16px; }
+  .topbar, .conversation-heading { align-items: flex-start; flex-wrap: wrap; }
+  h1 { font-size: 1.6rem; }
+  .composer div { flex-direction: column; align-items: stretch; }
+  .message.assistant { padding-left: 12px; }
+}

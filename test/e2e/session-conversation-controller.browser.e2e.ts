@@ -1,0 +1,227 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdirSync } from "node:fs";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
+import { chromium, type Browser, type Page } from "playwright";
+
+const repoRoot = new URL("../..", import.meta.url).pathname;
+
+describe("persistent stock conversation controller", () => {
+  let web: StartedProcess;
+  let browser: Browser;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    const port = await freePort();
+    baseUrl = `http://127.0.0.1:${port}`;
+    web = await startProcess(
+      [
+        "bun",
+        "run",
+        "vite",
+        "dev",
+        "demo",
+        "--port",
+        String(port),
+        "--strictPort",
+        "--host",
+        "127.0.0.1",
+      ],
+      {
+        cwd: `${repoRoot}/packages/react`,
+        ready: async () =>
+          (
+            await fetch(`${baseUrl}/embedded-chat.html`, {
+              signal: AbortSignal.timeout(2_000),
+            }).catch(() => null)
+          )?.ok === true,
+        timeoutMs: 60_000,
+      },
+    );
+    browser = await chromium.launch({ args: ["--disable-dev-shm-usage"] });
+  }, 90_000);
+
+  afterAll(async () => {
+    await Promise.allSettled([browser?.close(), web?.stop()]);
+  });
+
+  for (const width of [1440, 390]) {
+    test(`retains draft through layouts and sends annotations without text at ${width}px`, async () => {
+      const errors: string[] = [];
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      page.on("pageerror", (error) => errors.push(error.message));
+      try {
+        await page.goto(`${baseUrl}/embedded-chat.html?controller=1&scenario=long`, {
+          waitUntil: "networkidle",
+        });
+        const input = page.getByRole("textbox", { name: "Message the agent", exact: true });
+        await input.fill("Keep this draft while changing layouts");
+        await page.getByRole("button", { name: "Toggle panel layout" }).click();
+        await page.getByRole("button", { name: "Hide conversation" }).click();
+        expect(await input.count()).toBe(0);
+        await page.getByRole("button", { name: "Show conversation" }).click();
+        expect(await input.inputValue()).toBe("Keep this draft while changing layouts");
+        await input.fill("");
+        await page.getByRole("button", { name: "Add example annotation" }).click();
+        const send = page.getByRole("button", { name: "Send message", exact: true });
+        await send.waitFor();
+        expect(await send.isEnabled()).toBe(true);
+        const inputBox = await input.boundingBox();
+        const sendBox = await send.boundingBox();
+        expect(inputBox!.width).toBeGreaterThan(100);
+        expect(sendBox!.x).toBeGreaterThanOrEqual(0);
+        expect(sendBox!.x + sendBox!.width).toBeLessThanOrEqual(width);
+        expect(sendBox!.y + sendBox!.height).toBeLessThanOrEqual(900);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        const evidence = process.env.OPENGENI_CONVERSATION_EVIDENCE_DIR;
+        if (evidence) {
+          mkdirSync(evidence, { recursive: true });
+          await page.screenshot({ path: `${evidence}/annotation-${width}.png` });
+        }
+        await send.click();
+        await page.waitForFunction(
+          () =>
+            (
+              window as unknown as {
+                embeddedConversationHarness: { sent: unknown[] };
+              }
+            ).embeddedConversationHarness.sent.length === 1,
+        );
+        const state = await page.evaluate(
+          () =>
+            (
+              window as unknown as {
+                embeddedConversationHarness: { streams: number; sent: unknown[] };
+              }
+            ).embeddedConversationHarness,
+        );
+        expect(state.streams).toBe(1);
+        expect(state.sent).toMatchObject([
+          {
+            text: "",
+            modelContext: "Current record: ticket T-4821",
+            annotations: [{ quote: "Customer", note: "Check this exact source." }],
+          },
+        ]);
+        expect(errors).toEqual([]);
+      } catch (cause) {
+        throw new Error(`Browser check failed; page errors: ${errors.join("; ") || "none"}`, {
+          cause,
+        });
+      } finally {
+        await page.close();
+      }
+    }, 60_000);
+  }
+
+  /*
+   * `agentSignals` at desktop and phone widths: off, the goal pill and the
+   * Activity button (agents and commands) are gone, while queued messages,
+   * approvals and questions still show and fit the width.
+   */
+  async function open(width: number, query: string, check: (page: Page) => Promise<void>) {
+    const errors: string[] = [];
+    const page = await browser.newPage({ viewport: { width, height: 900 } });
+    page.on("pageerror", (error) => errors.push(error.message));
+    try {
+      await page.goto(`${baseUrl}/embedded-chat.html?${query}`, { waitUntil: "networkidle" });
+      await page.locator("[data-og-conversation-composer]").waitFor();
+      await check(page);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+      const evidence = process.env.OPENGENI_CONVERSATION_EVIDENCE_DIR;
+      if (evidence) {
+        mkdirSync(evidence, { recursive: true });
+        const name = query.replace(/[^a-z0-9]+/gi, "-");
+        await page.screenshot({ path: `${evidence}/agent-signals-${name}-${width}.png` });
+      }
+      expect(errors).toEqual([]);
+    } catch (cause) {
+      throw new Error(`Browser check failed; page errors: ${errors.join("; ") || "none"}`, {
+        cause,
+      });
+    } finally {
+      await page.close();
+    }
+  }
+
+  const goalPill = (page: Page) => page.locator('[data-og-session-chrome-signal="goal"]');
+  const queueChip = (page: Page) => page.locator('[data-og-session-chrome-signal="queue"]');
+
+  for (const width of [1440, 390]) {
+    test(`by default the goal pill shows with its pause reason at ${width}px`, async () => {
+      await open(width, "scenario=waiting&goal=paused", async (page) => {
+        await goalPill(page).waitFor();
+        expect(await goalPill(page).innerText()).toContain("Paused · agent");
+        expect(await queueChip(page).isVisible()).toBe(true);
+      });
+    }, 60_000);
+
+    test(`agentSignals off keeps the queue but hides the goal pill at ${width}px`, async () => {
+      await open(width, "scenario=waiting&goal=paused&signals=off", async (page) => {
+        await queueChip(page).waitFor();
+        expect(await queueChip(page).innerText()).toContain("2");
+        expect(await goalPill(page).count()).toBe(0);
+        expect(await page.getByRole("button", { name: "Session activity" }).count()).toBe(0);
+      });
+    }, 60_000);
+
+    test(`{ goal: false } hides only the goal pill, keeping queue and agents, at ${width}px`, async () => {
+      await open(width, "scenario=waiting&goal=paused&agents=1&signals=no-goal", async (page) => {
+        await queueChip(page).waitFor();
+        expect(await goalPill(page).count()).toBe(0);
+        expect(await queueChip(page).innerText()).toContain("2");
+        const agents = page.locator('[data-og-session-chrome-signal="agents"]');
+        const activity = page.getByRole("button", { name: "Session activity" });
+        // Narrow rows fold agents behind the Activity button.
+        expect((await agents.count()) + (await activity.count())).toBeGreaterThan(0);
+      });
+    }, 60_000);
+
+    test(`the session row lines up with the composer at ${width}px`, async () => {
+      await open(width, "scenario=waiting&goal=paused&agents=1", async (page) => {
+        await goalPill(page).waitFor();
+        const row = await page.locator("[data-og-session-chrome]").boundingBox();
+        const composer = await page.locator("[data-og-conversation-composer]").boundingBox();
+        expect(Math.abs(row!.x - composer!.x)).toBeLessThanOrEqual(1);
+        expect(Math.abs(row!.width - composer!.width)).toBeLessThanOrEqual(1);
+      });
+    }, 60_000);
+
+    test(`agentSignals off keeps approvals and questions at ${width}px`, async () => {
+      await open(width, "scenario=approval&goal=paused&signals=off", async (page) => {
+        const approve = page.getByRole("button", { name: "Approve action" });
+        await approve.waitFor();
+        const box = await approve.boundingBox();
+        expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+        expect(await goalPill(page).count()).toBe(0);
+      });
+      await open(width, "scenario=question&goal=paused&signals=off", async (page) => {
+        await page.getByText("Refund the duplicate $490.00 charge").first().waitFor();
+        expect(await goalPill(page).count()).toBe(0);
+      });
+    }, 60_000);
+
+    test(`a host mark leads the live turn row at ${width}px`, async () => {
+      await open(width, "scenario=running&mark=1", async (page) => {
+        const slot = page.locator("[data-og-live-mark]");
+        await slot.waitFor();
+        expect(await slot.getAttribute("data-og-live-mark")).toBe("working");
+        expect(await slot.getAttribute("aria-hidden")).toBe("true");
+        expect(await page.locator('[data-demo-mark="working"]').count()).toBe(1);
+        const mark = await slot.boundingBox();
+        const row = await page.locator("[data-og-exchange-status]").boundingBox();
+        // Leading edge of the row, no taller than the row's line.
+        expect(mark!.height).toBeLessThanOrEqual(20);
+        expect(mark!.x).toBeLessThan(row!.x);
+      });
+      await open(width, "scenario=running", async (page) => {
+        await page.locator("[data-og-exchange-status]").waitFor();
+        expect(await page.locator("[data-og-live-mark]").count()).toBe(0);
+      });
+    }, 60_000);
+  }
+});

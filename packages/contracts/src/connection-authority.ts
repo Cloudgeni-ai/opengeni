@@ -1,150 +1,164 @@
+import * as primitives from "./primitives";
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { ConnectionKind, SessionTenancyVisibility } from "./index";
 
-export const ConnectionAuthoritySelectionSource = z.enum(["explicit_workspace", "sender"]);
+export const ConnectionAuthoritySelectionSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["explicit_workspace", "sender"]),
+);
 export type ConnectionAuthoritySelectionSource = z.infer<typeof ConnectionAuthoritySelectionSource>;
 
-export const ConnectionUseSelectionSource = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$/u);
+export const ConnectionUseSelectionSource = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(128)
+    .regex(/^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$/u),
+);
 export type ConnectionUseSelectionSource = z.infer<typeof ConnectionUseSelectionSource>;
 
-const AcceptedConnectionWork = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("turn"),
-      turnId: z.string().uuid(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("scheduled_task"),
-      taskId: z.string().uuid(),
-      taskAuthorityRevision: z.number().int().positive(),
-      runId: z.string().uuid(),
-    })
-    .strict(),
-]);
+const AcceptedConnectionWork = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("kind", [
+    z
+      .object({
+        kind: z.literal("turn"),
+        turnId: primitives.uuid,
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("scheduled_task"),
+        taskId: primitives.uuid,
+        taskAuthorityRevision: primitives.positiveInteger,
+        runId: primitives.uuid,
+      })
+      .strict(),
+  ]),
+);
 
 /**
  * Internal, credential-free authority frozen when work is accepted. Personal
  * owner identity is retained only for live authorization and usage/audit
  * attribution; it is never part of the public delegation envelope.
  */
-export const ConnectionUseAuthoritySnapshot = z
-  .object({
-    organizationId: z.string().uuid(),
-    originWorkspaceId: z.string().uuid(),
-    targetWorkspaceId: z.string().uuid(),
-    targetSessionId: z.string().uuid(),
-    targetSessionVisibility: SessionTenancyVisibility,
-    targetSessionAuthorityEpoch: z.number().int().positive(),
-    acceptedWork: AcceptedConnectionWork,
-    connectionId: z.string().uuid(),
-    connectionGeneration: z.number().int().positive(),
-    connectionStatus: z.literal("active"),
-    providerDomain: z.string().min(1).max(2048),
-    connectionKind: ConnectionKind,
-    scope: z.enum(["workspace", "user"]),
-    ownerSubjectId: z.string().min(1).max(512).nullable(),
-    ownerOrganizationMembershipId: z.string().uuid().nullable(),
-    ownerMembershipAuthorizationRevision: z.number().int().positive().nullable().default(null),
-    authoritySource: ConnectionAuthoritySelectionSource,
-    selectionSources: z.array(ConnectionUseSelectionSource).min(1).max(128),
-    userDelegation: z.null(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    const ownedBySubject = value.scope !== "workspace";
-    const delegated = value.scope === "user";
-    if (ownedBySubject !== (value.ownerSubjectId !== null)) {
-      context.addIssue({
-        code: "custom",
-        path: ["ownerSubjectId"],
-        message: "personal connections retain an owner subject",
-      });
-    }
-    if (delegated !== (value.ownerOrganizationMembershipId !== null)) {
-      context.addIssue({
-        code: "custom",
-        path: ["ownerOrganizationMembershipId"],
-        message: "only user connections retain an owner membership",
-      });
-    }
-    if (delegated !== (value.ownerMembershipAuthorizationRevision !== null)) {
-      context.addIssue({
-        code: "custom",
-        path: ["ownerMembershipAuthorizationRevision"],
-        message: "only user connections retain an owner membership revision",
-      });
-    }
-    if (delegated && value.authoritySource !== "sender") {
-      context.addIssue({
-        code: "custom",
-        path: ["authoritySource"],
-        message: "user connections require authenticated sender provenance",
-      });
-    }
-    if (!delegated && value.authoritySource === "sender") {
-      context.addIssue({
-        code: "custom",
-        path: ["authoritySource"],
-        message: "workspace connections cannot claim sender provenance",
-      });
-    }
-    if (!delegated && value.originWorkspaceId !== value.targetWorkspaceId) {
-      context.addIssue({
-        code: "custom",
-        path: ["originWorkspaceId"],
-        message: "workspace connections must be owned by the target workspace",
-      });
-    }
-  });
+export const ConnectionUseAuthoritySnapshot = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      organizationId: primitives.uuid,
+      originWorkspaceId: primitives.uuid,
+      targetWorkspaceId: primitives.uuid,
+      targetSessionId: primitives.uuid,
+      targetSessionVisibility: SessionTenancyVisibility,
+      targetSessionAuthorityEpoch: primitives.positiveInteger,
+      acceptedWork: AcceptedConnectionWork,
+      connectionId: primitives.uuid,
+      connectionGeneration: primitives.positiveInteger,
+      connectionStatus: z.literal("active"),
+      providerDomain: z.string().min(1).max(2048),
+      connectionKind: ConnectionKind,
+      scope: z.enum(["workspace", "user"]),
+      ownerSubjectId: z.string().min(1).max(512).nullable(),
+      ownerOrganizationMembershipId: primitives.nullableUuid,
+      ownerMembershipAuthorizationRevision: z.number().int().positive().nullable().default(null),
+      authoritySource: ConnectionAuthoritySelectionSource,
+      selectionSources: z.array(ConnectionUseSelectionSource).min(1).max(128),
+      userDelegation: z.null(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      const ownedBySubject = value.scope !== "workspace";
+      const delegated = value.scope === "user";
+      if (ownedBySubject !== (value.ownerSubjectId !== null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["ownerSubjectId"],
+          message: "personal connections retain an owner subject",
+        });
+      }
+      if (delegated !== (value.ownerOrganizationMembershipId !== null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["ownerOrganizationMembershipId"],
+          message: "only user connections retain an owner membership",
+        });
+      }
+      if (delegated !== (value.ownerMembershipAuthorizationRevision !== null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["ownerMembershipAuthorizationRevision"],
+          message: "only user connections retain an owner membership revision",
+        });
+      }
+      if (delegated && value.authoritySource !== "sender") {
+        context.addIssue({
+          code: "custom",
+          path: ["authoritySource"],
+          message: "user connections require authenticated sender provenance",
+        });
+      }
+      if (!delegated && value.authoritySource === "sender") {
+        context.addIssue({
+          code: "custom",
+          path: ["authoritySource"],
+          message: "workspace connections cannot claim sender provenance",
+        });
+      }
+      if (!delegated && value.originWorkspaceId !== value.targetWorkspaceId) {
+        context.addIssue({
+          code: "custom",
+          path: ["originWorkspaceId"],
+          message: "workspace connections must be owned by the target workspace",
+        });
+      }
+    }),
+);
 export type ConnectionUseAuthoritySnapshot = z.infer<typeof ConnectionUseAuthoritySnapshot>;
 
-export const ConnectionUseDenialReason = z.enum([
-  "tenant_mismatch",
-  "workspace_access_inactive",
-  "session_inactive",
-  "session_identity_changed",
-  "session_visibility_changed",
-  "session_authority_epoch_changed",
-  "accepted_attempt_authority_required",
-  "accepted_snapshot_digest_changed",
-  "connection_missing",
-  "connection_identity_changed",
-  "connection_generation_changed",
-  "connection_status_inactive",
-  "connection_owner_changed",
-  "owner_membership_inactive",
-  "authority_missing",
-  "authority_identity_changed",
-  "authority_generation_changed",
-  "authority_status_inactive",
-  "grant_missing",
-  "grant_identity_changed",
-  "grant_generation_changed",
-  "grant_status_inactive",
-  "grant_expired",
-  "grant_already_consumed",
-]);
+export const ConnectionUseDenialReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "tenant_mismatch",
+    "workspace_access_inactive",
+    "session_inactive",
+    "session_identity_changed",
+    "session_visibility_changed",
+    "session_authority_epoch_changed",
+    "accepted_attempt_authority_required",
+    "accepted_snapshot_digest_changed",
+    "connection_missing",
+    "connection_identity_changed",
+    "connection_generation_changed",
+    "connection_status_inactive",
+    "connection_owner_changed",
+    "owner_membership_inactive",
+    "authority_missing",
+    "authority_identity_changed",
+    "authority_generation_changed",
+    "authority_status_inactive",
+    "grant_missing",
+    "grant_identity_changed",
+    "grant_generation_changed",
+    "grant_status_inactive",
+    "grant_expired",
+    "grant_already_consumed",
+  ]),
+);
 export type ConnectionUseDenialReason = z.infer<typeof ConnectionUseDenialReason>;
 
-const ConnectionUseAttributionFields = z
-  .object({
-    organizationId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    sessionId: z.string().uuid(),
-    connectionId: z.string().uuid(),
-    connectionGeneration: z.number().int().positive(),
-    scope: z.enum(["workspace", "user", "legacy_user"]),
-    ownerSubjectId: z.string().min(1).max(512).nullable(),
-    authorityId: z.string().uuid().nullable(),
-    grantId: z.string().uuid().nullable(),
-  })
-  .strict();
+const ConnectionUseAttributionFields = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      organizationId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      sessionId: primitives.uuid,
+      connectionId: primitives.uuid,
+      connectionGeneration: primitives.positiveInteger,
+      scope: z.enum(["workspace", "user", "legacy_user"]),
+      ownerSubjectId: z.string().min(1).max(512).nullable(),
+      authorityId: primitives.nullableUuid,
+      grantId: primitives.nullableUuid,
+    })
+    .strict(),
+);
 
 function refineConnectionUseAttribution(
   value: z.infer<typeof ConnectionUseAttributionFields>,
@@ -184,30 +198,36 @@ function refineConnectionUseAttribution(
 }
 
 /** Metadata-only attribution emitted after pre-use authorization. */
-export const ConnectionUseAttribution = ConnectionUseAttributionFields.extend({
-  scope: z.enum(["workspace", "user"]),
-  grantId: z.null(),
-}).superRefine(refineConnectionUseAttribution);
+export const ConnectionUseAttribution = /* @__PURE__ */ defineSchema(() =>
+  ConnectionUseAttributionFields.extend({
+    scope: z.enum(["workspace", "user"]),
+    grantId: z.null(),
+  }).superRefine(refineConnectionUseAttribution),
+);
 export type ConnectionUseAttribution = z.infer<typeof ConnectionUseAttribution>;
 
-export const ConnectionUseAuditFact = ConnectionUseAttributionFields.extend({
-  outcome: z.enum(["authorized", "denied"]),
-  denialReason: ConnectionUseDenialReason.nullable(),
-  occurredAt: z.string().datetime({ offset: true }),
-}).superRefine((value, context) => {
-  refineConnectionUseAttribution(value, context);
-  if ((value.outcome === "denied") !== (value.denialReason !== null)) {
-    context.addIssue({
-      code: "custom",
-      path: ["denialReason"],
-      message: "only denied connection use carries a denial reason",
-    });
-  }
-});
+export const ConnectionUseAuditFact = /* @__PURE__ */ defineSchema(() =>
+  ConnectionUseAttributionFields.extend({
+    outcome: z.enum(["authorized", "denied"]),
+    denialReason: ConnectionUseDenialReason.nullable(),
+    occurredAt: primitives.string.datetime({ offset: true }),
+  }).superRefine((value, context) => {
+    refineConnectionUseAttribution(value, context);
+    if ((value.outcome === "denied") !== (value.denialReason !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["denialReason"],
+        message: "only denied connection use carries a denial reason",
+      });
+    }
+  }),
+);
 export type ConnectionUseAuditFact = z.infer<typeof ConnectionUseAuditFact>;
 
-export const ConnectionUseAuthorizationResult = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("authorized"), attribution: ConnectionUseAttribution }).strict(),
-  z.object({ status: z.literal("denied"), reason: ConnectionUseDenialReason }).strict(),
-]);
+export const ConnectionUseAuthorizationResult = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("status", [
+    z.object({ status: z.literal("authorized"), attribution: ConnectionUseAttribution }).strict(),
+    z.object({ status: z.literal("denied"), reason: ConnectionUseDenialReason }).strict(),
+  ]),
+);
 export type ConnectionUseAuthorizationResult = z.infer<typeof ConnectionUseAuthorizationResult>;

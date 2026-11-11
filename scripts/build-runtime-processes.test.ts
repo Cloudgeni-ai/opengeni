@@ -21,7 +21,9 @@ test("production process bundles retain every runtime skill asset directory", as
       "bundled_default_skills",
       "bundled_artifact_skills",
       "bundled_project_skills",
+      "bundled_schedule_skills",
       "bundled_site_skills",
+      "bundled_secret_skills",
       "bundled_video_skills",
       "bundled_management_skills",
     ]);
@@ -29,11 +31,13 @@ test("production process bundles retain every runtime skill asset directory", as
       ["curated_skill_library", "azure-verified-modules"],
       ["bundled_default_skills", "document-parsing"],
       ["bundled_default_skills", "opengeni-client"],
-      ["bundled_artifact_skills", "opengeni-spreadsheets"],
-      ["bundled_project_skills", "opengeni-projects"],
-      ["bundled_site_skills", "opengeni-sites"],
-      ["bundled_video_skills", "opengeni-video-generation"],
-      ["bundled_management_skills", "opengeni-skills"],
+      ["bundled_artifact_skills", "spreadsheets"],
+      ["bundled_project_skills", "projects"],
+      ["bundled_schedule_skills", "schedules"],
+      ["bundled_site_skills", "sites"],
+      ["bundled_secret_skills", "secrets"],
+      ["bundled_video_skills", "video-generation"],
+      ["bundled_management_skills", "skill-management"],
     ] as const) {
       const skill = await readFile(
         join(outdir, "assets", "runtime", directoryName, skillName, "SKILL.md"),

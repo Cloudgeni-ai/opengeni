@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { digestCanonicalJson } from "@opengeni/tool-gateway";
 import { assertMcpOperationObservationAuthority } from "@opengeni/runtime";
 import { createMcpOperationObserverResolver } from "../src/activities/mcp-operation-observer";

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { apiContractAdmission, createApp, type AppDependencies } from "../src/app";
 
 const WORKSPACE = "00000000-0000-4000-8000-000000000001";
@@ -71,6 +71,29 @@ describe("API contract admission", () => {
     ).toBe("admit");
   });
 
+  test("signed machine renewal is outside the browser fence without exempting adjacent paths", () => {
+    for (const claimedRevision of [undefined, stale]) {
+      expect(
+        apiContractAdmission({
+          method: "POST",
+          pathname: "/v1/enrollments/renew",
+          authorization: undefined,
+          claimedRevision,
+        }),
+      ).toBe("admit");
+    }
+    for (const pathname of ["/v1/enrollments/renew/other", mutation.pathname]) {
+      expect(
+        apiContractAdmission({
+          method: "POST",
+          pathname,
+          authorization: undefined,
+          claimedRevision: undefined,
+        }),
+      ).toBe("reject");
+    }
+  });
+
   test("in production a stale browser mutation is 409 while a stale bearer proceeds", async () => {
     const app = appFor(testSettings({ environment: "production" }));
     const path = `/v1/workspaces/${WORKSPACE}/sessions/${SESSION}/control`;
@@ -89,9 +112,7 @@ describe("API contract admission", () => {
     for (const { headers, advertised } of [
       {
         headers: { authorization: "Bearer ogk_integration", [OPENGENI_API_CONTRACT_HEADER]: stale },
-        // A pinned SDK throws on any mismatched response revision, so a bearer
-        // that claimed a different revision receives no revision header.
-        advertised: null,
+        advertised: OPENGENI_API_CONTRACT_REVISION,
       },
       {
         headers: { authorization: "Bearer ogk_integration" },

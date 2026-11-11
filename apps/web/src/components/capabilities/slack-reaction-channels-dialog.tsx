@@ -1,11 +1,14 @@
 import type { WorkspaceSlackReactionSummonSettings } from "@opengeni/contracts";
 import type { SlackReactionChannel } from "@opengeni/sdk";
 import { Loader2Icon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { openGeniSlackBotConnectionOptions } from "@/lib/slack-bot";
+import type { ConnectionMetadata } from "@opengeni/react/app/types";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
+import { CheckboxField } from "@opengeni/react/ui/field";
 import {
   Dialog,
   DialogContent,
@@ -13,9 +16,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Select } from "@/components/ui/select";
-import { useAppContext } from "@/context";
+} from "@opengeni/react/ui/dialog";
+import { Select } from "@opengeni/react/ui/select";
+import { useAppContext } from "@opengeni/react/app/app-context";
 
 /**
  * Where the reaction shortcut works: anywhere the bot is a member, or only in
@@ -25,6 +28,7 @@ import { useAppContext } from "@/context";
 export function SlackReactionChannelsDialog({
   workspaceId,
   connectionId,
+  connections,
   settings,
   open,
   canManage,
@@ -33,6 +37,8 @@ export function SlackReactionChannelsDialog({
 }: {
   workspaceId: string;
   connectionId: string | null;
+  /** The workspace policy spans all verified installations stored here. */
+  connections?: ConnectionMetadata[];
   settings: WorkspaceSlackReactionSummonSettings;
   open: boolean;
   canManage: boolean;
@@ -41,10 +47,11 @@ export function SlackReactionChannelsDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      {open && connectionId ? (
+      {open && (connectionId || connections) ? (
         <SlackReactionChannelsDialogBody
           workspaceId={workspaceId}
           connectionId={connectionId}
+          connections={connections}
           settings={settings}
           canManage={canManage}
           onClose={() => onOpenChange(false)}
@@ -58,13 +65,15 @@ export function SlackReactionChannelsDialog({
 function SlackReactionChannelsDialogBody({
   workspaceId,
   connectionId,
+  connections,
   settings,
   canManage,
   onClose,
   onSave,
 }: {
   workspaceId: string;
-  connectionId: string;
+  connectionId: string | null;
+  connections?: ConnectionMetadata[];
   settings: WorkspaceSlackReactionSummonSettings;
   canManage: boolean;
   onClose: () => void;
@@ -72,7 +81,25 @@ function SlackReactionChannelsDialogBody({
 }) {
   const context = useAppContext();
   const [draft, setDraft] = useState<WorkspaceSlackReactionSummonSettings>(settings);
-  const [channels, setChannels] = useState<SlackReactionChannel[]>([]);
+  const installations = useMemo(
+    () =>
+      connections === undefined
+        ? connectionId
+          ? [{ connectionId, label: "Slack workspace" }]
+          : []
+        : openGeniSlackBotConnectionOptions(
+            [
+              ...new Map(connections.map((connection) => [connection.id, connection])).values(),
+            ].filter(
+              (connection) =>
+                connection.workspaceId === workspaceId && connection.status === "active",
+            ),
+          ).map(({ connection, label }) => ({ connectionId: connection.id, label })),
+    [connections, connectionId, workspaceId],
+  );
+  const [channelGroups, setChannelGroups] = useState<
+    Array<{ connectionId: string; label: string; channels: SlackReactionChannel[] }>
+  >([]);
   const [channelsLoading, setChannelsLoading] = useState(false);
   const [channelsError, setChannelsError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -82,25 +109,32 @@ function SlackReactionChannelsDialogBody({
   useEffect(() => {
     if (!canManage || draft.channelPolicy.mode !== "allowlist") return;
     let cancelled = false;
+    setChannelGroups([]);
     setChannelsLoading(true);
     setChannelsError(null);
     void (async () => {
       try {
-        const collected: SlackReactionChannel[] = [];
-        let cursor: string | undefined;
-        for (let page = 0; page < 5; page += 1) {
-          const result = await context.client.listOpenGeniSlackReactionChannels(
-            workspaceId,
-            connectionId,
-            cursor,
-          );
-          collected.push(...result.channels);
-          cursor = result.nextCursor ?? undefined;
-          if (!cursor) break;
+        const groups: typeof channelGroups = [];
+        for (const installation of installations) {
+          const collected: SlackReactionChannel[] = [];
+          let cursor: string | undefined;
+          for (let page = 0; page < 5; page += 1) {
+            if (cancelled) return;
+            const result = await context.client.listOpenGeniSlackReactionChannels(
+              workspaceId,
+              installation.connectionId,
+              cursor,
+            );
+            collected.push(...result.channels);
+            cursor = result.nextCursor ?? undefined;
+            if (!cursor) break;
+          }
+          groups.push({
+            ...installation,
+            channels: [...new Map(collected.map((channel) => [channel.id, channel])).values()],
+          });
         }
-        if (!cancelled) {
-          setChannels([...new Map(collected.map((channel) => [channel.id, channel])).values()]);
-        }
+        if (!cancelled) setChannelGroups(groups);
       } catch (error) {
         if (!cancelled) setChannelsError(`Couldn't load Slack channels. ${userErrorText(error)}`);
       } finally {
@@ -110,16 +144,17 @@ function SlackReactionChannelsDialogBody({
     return () => {
       cancelled = true;
     };
-  }, [canManage, connectionId, context.client, draft.channelPolicy.mode, workspaceId]);
+  }, [canManage, installations, context.client, draft.channelPolicy.mode, workspaceId]);
 
   function toggleChannel(channelId: string, checked: boolean) {
     if (draft.channelPolicy.mode !== "allowlist") return;
     const selected = new Set(draft.channelPolicy.channelIds);
+    if (checked && !selected.has(channelId) && selected.size >= 100) return;
     if (checked) selected.add(channelId);
     else selected.delete(channelId);
     setDraft({
       ...draft,
-      channelPolicy: { mode: "allowlist", channelIds: [...selected].slice(0, 100) },
+      channelPolicy: { mode: "allowlist", channelIds: [...selected] },
     });
   }
 
@@ -141,12 +176,12 @@ function SlackReactionChannelsDialogBody({
   }
 
   return (
-    <DialogContent className="max-w-lg">
+    <DialogContent>
       <DialogHeader>
         <DialogTitle>Where the reaction shortcut works</DialogTitle>
         <DialogDescription>
-          React with the Opengeni emoji on a message to start work from it. This reads the selected
-          message and its thread; it does not sync the channel.
+          This setting applies to all Slack bots installed in this Opengeni workspace. React with
+          the Opengeni emoji to start work from a message and its thread.
         </DialogDescription>
       </DialogHeader>
 
@@ -180,25 +215,34 @@ function SlackReactionChannelsDialogBody({
             </p>
           ) : channelsError ? (
             <p className="mt-2 text-2xs text-danger">{channelsError}</p>
-          ) : channels.length === 0 ? (
+          ) : channelGroups.length === 0 ? (
             <p className="mt-2 text-2xs text-fg-subtle">
-              Opengeni has not been invited anywhere yet. Tag @Opengeni in Slack, then return here.
+              No active Slack bot installations in this Opengeni workspace.
             </p>
           ) : (
-            <div className="mt-2 grid max-h-52 gap-2 overflow-y-auto sm:grid-cols-2">
-              {channels.map((channel) => (
-                <label key={channel.id} className="flex items-center gap-2 text-xs text-fg-muted">
-                  <input
-                    type="checkbox"
-                    checked={selectedChannelIds.includes(channel.id)}
-                    disabled={!canManage || saving}
-                    onChange={(event) => toggleChannel(channel.id, event.target.checked)}
-                  />
-                  <span className="truncate">
-                    {channel.isPrivate ? "Private · " : "#"}
-                    {channel.name ?? channel.id}
-                  </span>
-                </label>
+            <div className="mt-2 max-h-72 space-y-4 overflow-y-auto">
+              {channelGroups.map((group) => (
+                <fieldset key={group.connectionId} className="space-y-2">
+                  <legend className="text-xs font-medium text-fg">{group.label}</legend>
+                  {group.channels.length === 0 ? (
+                    <p className="text-xs text-fg-subtle">No joined conversations.</p>
+                  ) : (
+                    group.channels.map((channel) => (
+                      <CheckboxField
+                        key={channel.id}
+                        label={`${channel.isPrivate ? "Private · " : "#"}${channel.name ?? channel.id}`}
+                        checked={selectedChannelIds.includes(channel.id)}
+                        disabled={
+                          !canManage ||
+                          saving ||
+                          (selectedChannelIds.length >= 100 &&
+                            !selectedChannelIds.includes(channel.id))
+                        }
+                        onCheckedChange={(checked) => toggleChannel(channel.id, checked)}
+                      />
+                    ))
+                  )}
+                </fieldset>
               ))}
             </div>
           )}
@@ -209,7 +253,16 @@ function SlackReactionChannelsDialogBody({
         <Button type="button" variant="outline" onClick={onClose}>
           Cancel
         </Button>
-        <Button type="button" disabled={!canManage || saving} onClick={() => void save()}>
+        <Button
+          type="button"
+          disabled={
+            !canManage ||
+            saving ||
+            (draft.channelPolicy.mode === "allowlist" &&
+              (channelsLoading || channelsError !== null))
+          }
+          onClick={() => void save()}
+        >
           {saving ? <Loader2Icon className="animate-spin" /> : null}
           Save
         </Button>

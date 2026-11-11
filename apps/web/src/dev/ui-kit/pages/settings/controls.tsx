@@ -1,10 +1,10 @@
 import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
-import { HelpTip } from "@/components/ui/inline-help";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu, type SelectMenuProps } from "@/components/ui/select-menu";
-import { useSettingRowField } from "@/components/ui/setting-row";
-import { cn } from "@/lib/utils";
+import { HelpTip } from "@opengeni/react/ui/inline-help";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu, type SelectMenuProps } from "@opengeni/react/ui/select-menu";
+import { useSettingRowField } from "@opengeni/react/ui/setting-row";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 /* ----------------------------------------------------------------------------
    Preview controls: the open product questions and the preview state, shown

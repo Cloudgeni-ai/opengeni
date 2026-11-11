@@ -16,14 +16,16 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   buildSandboxImage,
   freePort,
+  startTestServices,
+  type TestServices,
+} from "@opengeni/testing/compose";
+import {
   startE2eWorkerTopology,
   startProcess,
-  startTestServices,
   type StartedE2eWorkerTopology,
   type StartedProcess,
-  type TestServices,
   waitFor,
-} from "@opengeni/testing";
+} from "@opengeni/testing/process";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 let apiPort = 0;

@@ -1,4 +1,4 @@
-# Include this file in the OpenGeni application-chart upgrade after the
+# Include this file in the Opengeni application-chart upgrade after the
 # opengeni-observability release has installed the Prometheus Operator CRDs.
 
 observability:

@@ -26,7 +26,7 @@ optional setup and account presentation lives in `@opengeni/react/connect`.
 
 # @opengeni/connect
 
-Framework-neutral state for a durable OpenGeni connection setup attempt. This
+Framework-neutral state for a durable Opengeni connection setup attempt. This
 package contains no React, browser storage, provider SDK, or server credentials.
 Use `ConnectController` with an authenticated `ConnectTransport`; use
 `@opengeni/react/connect` to observe that same controller from React.
@@ -73,7 +73,7 @@ workspace access; browser-supplied actor IDs are not proof of identity.
 
 Catalog readiness reflects curated provider configuration and current access.
 Accounts expose connection metadata, not credentials. `disconnect` uses the
-existing local connection-revocation endpoint: it removes OpenGeni access, not
+existing local connection-revocation endpoint: it removes Opengeni access, not
 upstream provider consent. Aborting an in-flight mutation stops observation and
 does not guarantee that the server rolled it back; recover durable attempts
 before deciding whether to retry. A signal already aborted before dispatch

@@ -41,32 +41,33 @@ const original = { ...fs };
 const ghost = "2147483647";
 const code = process.argv[2];
 let ownedForStatRace;
-let ownedStatReads = 0;
+let ownedWasSignaled = false;
+const originalKill = process.kill.bind(process);
+process.kill = (pid, signal) => {
+  if (ownedForStatRace && pid === ownedForStatRace.pid && signal === "SIGTERM") ownedWasSignaled = true;
+  return originalKill(pid, signal);
+};
 mock.module("node:fs/promises", () => ({
   ...original,
   readdir: async (path, options) => path === "/proc"
     ? [{ name: ghost, isDirectory: () => true }, ...await original.readdir(path, options)]
     : original.readdir(path, options),
   readFile: async (path, ...args) => {
-    if (code === "ESRCH" && ownedForStatRace && path === "/proc/" + ownedForStatRace.pid + "/stat" && ++ownedStatReads > 1) {
+    if (code === "ESRCH" && ownedWasSignaled && path === "/proc/" + ownedForStatRace.pid + "/stat") {
       await ownedForStatRace.exited;
       throw Object.assign(new Error("process exited after procfs open"), { code });
     }
-    if (path === "/proc/" + ghost + "/cmdline") {
+    if (path === "/proc/" + ghost + "/stat" || path === "/proc/" + ghost + "/cmdline") {
       throw Object.assign(new Error("synthetic procfs read failure"), { code });
     }
     return original.readFile(path, ...args);
   },
 }));
-const { AgentBrowserJsonRunner } = await import(process.argv[1]);
+const { ManagedBrowserRunner } = await import(process.argv[1]);
 const root = await original.mkdtemp("/tmp/og-proc-exit-");
 const profileDirectory = join(root, "profile");
-const runner = await AgentBrowserJsonRunner.create({
-  namespace: "og", sessionName: "proc-exit",
-  socketDirectory: join(root, "socket"), profileDirectory,
-  downloadDirectory: join(root, "downloads"), screenshotDirectory: join(root, "screenshots"),
+const runner = await ManagedBrowserRunner.create({ profileDirectory,
   headed: false, browserExecutablePath: process.execPath,
-  binary: { path: process.execPath, name: "agent-browser-linux-x64", version: "0.33.2", sha256: "fixture" },
 });
 const spawn = (profile) => Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 60000)", "--user-data-dir=" + profile], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 const owned = spawn(profileDirectory);

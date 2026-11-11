@@ -18,7 +18,7 @@ describe("web workbench peer-state chunk boundary", () => {
         "packages/react/src/editor.ts",
         "packages/react/src/desktop.ts",
         "packages/react/src/components/sandbox-terminal.tsx",
-        "apps/web/src/routes/session.tsx",
+        "packages/react/src/app/routes/session.tsx",
       ]) {
         expect(stateTest.test(moduleId(relative))).toBe(false);
       }

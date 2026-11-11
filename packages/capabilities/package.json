@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/capabilities",
-  "version": "0.3.4",
-  "description": "Protocol-neutral capability integration compilers and local MCP adapters for OpenGeni.",
+  "version": "6.14.0",
+  "description": "Protocol-neutral capability integration compilers and local MCP adapters for Opengeni.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -31,11 +31,12 @@
   },
   "scripts": {
     "build": "bun ../../scripts/build-typescript-package.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
     "@openai/agents": "0.14.3",
+    "@opengeni/contracts": "workspace:*",
     "@opengeni/network": "workspace:*",
     "graphql": "^16.12.0",
     "js-yaml": "4.1.1"

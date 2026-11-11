@@ -14,7 +14,7 @@ import {
   LOSSLESS_TEXT_PREFIX,
   resumeHostExportConsumer,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createObservability } from "@opengeni/observability";
 import { createHostExportPump } from "../src/host-export-pump";
 

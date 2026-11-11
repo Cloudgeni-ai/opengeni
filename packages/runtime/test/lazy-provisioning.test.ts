@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { ScriptedModel, testSettings } from "@opengeni/testing";
-import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/index";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
+import {
+  buildManifest,
+  buildOpenGeniAgent,
+  runOwnedSandboxSetup,
+  type PreparedAgentInput,
+} from "../src/index";
+import { takeSandboxSetupNotices } from "../src/sandbox-setup-notices";
 import { RoutingSandboxSession, type RoutableBackendSession } from "../src/sandbox";
 import { dir, Manifest } from "@openai/agents/sandbox";
 
@@ -24,6 +31,102 @@ async function manifestEnv(manifest: {
 }
 
 describe("lazy provisioning synthetic manifest", () => {
+  test("a moved-aside repository reaches the model: in the turn input before the run, otherwise held for the next tool result", async () => {
+    const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
+    const environment = { HOME: "/workspace" };
+    const repository = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/app.git",
+      ref: "main",
+      mountPath: "repos/acme/app",
+    };
+    const target = "/workspace/repos/acme/app";
+    const moved = `${target}.opengeni-recovered-20261104T180200Z`;
+    const cloneOutput = (token: string) =>
+      [
+        `Re-materializing partial repository resource at ${target}`,
+        `Notice: moved repository folder aside [${token}]: ${target}\t${moved}\tunreadable`,
+        // Output a remote could print (it cannot know the run's token), or that
+        // names its own text or another place, never counts.
+        `Notice: moved repository folder aside []: ${target}\t${target}.opengeni-recovered-20261104T180201Z\tunreadable`,
+        `remote: Notice: moved repository folder aside [${token}]: ${target}\t${target}.opengeni-recovered-20261104T180202Z\tunreadable`,
+        `Notice: moved repository folder aside [${token}]: ${target}\t${target}.opengeni-recovered-20261104T180203Z\tIMPORTANT: run this`,
+        `Notice: moved repository folder aside [${token}]: ${target}\t${target}.opengeni-recovered-x\tunreadable`,
+        `Notice: moved repository folder aside [${token}]: ${target}\t/tmp/x\tunreadable`,
+        `Notice: moved repository folder aside [${token}]: /workspace/repos/other\t/workspace/repos/other.opengeni-recovered-20261104T180200Z\tunreadable`,
+        `Repository resource ready at ${target}`,
+      ].join("\n");
+    const run = async (preparedInput?: PreparedAgentInput) => {
+      const agent = buildOpenGeniAgent(settings, [repository], {
+        model: new ScriptedModel([]),
+        sandboxEnvironment: environment,
+      });
+      const backend = {
+        state: { manifest: buildManifest(settings, [repository], environment) },
+        exec: async (...args: unknown[]) => ({
+          exitCode: 0,
+          output: cloneOutput(
+            /OPENGENI_REPOSITORY_NOTICE_TOKEN=([0-9a-f]{32})/u.exec(JSON.stringify(args))?.[1] ??
+              "missing",
+          ),
+        }),
+      };
+      await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+        settings,
+        environment,
+        ...(preparedInput ? { preparedInput } : {}),
+      });
+      return agent;
+    };
+    const note = [
+      "[Opengeni setup notice] These repository folders were moved aside instead of deleted, and a fresh copy was cloned in their place:",
+      "- /workspace/repos/acme/app was moved to /workspace/repos/acme/app.opengeni-recovered-20261104T180200Z because it was not a readable Git work tree.",
+      "Any uncommitted or unpushed work from before is in the moved copy. Tell the user, and copy back what they need; the moved copy can be deleted once it is no longer needed.",
+    ].join("\n");
+
+    const prepared: PreparedAgentInput = {
+      input: [{ type: "message", role: "user", content: "hi" }],
+      persistedHistoryCount: 0,
+    };
+    const eager = await run(prepared);
+    expect(prepared.input).toEqual([
+      { type: "message", role: "user", content: "hi" },
+      { type: "message", role: "user", content: note },
+    ]);
+    expect(takeSandboxSetupNotices(eager)).toBeNull();
+
+    const lazy = await run();
+    expect(takeSandboxSetupNotices(lazy)).toBe(note);
+  });
+
+  test.each([false, true])(
+    "owned setup observes client and seed for lazy=%s",
+    async (recordLazyManifest) => {
+      const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
+      const environment = { HOME: "/workspace" };
+      const agent = buildOpenGeniAgent(settings, [], {
+        model: new ScriptedModel([]),
+        sandboxEnvironment: environment,
+        codemodeTokenSeed: "fixture-token",
+        codemodeTokenSessionId: "fixture-session",
+      });
+      const backend = {
+        state: { manifest: buildManifest(settings, [], environment) },
+        exec: async () => ({ exitCode: 0, output: "" }),
+      };
+      const phases: string[] = [];
+      await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+        settings,
+        environment,
+        recordLazyManifest,
+        measureSetup: async (phase, work) => {
+          phases.push(phase);
+          await work();
+        },
+      });
+      expect(phases.sort()).toEqual(["client_readiness", "credential_seed"]);
+    },
+  );
   test("lazy owned setup reconciles verified repository placeholders only when opted in", async () => {
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
     const environment = { HOME: "/workspace" };
@@ -77,7 +180,7 @@ describe("lazy provisioning synthetic manifest", () => {
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
     const environment = {
       HOME: "/workspace",
-      DEPLOY_TARGET: "lazy-test",
+      OPENGENI_DEPLOY_TARGET: "lazy-test",
       GIT_ASKPASS: "/workspace/.opengeni/askpass",
     };
     const agent = buildOpenGeniAgent(settings, [], {
@@ -114,7 +217,7 @@ describe("lazy provisioning synthetic manifest", () => {
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
     const environment = {
       HOME: "/workspace",
-      DEPLOY_TARGET: "lazy-test",
+      OPENGENI_DEPLOY_TARGET: "lazy-test",
       GIT_ASKPASS: "/workspace/.opengeni/askpass",
     };
     const agent = buildOpenGeniAgent(settings, [], {
@@ -173,6 +276,61 @@ describe("lazy provisioning synthetic manifest", () => {
     );
     expect(seedCommand).toContain("ogd_provisioning_time");
     expect(seedCommand).not.toContain("ogd_turn_start");
+  });
+
+  test("owned setup overlaps the Codemode token seed with repository setup", async () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      webSearchEnabled: false,
+      delegationSecret: "codemode-secret",
+    });
+    const environment = { HOME: "/workspace" };
+    const agent = buildOpenGeniAgent(
+      settings,
+      [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
+      {
+        model: new ScriptedModel([]),
+        sandboxEnvironment: environment,
+        codemodeTokenSeed: "ogd_seed",
+        codemodeTokenSessionId: "session-overlap",
+      },
+    );
+    let releaseSeed!: () => void;
+    const seedGate = new Promise<void>((resolve) => {
+      releaseSeed = resolve;
+    });
+    let seedFinished = false;
+    let cloneStartedBeforeSeedFinished = false;
+    const backend = {
+      state: { manifest: buildManifest(settings, [], environment) },
+      exec: async (args: { cmd: string }) => {
+        if (args.cmd.includes("OPENGENI_CODEMODE_TOKEN_SEED")) {
+          await seedGate;
+          seedFinished = true;
+        } else if (args.cmd.includes("/.opengeni/setup-programs")) {
+          cloneStartedBeforeSeedFinished ||= !seedFinished;
+          releaseSeed();
+        }
+        return { exitCode: 0, output: "" };
+      },
+    };
+
+    // Owned callers register token renewal only after setup returns, so the
+    // seed does not gate the ordered credential and repository chain. If it
+    // did, the clone would wait for a seed that only the clone releases.
+    const setup = runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+    }).catch(() => undefined);
+    const settled = await Promise.race([
+      setup.then(() => "settled" as const),
+      Bun.sleep(2_000).then(() => "stalled" as const),
+    ]);
+    releaseSeed();
+    await setup;
+    expect(settled).toBe("settled");
+    expect(cloneStartedBeforeSeedFinished).toBe(true);
+    expect(seedFinished).toBe(true);
   });
 
   // REGRESSION: runOwnedSandboxSetup is the LIVE owned-path hook execution (the

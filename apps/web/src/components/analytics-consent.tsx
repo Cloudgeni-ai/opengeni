@@ -8,8 +8,8 @@ import {
   storedAnalyticsConsent,
   takePendingAnalyticsPreferencesOpen,
   type AnalyticsConsent,
-} from "@/lib/analytics-consent";
-import type { ClientConfig } from "@/types";
+} from "@opengeni/react/app/lib/analytics-consent";
+import type { ClientConfig } from "@opengeni/react/app/types";
 import { journeyAction, journeyPage } from "@/lib/analytics-journey";
 
 /**

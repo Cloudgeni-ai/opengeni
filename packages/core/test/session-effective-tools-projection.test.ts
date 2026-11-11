@@ -1,7 +1,9 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { configuredModels, withXaiSubscriptionCatalogProvider } from "@opengeni/config";
+import * as config from "@opengeni/config";
 import {
   AgentEffectiveTools,
+  CUA_DESKTOP_TOOLS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   resolveAgentConfig,
   type AgentCapabilities,
@@ -9,7 +11,7 @@ import {
 } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
 import * as catalog from "../src/model-catalog";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   sessionEffectiveToolProjectionInput,
   sessionWithEffectiveToolPolicy,
@@ -19,11 +21,24 @@ import {
 
 const settings = testSettings({ openaiModel: "gpt-6-astra", lazyToolSearchEnabled: true });
 
+// The workspace's EU-only setting: off unless a test says otherwise.
+let euOnly: ReturnType<typeof spyOn<typeof db, "isWorkspaceEuOnly">>;
+// The sessions with a goal: none unless a test says otherwise.
+let goals: ReturnType<typeof spyOn<typeof db, "sessionsWithGoal">>;
+beforeEach(() => {
+  euOnly = spyOn(db, "isWorkspaceEuOnly").mockResolvedValue(false);
+  goals = spyOn(db, "sessionsWithGoal").mockResolvedValue(new Set());
+});
+afterEach(() => {
+  euOnly.mockRestore();
+  goals.mockRestore();
+});
+
 function session(capabilities: AgentCapabilities = "all", overrides: Partial<Session> = {}) {
   const agent = resolveAgentConfig({
     creator: "api",
     request: { capabilities },
-    deployment: { unavailable: {}, admissionEnabled: true, defaultForNewSessions: false },
+    deployment: { unavailable: {} },
     workspace: { defaults: null, humanInputEnabled: true },
     goal: false,
   }).config!;
@@ -69,7 +84,370 @@ function projected(row = session(), env = context()) {
   );
 }
 
+async function withPageContext(
+  rows: readonly Session[],
+  catalogSettings: typeof settings,
+  run: (env: SessionEffectiveToolsContext) => void | Promise<void>,
+) {
+  const workspace = spyOn(db, "requireWorkspace").mockResolvedValue({
+    settings: {},
+  } as Awaited<ReturnType<typeof db.requireWorkspace>>);
+  const models = spyOn(catalog, "resolveWorkspaceCatalogSettings").mockResolvedValue({
+    settings: catalogSettings,
+    source: "code",
+    version: null,
+    modelNotes: {},
+  });
+  const skills = spyOn(db, "hasWorkspaceManagedSkill").mockResolvedValue(false);
+  const history = spyOn(db, "sessionsWithToolRouterHistory").mockResolvedValue(new Set());
+  try {
+    await run(
+      await workspaceSessionEffectiveToolsContext(
+        { db: {} as db.Database, settings },
+        rows[0]!.workspaceId,
+        "human",
+        rows,
+      ),
+    );
+    const configured = rows.filter((row) => row.agent != null);
+    expect(skills).toHaveBeenCalledTimes(
+      configured.some((row) => row.agent?.capabilities.skills === "read") ? 1 : 0,
+    );
+    if (configured.length) {
+      expect(history).toHaveBeenCalledTimes(1);
+      expect(history.mock.calls[0]?.[1]).toEqual({
+        accountId: configured[0]!.accountId,
+        workspaceId: rows[0]!.workspaceId,
+        sessionIds: [...new Set(configured.map((row) => row.id))],
+      });
+    } else {
+      expect(history).not.toHaveBeenCalled();
+    }
+  } finally {
+    history.mockRestore();
+    skills.mockRestore();
+    models.mockRestore();
+    workspace.mockRestore();
+  }
+}
+
+describe("response-page model resolution", () => {
+  test("resolves each distinct configured model once, including missing models", async () => {
+    const rows = [session(), session(), session("all", { model: "missing-model" })];
+    rows.push(rows[2]!);
+    const resolve = spyOn(config, "resolveModelProviderForTurn");
+    try {
+      await withPageContext(rows, settings, (env) => {
+        expect(resolve).toHaveBeenCalledTimes(2);
+        expect(env.modelProviders?.has("missing-model")).toBe(true);
+        for (const row of rows) projected(row, env);
+        expect(resolve).toHaveBeenCalledTimes(2);
+        // A caller can still project a row not present in the original page.
+        projected(session("all", { model: "another-missing-model" }), env);
+        expect(resolve).toHaveBeenCalledTimes(3);
+      });
+    } finally {
+      resolve.mockRestore();
+    }
+  });
+
+  test("mixed pages preserve exact serialized responses and legacy rows", async () => {
+    const rows = [
+      session(),
+      session("none"),
+      session("all", { model: "missing-model", sandboxBackend: "local" }),
+      session("all", { model: "supergrok/grok-4.6", sandboxBackend: "local" }),
+    ];
+    const legacy = { ...session(), agent: null };
+    await withPageContext([...rows, legacy], settings, (env) => {
+      const uncached = { ...env, modelProviders: undefined };
+      for (const row of rows) {
+        expect(JSON.stringify(projected(row, env))).toBe(JSON.stringify(projected(row, uncached)));
+      }
+      expect(JSON.stringify(sessionWithEffectiveToolPolicy(legacy, ["opengeni"], [], env))).toBe(
+        JSON.stringify(sessionWithEffectiveToolPolicy(legacy, ["opengeni"], [], uncached)),
+      );
+    });
+  });
+
+  test("registry aliases keep the same capabilities as uncached resolution", async () => {
+    const pageSettings = {
+      ...settings,
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "example",
+          api: "chat",
+          baseUrl: "https://provider.example/v1",
+          apiKey: "test-key",
+          models: [
+            {
+              id: "example/model",
+              aliases: ["example/alias"],
+              capabilities: configuredModels(settings)[0]!.capabilities,
+            },
+          ],
+        },
+      ]),
+    };
+    const rows = ["example/model", "example/alias"].map((model) => session("all", { model }));
+    await withPageContext(rows, pageSettings, (env) => {
+      for (const row of rows) {
+        expect(JSON.stringify(projected(row, env))).toBe(
+          JSON.stringify(projected(row, { ...env, modelProviders: undefined })),
+        );
+      }
+      expect(projected(rows[0]!, env).effectiveTools).toEqual(
+        projected(rows[1]!, env).effectiveTools,
+      );
+    });
+  });
+
+  test("a new page uses its own catalog settings rather than deployment or previous-page state", async () => {
+    const row = session();
+    let first: SessionEffectiveToolsContext | undefined;
+    await withPageContext([row], { ...settings, webSearchEnabled: false }, (env) => {
+      first = env;
+      expect(projected(row, env)).toEqual(projected(row, { ...env, modelProviders: undefined }));
+    });
+    await withPageContext([row], { ...settings, webSearchEnabled: true }, (env) => {
+      expect(env.modelProviders).not.toBe(first!.modelProviders);
+      expect(projected(row, env)).toEqual(projected(row, { ...env, modelProviders: undefined }));
+      expect(projected(row, env).effectiveTools).not.toEqual(projected(row, first!).effectiveTools);
+    });
+  });
+
+  test("legacy-only pages do not resolve a model", async () => {
+    const resolve = spyOn(config, "resolveModelProviderForTurn");
+    try {
+      await withPageContext([{ ...session(), agent: null }], settings, (env) => {
+        expect(env.modelProviders).toBeUndefined();
+        expect(resolve).not.toHaveBeenCalled();
+      });
+    } finally {
+      resolve.mockRestore();
+    }
+  });
+
+  test.skipIf(process.env.OPENGENI_BENCH_SESSION_PROJECTION !== "1")(
+    "benchmarks exact response pages with repeated registry models",
+    async () => {
+      const capabilities = configuredModels(settings)[0]!.capabilities;
+      const pageSettings = {
+        ...settings,
+        modelProvidersJson: JSON.stringify([
+          {
+            id: "example",
+            api: "chat",
+            baseUrl: "https://provider.example/v1",
+            apiKey: "test-key",
+            models: Array.from({ length: 32 }, (_, index) => ({
+              id: `example/model-${index}`,
+              upstreamModelId: `model-${index}`,
+              aliases: [`example/alias-${index}`],
+              capabilities,
+            })),
+          },
+        ]),
+      };
+      for (const size of [1, 20, 100]) {
+        const rows = Array.from({ length: size }, (_, index) =>
+          session("all", { model: `example/${index % 2 ? "alias" : "model"}-${index % 4}` }),
+        );
+        await withPageContext(rows, pageSettings, (env) => {
+          const before = { ...env, modelProviders: undefined };
+          const expected = JSON.stringify(rows.map((row) => projected(row, before)));
+          const samples: Record<string, Array<{ wallMs: number; cpuMs: number }>> = {
+            before: [],
+            after: [],
+          };
+          for (let round = 0; round < 9; round++) {
+            for (const mode of round % 2 ? ["after", "before"] : ["before", "after"]) {
+              const cpu = process.cpuUsage();
+              const start = performance.now();
+              // Charge the optimized path for constructing its per-page map.
+              const active =
+                mode === "before"
+                  ? before
+                  : {
+                      ...env,
+                      modelProviders: new Map(
+                        [...new Set(rows.map((row) => row.model))].map(
+                          (id) =>
+                            [id, config.resolveModelProviderForTurn(pageSettings, id)] as const,
+                        ),
+                      ),
+                    };
+              const actual = JSON.stringify(rows.map((row) => projected(row, active)));
+              const wallMs = performance.now() - start;
+              const used = process.cpuUsage(cpu);
+              expect(actual).toBe(expected);
+              if (round > 1)
+                samples[mode]!.push({ wallMs, cpuMs: (used.user + used.system) / 1000 });
+            }
+          }
+          const median = (values: number[]) =>
+            values.sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
+          console.log(
+            JSON.stringify({
+              size,
+              registryModels: 32,
+              distinctModels: Math.min(size, 4),
+              results: Object.fromEntries(
+                Object.entries(samples).map(([mode, values]) => [
+                  mode,
+                  {
+                    wallMs: median(values.map((value) => value.wallMs)),
+                    cpuMs: median(values.map((value) => value.cpuMs)),
+                  },
+                ]),
+              ),
+              samples,
+            }),
+          );
+        });
+      }
+    },
+    120_000,
+  );
+});
+
 describe("server effectiveTools environment projection", () => {
+  test.each([true, false])("interaction entries stay upfront with lazy=%s", (lazy) => {
+    const env = context({ settings: { ...settings, lazyToolSearchEnabled: lazy } });
+    const row = session("all", {
+      firstPartyMcpTools: ["browser_open", "browser_read", "computer_open", "computer_observe"],
+      tools: [{ id: "opengeni", eager: true }],
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+    });
+    const tools = projected(row, env).effectiveTools!.tools;
+    for (const name of ["browser_open", "computer_open"]) {
+      expect(tools.find((tool) => tool.name === `interaction__${name}`)?.visibility).toBe(
+        "upfront",
+      );
+    }
+    for (const name of ["browser_read", "computer_observe"]) {
+      expect(tools.find((tool) => tool.name === `interaction__${name}`)?.visibility).toBe(
+        lazy ? "search" : "upfront",
+      );
+    }
+    const restrictedRows: Array<typeof row> = [
+      { ...row, firstPartyMcpTools: ["browser_read"] },
+      { ...row, firstPartyMcpPermissions: ["sessions:read"] },
+      { ...row, agent: session("none").agent },
+    ];
+    for (const restricted of restrictedRows) {
+      expect(
+        projected(restricted, env).effectiveTools!.tools.some(
+          (tool) =>
+            tool.name === "interaction__browser_open" || tool.name === "interaction__computer_open",
+        ),
+      ).toBe(false);
+    }
+  });
+
+  test("native computer projection matches eager and deferred interaction tools", () => {
+    for (const lazy of [true, false]) {
+      const env = context({ settings: { ...settings, lazyToolSearchEnabled: lazy } });
+      const row = session("all", {
+        firstPartyMcpTools: ["computer_open", "computer_act"],
+        tools: [{ id: "opengeni", eager: true }],
+        toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      });
+      const result = projected(row, env).effectiveTools!;
+      const native = result.tools.filter((tool) => tool.name.startsWith("interaction__cua_"));
+      expect(native).toEqual(
+        CUA_DESKTOP_TOOLS.map((tool) => ({
+          name: `interaction__cua_${tool.name}`,
+          capability: "browser",
+          source: "first_party",
+          visibility: lazy ? "search" : "upfront",
+        })),
+      );
+      expect(AgentEffectiveTools.safeParse(result).success).toBe(true);
+      expect(result.tools.some((tool) => tool.name === "tool_search")).toBe(lazy);
+    }
+  });
+
+  test("native computer projection follows current defaults only for opted-in sessions", () => {
+    const row = session("all", {
+      firstPartyMcpTools: [],
+      toolPolicy: {
+        mode: "workspace_default",
+        inheritedFromSessionId: null,
+        firstPartyMode: "workspace_default",
+      },
+    });
+    const env = context({
+      workspaceSettings: {
+        sessionToolDefaults: { firstPartyMcpTools: ["computer_open", "computer_act"] },
+      },
+    });
+    const nativeCount = (current: typeof row, currentEnv = env) =>
+      projected(current, currentEnv).effectiveTools!.tools.filter((tool) =>
+        tool.name.startsWith("interaction__cua_"),
+      ).length;
+    expect(nativeCount(row)).toBe(CUA_DESKTOP_TOOLS.length);
+    expect(
+      nativeCount({ ...row, toolPolicy: { ...row.toolPolicy, firstPartyMode: "explicit" } }),
+    ).toBe(0);
+    expect(
+      nativeCount(
+        { ...row, firstPartyMcpTools: ["computer_open", "computer_act"] },
+        context({ workspaceSettings: { sessionToolDefaults: { firstPartyMcpTools: [] } } }),
+      ),
+    ).toBe(0);
+  });
+
+  test("native computer projection cannot restore missing selection or authority", () => {
+    const row = session("all", { firstPartyMcpTools: ["computer_open", "computer_act"] });
+    const noSecret = context({
+      settings: {
+        ...settings,
+        productAccessMode: "managed",
+        delegationSecret: undefined,
+      },
+    });
+    const unavailable = { ...row, agent: { ...row.agent, unavailable: ["browser" as const] } };
+    for (const [current, env] of [
+      [{ ...row, firstPartyMcpTools: ["computer_open"] }, context()],
+      [{ ...row, firstPartyMcpTools: ["computer_act"] }, context()],
+      [{ ...row, firstPartyMcpPermissions: ["sessions:read"] }, context()],
+      [{ ...row, firstPartyMcpPermissions: [] }, context()],
+      [row, noSecret],
+      [session({ from: "all", browser: false }), context()],
+      [unavailable, context()],
+      [row, context({ settings: { ...settings, allowedFirstPartyMcpTools: ["computer_open"] } })],
+    ] as const) {
+      expect(
+        projected(current as typeof row, env).effectiveTools!.tools.some((tool) =>
+          tool.name.startsWith("interaction__cua_"),
+        ),
+      ).toBe(false);
+    }
+  });
+  test("browser downloads follow capability selection and both save permissions", () => {
+    for (const permissions of [
+      ["sessions:read"],
+      ["sessions:read", "sessions:control"],
+      ["sessions:read", "sessions:control", "files:upload"],
+    ] as NonNullable<Session["firstPartyMcpPermissions"]>[]) {
+      const row = session("all", {
+        firstPartyMcpTools: ["browser_downloads", "browser_download_save"],
+        firstPartyMcpPermissions: permissions,
+      });
+      const input = sessionEffectiveToolProjectionInput(row, [], context());
+      expect(input.firstPartyMcpTools).toContain("browser_downloads");
+      expect(input.firstPartyMcpTools.includes("browser_download_save")).toBe(
+        permissions.includes("files:upload"),
+      );
+    }
+    const disabled = session("none", {
+      firstPartyMcpTools: ["browser_downloads", "browser_download_save"],
+    });
+    expect(sessionEffectiveToolProjectionInput(disabled, [], context()).firstPartyMcpTools).toEqual(
+      [],
+    );
+  });
   test.each(["codex/gpt-5.6-sol", "supergrok/grok-4.6", "gpt-6-astra"])(
     "%s metadata does not infer media attachment from model or pool readiness",
     async (model) => {
@@ -84,11 +462,10 @@ describe("server effectiveTools environment projection", () => {
         version: null,
         modelNotes: {},
       });
-      const history = spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(false);
+      const history = spyOn(db, "sessionsWithToolRouterHistory").mockResolvedValue(new Set());
       const codexPool = spyOn(db, "workspaceCodexSubscriptionActive").mockResolvedValue(true);
-      const xaiPool = spyOn(db, "workspaceXaiSubscriptionActiveForAuthority").mockResolvedValue(
-        true,
-      );
+      // SuperGrok readiness is the core route's answer (its legacy pool is gone).
+      const xaiPool = spyOn(db, "readSubscriptionCoreReadiness");
       const credentials = spyOn(db, "loadWorkspaceVercelAiGatewayApiKey");
       const policy = spyOn(db, "getWorkspaceVideoGenerationPolicy");
       const authority = spyOn(db, "getLatestStartedSessionTurn");
@@ -166,8 +543,34 @@ describe("server effectiveTools environment projection", () => {
     );
     expect(absent.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("generate_video");
   });
+  test("EU-only: media tools without an EU route are never projected", () => {
+    const row = session("all", { model: "supergrok/grok-4.6", sandboxBackend: "local" });
+    const attached = context({
+      objectStorageAvailable: true,
+      mediaAttachments: new Map([[row.id, { image: "provider_adapter", video: true }]]),
+    });
+    const eu = { ...attached, settings: { ...attached.settings, requiredModelGeography: "eu" } };
+    const names = projected(row, eu as SessionEffectiveToolsContext).effectiveTools!.tools.map(
+      (tool) => tool.name,
+    );
+    expect(names).not.toContain("generate_image");
+    expect(names).not.toContain("generate_video");
+    expect(names).not.toContain("x_search");
+  });
+
+  test("EU-only: the context reads the workspace setting and narrows its settings", async () => {
+    euOnly.mockResolvedValue(true);
+    await withPageContext([session()], settings, (env) => {
+      expect(env.settings.requiredModelGeography).toBe("eu");
+    });
+    euOnly.mockResolvedValue(false);
+    await withPageContext([session()], settings, (env) => {
+      expect(env.settings.requiredModelGeography).toBeUndefined();
+    });
+  });
+
   test("bundled artifact Skills cannot leak a reader from disabled legacy columns", () => {
-    const result = projected(session("none", { bundledSkillIds: ["builtin:opengeni-documents"] }));
+    const result = projected(session("none", { bundledSkillIds: ["builtin:documents"] }));
     expect(result.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("skill_read");
   });
   test("null config preserves the exact legacy projection and skips metadata reads", async () => {
@@ -202,14 +605,11 @@ describe("server effectiveTools environment projection", () => {
       version: null,
       modelNotes: {},
     });
-    const skills = spyOn(db, "listSkillDescriptors").mockResolvedValue([
-      { activationMode: "session_selected" },
-      { activationMode: "workspace_managed" },
-    ] as Awaited<ReturnType<typeof db.listSkillDescriptors>>);
+    const skills = spyOn(db, "hasWorkspaceManagedSkill").mockResolvedValue(true);
     const sandbox = spyOn(db, "getSandbox").mockResolvedValue({
       kind: "selfhosted",
     } as NonNullable<Awaited<ReturnType<typeof db.getSandbox>>>);
-    const history = spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(true);
+    const history = spyOn(db, "sessionsWithToolRouterHistory").mockResolvedValue(new Set([row.id]));
     try {
       const result = await workspaceSessionEffectiveToolsContext(
         { db: {} as db.Database, settings: envSettings, objectStorage: {} },
@@ -222,9 +622,23 @@ describe("server effectiveTools environment projection", () => {
       expect(result.objectStorageAvailable).toBe(true);
       expect(result.activeSandboxBackends?.get(sandboxId)).toBe("selfhosted");
       expect(result.routerHistorySessionIds?.has(row.id)).toBe(true);
+      expect(result.goalSessionIds).toEqual(new Set());
+      expect(goals).toHaveBeenCalledTimes(1);
+      expect(goals.mock.calls[0]?.slice(1)).toEqual([row.workspaceId, [row.id]]);
       expect(models).toHaveBeenCalledTimes(1);
+      expect(skills).toHaveBeenCalledTimes(1);
+      expect(skills.mock.calls[0]?.[1]).toEqual({
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        subjectId: "human",
+      });
       expect(sandbox).toHaveBeenCalledTimes(1);
       expect(history).toHaveBeenCalledTimes(1);
+      expect(history.mock.calls[0]?.[1]).toEqual({
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        sessionIds: [row.id],
+      });
       expect(sandbox.mock.calls[0]?.[1]).toEqual({
         accountId: row.accountId,
         workspaceId: row.workspaceId,
@@ -237,6 +651,18 @@ describe("server effectiveTools environment projection", () => {
       models.mockRestore();
       workspace.mockRestore();
     }
+  });
+
+  test("goal_resume is projected once the session has a goal, as the worker attaches it", () => {
+    const resume = "opengeni__goal_resume";
+    const names = (env: SessionEffectiveToolsContext) =>
+      projected(session(), env).effectiveTools!.tools.map((tool) => tool.name);
+    const row = session();
+    expect(names(context({ goalSessionIds: new Set() }))).not.toContain(resume);
+    expect(names(context({ goalSessionIds: new Set() }))).toContain("opengeni__goal_set");
+    expect(names(context({ goalSessionIds: new Set([row.id]) }))).toContain(resume);
+    // Without the goal lookup the projection keeps it, as an unknown goal does.
+    expect(names(context())).toContain(resume);
   });
 
   test("configured all reports availability without inventing media or sandbox tools", () => {
@@ -273,13 +699,27 @@ describe("server effectiveTools environment projection", () => {
 
   test("explicit empty bundles differ from the worker's omitted bundled defaults", () => {
     const absent = sessionEffectiveToolProjectionInput(
-      session("none", { bundledSkillIds: undefined }),
+      session("all", { bundledSkillIds: undefined }),
       [],
       context(),
     );
-    const empty = sessionEffectiveToolProjectionInput(session("none"), [], context());
+    const empty = sessionEffectiveToolProjectionInput(session("all"), [], context());
     expect(absent.environment.hasSkills).toBe(true);
     expect(empty.environment.hasSkills).toBe(false);
+  });
+
+  test('"none" without an explicit bundle list has no bundled guides', () => {
+    const omitted = projected(session("none", { bundledSkillIds: undefined }));
+    expect(omitted.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("skill_read");
+    expect(
+      sessionEffectiveToolProjectionInput(
+        session("none", { bundledSkillIds: undefined }),
+        [],
+        context(),
+      ).environment.hasSkills,
+    ).toBe(false);
+    const listed = projected(session("none", { bundledSkillIds: ["builtin:opengeni-help"] }));
+    expect(listed.effectiveTools!.tools.map((tool) => tool.name)).toContain("skill_read");
   });
 
   test("model flags and workspace human-input switch narrow the all config", () => {
@@ -394,7 +834,9 @@ describe("server effectiveTools environment projection", () => {
   test("model-facing names and visibility match progressive disclosure", () => {
     const tools = projected().effectiveTools!.tools;
     const named = (name: string) => tools.find((tool) => tool.name === name);
-    expect(named("opengeni__goal_set")?.visibility).toBe("search");
+    // Harness control tools are in the first request on every path.
+    expect(named("opengeni__goal_set")?.visibility).toBe("upfront");
+    expect(named("opengeni__knowledge_search")?.visibility).toBe("search");
     expect(named("request_human_input")?.visibility).toBe("upfront");
     expect(named("skill_read")?.visibility).toBe("upfront");
     expect(named("skill_save")?.visibility).toBe("search");
@@ -443,13 +885,55 @@ describe("server effectiveTools environment projection", () => {
     ).toEqual([]);
   });
 
+  test("media on predicts the router before any media provider is attached, as the worker does", () => {
+    const row = session(
+      { from: "none", humanInput: false, skills: false, media: true },
+      { firstPartyMcpTools: [] },
+    );
+    const input = sessionEffectiveToolProjectionInput(
+      row,
+      [{ kind: "mcp", id: "opengeni", eager: true }],
+      context(),
+    );
+    expect(input.environment.hasDeferredTools).toBe(true);
+    expect(input.routerToolNames.length).toBeGreaterThan(0);
+  });
+
   test("configured recovery tools exist even with no first-party selection", () => {
-    const row = session("none", { firstPartyMcpTools: [] });
+    const row = session("none", { firstPartyMcpTools: [], sandboxBackend: "local" });
     const names = projected(row).effectiveTools!.tools.map((tool) => tool.name);
     expect(names).toContain("opengeni__wait_for_input");
     expect(names).toContain("opengeni__command_read");
     expect(names).toContain("opengeni__command_wait");
     expect(names).not.toContain("opengeni__set_session_title");
+  });
+
+  test("background-command tools need a sandbox or Connected Machine", () => {
+    for (const capabilities of ["none", "all"] as const) {
+      const detached = projected(session(capabilities, { sandboxBackend: "none" }));
+      const detachedNames = detached.effectiveTools!.tools.map((tool) => tool.name);
+      // Without compute, a "none" agent has nothing that could resume a wait.
+      expect(detachedNames.includes("opengeni__wait_for_input")).toBe(capabilities === "all");
+      expect(detachedNames).not.toContain("opengeni__command_read");
+      expect(detachedNames).not.toContain("opengeni__command_wait");
+
+      const managed = projected(session(capabilities, { sandboxBackend: "local" }));
+      expect(managed.effectiveTools!.tools).toContainEqual(
+        expect.objectContaining({ name: "opengeni__command_read", capability: "sandbox" }),
+      );
+      expect(managed.effectiveTools!.tools.map((tool) => tool.name)).toContain(
+        "opengeni__command_wait",
+      );
+
+      const sandboxId = "44444444-4444-4444-8444-444444444444";
+      const machine = projected(
+        session(capabilities, { sandboxBackend: "none", activeSandboxId: sandboxId }),
+        context({ activeSandboxBackends: new Map([[sandboxId, "selfhosted"]]) }),
+      );
+      const machineNames = machine.effectiveTools!.tools.map((tool) => tool.name);
+      expect(machineNames).toContain("opengeni__command_read");
+      expect(machineNames).toContain("opengeni__command_wait");
+    }
   });
 
   test("code search follows frozen session, deployment key, workspace off and sandbox", () => {
@@ -486,5 +970,139 @@ describe("server effectiveTools environment projection", () => {
         settings: { ...env.settings, webSearchEnabled: false },
       }).hostedToolNames,
     ).toEqual([]);
+  });
+});
+
+describe("provider web search projection", () => {
+  const providerSettings = (overrides: Partial<typeof settings> = {}) => {
+    const current = configuredModels(settings)[0]!.capabilities;
+    return testSettings({
+      ...settings,
+      webSearchProvider: "tinyfish",
+      webSearchApiKey: "tinyfish-key",
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "acme",
+          api: "chat",
+          baseUrl: "https://acme.example/v1",
+          apiKey: "fake-test-key",
+          models: [
+            {
+              id: "acme/no-search",
+              upstreamModelId: "no-search",
+              capabilities: {
+                ...current,
+                hostedTools: {
+                  ...current.hostedTools,
+                  webSearch: { upstream: "unknown", runnable: false },
+                },
+              },
+            },
+          ],
+        },
+      ]),
+      ...overrides,
+    });
+  };
+  const names = (row: ReturnType<typeof session>, env: SessionEffectiveToolsContext) =>
+    projected(row, env)
+      .effectiveTools!.tools.filter((tool) => tool.capability === "webSearch")
+      .map((tool) => [tool.name, tool.source, tool.visibility]);
+
+  test("a model without hosted search reports the provider tools upfront", () => {
+    const env = context({ settings: providerSettings() });
+    expect(names(session("all", { model: "acme/no-search" }), env)).toEqual([
+      ["web_search", "runtime", "upfront"],
+      ["web_fetch", "runtime", "upfront"],
+    ]);
+    const result = projected(session("all", { model: "acme/no-search" }), env).effectiveTools!;
+    expect(result.capabilities.webSearch).toBe(true);
+    expect(result.unavailable).not.toContain("webSearch");
+  });
+
+  test("hosted search is kept in fallback mode and replaced in replace mode", () => {
+    expect(names(session(), context({ settings: providerSettings() }))).toEqual([
+      ["web_search", "hosted", "upfront"],
+    ]);
+    expect(
+      names(
+        session(),
+        context({ settings: providerSettings({ webSearchProviderMode: "replace" }) }),
+      ),
+    ).toEqual([
+      ["web_search", "runtime", "upfront"],
+      ["web_fetch", "runtime", "upfront"],
+    ]);
+  });
+
+  test("a workspace with Opengeni credits off is not shown paid provider tools", () => {
+    const row = session("all", { model: "acme/no-search" });
+    // Tinyfish is free by default; an explicit price makes both tools billed.
+    const paid = {
+      billingMode: "stripe" as const,
+      webSearchPricingJson: JSON.stringify({ searchMicros: 5_000, fetchMicros: 1_000 }),
+    };
+    const billed = providerSettings(paid);
+    const creditsOff = { allowCreditModels: false };
+    expect(names(row, context({ settings: billed, workspaceSettings: creditsOff }))).toEqual([]);
+    // Replace mode falls back to the model's hosted search.
+    expect(
+      names(
+        session(),
+        context({
+          settings: providerSettings({ ...paid, webSearchProviderMode: "replace" }),
+          workspaceSettings: creditsOff,
+        }),
+      ),
+    ).toEqual([["web_search", "hosted", "upfront"]]);
+    expect(
+      names(row, context({ settings: billed, workspaceSettings: { allowCreditModels: true } })),
+    ).toEqual([
+      ["web_search", "runtime", "upfront"],
+      ["web_fetch", "runtime", "upfront"],
+    ]);
+  });
+
+  test("unconfigured deployments and disabled web search offer nothing new", () => {
+    const row = session("all", { model: "acme/no-search" });
+    expect(
+      names(row, context({ settings: providerSettings({ webSearchProvider: undefined }) })),
+    ).toEqual([]);
+    const disabled = session({ webSearch: false } as AgentCapabilities, {
+      model: "acme/no-search",
+    });
+    expect(names(disabled, context({ settings: providerSettings() }))).toEqual([]);
+  });
+
+  test("a credit-billed model on a billed deployment is shown the billed tools, not hosted search", () => {
+    // The default model is credit-billed and has hosted search.
+    const billed = providerSettings({ billingMode: "stripe" });
+    expect(names(session(), context({ settings: billed }))).toEqual([
+      ["web_search", "runtime", "upfront"],
+      ["web_fetch", "runtime", "upfront"],
+    ]);
+    expect(
+      projected(session(), context({ settings: billed })).effectiveTools!.capabilities,
+    ).toMatchObject({ webSearch: true });
+    const hosted = [["web_search", "hosted", "upfront"]];
+    // CloudGeni's host account (a legacy billing account) keeps hosted search.
+    expect(
+      names(
+        session("all", { accountId: "25eacc5d-f383-4f79-910a-b3d11dbf1310" }),
+        context({ settings: billed }),
+      ),
+    ).toEqual(hosted);
+    // So does every account when the operator turned the charges off.
+    expect(
+      names(
+        session(),
+        context({
+          settings: providerSettings({
+            billingMode: "stripe",
+            paidHostedToolsCreditBilling: false,
+          }),
+        }),
+      ),
+    ).toEqual(hosted);
   });
 });

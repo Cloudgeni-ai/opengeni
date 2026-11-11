@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { ArtifactCatalogItem, ArtifactCatalogListQuery, ArtifactCatalogListResponse } from "../src";
+import {
+  ArtifactCatalogItem,
+  ArtifactCatalogListQuery,
+  ArtifactCatalogListResponse,
+  ArtifactPinResponse,
+  UpdateArtifactPinRequest,
+} from "../src";
 
 test("catalog query has bounded defaults and a closed filter vocabulary", () => {
   expect(ArtifactCatalogListQuery.parse({})).toEqual({
@@ -35,6 +41,8 @@ test("catalog metadata preserves native IDs and rejects storage/provenance extra
     updatedAt: "2026-08-01T00:00:00.000Z",
   } as const;
   expect(ArtifactCatalogItem.parse(item)).toEqual(item);
+  expect(ArtifactCatalogItem.parse({ ...item, pinned: true }).pinned).toBe(true);
+  expect(ArtifactCatalogItem.safeParse({ ...item, pinned: "true" }).success).toBe(false);
   for (const extra of [
     { sourceTurnId: "private" },
     { bucket: "private" },
@@ -47,4 +55,19 @@ test("catalog metadata preserves native IDs and rejects storage/provenance extra
   expect(ArtifactCatalogListResponse.parse({ items: [item], nextCursor: null }).items).toHaveLength(
     1,
   );
+});
+
+test("pin mutation is a compact, kind-qualified and closed contract", () => {
+  expect(UpdateArtifactPinRequest.parse({ pinned: false })).toEqual({ pinned: false });
+  for (const input of [{}, { pinned: "true" }, { pinned: true, workspaceId: "other" }])
+    expect(UpdateArtifactPinRequest.safeParse(input).success).toBe(false);
+  expect(ArtifactPinResponse.parse({ kind: "file", artifactId: "native", pinned: true })).toEqual({
+    kind: "file",
+    artifactId: "native",
+    pinned: true,
+  });
+  expect(
+    ArtifactPinResponse.safeParse({ kind: "attachment", artifactId: "native", pinned: true })
+      .success,
+  ).toBe(false);
 });

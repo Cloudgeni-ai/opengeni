@@ -14,17 +14,11 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import {
-  acquireSharedTestDatabase,
-  freePort,
-  MemoryEventBus,
-  runCommand,
-  startProcess,
-  testSettings,
-  waitFor,
-  type SharedTestDatabase,
-  type StartedProcess,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { runCommand, startProcess, waitFor, type StartedProcess } from "@opengeni/testing/process";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   chromium,
   type Browser,
@@ -37,6 +31,7 @@ const repoRoot = new URL("../..", import.meta.url).pathname;
 const ownerHeaders = { "x-opengeni-subject": "session-header-owner" };
 const screenshotPhase =
   process.env.SESSION_HEADER_SCREENSHOT_PHASE === "before" ? "before" : "after";
+const screenshotDir = process.env.SESSION_HEADER_SCREENSHOT_DIR ?? "/tmp";
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
   wakeSessionWorkflow: async () => undefined,
@@ -125,7 +120,13 @@ describe("responsive production session header", () => {
         timeoutMs: 45_000,
       },
     );
-    browser = await chromium.launch();
+    // OPENGENI_TEST_CHROMIUM points at a system Chromium where Playwright's
+    // own build can't load (NixOS, for example), as other browser tests allow.
+    browser = await chromium.launch(
+      process.env.OPENGENI_TEST_CHROMIUM
+        ? { executablePath: process.env.OPENGENI_TEST_CHROMIUM, args: ["--no-sandbox"] }
+        : {},
+    );
 
     const bootstrap = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
@@ -252,9 +253,15 @@ describe("responsive production session header", () => {
       const page = await context.newPage();
       await page.goto(`${webBaseUrl}/workspaces/${fixture.workspaceId}/sessions/${session.id}`);
       const header = page.locator("header");
-      const waitStatus = page.locator("[data-session-wait-status]");
+      // The wait is the first chip of the status row above the composer.
+      const waitStatus = page.getByTestId("session-chrome-wait");
       await waitStatus.getByText("Waiting for CI to finish", { exact: true }).waitFor();
-      expect(await waitStatus.innerText()).toContain("Checks again at");
+      expect(await waitStatus.getAttribute("aria-label")).toMatch(
+        /^Waiting for CI to finish\. Checks again at /,
+      );
+      await waitStatus.click();
+      const waitPanel = page.locator('[data-og-session-chrome-panel="wait"]');
+      expect(await waitPanel.innerText()).toContain("resumes sooner if an update arrives");
       expect(await header.locator("[data-session-wait-badge]").innerText()).toBe("Waiting");
       const waitLabel = page
         .locator(`a[href="/workspaces/${fixture.workspaceId}/sessions/${session.id}"]`)
@@ -272,11 +279,100 @@ describe("responsive production session header", () => {
         disposition: "timeout",
       });
       await publishDurableSessionEvents(bus, fixture.workspaceId, session.id, settled.events);
-      await header.getByText("Queued", { exact: true }).waitFor();
+      // The visible queued status badge reads "Starting" while the turn awaits a
+      // worker (#2979), and its startup feedback lives in the conversation (#3530).
+      await header.locator('[data-status="queued"]:visible', { hasText: /^Starting$/ }).waitFor();
       await waitStatus.waitFor({ state: "detached" });
-      await page.locator("[data-session-dispatch-wait]").waitFor();
+      await header.locator("[data-session-wait-badge]").waitFor({ state: "detached" });
+      await page.locator(".og-genie-loading").waitFor();
       expect(await header.innerText()).not.toContain("Waiting ·");
       expect(await header.innerText()).not.toContain("Idle");
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("the Waiting pill has the same type, height, padding, border and dot as Running", async () => {
+    const session = await createSession(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "Compare status pills",
+      title: "Status pill parity",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(dbClient.db, fixture.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("pill parity turn not claimed");
+    const context = await configuredContext(browser, {
+      viewport: { width: 1440, height: 900 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto(sessionUrl({ ...fixture, sessionId: session.id }));
+      const header = page.locator("header");
+      const running = header.locator('[data-status="running"]:visible');
+      await running.waitFor();
+      // Measure both pills in the same (dark) theme so the colour check means something.
+      await setTheme(page, "dark");
+      const runningMetrics = await statusPillMetrics(running);
+      await captureStatusPill(page, "running");
+
+      await waitForSessionInputWithEvent(dbClient.db, fixture.workspaceId, session.id, {
+        reason: "Waiting for review",
+        timeoutSeconds: 600,
+        command: {
+          accountId: fixture.accountId,
+          actor: {
+            type: "agent_attempt",
+            sessionId: session.id,
+            turnId: claimed.turn.id,
+            attemptId,
+            executionGeneration: claimed.turn.executionGeneration,
+          },
+          operationKey: crypto.randomUUID(),
+        },
+      });
+      await applySessionTurnSettlement(dbClient.db, fixture.workspaceId, {
+        sessionId: session.id,
+        turnId: claimed.turn.id,
+        triggerEventId: claimed.turn.triggerEventId,
+        attemptId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [{ type: "turn.completed", payload: { reason: "wait_for_input" } }],
+      });
+      await page.reload();
+      const waiting = header.locator("[data-session-wait-badge]:visible");
+      await waiting.waitFor();
+      expect(await waiting.innerText()).toBe("Waiting");
+      await captureStatusPill(page, "waiting");
+      // Only the colour may differ: the pill's geometry and type match exactly.
+      const { color: waitingColor, ...waitingShape } = await statusPillMetrics(waiting);
+      const { color: runningColor, ...runningShape } = runningMetrics;
+      expect(waitingShape).toEqual(runningShape);
+      expect(waitingColor).not.toBe(runningColor);
     } finally {
       await context.close();
     }
@@ -316,11 +412,16 @@ describe("responsive production session header", () => {
       try {
         const page = await context.newPage();
         await page.goto(sessionUrl({ ...fixture, sessionId: session.id }));
-        const status = page.locator("[data-session-dispatch-wait]");
+        // Startup feedback for a queued turn lives in the conversation (#3530):
+        // a failed dispatch says so at once, and its details carry the error.
+        const startup = page.locator(".og-genie-loading");
+        await startup.getByText("Unable to start yet.").first().waitFor();
+        await startup.getByRole("button", { name: /Behind the magic/ }).click();
+        const status = page.locator("[data-og-startup-dispatch-details]");
         await status.waitFor();
         expect(await status.innerText()).toContain("No agent turn is running");
-        await status.getByText("Start details", { exact: true }).click();
         expect(await status.innerText()).toContain("Control worker unavailable");
+        expect(await startup.locator(".animate-spin").count()).toBe(0);
         expect(await status.locator(".animate-spin").count()).toBe(0);
         expect(await status.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
           true,
@@ -382,6 +483,9 @@ describe("responsive production session header", () => {
         isMobile: true,
         hasTouch: true,
         theme: "dark" as const,
+        // Everything optional is in the "…" menu here; the title keeps what is left.
+        minIdentity: 40,
+        minTitle: 32,
       },
       {
         name: "tablet-768-light",
@@ -422,7 +526,7 @@ describe("responsive production session header", () => {
         await page.getByRole("navigation", { name: "Session ancestry" }).waitFor();
 
         await page.screenshot({
-          path: `/tmp/session-header-${screenshotPhase}-${matrixCase.name}.png`,
+          path: `${screenshotDir}/session-header-${screenshotPhase}-${matrixCase.name}.png`,
           fullPage: true,
           animations: "disabled",
         });
@@ -434,18 +538,23 @@ describe("responsive production session header", () => {
         expect(metrics.documentOverflow).toBe(false);
         expect(metrics.headerOverflow).toBe(false);
         expect(metrics.headerInsideViewport).toBe(true);
-        expect(metrics.identityWidth).toBeGreaterThanOrEqual(72);
-        expect(metrics.titleWidth).toBeGreaterThanOrEqual(40);
+        const minimums = matrixCase as { minIdentity?: number; minTitle?: number };
+        expect(metrics.identityWidth).toBeGreaterThanOrEqual(minimums.minIdentity ?? 72);
+        expect(metrics.titleWidth).toBeGreaterThanOrEqual(minimums.minTitle ?? 40);
         expect(metrics.backWidth).toBeGreaterThanOrEqual(44);
         expect(metrics.offscreenControls).toEqual([]);
-        expect(metrics.headerFlexWrap).toBe("wrap");
+        // One row at every width: nothing wraps, and the parent link is a
+        // small line above the title rather than a row of its own.
+        expect(metrics.headerFlexWrap).toBe("nowrap");
+        expect(metrics.headerHeight).toBeLessThanOrEqual(60);
+        expect(metrics.backCenter).toBeLessThan(metrics.titleCenter);
 
         const ancestry = page.getByRole("navigation", { name: "Session ancestry" });
         if (matrixCase.viewport.width >= 640) {
-          await ancestry
-            .getByRole("button", { name: "31 intermediate ancestor sessions" })
-            .waitFor();
-          expect(await ancestry.getByRole("link").count()).toBe(2);
+          // The 32 ancestors before the parent share one menu; the parent is
+          // the one link, leading into the title.
+          await ancestry.getByRole("button", { name: "32 earlier sessions" }).waitFor();
+          expect(await ancestry.getByRole("link").count()).toBe(1);
         } else {
           expect(await ancestry.getByRole("link").count()).toBe(1);
         }
@@ -495,7 +604,7 @@ describe("responsive production session header", () => {
         await assertHeaderKeyboardOrder(page);
         await expectNoAxeViolations(page, ["header"]);
         await page.screenshot({
-          path: `/tmp/session-header-${screenshotPhase}-phone-320-${state}.png`,
+          path: `${screenshotDir}/session-header-${screenshotPhase}-phone-320-${state}.png`,
           fullPage: true,
           animations: "disabled",
         });
@@ -532,7 +641,7 @@ describe("responsive production session header", () => {
       expect(metrics.offscreenControls).toEqual([]);
       expect(metrics.headerOverflow).toBe(false);
       await page.screenshot({
-        path: `/tmp/session-header-${screenshotPhase}-phone-safe-area.png`,
+        path: `${screenshotDir}/session-header-${screenshotPhase}-phone-safe-area.png`,
         fullPage: true,
         animations: "disabled",
       });
@@ -540,6 +649,76 @@ describe("responsive production session header", () => {
       await context.close();
     }
   }, 30_000);
+
+  test("phones keep one row and move find, rename, pin and archive into the more menu", async () => {
+    const created = await createSession(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "Compact phone header with a long session name that must truncate",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const context = await configuredContext(browser, {
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+      extraHTTPHeaders: ownerHeaders,
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto(sessionUrl({ ...fixture, sessionId: created.id }));
+      const header = page.locator("header");
+      const title = header.locator("button[title$='click to rename']");
+      await title.waitFor();
+      // No dedicated Find row and no inline pin, rename pencil or find on phones.
+      expect(await page.getByRole("button", { name: "Find in conversation" }).isVisible()).toBe(
+        false,
+      );
+      expect(await header.getByRole("button", { name: "Pin session" }).isVisible()).toBe(false);
+      expect(await header.getByRole("button", { name: "Rename session" }).isVisible()).toBe(false);
+      const box = await header.boundingBox();
+      expect(box!.height).toBeLessThanOrEqual(64);
+      // The side panel stays one tap away.
+      expect(await header.getByRole("button", { name: "Open workspace" }).isVisible()).toBe(true);
+      await header.getByRole("button", { name: "More session actions" }).click();
+      const menu = page.getByRole("menu");
+      for (const name of ["Find", "Rename", "Pin", "Archive"]) {
+        expect(await menu.getByRole("menuitem", { name, exact: true }).isVisible()).toBe(true);
+      }
+      await page.screenshot({
+        path: `${screenshotDir}/session-header-${screenshotPhase}-phone-menu.png`,
+        animations: "disabled",
+      });
+      await menu.getByRole("menuitem", { name: "Find", exact: true }).click();
+      const find = page.getByRole("searchbox", { name: "Find in conversation" });
+      await find.waitFor();
+      await waitFor(async () => await find.evaluate((node) => node === document.activeElement), {
+        timeoutMs: 3_000,
+      });
+      await page.screenshot({
+        path: `${screenshotDir}/session-header-${screenshotPhase}-phone-find.png`,
+        animations: "disabled",
+      });
+      await page.keyboard.press("Escape");
+      await find.waitFor({ state: "detached" });
+      await header.getByRole("button", { name: "More session actions" }).click();
+      await page.getByRole("menuitem", { name: "Archive", exact: true }).click();
+      // Archive asks nothing and offers Undo; an archived chat offers no
+      // Restore and no second Archive.
+      await page.getByText(/^Archived “/).waitFor();
+      await page.getByRole("button", { name: "Undo", exact: true }).waitFor();
+      await header.getByRole("button", { name: "More session actions" }).click();
+      await page.getByRole("menuitem", { name: "Find", exact: true }).waitFor();
+      expect(await page.getByRole("menuitem", { name: /^Restore|^Archive/ }).count()).toBe(0);
+      expect(pageErrors.get(context)).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
 
   test("an untouched provisional rename cannot overwrite a semantic title arriving mid-edit", async () => {
     const openingPrompt = "Inspect provisional session naming in the browser";
@@ -706,14 +885,53 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
   }, theme);
 }
 
+/** Everything about a status pill except its colour. */
+async function statusPillMetrics(pill: ReturnType<Page["locator"]>) {
+  return await pill.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const dot = element.firstElementChild?.getBoundingClientRect();
+    return {
+      color: style.color,
+      fontFamily: style.fontFamily,
+      fontSize: style.fontSize,
+      lineHeight: style.lineHeight,
+      fontWeight: style.fontWeight,
+      height: element.getBoundingClientRect().height,
+      padding: [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft],
+      borderWidth: style.borderTopWidth,
+      borderRadius: style.borderTopLeftRadius,
+      gap: style.columnGap,
+      dot: dot ? [dot.width, dot.height] : null,
+    };
+  });
+}
+
+/** Light and dark crops of the header's right side, for before/after review. */
+async function captureStatusPill(page: Page, state: string): Promise<void> {
+  const box = await page.locator("header").boundingBox();
+  if (!box) throw new Error("missing header box");
+  const width = Math.min(560, box.width);
+  for (const theme of ["dark", "light"] as const) {
+    await setTheme(page, theme);
+    await page.screenshot({
+      path: `${screenshotDir}/session-header-${screenshotPhase}-pill-${state}-${theme}.png`,
+      clip: { x: box.x + box.width - width, y: box.y, width, height: box.height },
+    });
+  }
+  await setTheme(page, "dark");
+}
+
 type SessionHeaderMetrics = {
   documentOverflow: boolean;
   headerOverflow: boolean;
   headerInsideViewport: boolean;
   headerFlexWrap: string;
+  headerHeight: number;
   identityWidth: number;
   titleWidth: number;
+  titleCenter: number;
   backWidth: number;
+  backCenter: number;
   paddingTop: number;
   paddingLeft: number;
   paddingRight: number;
@@ -755,9 +973,12 @@ async function sessionHeaderMetrics(page: Page): Promise<SessionHeaderMetrics> {
       headerInsideViewport:
         headerRect.left >= viewportLeft - 0.5 && headerRect.right <= viewportRight + 0.5,
       headerFlexWrap: style.flexWrap,
+      headerHeight: headerRect.height,
       identityWidth: identity.getBoundingClientRect().width,
       titleWidth: title.getBoundingClientRect().width,
+      titleCenter: title.getBoundingClientRect().top + title.getBoundingClientRect().height / 2,
       backWidth: back.getBoundingClientRect().width,
+      backCenter: back.getBoundingClientRect().top + back.getBoundingClientRect().height / 2,
       paddingTop: Number.parseFloat(style.paddingTop),
       paddingLeft: Number.parseFloat(style.paddingLeft),
       paddingRight: Number.parseFloat(style.paddingRight),
@@ -804,8 +1025,8 @@ async function assertHeaderKeyboardOrder(page: Page): Promise<void> {
     expect(await control.evaluate((element) => element === document.activeElement)).toBe(true);
     const box = await control.boundingBox();
     expect(box).not.toBeNull();
-    // Controls may wrap onto a later row at extreme widths, so only require
-    // stable DOM/focus order—not a fragile single-line x-coordinate ordering.
+    // The parent link sits above the title, so only require stable DOM/focus
+    // order—not a fragile single-line x-coordinate ordering.
     previousX = Math.max(previousX, box!.x);
   }
   expect(previousX).toBeGreaterThanOrEqual(0);

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   activateBrowserSession,
   acceptSessionApprovalDecision,
@@ -15,9 +15,7 @@ import {
   createSession,
   createSiteAuthConnection,
   completeExternalAuth,
-  completeProtectedAuthFill,
   dispatchBrowserSessionOperation,
-  dispatchProtectedAuthFill,
   dispatchExternalAuth,
   expireSessionInteractionIntervention,
   findBrowserSessionControlRecordByOperation,
@@ -25,7 +23,6 @@ import {
   getExternalAuthInteractiveContext,
   getInteractionIntervention,
   getInteractionInterventionResumeForEvent,
-  getProtectedAuthFillPreparation,
   getSession,
   getExternalAuthPreparation,
   initializeSessionStartAtomically,
@@ -36,7 +33,6 @@ import {
   listNetworkRoutes,
   listSiteAuthConnections,
   peekSessionWork,
-  prepareProtectedAuthFill,
   prepareExternalAuth,
   prepareBrowserSessionCreate,
   reportAuthRun,
@@ -219,7 +215,7 @@ async function claimTurn(scope: Awaited<ReturnType<typeof fixture>>) {
   return { attemptId, turn: claim.turn };
 }
 
-function humanSiteAuth(operationId = crypto.randomUUID()) {
+function siteAuth(operationId = crypto.randomUUID()) {
   return {
     operationId,
     name: `Example ${operationId.slice(0, 8)}`,
@@ -227,39 +223,6 @@ function humanSiteAuth(operationId = crypto.randomUUID()) {
     origins: ["https://example.com"],
     loginUrl: "https://example.com/login",
     verificationUrlPrefixes: ["https://example.com/app"],
-    authorities: [
-      {
-        id: "human",
-        kind: "human" as const,
-        label: "Ask the user",
-        fields: [
-          { id: "email", purpose: "identifier" as const },
-          { id: "password", purpose: "password" as const },
-        ],
-      },
-    ],
-    methods: [
-      {
-        id: "password",
-        kind: "password" as const,
-        label: "Email and password",
-        authorityIds: ["human"],
-      },
-    ],
-    preferredIdentityId: null,
-    preferredPlacement: null,
-    preferredNetworkRouteId: null,
-    healthPolicy: {
-      mode: "on_use" as const,
-      intervalSeconds: null,
-      automaticRepair: false,
-    },
-  };
-}
-
-function externalSiteAuth(operationId = crypto.randomUUID()) {
-  return {
-    ...humanSiteAuth(operationId),
     authorities: [
       {
         id: "kernel-managed",
@@ -278,6 +241,14 @@ function externalSiteAuth(operationId = crypto.randomUUID()) {
         authorityIds: ["kernel-managed"],
       },
     ],
+    preferredIdentityId: null,
+    preferredPlacement: null,
+    preferredNetworkRouteId: null,
+    healthPolicy: {
+      mode: "on_use" as const,
+      intervalSeconds: null,
+      automaticRepair: false,
+    },
   };
 }
 
@@ -490,24 +461,18 @@ describe("browser auth and network resources", () => {
       credentialEncrypted: "encrypted-never-read-here",
     });
     const operationId = crypto.randomUUID();
-    const base = humanSiteAuth(operationId);
+    const base = siteAuth(operationId);
     const credentialAuthority = {
       id: "connection",
-      kind: "connection_fields" as const,
+      kind: "external_provider" as const,
       label: "Saved connection",
+      adapterId: "kernel",
+      connectionId: "kernel-connection-1",
       credential: {
         connectionId,
         connectionSubjectId: scope.actorSubjectId,
         providerDomain: "example.com",
       },
-      fields: [
-        { id: "email", purpose: "identifier" as const, credentialKey: "email" },
-        {
-          id: "password",
-          purpose: "password" as const,
-          credentialKey: "password",
-        },
-      ],
     };
     const created = await createSiteAuthConnection(client.db, {
       ...scope,
@@ -543,7 +508,7 @@ describe("browser auth and network resources", () => {
       createSiteAuthConnection(client.db, {
         ...scope,
         actorSubjectId: "agent:workspace",
-        ...humanSiteAuth(),
+        ...siteAuth(),
         authorities: [credentialAuthority],
         methods: [{ ...base.methods[0]!, authorityIds: ["connection"] }],
       }),
@@ -580,13 +545,13 @@ describe("browser auth and network resources", () => {
     await expect(
       createSiteAuthConnection(client.db, {
         ...scope,
-        ...humanSiteAuth(),
+        ...siteAuth(),
         preferredNetworkRouteId: route.route.id,
       }),
     ).rejects.toThrow("external browser provider placement");
     const configured = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...humanSiteAuth(),
+      ...siteAuth(),
       preferredPlacement: {
         kind: "external_provider",
         providerId: "kernel",
@@ -660,7 +625,7 @@ describe("browser auth and network resources", () => {
     const scope = await fixture();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...humanSiteAuth(),
+      ...siteAuth(),
     });
     const browser = await activeBrowser(scope);
     const startOperationId = crypto.randomUUID();
@@ -672,8 +637,8 @@ describe("browser auth and network resources", () => {
       targetId: "target-1",
       expectedTargetGeneration: "target-generation-1",
       expectedDocumentGeneration: "document-generation-1",
-      methodId: "password",
-      authorityId: "human",
+      methodId: "kernel-managed",
+      authorityId: "kernel-managed",
     });
     expect(started.run).toMatchObject({ state: "discovering", version: 1 });
     expect(
@@ -685,8 +650,8 @@ describe("browser auth and network resources", () => {
         targetId: "target-1",
         expectedTargetGeneration: "target-generation-1",
         expectedDocumentGeneration: "document-generation-1",
-        methodId: "password",
-        authorityId: "human",
+        methodId: "kernel-managed",
+        authorityId: "kernel-managed",
       }),
     ).toMatchObject({ replayed: true });
 
@@ -696,13 +661,10 @@ describe("browser auth and network resources", () => {
       controllerGeneration: browser.controllerGeneration,
       operationId: crypto.randomUUID(),
       expectedVersion: 1,
-      state: "awaiting_secret",
-      pendingFields: [
-        { id: "email", label: "Email", purpose: "identifier" },
-        { id: "password", label: "Password", purpose: "password" },
-      ],
+      state: "awaiting_external_action",
+      externalAction: { kind: "push", label: "Approve the sign-in on your phone", expiresAt: null },
     });
-    expect(waiting.run).toMatchObject({ state: "awaiting_secret", version: 2 });
+    expect(waiting.run).toMatchObject({ state: "awaiting_external_action", version: 2 });
 
     const interventionOperationId = crypto.randomUUID();
     const intervention = await createInteractionIntervention(client.db, {
@@ -767,111 +729,12 @@ describe("browser auth and network resources", () => {
     ).toMatchObject({ status: "completed" });
   });
 
-  test("atomically turns a human protected fill into one replay-safe intervention", async () => {
-    if (!available) return;
-    const scope = await fixture();
-    const auth = await createSiteAuthConnection(client.db, {
-      ...scope,
-      ...humanSiteAuth(),
-    });
-    const browser = await activeBrowser(scope);
-    const started = await startAuthRun(client.db, {
-      ...scope,
-      ...browser,
-      operationId: crypto.randomUUID(),
-      siteAuthConnectionId: auth.connection.id,
-      targetId: "target-human",
-      expectedTargetGeneration: "target-generation-human",
-      expectedDocumentGeneration: "document-generation-human",
-      methodId: "password",
-      authorityId: "human",
-    });
-    const operationId = crypto.randomUUID();
-    const request = {
-      operationId,
-      expectedVersion: started.run.version,
-      expectedTargetGeneration: "target-generation-human",
-      expectedDocumentGeneration: "document-generation-human",
-      expectedFrameId: "frame-human",
-      authorityId: "human",
-      fields: [
-        {
-          fieldId: "email",
-          locator: { kind: "css" as const, selector: "#email" },
-        },
-        {
-          fieldId: "password",
-          locator: { kind: "css" as const, selector: "#password" },
-        },
-      ],
-      submit: { type: "none" as const },
-    };
-    await prepareProtectedAuthFill(client.db, {
-      ...scope,
-      authRunId: started.run.id,
-      credentialVersion: null,
-      ...request,
-    });
-    const waiting = await completeProtectedAuthFill(client.db, {
-      ...scope,
-      authRunId: started.run.id,
-      operationId,
-      status: "needs_human",
-      intervention: {
-        originatingSessionId: scope.sessionId,
-        kind: "manual_login",
-        reason: "Sign in in this browser tab.",
-        expiresInSeconds: 900,
-      },
-    });
-    expect(waiting).toMatchObject({
-      status: "needs_human",
-      replayed: false,
-      run: { state: "awaiting_secret", version: 2 },
-    });
-    expect(waiting.run.interventionId).toBeString();
-    expect((await listInteractionInterventions(client.db, scope)).interventions).toEqual([
-      expect.objectContaining({
-        id: waiting.run.interventionId,
-        operationId,
-        status: "open",
-        authRunId: started.run.id,
-      }),
-    ]);
-    expect(
-      await prepareProtectedAuthFill(client.db, {
-        ...scope,
-        authRunId: started.run.id,
-        credentialVersion: null,
-        ...request,
-      }),
-    ).toMatchObject({
-      replayed: true,
-      response: {
-        replayed: true,
-        run: { interventionId: waiting.run.interventionId },
-      },
-    });
-    await resolveInteractionIntervention(client.db, {
-      ...scope,
-      interventionId: waiting.run.interventionId!,
-      operationId: crypto.randomUUID(),
-      expectedVersion: 1,
-      outcome: "completed",
-    });
-    expect(await getAuthRun(client.db, { ...scope, authRunId: started.run.id })).toMatchObject({
-      state: "working",
-      interventionId: null,
-      version: 3,
-    });
-  });
-
   test("advances external auth durably and rebinds the run after provider profile load", async () => {
     if (!available) return;
     const scope = await fixture();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...externalSiteAuth(),
+      ...siteAuth(),
     });
     const browser = await activeBrowser(scope);
     const started = await startAuthRun(client.db, {
@@ -1257,6 +1120,471 @@ describe("browser auth and network resources", () => {
     ).toEqual({ action: "stale", events: [] });
   });
 
+  async function freezeInteractionRequest(
+    scope: Awaited<ReturnType<typeof fixture>>,
+    claimed: Awaited<ReturnType<typeof claimTurn>>,
+    toolCallId: string,
+    input: Record<string, unknown>,
+    currentTarget?:
+      | {
+          controllerGeneration: string;
+          targetGeneration: string;
+          documentGeneration: string | null;
+        }
+      | string,
+  ) {
+    const interventionId = crypto.randomUUID();
+    const settled = await applySessionTurnSettlement(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId: claimed.attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: claimed.turn.id,
+      runState: {
+        serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+        pendingApprovals: [{ id: toolCallId }],
+        interactionInterventionRequests: [
+          {
+            id: interventionId,
+            operationId: crypto.randomUUID(),
+            toolCallId,
+            input: input as never,
+            ...(currentTarget !== undefined ? { currentTarget } : {}),
+          },
+        ],
+      },
+      events: [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+    });
+    return { settled, interventionId };
+  }
+
+  test("answers an interaction request it cannot record as the call's result", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const claimed = await claimTurn(scope);
+    const toolCallId = "interaction-human-unknown-generations";
+    // An agent that never saw the generations passed placeholders. The pause
+    // used to fail the whole turn here; the person was never asked.
+    const { settled, interventionId } = await freezeInteractionRequest(scope, claimed, toolCallId, {
+      operation: "request",
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "target-unknown",
+      expectedControllerGeneration: "unknown",
+      expectedTargetGeneration: "unknown",
+      expectedDocumentGeneration: "unknown",
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+    });
+    expect(settled.action).toBe("settled");
+    if (settled.action !== "settled") throw new Error("pause was not recorded");
+    const refusal = settled.events.find((event) => event.type === "user.approvalDecision");
+    expect(refusal?.payload).toEqual({
+      approvalId: toolCallId,
+      decision: "reject",
+      refusal:
+        "Nothing was requested: the expected generation values given do not match the tab or window as it is now. Call interaction_request_human again and leave out expectedControllerGeneration, expectedTargetGeneration and expectedDocumentGeneration; they are read from the tab or window when the turn pauses.",
+    });
+    // Nothing was recorded, so no person sees a request.
+    await expect(
+      getInteractionIntervention(client.db, { ...scope, interventionId }),
+    ).rejects.toBeInstanceOf(InteractionResourceNotFoundError);
+    // The workflow resumes the turn with the refusal at once.
+    expect(await peekSessionWork(client.db, scope.workspaceId, scope.sessionId)).toMatchObject({
+      kind: "approval-pending",
+      triggerEventId: refusal!.id,
+    });
+    expect(
+      await getInteractionInterventionResumeForEvent(
+        client.db,
+        scope.workspaceId,
+        scope.sessionId,
+        refusal!,
+      ),
+    ).toBeNull();
+    const resumed = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      workflowId: `session-${scope.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "approval", triggerEventId: refusal!.id },
+    });
+    expect(resumed.action).toBe("claimed");
+  });
+
+  test("records a request without generations from the target as it is now", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const claimed = await claimTurn(scope);
+    const toolCallId = "interaction-human-current-target";
+    const request = {
+      operation: "request",
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "target-current",
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+    };
+    const currentTarget = {
+      controllerGeneration: browser.controllerGeneration,
+      targetGeneration: "target-generation-current",
+      documentGeneration: "document-generation-current",
+    };
+    const { settled, interventionId } = await freezeInteractionRequest(
+      scope,
+      claimed,
+      toolCallId,
+      request,
+      currentTarget,
+    );
+    expect(settled.action).toBe("settled");
+    if (settled.action !== "settled") throw new Error("pause was not recorded");
+    expect(settled.events.map((event) => event.type)).not.toContain("user.approvalDecision");
+    expect(await getInteractionIntervention(client.db, { ...scope, interventionId })).toMatchObject(
+      {
+        status: "open",
+        targetId: "target-current",
+        ...currentTarget,
+        originatingToolOperationId: expect.any(String),
+      },
+    );
+    expect(await peekSessionWork(client.db, scope.workspaceId, scope.sessionId)).toMatchObject({
+      kind: "approval-wait",
+      interactionInterventionId: interventionId,
+    });
+  });
+
+  test("refuses requests whose target is gone or already has an open request", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const request = {
+      operation: "request",
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "target-busy",
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+    };
+
+    const gone = await freezeInteractionRequest(
+      scope,
+      await claimTurn(scope),
+      "interaction-human-gone",
+      request,
+      "browser tab target-busy was not found",
+    );
+    if (gone.settled.action !== "settled") throw new Error("pause was not recorded");
+    expect(
+      gone.settled.events.find((event) => event.type === "user.approvalDecision")?.payload,
+    ).toMatchObject({
+      refusal:
+        "Nothing was requested: browser tab target-busy was not found. Observe the tab or window again, then call interaction_request_human again if a person still needs to act there.",
+    });
+
+    // Another request already asks a person to act on this tab, for example
+    // the one browser_auth opened. Its unique index used to fail the pause.
+    const open = await createInteractionIntervention(client.db, {
+      ...scope,
+      operationId: crypto.randomUUID(),
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "target-busy",
+      expectedControllerGeneration: browser.controllerGeneration,
+      expectedTargetGeneration: "target-generation-busy",
+      expectedDocumentGeneration: null,
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+      expiresInSeconds: 900,
+      originatingSessionId: scope.sessionId,
+    });
+    const busy = await freezeInteractionRequest(
+      scope,
+      await resumeRefusedTurn(scope, gone.settled),
+      "interaction-human-busy",
+      request,
+      {
+        controllerGeneration: browser.controllerGeneration,
+        targetGeneration: "target-generation-busy",
+        documentGeneration: null,
+      },
+    );
+    if (busy.settled.action !== "settled") throw new Error("pause was not recorded");
+    expect(
+      busy.settled.events.find((event) => event.type === "user.approvalDecision")?.payload,
+    ).toMatchObject({
+      refusal: `Nothing was requested: another open request (intervention ${open.intervention.id}) already asks a person to act on this tab or window. If browser_auth returned that interventionId, wait for it with operation=wait; otherwise ask again only after that request is finished.`,
+    });
+    await expect(
+      getInteractionIntervention(client.db, { ...scope, interventionId: busy.interventionId }),
+    ).rejects.toBeInstanceOf(InteractionResourceNotFoundError);
+  });
+
+  async function resumeRefusedTurn(
+    scope: Awaited<ReturnType<typeof fixture>>,
+    settled: Awaited<ReturnType<typeof applySessionTurnSettlement>>,
+  ) {
+    if (settled.action !== "settled") throw new Error("pause was not recorded");
+    const refusal = settled.events.find((event) => event.type === "user.approvalDecision")!;
+    const attemptId = crypto.randomUUID();
+    const resumed = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      workflowId: `session-${scope.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "approval", triggerEventId: refusal.id },
+    });
+    if (resumed.action !== "claimed") throw new Error(`Could not resume: ${resumed.reason}`);
+    return { attemptId, turn: resumed.turn };
+  }
+
+  function refusalOf(settled: Awaited<ReturnType<typeof applySessionTurnSettlement>>) {
+    if (settled.action !== "settled") throw new Error("pause was not recorded");
+    const decision = settled.events.find((event) => event.type === "user.approvalDecision");
+    return (decision?.payload as { refusal?: string } | undefined)?.refusal ?? null;
+  }
+
+  const LEAVE_OUT_GENERATIONS =
+    "Call interaction_request_human again and leave out expectedControllerGeneration, expectedTargetGeneration and expectedDocumentGeneration; they are read from the tab or window when the turn pauses.";
+
+  test("checks supplied generations against the target as read at the pause", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const current = {
+      controllerGeneration: browser.controllerGeneration,
+      targetGeneration: "target-generation-now",
+      documentGeneration: "document-generation-now",
+    };
+    const request = (targetId: string, generations: Record<string, unknown>) => ({
+      operation: "request",
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId,
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+      ...generations,
+    });
+
+    // A supplied target generation that the tab no longer has is refused, and
+    // the agent is told to leave the fields out rather than observe again.
+    let claimed = await claimTurn(scope);
+    const stale = await freezeInteractionRequest(
+      scope,
+      claimed,
+      "call-stale-target",
+      request("tab-stale", { expectedTargetGeneration: "target-generation-before" }),
+      current,
+    );
+    expect(refusalOf(stale.settled)).toBe(
+      `Nothing was requested: the expected generation values given do not match the tab or window as it is now. ${LEAVE_OUT_GENERATIONS}`,
+    );
+    await expect(
+      getInteractionIntervention(client.db, { ...scope, interventionId: stale.interventionId }),
+    ).rejects.toBeInstanceOf(InteractionResourceNotFoundError);
+
+    // Supplied values that match the reading are recorded with it.
+    claimed = await resumeRefusedTurn(scope, stale.settled);
+    const matching = await freezeInteractionRequest(
+      scope,
+      claimed,
+      "call-matching",
+      request("tab-matching", { expectedDocumentGeneration: current.documentGeneration }),
+      current,
+    );
+    expect(refusalOf(matching.settled)).toBeNull();
+    expect(
+      await getInteractionIntervention(client.db, {
+        ...scope,
+        interventionId: matching.interventionId,
+      }),
+    ).toMatchObject({ status: "open", targetId: "tab-matching", ...current });
+  });
+
+  test("records fully supplied generations as given when the target cannot be read", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const unreadable = "the current state of browser tab tab-unread could not be read";
+    const base = {
+      operation: "request",
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "tab-unread",
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+      expectedControllerGeneration: browser.controllerGeneration,
+      expectedTargetGeneration: "target-generation-given",
+    };
+    // Without a reading, a request missing a generation cannot be recorded.
+    const partial = await freezeInteractionRequest(
+      scope,
+      await claimTurn(scope),
+      "call-partial",
+      base,
+      unreadable,
+    );
+    expect(refusalOf(partial.settled)).toBe(
+      `Nothing was requested: ${unreadable}. Observe the tab or window again, then call interaction_request_human again if a person still needs to act there.`,
+    );
+    // All three supplied: recorded as given (the controller is still checked).
+    const given = await freezeInteractionRequest(
+      scope,
+      await resumeRefusedTurn(scope, partial.settled),
+      "call-given",
+      { ...base, expectedDocumentGeneration: null },
+      unreadable,
+    );
+    expect(refusalOf(given.settled)).toBeNull();
+    expect(
+      await getInteractionIntervention(client.db, {
+        ...scope,
+        interventionId: given.interventionId,
+      }),
+    ).toMatchObject({
+      status: "open",
+      controllerGeneration: browser.controllerGeneration,
+      targetGeneration: "target-generation-given",
+      documentGeneration: null,
+    });
+  });
+
+  test("refuses waits it cannot attach in plain words", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const missing = crypto.randomUUID();
+    const notFound = await freezeInteractionRequest(
+      scope,
+      await claimTurn(scope),
+      "call-wait-missing",
+      { operation: "wait", interventionId: missing },
+    );
+    expect(refusalOf(notFound.settled)).toBe(
+      `Not waiting: intervention ${missing} was not found. Use operation=wait only with an interventionId browser_auth returned in this turn; otherwise ask with operation=request.`,
+    );
+
+    // Opened outside this turn (no originating turn): not this call's to wait for.
+    const foreign = await createInteractionIntervention(client.db, {
+      ...scope,
+      operationId: crypto.randomUUID(),
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "tab-foreign",
+      expectedControllerGeneration: browser.controllerGeneration,
+      expectedTargetGeneration: "target-generation-foreign",
+      expectedDocumentGeneration: null,
+      kind: "mfa",
+      reason: "Approve the sign-in on your phone.",
+      expiresInSeconds: 900,
+      originatingSessionId: scope.sessionId,
+    });
+    const claimed = await resumeRefusedTurn(scope, notFound.settled);
+    const other = await freezeInteractionRequest(scope, claimed, "call-wait-foreign", {
+      operation: "wait",
+      interventionId: foreign.intervention.id,
+    });
+    expect(refusalOf(other.settled)).toBe(
+      `Not waiting: intervention ${foreign.intervention.id} was opened by another agent turn. Use operation=wait only with an interventionId browser_auth returned in this turn; otherwise ask with operation=request.`,
+    );
+
+    await resolveInteractionIntervention(client.db, {
+      ...scope,
+      interventionId: foreign.intervention.id,
+      operationId: crypto.randomUUID(),
+      expectedVersion: 1,
+      outcome: "completed",
+    });
+    const finished = await freezeInteractionRequest(
+      scope,
+      await resumeRefusedTurn(scope, other.settled),
+      "call-wait-finished",
+      { operation: "wait", interventionId: foreign.intervention.id },
+    );
+    expect(refusalOf(finished.settled)).toBe(
+      `Not waiting: intervention ${foreign.intervention.id} is no longer open; it was finished, dismissed or expired. Observe the tab or window again, then call interaction_request_human with operation=request if a person still needs to act there.`,
+    );
+  });
+
+  test("refuses a request that loses the open-request race instead of failing the turn", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const claimed = await claimTurn(scope);
+    // Another writer holds an uncommitted open request on the same tab, so
+    // the pause's check cannot see it and its insert waits on the unique
+    // index; once that writer commits, the insert fails with 23505.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let inserted!: () => void;
+    const insertedRow = new Promise<void>((resolve) => {
+      inserted = resolve;
+    });
+    const competing = shared!.admin.begin(async (tx) => {
+      await tx`
+        insert into interaction_interventions (
+          id, account_id, workspace_id, resource_kind, resource_id, target_id,
+          controller_generation, target_generation, document_generation, kind, reason,
+          originating_session_id, operation_id, expires_at
+        ) values (
+          ${crypto.randomUUID()}, ${scope.accountId}, ${scope.workspaceId}, 'browser_session',
+          ${browser.browserSessionId}, 'tab-race', ${browser.controllerGeneration},
+          'target-generation-race', null, 'mfa', 'Approve the sign-in on your phone.',
+          ${scope.sessionId}, ${crypto.randomUUID()}, now() + interval '15 minutes'
+        )
+      `;
+      inserted();
+      await released;
+    });
+    await insertedRow;
+    const pausing = freezeInteractionRequest(
+      scope,
+      claimed,
+      "call-race",
+      {
+        operation: "request",
+        resourceKind: "browser_session",
+        resourceId: browser.browserSessionId,
+        targetId: "tab-race",
+        kind: "mfa",
+        reason: "Approve the sign-in on your phone.",
+      },
+      {
+        controllerGeneration: browser.controllerGeneration,
+        targetGeneration: "target-generation-race",
+        documentGeneration: null,
+      },
+    );
+    // Commit the competing request only once the pause's insert waits on it.
+    for (let waited = 0; ; waited += 25) {
+      const [waiting] = await shared!.admin<{ blocked: number }[]>`
+        select count(*)::int as blocked from pg_stat_activity
+        where datname = current_database() and wait_event_type = 'Lock'
+          and query ilike '%insert into "interaction_interventions"%'
+      `;
+      if ((waiting?.blocked ?? 0) > 0) break;
+      if (waited > 10_000) throw new Error("the pause never reached its insert");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    release();
+    await competing;
+    const { settled, interventionId } = await pausing;
+    expect(refusalOf(settled)).toBe(
+      "Nothing was requested: another open request already asks a person to act on this tab or window. If browser_auth returned that interventionId, wait for it with operation=wait; otherwise ask again only after that request is finished.",
+    );
+    await expect(
+      getInteractionIntervention(client.db, { ...scope, interventionId }),
+    ).rejects.toBeInstanceOf(InteractionResourceNotFoundError);
+  });
+
   test("cancels leftover intervention resources with their terminal agent turn", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -1302,39 +1630,10 @@ describe("browser auth and network resources", () => {
     ).toMatchObject({ status: "cancelled", version: 2 });
   });
 
-  test("fences protected credential fill and verifies only the observed exact target", async () => {
+  test("verifies only the observed exact target", async () => {
     if (!available) return;
     const scope = await fixture();
-    const credentialId = crypto.randomUUID();
-    await insertPersonalConnectionFixture({
-      scope,
-      connectionId: credentialId,
-      providerDomain: "example.com",
-      credentialEncrypted: "encrypted-outside-auth-run",
-      version: 7,
-    });
-    const base = humanSiteAuth();
-    const auth = await createSiteAuthConnection(client.db, {
-      ...scope,
-      ...base,
-      authorities: [
-        {
-          id: "saved",
-          kind: "connection_fields",
-          label: "Saved login",
-          credential: {
-            connectionId: credentialId,
-            connectionSubjectId: scope.actorSubjectId,
-            providerDomain: "example.com",
-          },
-          fields: [
-            { id: "email", purpose: "identifier", credentialKey: "email" },
-            { id: "password", purpose: "password", credentialKey: "password" },
-          ],
-        },
-      ],
-      methods: [{ ...base.methods[0]!, authorityIds: ["saved"] }],
-    });
+    const auth = await createSiteAuthConnection(client.db, { ...scope, ...siteAuth() });
     const browser = await activeBrowser(scope);
     const started = await startAuthRun(client.db, {
       ...scope,
@@ -1344,100 +1643,19 @@ describe("browser auth and network resources", () => {
       targetId: "target-1",
       expectedTargetGeneration: "target-generation-1",
       expectedDocumentGeneration: "document-generation-1",
-      methodId: "password",
-      authorityId: "saved",
+      methodId: "kernel-managed",
+      authorityId: "kernel-managed",
     });
-    const operationId = crypto.randomUUID();
-    const request = {
-      operationId,
+    const working = await reportAuthRun(client.db, {
+      ...scope,
+      authRunId: started.run.id,
+      controllerGeneration: browser.controllerGeneration,
+      operationId: crypto.randomUUID(),
       expectedVersion: started.run.version,
-      expectedTargetGeneration: "target-generation-1",
-      expectedDocumentGeneration: "document-generation-1",
-      expectedFrameId: "frame-1",
-      authorityId: "saved",
-      fields: [
-        {
-          fieldId: "email",
-          locator: { kind: "css" as const, selector: "#email" },
-        },
-        {
-          fieldId: "password",
-          locator: { kind: "css" as const, selector: "#password" },
-        },
-      ],
-      submit: {
-        type: "click" as const,
-        locator: { kind: "css" as const, selector: "#login" },
-      },
-    };
-    expect(
-      await getProtectedAuthFillPreparation(client.db, {
-        ...scope,
-        authRunId: started.run.id,
-        ...request,
-      }),
-    ).toBeNull();
-    const prepared = await prepareProtectedAuthFill(client.db, {
-      ...scope,
-      authRunId: started.run.id,
-      credentialVersion: 7,
-      ...request,
+      state: "working",
     });
-    expect(prepared).toMatchObject({
-      operationState: "prepared",
-      credentialVersion: 7,
-      response: null,
-    });
-    expect(
-      await getProtectedAuthFillPreparation(client.db, {
-        ...scope,
-        authRunId: started.run.id,
-        ...request,
-      }),
-    ).toMatchObject({ operationState: "prepared", credentialVersion: 7 });
-    expect(
-      await dispatchProtectedAuthFill(client.db, {
-        ...scope,
-        authRunId: started.run.id,
-        operationId,
-      }),
-    ).toBe("dispatched");
-    const completed = await completeProtectedAuthFill(client.db, {
-      ...scope,
-      authRunId: started.run.id,
-      operationId,
-      status: "submitted",
-      targetGeneration: "target-generation-1",
-      documentGeneration: "document-generation-2",
-    });
-    expect(completed).toMatchObject({
-      status: "submitted",
-      replayed: false,
-      run: {
-        state: "working",
-        version: 2,
-        documentGeneration: "document-generation-2",
-      },
-    });
-    expect(
-      await prepareProtectedAuthFill(client.db, {
-        ...scope,
-        authRunId: started.run.id,
-        credentialVersion: 99,
-        ...request,
-      }),
-    ).toMatchObject({
-      operationState: "completed",
-      credentialVersion: 7,
-      replayed: true,
-      response: { replayed: true },
-    });
-    const [operation] = await shared!.admin<
-      Array<{ metadata: unknown; result: unknown }>
-    >`select metadata, result from interaction_resource_operations where operation_id = ${operationId}`;
-    expect(JSON.stringify(operation)).not.toContain("encrypted-outside-auth-run");
-
-    const verified = await verifyAuthRun(client.db, {
+    expect(working.run).toMatchObject({ state: "working", version: 2 });
+    const verification = {
       ...scope,
       authRunId: started.run.id,
       controllerGeneration: browser.controllerGeneration,
@@ -1445,8 +1663,18 @@ describe("browser auth and network resources", () => {
       targetGeneration: "target-generation-1",
       documentGeneration: "document-generation-2",
       url: "https://example.com/app/home",
+      expectedVersion: working.run.version,
+    };
+    await expect(
+      verifyAuthRun(client.db, {
+        ...verification,
+        targetId: "target-2",
+        operationId: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("Verification targets another browser tab");
+    const verified = await verifyAuthRun(client.db, {
+      ...verification,
       operationId: crypto.randomUUID(),
-      expectedVersion: completed.run.version,
     });
     expect(verified.run).toMatchObject({
       state: "verified",
@@ -1463,7 +1691,7 @@ describe("browser auth and network resources", () => {
   test("projects only causally newest auth health evidence and schedules maintained repair", async () => {
     if (!available) return;
     const scope = await fixture();
-    const request = humanSiteAuth();
+    const request = siteAuth();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
       ...request,
@@ -1571,7 +1799,7 @@ describe("browser auth and network resources", () => {
     const scope = await fixture();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...humanSiteAuth(),
+      ...siteAuth(),
       healthPolicy: {
         mode: "maintained",
         intervalSeconds: 120,
@@ -1613,7 +1841,7 @@ describe("browser auth and network resources", () => {
       createdBy: {
         kind: "service",
         subjectId: "site-auth-maintenance",
-        label: "OpenGeni authentication maintenance",
+        label: "Opengeni authentication maintenance",
       },
       createdByContext: {
         opengeniSiteAuthConnectionId: auth.connection.id,
@@ -1794,7 +2022,7 @@ describe("browser auth and network resources", () => {
     const scope = await fixture();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...humanSiteAuth(),
+      ...siteAuth(),
       healthPolicy: { mode: "maintained", intervalSeconds: 120, automaticRepair: true },
     });
     const [claim] = await claimSiteAuthMaintenance(client.db, {
@@ -1851,7 +2079,7 @@ describe("browser auth and network resources", () => {
     const scope = await fixture();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...humanSiteAuth(),
+      ...siteAuth(),
       healthPolicy: { mode: "maintained", intervalSeconds: 3_600, automaticRepair: true },
     });
     const claims = await claimSiteAuthMaintenance(client.db, {
@@ -1948,7 +2176,7 @@ describe("browser auth and network resources", () => {
     const scope = await fixture();
     const auth = await createSiteAuthConnection(client.db, {
       ...scope,
-      ...humanSiteAuth(),
+      ...siteAuth(),
       healthPolicy: { mode: "maintained", intervalSeconds: 3_600, automaticRepair: true },
     });
     const claim = (

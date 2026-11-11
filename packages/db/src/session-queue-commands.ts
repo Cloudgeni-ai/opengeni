@@ -1,7 +1,26 @@
+import {
+  ClaudeProviderAccountAuthoritySnapshotV1,
+  MESSAGE_TIME_ZONE_METADATA_KEY,
+  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+} from "@opengeni/contracts";
+import {
+  receiverSubscriptionAuthorityV2InTransaction,
+  receiverSubscriptionAuthorityInTransaction,
+  sharedPoolSubscriptionAuthoritySnapshotsInTransaction,
+} from "./accepted-subscription-authority";
 import { acceptSessionFileAttachments } from "./session-file-attachments";
+import { admitRequestedRepositories } from "./session-resource-removal";
 import { ArchivedSessionImportError } from "./archived-session-imports";
-import { withEffectiveSessionPolicy } from "./session-execution-policy";
-import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
+import { SessionArchivedError } from "./session-archive-errors";
+import {
+  effectiveSessionPolicyQuery,
+  withEffectiveSessionPolicy,
+} from "./session-execution-policy";
+import {
+  parseAcceptedMcpAccountBindings,
+  parseConnectionAccountIntent,
+} from "./mcp-account-bindings";
+import { withoutLapsedWorkspaceAccountBindings } from "./lapsed-workspace-account-bindings";
 import {
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
@@ -11,6 +30,7 @@ import {
   TimelineAnnotations,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
+  parseSessionRemovedRepositories,
   renderTimelineAnnotationsForModel,
   ResourceRef,
   resourceMountPath,
@@ -18,8 +38,10 @@ import {
   sessionTurnSurfaceOrNull,
   turnExecutionPolicyAuditMetadata,
   type SessionTurnSurface,
+  type BillingOrigin,
   type McpPersonalConnectionDelegation,
   type McpConnectionAccountBinding,
+  type ConnectionAccountIntent,
   type DraftTimelineAnnotation,
   type LatencyMode,
   type ReasoningEffort,
@@ -39,6 +61,7 @@ import {
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   withSessionRlsActorContext,
+  withWorkspaceSessionActivityRls,
   setSubjectRlsContext,
   type Database,
   type SessionActivityDatabase,
@@ -48,9 +71,17 @@ import {
   fromPostgresLosslessText,
   withLosslessContentWriteVersion,
 } from "./lossless-json";
+import { withBoundSessionEventPayloads } from "./session-event-write-bounds";
+import {
+  runnableQueuedTurnExists,
+  sessionMachineOwnerSubject,
+  waitsForMachineOwnerSql,
+} from "./machine-owner-wait";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
+import { deleteSubscriptionCoreWaitersForTurns } from "./subscription-core/waiters";
 import { cancelTurnInteractionInterventionsInTransaction } from "./browser-auth";
 import {
+  AgentCommandAuthorityError,
   assertAgentCommandAuthorityInTransaction,
   autoResumeSessionBranchInTransaction,
   canonicalSessionCommandHash,
@@ -71,6 +102,8 @@ import {
   updateSessionCommandReceiptResult,
 } from "./session-control";
 import { sessionRealtimeIsActiveInTransaction } from "./session-realtime-state";
+import { lockSiteRuntimeAdmission } from "./site-runtime-admission";
+import { notifyActorDraftChanged } from "./session-list-notifications";
 import { autoResumeGoalPausedByCapInTransaction } from "./session-goal-pacing";
 import {
   mirrorSessionRealtimeContextInTransaction,
@@ -82,9 +115,13 @@ import {
   frozenInitiatorForCommandActor,
   initiatorColumns,
   initiatorFromStorage,
+  sameTurnSender,
   type FrozenTurnInitiator,
 } from "./turn-initiator";
-import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
+import {
+  copySubscriptionAuthorityCompatInTransaction,
+  coreSubscriptionAuthorityV2ForAcceptanceInTransaction,
+} from "./subscription-core-acceptance-authority";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
 
@@ -100,7 +137,8 @@ export type QueueCommandConflictCode =
   | "DRAFT_CHANGED"
   | "DRAFT_NOT_EMPTY"
   | "EDIT_SOURCE_CHANGED"
-  | "ONCE_ATTACHMENT_IMMUTABLE";
+  | "ONCE_ATTACHMENT_IMMUTABLE"
+  | "WAITING_FOR_MACHINE_OWNER";
 
 export class QueueCommandConflictError extends Error {
   readonly name = "QueueCommandConflictError";
@@ -116,6 +154,45 @@ export class QueueCommandConflictError extends Error {
   ) {
     super(message);
   }
+}
+
+/**
+ * A session that keeps personal memory (a private session or a user-scoped
+ * memory session) can only run work caused by a verified human: its owner for
+ * a private session. Every turn resolves that owner before the model runs, so
+ * admitting a prompt without one only produces a turn that fails on start.
+ * Refuse it at admission with a reason the caller can act on.
+ */
+export class PersonalSessionInitiatorRequiredError extends Error {
+  readonly name = "PersonalSessionInitiatorRequiredError";
+  readonly code = "PERSONAL_SESSION_OWNER_REQUIRED";
+
+  constructor() {
+    super(
+      "This session keeps personal memory, so it only accepts messages sent by its owner. Send it as that person, or use a shared session.",
+    );
+  }
+}
+
+/**
+ * Mirrors the personal-destination guard every agent attempt applies on start
+ * (`knowledge_resolve_actor` / `knowledge_learning_for_turn`, migration 0868).
+ * A personal workspace alone is not personal memory without a human: work
+ * there with no initiating human (a published Site's visitor, other service
+ * work) starts in the Workspace destination with learning off, so its
+ * follow-up prompts are admitted like its first one.
+ */
+function assertPersonalSessionInitiator(input: {
+  session: { visibility: string; memoryScope: string; ownerSubjectId: string | null };
+  initiatingHumanSubjectId: string | null;
+}): void {
+  const subject = input.initiatingHumanSubjectId;
+  const ownerMismatch =
+    input.session.visibility === "user_private" && input.session.ownerSubjectId !== subject;
+  if (subject && !ownerMismatch) return;
+  const personal =
+    input.session.visibility === "user_private" || input.session.memoryScope === "user";
+  if (personal) throw new PersonalSessionInitiatorRequiredError();
 }
 
 export type ComposerDraftRow = typeof schema.composerDrafts.$inferSelect;
@@ -140,6 +217,23 @@ export type SteerQueueCommandResult = QueueCommandResult & {
   wakeRevision: number;
 };
 
+/**
+ * How a person's prompt asks to be delivered. `steer_or_send` is resolved to
+ * `steer` or `send` inside the prompt transaction (see
+ * `submitHumanPromptInTransaction`); only the resolved one is recorded.
+ */
+export type HumanPromptDelivery = "send" | "steer" | "steer_or_send";
+
+/**
+ * The receipt action of a prompt. `steer_or_send` may steer, so it shares the
+ * Steer action; its request hash keeps it distinct from a plain Steer.
+ */
+export function humanPromptCommandAction(
+  delivery: HumanPromptDelivery,
+): "prompt.send" | "prompt.steer" {
+  return delivery === "send" ? "prompt.send" : "prompt.steer";
+}
+
 export type SubmitHumanPromptResult = {
   receipt: SessionCommandReceiptRow;
   routing: SessionPromptRouting;
@@ -156,6 +250,12 @@ export type SubmitHumanPromptResult = {
   wakeRevision: number;
   interruptionCount: number;
   workspaceControlEventId: string | null;
+  /**
+   * The chat runs on another person's personal machine, so this message waits
+   * for its owner instead of running (`machine-owner-wait.ts`). As decided at
+   * acceptance.
+   */
+  waitsForMachineOwner: boolean;
   replay: boolean;
 };
 
@@ -231,7 +331,7 @@ async function loadSubmittedHumanPromptReplay(
     workspaceId: string;
     sessionId: string;
     subjectId: string;
-    delivery: "send" | "steer";
+    delivery: HumanPromptDelivery;
     expectedDraftRevision?: number | null;
     receipt: SessionCommandReceiptRow;
   },
@@ -275,11 +375,14 @@ async function loadSubmittedHumanPromptReplay(
   const replayDraft =
     input.expectedDraftRevision === null || input.expectedDraftRevision === undefined
       ? null
-      : await getComposerDraftInTransaction(db, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          subjectId: input.subjectId,
-        });
+      : await withEffectiveComposerDraftPolicy(
+          db,
+          await getComposerDraftInTransaction(db, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            subjectId: input.subjectId,
+          }),
+        );
   return {
     receipt: input.receipt,
     routing:
@@ -287,7 +390,7 @@ async function loadSubmittedHumanPromptReplay(
       input.receipt.result.routing === "queued_for_execution" ||
       input.receipt.result.routing === "accepted_for_steering"
         ? input.receipt.result.routing
-        : input.delivery === "steer"
+        : input.delivery !== "send"
           ? "accepted_for_steering"
           : // Pre-routing receipts cannot reconstruct admission-time activity
             // or Pause truth. Queue is the only conservative placement; a
@@ -307,6 +410,7 @@ async function loadSubmittedHumanPromptReplay(
       typeof input.receipt.result.workspaceControlEventId === "string"
         ? input.receipt.result.workspaceControlEventId
         : null,
+    waitsForMachineOwner: input.receipt.result.waitsForMachineOwner === true,
     replay: true,
   };
 }
@@ -319,7 +423,7 @@ export async function replaySubmittedHumanPromptFromBoundaryReceipt(
     subjectId: string;
     actor: SessionCommandActor;
     operationKey: string;
-    delivery: "send" | "steer";
+    delivery: HumanPromptDelivery;
     boundaryRequestHash: string;
     expectedDraftRevision?: number | null;
     /** Wait for an overlapping same-key transaction before checking committed replay truth. */
@@ -332,7 +436,7 @@ export async function replaySubmittedHumanPromptFromBoundaryReceipt(
   const receipt = await getCompletedSessionPromptCommandReceipt(db, {
     workspaceId: input.workspaceId,
     actor: input.actor,
-    action: input.delivery === "steer" ? "prompt.steer" : "prompt.send",
+    action: humanPromptCommandAction(input.delivery),
     targetSessionId: input.sessionId,
     operationKey: input.operationKey,
     boundaryRequestHash: input.boundaryRequestHash,
@@ -411,17 +515,19 @@ async function personalConnectionDelegationsForAgentActor(
   return { delegations, mcpAccountBindings, connectionAuthoritySubjectId };
 }
 
-async function xaiAuthorityForAgentActor(
+/**
+ * The sender's exact causal human. Agent-originated work keeps this human for
+ * permissions and provenance, but never the sender's subscription pool: the
+ * receiving session's own accepted work owns that (see
+ * `receiverSubscriptionAuthorityInTransaction`).
+ */
+async function subscriptionCausalHumanForAgentActor(
   db: Database,
   workspaceId: string,
   actor: Extract<SessionCommandActor, { type: "agent_attempt" }>,
-): Promise<{
-  snapshot: ReturnType<typeof XaiProviderAccountAuthoritySnapshotV1.parse>;
-  subjectId: string | null;
-}> {
+): Promise<string | null> {
   const [row] = await db
     .select({
-      snapshot: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
       initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
       initiatorKind: schema.sessionTurns.initiatorKind,
       initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
@@ -437,15 +543,13 @@ async function xaiAuthorityForAgentActor(
     .limit(1);
   if (!row) {
     throw new SessionControlInvariantError(
-      `Agent xAI authority turn not found: ${actor.sessionId}/${actor.turnId}`,
+      `Agent subscription authority turn not found: ${actor.sessionId}/${actor.turnId}`,
     );
   }
-  return {
-    snapshot: XaiProviderAccountAuthoritySnapshotV1.parse(row.snapshot),
-    subjectId:
-      row.initiatingHumanSubjectId ??
-      (row.initiatorKind === "subject" ? row.initiatorSubjectId : null),
-  };
+  return (
+    row.initiatingHumanSubjectId ??
+    (row.initiatorKind === "subject" ? row.initiatorSubjectId : null)
+  );
 }
 
 async function lockSession(
@@ -470,8 +574,31 @@ type SteerSupersessionResult = {
   replacedTurn: typeof schema.sessionTurns.$inferSelect | null;
   liveCurrentTurnId: string | null;
   deferredUntilCompaction: boolean;
+  /**
+   * The live attempt keeps running and hands over at its next model-step
+   * boundary: after the current step's tool calls finish, before the next
+   * model request. Nothing in flight is interrupted.
+   */
+  deferredUntilModelStep: boolean;
   lastSequence: number;
 };
+
+/** True when the Steer leaves the live attempt running until a safe boundary. */
+export function steerSupersessionIsDeferred(
+  supersession: Pick<SteerSupersessionResult, "deferredUntilCompaction" | "deferredUntilModelStep">,
+): boolean {
+  return supersession.deferredUntilCompaction || supersession.deferredUntilModelStep;
+}
+
+/** Durable display facts for a deferred Steer, shared by metadata and events. */
+function steerDeferralFacts(
+  supersession: Pick<SteerSupersessionResult, "deferredUntilCompaction" | "deferredUntilModelStep">,
+): { deferredUntilCompaction?: true; deferredUntilModelStep?: true } {
+  return {
+    ...(supersession.deferredUntilCompaction ? { deferredUntilCompaction: true as const } : {}),
+    ...(supersession.deferredUntilModelStep ? { deferredUntilModelStep: true as const } : {}),
+  };
+}
 
 async function turnAttemptIsCompacting(
   db: Database,
@@ -517,8 +644,12 @@ async function turnAttemptIsCompacting(
 
 /**
  * One canonical replacement transition shared by human row/new-prompt Steer
- * and Agent Steer. A live owner is interrupted and remains current until exact
- * settlement; an ownerless approval/recovery/capacity turn is superseded now.
+ * and Agent Steer. A live owner keeps running and hands over at its next
+ * model-step boundary (the worker's model-call admission reads the pending
+ * Steer, so the current step's tool calls finish and nothing is cut off). With
+ * `interrupt`, the live owner is interrupted now and remains current until
+ * exact settlement. An ownerless approval/recovery/capacity turn is superseded
+ * now either way.
  */
 export async function supersedeSessionCurrentDirectionInTransaction(
   db: Database,
@@ -531,6 +662,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     operationId: string;
     controlRevision: number;
     lastSequence: number;
+    /** Interrupt a live attempt now instead of at its next model step. */
+    interrupt?: boolean;
+    /** Who the ownerless supersession records, when not the acting command actor. */
+    supersededBy?: string;
   },
 ): Promise<SteerSupersessionResult> {
   if (!input.activeTurnId) {
@@ -540,6 +675,7 @@ export async function supersedeSessionCurrentDirectionInTransaction(
       replacedTurn: null,
       liveCurrentTurnId: null,
       deferredUntilCompaction: false,
+      deferredUntilModelStep: false,
       lastSequence: input.lastSequence,
     };
   }
@@ -595,6 +731,7 @@ export async function supersedeSessionCurrentDirectionInTransaction(
       replacedTurn: current.source === "compaction" ? null : current,
       liveCurrentTurnId: current.id,
       deferredUntilCompaction: true,
+      deferredUntilModelStep: false,
       lastSequence: input.lastSequence,
     };
   }
@@ -603,6 +740,19 @@ export async function supersedeSessionCurrentDirectionInTransaction(
       throw new SessionControlInvariantError(
         `Live attempt ${current.activeAttemptId} owns non-running turn ${current.id}`,
       );
+    }
+    if (input.interrupt !== true) {
+      // No interruption row: the attempt stays authoritative and its next
+      // model-call admission hands over (see `hasPendingSteerForTurn`).
+      return {
+        interruptionCount: 0,
+        steerTargetTurn: current,
+        replacedTurn: current,
+        liveCurrentTurnId: current.id,
+        deferredUntilCompaction: false,
+        deferredUntilModelStep: true,
+        lastSequence: input.lastSequence,
+      };
     }
     const [interruption] = await db
       .insert(schema.sessionAttemptInterruptions)
@@ -623,6 +773,7 @@ export async function supersedeSessionCurrentDirectionInTransaction(
       replacedTurn: current,
       liveCurrentTurnId: current.id,
       deferredUntilCompaction: false,
+      deferredUntilModelStep: false,
       lastSequence: input.lastSequence,
     };
   }
@@ -649,9 +800,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
       status: "cancelled",
       response: { outcome: "cancelled" },
       respondedBy:
-        input.actor.type === "agent_attempt"
+        input.supersededBy ??
+        (input.actor.type === "agent_attempt"
           ? `attempt:${input.actor.attemptId}`
-          : input.actor.subjectId,
+          : input.actor.subjectId),
       respondedAt: now,
       updatedAt: now,
     })
@@ -661,6 +813,7 @@ export async function supersedeSessionCurrentDirectionInTransaction(
         eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
         eq(schema.sessionHumanInputRequests.turnId, current.id),
         eq(schema.sessionHumanInputRequests.status, "pending"),
+        eq(schema.sessionHumanInputRequests.origin, "tool_call"),
       ),
     )
     .returning({
@@ -726,9 +879,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     .set({
       status: "superseded",
       cancelledBy:
-        input.actor.type === "agent_attempt"
+        input.supersededBy ??
+        (input.actor.type === "agent_attempt"
           ? `attempt:${input.actor.attemptId}`
-          : input.actor.subjectId,
+          : input.actor.subjectId),
       cancelReason: "steer",
       version: current.version + 1,
       finishedAt: now,
@@ -736,28 +890,16 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     })
     .where(eq(schema.sessionTurns.id, current.id));
   if (current.status === "waiting_capacity") {
-    await db
-      .update(schema.codexCapacityWaiters)
-      .set({ status: "superseded", updatedAt: now })
-      .where(
-        and(
-          eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-          eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
-          eq(schema.codexCapacityWaiters.blockedTurnId, current.id),
-          eq(schema.codexCapacityWaiters.status, "waiting"),
-        ),
-      );
-    await db
-      .update(schema.xaiCapacityWaiters)
-      .set({ status: "superseded", lastWakeReason: "steer", updatedAt: now })
-      .where(
-        and(
-          eq(schema.xaiCapacityWaiters.workspaceId, input.workspaceId),
-          eq(schema.xaiCapacityWaiters.sessionId, input.sessionId),
-          eq(schema.xaiCapacityWaiters.blockedTurnId, current.id),
-          eq(schema.xaiCapacityWaiters.status, "waiting"),
-        ),
-      );
+    // SuperGrok's and Claude's legacy waiters are read-only after their
+    // cutover receipts, which this binary requires: none can be waiting (each
+    // cutover moved or superseded every one). The shared subscription core's
+    // waiter (of whichever provider) exists
+    // only while its turn waits; the Steer ends that wait, so the row goes
+    // with it (its pending wake deliveries cascade).
+    await deleteSubscriptionCoreWaitersForTurns(db, null, {
+      workspaceId: input.workspaceId,
+      turnIds: [current.id],
+    });
   }
   return {
     interruptionCount: 0,
@@ -765,8 +907,196 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     replacedTurn: current,
     liveCurrentTurnId: null,
     deferredUntilCompaction: false,
+    deferredUntilModelStep: false,
     lastSequence,
   };
+}
+
+export type WaitingSteerResolution = {
+  wakeRevision: number;
+  workflowId: string;
+  /** Committed events to fan out live (closed calls, supersession, status). */
+  eventIds: string[];
+};
+
+/**
+ * A Steer accepted while the current turn was running waits for that turn's
+ * next model step. If the turn stops in an ownerless wait first (an approval,
+ * a structured question or a capacity wait), there is no next model step to
+ * hand over at, so the waiting Steer replaces the wait now, exactly as a Steer
+ * accepted after the wait began would: unexecuted approvals and questions are
+ * closed and the Steer runs next. The worker calls this right after it
+ * settles such a wait. Returns null when no Steer is waiting, the turn moved
+ * on, or the session is paused (the Steer then stays first in line).
+ */
+export async function resolveWaitingSteerInTransaction(
+  db: SessionActivityDatabase,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+): Promise<WaitingSteerResolution | null> {
+  const admission = await lockWorkspaceInferenceControlForAdmission(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    resumePausedBranch: false,
+  });
+  // Canonical event-write prefix after admission: workspace, session, then the
+  // ownerless turn this Steer replaces (the supersession re-reads it locked).
+  const locks = await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    sessionIds: [input.sessionId],
+    turnIds: [input.turnId],
+  });
+  const session = locks.sessions[0];
+  if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+  if (session.activeTurnId !== input.turnId) return null;
+  const control = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
+    workspaceControl: admission.control,
+  });
+  if (control.state !== "active") return null;
+  const [current] = await db
+    .select({
+      status: schema.sessionTurns.status,
+      activeAttemptId: schema.sessionTurns.activeAttemptId,
+    })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        eq(schema.sessionTurns.id, input.turnId),
+      ),
+    )
+    .limit(1);
+  if (
+    !current ||
+    current.activeAttemptId ||
+    !["requires_action", "waiting_capacity"].includes(current.status)
+  ) {
+    return null;
+  }
+  const rows = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
+  const waiting = rows.find((row) => {
+    const metadata = row.metadata as Record<string, unknown> | null;
+    return (
+      metadata?.delivery === "steer" &&
+      (metadata.deferredUntilModelStep === true || metadata.deferredUntilCompaction === true)
+    );
+  });
+  const [agentSteer] = waiting
+    ? []
+    : await db
+        .select({ id: schema.sessionSystemUpdates.id })
+        .from(schema.sessionSystemUpdates)
+        .where(
+          and(
+            eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+            eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+            eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+            eq(schema.sessionSystemUpdates.state, "pending"),
+          ),
+        )
+        .limit(1);
+  if (!waiting && !agentSteer) return null;
+  const steeredBy = waiting
+    ? (waiting.initiatingHumanSubjectId ?? waiting.initiatorSubjectId ?? "steer")
+    : "agent_steer";
+  const operationId = crypto.randomUUID();
+  const supersession = await supersedeSessionCurrentDirectionInTransaction(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    activeTurnId: input.turnId,
+    actor: { type: "operator", subjectId: steeredBy },
+    supersededBy: steeredBy,
+    operationId,
+    controlRevision: 0,
+    lastSequence: session.lastSequence,
+  });
+  if (supersession.liveCurrentTurnId !== null) {
+    throw new SessionControlInvariantError(
+      `Ownerless turn ${input.turnId} stayed current after a waiting Steer replaced it`,
+    );
+  }
+  const now = new Date();
+  let sequence = supersession.lastSequence;
+  const eventValues: SessionEventInsertWithPayload[] = [
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sequence: ++sequence,
+      type: "turn.superseded",
+      turnId: input.turnId,
+      payload: waiting
+        ? { reason: "steer", targetTurnId: waiting.id }
+        : { reason: "agent_steer", targetUpdateId: agentSteer!.id },
+      occurredAt: now,
+    },
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sequence: ++sequence,
+      type: "session.status.changed",
+      payload: { status: "queued" },
+      occurredAt: now,
+    },
+  ];
+  let queueVersion = session.queueVersion;
+  if (waiting) {
+    // The Steer no longer waits for a model step: clear its deferral facts so
+    // clients stop showing it as waiting.
+    const {
+      deferredUntilCompaction: _compactionDeferral,
+      deferredUntilModelStep: _modelStepDeferral,
+      ...metadata
+    } = waiting.metadata as Record<string, unknown>;
+    await db
+      .update(schema.sessionTurns)
+      .set({ version: waiting.version + 1, metadata, updatedAt: now })
+      .where(eq(schema.sessionTurns.id, waiting.id));
+    queueVersion += 1;
+  }
+  const eventRows = await db
+    .insert(schema.sessionEvents)
+    .values(
+      withLosslessContentWriteVersion(
+        withBoundSessionEventPayloads(eventValues),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
+    .returning({ id: schema.sessionEvents.id });
+  await db
+    .update(schema.sessions)
+    .set({
+      activeTurnId: null,
+      status: "queued",
+      queueVersion,
+      lastSequence: sequence,
+      updatedAt: now,
+    })
+    .where(eq(schema.sessions.id, input.sessionId));
+  const workflowId = session.temporalWorkflowId ?? `session-${input.sessionId}`;
+  const wakeRevision = await registerSessionWorkflowWakeInTransaction(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    temporalWorkflowId: workflowId,
+    reason: "waiting_steer",
+  });
+  return { wakeRevision, workflowId, eventIds: eventRows.map((row) => row.id) };
+}
+
+/** {@link resolveWaitingSteerInTransaction} in its own session-activity transaction. */
+export async function resolveWaitingSteer(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+): Promise<WaitingSteerResolution | null> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, (scoped) =>
+    // The scope already runs in its own transaction.
+    resolveWaitingSteerInTransaction(scoped, input),
+  );
 }
 
 async function loadQueuedTurns(
@@ -801,6 +1131,69 @@ async function loadQueuedTurns(
   });
   const byId = new Map(locks.turns.map((row) => [row.id, row]));
   return rows.map((row) => byId.get(row.id)).filter((row): row is QueuedTurnRow => Boolean(row));
+}
+
+/**
+ * Queue order for a newly Steered row. Steers waiting for the live turn's next
+ * boundary are read in the order they were sent, so a later waiting Steer joins
+ * the end of that leading run; an interrupting Steer (and any Steer with nothing
+ * live to wait for) goes first. Queued Sends always stay behind every Steer.
+ */
+function steerQueueOrder(
+  target: QueuedTurnRow,
+  others: QueuedTurnRow[],
+  supersession: Pick<
+    SteerSupersessionResult,
+    "liveCurrentTurnId" | "deferredUntilCompaction" | "deferredUntilModelStep"
+  >,
+): QueuedTurnRow[] {
+  if (!supersession.liveCurrentTurnId || !steerSupersessionIsDeferred(supersession)) {
+    return [target, ...others];
+  }
+  let waiting = 0;
+  while (waiting < others.length) {
+    const metadata = others[waiting]!.metadata as Record<string, unknown> | null;
+    const waitingSteer =
+      metadata?.delivery === "steer" &&
+      (metadata.deferredUntilModelStep === true || metadata.deferredUntilCompaction === true);
+    if (!waitingSteer) break;
+    waiting += 1;
+  }
+  return [...others.slice(0, waiting), target, ...others.slice(waiting)];
+}
+
+/**
+ * Queue order for a `steer_or_send` message that steers a turn about to start
+ * (accepted, not yet claimed). It goes right behind that turn and the Steers
+ * already waiting for it, in the order they were sent, and ahead of later
+ * Sends. The starting turn claims first and, finding this Steer pending,
+ * hands over to it before its first model request, so the agent reads both
+ * messages together; a leading Steer is claimed together with it.
+ */
+function steerStartingTurnOrder(
+  target: QueuedTurnRow,
+  others: QueuedTurnRow[],
+  machineOwner: string | null,
+): QueuedTurnRow[] {
+  // Messages waiting for a personal machine's owner never start by themselves
+  // (`machine-owner-wait.ts`), so the starting turn is the first other row.
+  const waits = (row: QueuedTurnRow): boolean => {
+    if (machineOwner === null || row.startedAt !== null) return false;
+    const causal =
+      row.initiatingHumanSubjectId?.trim() ||
+      (row.initiatorKind === "subject" ? row.initiatorSubjectId?.trim() : "") ||
+      null;
+    return causal !== machineOwner;
+  };
+  const starting = others.findIndex((row) => !waits(row));
+  let behind = starting < 0 ? others.length : starting + 1;
+  while (behind < others.length) {
+    const row = others[behind]!;
+    const metadata = row.metadata as Record<string, unknown> | null;
+    if (metadata?.delivery !== "steer" || waits(row)) break;
+    behind += 1;
+  }
+  return [...others.slice(0, behind), target, ...others.slice(behind)];
 }
 
 async function normalizeQueuePositions(
@@ -896,6 +1289,28 @@ export async function getComposerDraftInTransaction(
   return rows[0] ?? null;
 }
 
+/**
+ * A draft that follows the chat's settings reads as the chat's current
+ * effective model, reasoning effort and speed (the same projection a Send
+ * without a model uses), so a change made outside the composer is what the
+ * person sees and sends. A draft with the person's own pick is returned as
+ * stored. Call inside the caller's workspace/subject RLS boundary.
+ */
+export async function withEffectiveComposerDraftPolicy(
+  db: Database,
+  draft: ComposerDraftRow | null,
+): Promise<ComposerDraftRow | null> {
+  if (!draft?.policyFollowsSession) return draft;
+  const [policy] = await effectiveSessionPolicyQuery(db, draft.workspaceId, [draft.sessionId]);
+  if (!policy) return draft;
+  return {
+    ...draft,
+    model: policy.model,
+    reasoningEffort: policy.reasoningEffort,
+    latencyMode: policy.latencyMode,
+  };
+}
+
 export async function saveComposerDraftInTransaction(
   db: Database,
   input: {
@@ -907,9 +1322,13 @@ export async function saveComposerDraftInTransaction(
     text: string;
     annotations?: DraftTimelineAnnotation[];
     resources: ResourceRef[];
-    model: string;
-    reasoningEffort: ReasoningEffort;
-    latencyMode: LatencyMode;
+    /**
+     * The person's pick in the composer. Omit all three to keep the draft on
+     * the chat's own settings, so it follows later changes to them.
+     */
+    model?: string | undefined;
+    reasoningEffort?: ReasoningEffort | undefined;
+    latencyMode?: LatencyMode | undefined;
     /**
      * Bound the workspace control prefix wait (request-scoped API callers pass
      * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
@@ -939,6 +1358,14 @@ export async function saveComposerDraftInTransaction(
     });
   }
   const revision = currentRevision + 1;
+  const picked =
+    input.model !== undefined ||
+    input.reasoningEffort !== undefined ||
+    input.latencyMode !== undefined;
+  const [sessionPolicy] = await effectiveSessionPolicyQuery(db, input.workspaceId, [
+    input.sessionId,
+  ]);
+  if (!sessionPolicy) throw new Error(`Session not found: ${input.sessionId}`);
   const values = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -950,9 +1377,10 @@ export async function saveComposerDraftInTransaction(
     resources: withCanonicalResourceMountPaths(input.resources),
     tools: [],
     toolsProvided: false,
-    model: input.model,
-    reasoningEffort: input.reasoningEffort,
-    latencyMode: input.latencyMode,
+    model: input.model ?? sessionPolicy.model,
+    reasoningEffort: input.reasoningEffort ?? sessionPolicy.reasoningEffort,
+    latencyMode: input.latencyMode ?? sessionPolicy.latencyMode,
+    policyFollowsSession: !picked,
     // A queue edit is still the same accepted work item. Preserve its frozen
     // initiator through arbitrary draft saves; only a genuinely new compose or
     // Steer captures the submitting actor.
@@ -968,6 +1396,11 @@ export async function saveComposerDraftInTransaction(
         .returning()
     : await db.insert(schema.composerDrafts).values(values).returning();
   if (!saved) throw new Error("Composer draft did not save");
+  await notifyActorDraftChanged(db, {
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    sessionId: input.sessionId,
+  });
   return saved;
 }
 
@@ -1377,6 +1810,8 @@ export async function editQueuedTurnInTransaction(
     model: turn.model,
     reasoningEffort: turn.reasoningEffort,
     latencyMode: turn.latencyMode,
+    // Editing a queued message keeps the settings it was sent with.
+    policyFollowsSession: false,
     sourceTurnId: turn.id,
     sourceTurnVersion: turn.version,
     updatedAt: new Date(),
@@ -1389,6 +1824,11 @@ export async function editQueuedTurnInTransaction(
         .returning()
     : await db.insert(schema.composerDrafts).values(draftValues).returning();
   if (!draft) throw new Error("Queue Edit did not persist its draft");
+  await notifyActorDraftChanged(db as unknown as Database, {
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    sessionId: input.sessionId,
+  });
   const now = new Date();
   const queueVersion = session.queueVersion + 1;
   await db
@@ -1471,6 +1911,12 @@ export async function steerQueuedTurnInTransaction(
     operationKey: string;
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
+    /**
+     * Interrupt the running attempt now, cutting off its in-flight step,
+     * instead of handing over at its next model step. Also turns an
+     * already-deferred Steer into an immediate one ("Send now").
+     */
+    interrupt?: boolean;
   },
 ): Promise<SteerQueueCommandResult> {
   const admission = await lockWorkspaceInferenceControlForAdmission(db, {
@@ -1496,6 +1942,8 @@ export async function steerQueuedTurnInTransaction(
   const requestHash = canonicalSessionCommandHash({
     expectedTurnVersion: input.expectedTurnVersion,
     controlEtag: input.controlEtag ?? null,
+    // Omitted when false so earlier receipts keep their exact replay hash.
+    ...(input.interrupt === true ? { interrupt: true } : {}),
   });
   const reserved = await reserveSessionCommandReceipt(db, {
     accountId: input.accountId,
@@ -1528,7 +1976,7 @@ export async function steerQueuedTurnInTransaction(
       replay: true,
     };
   }
-  await lockSession(db, input.workspaceId, input.sessionId);
+  const lockedSession = await lockSession(db, input.workspaceId, input.sessionId);
   if (input.actor.type === "agent_attempt") {
     await assertAgentCommandAuthorityInTransaction(db, {
       workspaceId: input.workspaceId,
@@ -1536,6 +1984,34 @@ export async function steerQueuedTurnInTransaction(
       targetSessionId: input.sessionId,
       action: "steer",
     });
+  }
+  // A message waiting for the personal machine's owner cannot run there, so
+  // it must not interrupt or replace the owner's work either.
+  const machineOwner = await sessionMachineOwnerSubject(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+  });
+  if (machineOwner !== null) {
+    const [waiting] = await db
+      .select({ id: schema.sessionTurns.id })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, input.turnId),
+          waitsForMachineOwnerSql(machineOwner),
+        ),
+      )
+      .limit(1);
+    if (waiting) {
+      throw new QueueCommandConflictError(
+        "WAITING_FOR_MACHINE_OWNER",
+        "This message waits for the owner of the personal machine the chat runs on, so it cannot be sent now",
+        { queueVersion: lockedSession.queueVersion },
+      );
+    }
   }
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl,
@@ -1578,6 +2054,7 @@ export async function steerQueuedTurnInTransaction(
     operationId: reserved.receipt.id,
     controlRevision: resumed.revision,
     lastSequence: session.lastSequence,
+    ...(input.interrupt === true ? { interrupt: true } : {}),
   });
   const interruptionCount = supersession.interruptionCount;
   const steerTargetTurn = supersession.steerTargetTurn;
@@ -1585,9 +2062,10 @@ export async function steerQueuedTurnInTransaction(
   const supersededAttemptId = supersession.replacedTurn?.activeAttemptId ?? null;
   const liveCurrentTurnId = supersession.liveCurrentTurnId;
   const deferredUntilCompaction = supersession.deferredUntilCompaction;
+  const deferredUntilModelStep = supersession.deferredUntilModelStep;
 
   const withoutTarget = rows.filter((row) => row.id !== target.id);
-  const ordered = [target, ...withoutTarget];
+  const ordered = steerQueueOrder(target, withoutTarget, supersession);
   await normalizeQueuePositions(
     db,
     input.workspaceId,
@@ -1596,17 +2074,24 @@ export async function steerQueuedTurnInTransaction(
   );
   const now = new Date();
   const queueVersion = session.queueVersion + 1;
+  // A repeated Steer (for example "Send now" on a deferred one) replaces the
+  // earlier deferral facts instead of accumulating them.
+  const {
+    deferredUntilCompaction: _previousCompactionDeferral,
+    deferredUntilModelStep: _previousModelStepDeferral,
+    ...targetMetadata
+  } = target.metadata;
   await db
     .update(schema.sessionTurns)
     .set({
       version: target.version + 1,
       metadata: {
-        ...target.metadata,
+        ...targetMetadata,
         delivery: "steer",
         replacedTurnId: supersededTurnId,
         replacedAttemptId: supersededAttemptId,
         interruptionCount,
-        ...(deferredUntilCompaction ? { deferredUntilCompaction: true } : {}),
+        ...steerDeferralFacts(supersession),
       },
       updatedAt: now,
     })
@@ -1643,14 +2128,20 @@ export async function steerQueuedTurnInTransaction(
       operationId: reserved.receipt.id,
       targetTurnId: target.id,
       replacedTurnId: supersededTurnId,
-      stopping: liveCurrentTurnId !== null && !deferredUntilCompaction,
-      ...(deferredUntilCompaction ? { deferredUntilCompaction: true } : {}),
+      stopping: liveCurrentTurnId !== null && !steerSupersessionIsDeferred(supersession),
+      ...steerDeferralFacts(supersession),
     },
     occurredAt: now,
   });
   const eventRows = await db
     .insert(schema.sessionEvents)
-    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+    .values(
+      withLosslessContentWriteVersion(
+        withBoundSessionEventPayloads(eventValues),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning({
       id: schema.sessionEvents.id,
     });
@@ -1658,7 +2149,14 @@ export async function steerQueuedTurnInTransaction(
     .update(schema.sessions)
     .set({
       activeTurnId: liveCurrentTurnId,
-      status: liveCurrentTurnId ? session.status : "queued",
+      status: liveCurrentTurnId
+        ? (session.admissionBlock?.previousStatus ?? session.status)
+        : "queued",
+      // Queue-row Steer is the same explicit admission recheck as a fresh
+      // Send/Steer or Resume. Keeping the old block would let delivery ACK
+      // the wake while peek and claim permanently refuse this direction.
+      // Receipt replay returns above, so it cannot clear a later rejection.
+      admissionBlock: null,
       queueVersion,
       queueHeadPosition: 0,
       queueTailPosition: ordered.length,
@@ -1680,6 +2178,7 @@ export async function steerQueuedTurnInTransaction(
           replacedTurnId: supersededTurnId,
           interruptionCount,
           deferredUntilCompaction,
+          deferredUntilModelStep,
         },
       },
       "metadata",
@@ -1702,6 +2201,7 @@ export async function steerQueuedTurnInTransaction(
       interruptionCount,
       supersededTurnId,
       deferredUntilCompaction,
+      deferredUntilModelStep,
       wakeRevision,
       workspaceControlEventId: resumed.workspaceControlEventId,
     },
@@ -1719,6 +2219,131 @@ export async function steerQueuedTurnInTransaction(
   };
 }
 
+/**
+ * The sender's time zone is presentation context, not part of a prompt's
+ * request identity: a retry that names another zone (or none) replays the
+ * original turn instead of conflicting with it.
+ */
+function turnMetadataRequestIdentity(
+  turnMetadata: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!turnMetadata || !(MESSAGE_TIME_ZONE_METADATA_KEY in turnMetadata)) return turnMetadata ?? {};
+  const { [MESSAGE_TIME_ZONE_METADATA_KEY]: _timeZone, ...identity } = turnMetadata;
+  return identity;
+}
+
+/** A turn's causal person, read the way the attempt admission trigger reads it. */
+function causalHuman(
+  initiatingHumanSubjectId: string | null | undefined,
+  initiatorKind: string | null | undefined,
+  initiatorSubjectId: string | null | undefined,
+): string | null {
+  return (
+    initiatingHumanSubjectId?.trim() ||
+    (initiatorKind === "subject" ? initiatorSubjectId?.trim() : undefined) ||
+    null
+  );
+}
+
+/**
+ * Whose message a prompt is, before any Steer or Resume decision: the edited
+ * queued message's sender for a queue edit, otherwise the command's actor.
+ */
+async function promptCausalHuman(
+  db: SessionActivityDatabase,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    sourceTurnId: string | null;
+    actorInitiator: FrozenTurnInitiator | null;
+  },
+): Promise<string | null> {
+  if (input.sourceTurnId) {
+    const [source] = await db
+      .select({
+        initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+        initiatorKind: schema.sessionTurns.initiatorKind,
+        initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, input.sourceTurnId),
+        ),
+      )
+      .limit(1);
+    return source
+      ? causalHuman(
+          source.initiatingHumanSubjectId,
+          source.initiatorKind,
+          source.initiatorSubjectId,
+        )
+      : null;
+  }
+  const actor = input.actorInitiator;
+  if (!actor) return null;
+  return causalHuman(
+    actor.initiatingHumanSubjectId,
+    actor.initiator.kind,
+    actor.initiator.kind === "subject" ? actor.initiator.subjectId : null,
+  );
+}
+
+/**
+ * Whether the queued message a queue edit resubmits was sent by its editor.
+ * Only then does the edit keep the message's accepted authority.
+ */
+async function queueEditSourceSentBy(
+  db: SessionActivityDatabase,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    sourceTurnId: string;
+    editor: FrozenTurnInitiator;
+  },
+): Promise<boolean> {
+  const [source] = await db
+    .select({
+      initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+      initiatorKind: schema.sessionTurns.initiatorKind,
+      initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+      initiatorContext: schema.sessionTurns.initiatorContext,
+    })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        eq(schema.sessionTurns.id, input.sourceTurnId),
+      ),
+    )
+    .limit(1);
+  if (!source) return false;
+  return sameTurnSender(
+    {
+      initiator: initiatorFromStorage(
+        source.initiatorKind,
+        source.initiatorSubjectId,
+        source.initiatorContext ?? {},
+      ),
+      initiatingHumanSubjectId: source.initiatingHumanSubjectId,
+    },
+    input.editor,
+  );
+}
+
+/**
+ * Session statuses whose active turn waits with no live attempt and that an
+ * ordinary human Send takes over (Steer semantics) instead of queueing behind:
+ * a pending decision, or a turn parked on provider capacity such as a used-up
+ * subscription. See `submitHumanPromptInTransaction`.
+ */
+export function sendTakesOverActiveWait(status: string): boolean {
+  return status === "requires_action" || status === "waiting_capacity";
+}
+
 export async function submitHumanPromptInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -1731,7 +2356,7 @@ export async function submitHumanPromptInTransaction(
     operationKey: string;
     /** Stable parsed boundary-request identity used before mutable enrichment. */
     boundaryRequestHash?: string;
-    delivery: "send" | "steer";
+    delivery: HumanPromptDelivery;
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
     text: string;
@@ -1759,10 +2384,17 @@ export async function submitHumanPromptInTransaction(
     source: "user" | "api";
     /** Content-free product surface the request entered through. */
     surface?: SessionTurnSurface | null;
+    /**
+     * Funding origin of whoever sent this message, frozen on its turn. An
+     * edit is billed to its sender too; null inherits the session's latest.
+     */
+    billingOrigin?: BillingOrigin | null;
     /** Record the admitted run's durable usage fact in this transaction. */
     recordAgentRunUsage?: boolean;
     personalConnectionDelegations?: McpPersonalConnectionDelegation[];
     mcpAccountBindings?: McpConnectionAccountBinding[] | null;
+    /** The sender's account intent: their principal and explicit picks. */
+    connectionAccountIntent?: ConnectionAccountIntent | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
     mcpCredentialUpdates?: Array<{
       id: string;
@@ -1770,7 +2402,20 @@ export async function submitHumanPromptInTransaction(
     }>;
     /** Trusted database-only admission seam. It runs only after a completed
      * operation replay has been ruled out; throwing rolls the prompt back. */
-    beforeFreshPromptCommit?: (tx: Database) => Promise<void>;
+    beforeFreshPromptCommit?: (
+      tx: Database,
+      authority: {
+        claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
+        /**
+         * The accepted source the snapshot was copied from (an edit's source
+         * turn, or the receiving session of agent-submitted work); absent
+         * when the prompt resolved the current source.
+         */
+        claudeAcceptedSource?:
+          | { kind: "session_turn"; turnId: string }
+          | { kind: "receiving_session"; sessionId: string };
+      },
+    ) => Promise<void>;
     /** Backend-only authority capture, atomic with the newly accepted turn. */
     captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
 
@@ -1780,7 +2425,8 @@ export async function submitHumanPromptInTransaction(
 ): Promise<SubmitHumanPromptResult> {
   const annotations = TimelineAnnotations.parse(input.annotations ?? []);
   // Send is inert queue admission while paused; Steer deliberately resumes.
-  // Tell the lock helper which path may need the exclusive control prefix.
+  // `steer_or_send` never resumes: it steers only an active branch. Tell the
+  // lock helper which path may need the exclusive control prefix.
   const admission = await lockWorkspaceInferenceControlForAdmission(db, {
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
@@ -1807,11 +2453,13 @@ export async function submitHumanPromptInTransaction(
     turnIds: input.actor.type === "agent_attempt" ? [input.actor.turnId] : [],
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
-  if (
-    promptLocks.sessions.find((session) => session.id === input.sessionId)?.importedArchiveImportId
-  ) {
+  const promptTarget = promptLocks.sessions.find((session) => session.id === input.sessionId);
+  if (promptTarget?.importedArchiveImportId) {
     throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
   }
+  // Archived chats are read-only, including during the undo window.
+  if (promptTarget?.contentArchiveState || promptTarget?.archivedAt)
+    throw new SessionArchivedError();
   const requestHash = canonicalSessionCommandHash({
     delivery: input.delivery,
     controlEtag: input.controlEtag ?? null,
@@ -1829,7 +2477,7 @@ export async function submitHumanPromptInTransaction(
     reasoningEffort: input.reasoningEffort ?? null,
     latencyMode: input.latencyMode ?? null,
     source: input.source,
-    turnMetadata: input.turnMetadata ?? {},
+    turnMetadata: turnMetadataRequestIdentity(input.turnMetadata),
     messagePresentation: input.messagePresentation ?? null,
     mirrorToRealtime: input.mirrorToRealtime ?? true,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
@@ -1847,7 +2495,7 @@ export async function submitHumanPromptInTransaction(
         }
       : {}),
   });
-  const action = input.delivery === "steer" ? "prompt.steer" : "prompt.send";
+  const action = humanPromptCommandAction(input.delivery);
   const reserved = input.boundaryRequestHash
     ? await reserveSessionPromptCommandReceipt(db, {
         accountId: input.accountId,
@@ -1881,8 +2529,14 @@ export async function submitHumanPromptInTransaction(
       receipt: reserved.receipt,
     });
   }
-  await input.beforeFreshPromptCommit?.(db);
-
+  // Checked against the locked session row, so a removal committed while
+  // this request was on its way still applies: an agent cannot attach a
+  // repository a person removed, and a person attaching one ends its record.
+  const repositoryAdmission = admitRequestedRepositories({
+    removedRepositories: parseSessionRemovedRepositories(promptTarget?.removedRepositories),
+    requested: input.resources,
+    requester: input.actor.type === "agent_attempt" ? "agent" : "person",
+  });
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl,
   });
@@ -1890,7 +2544,26 @@ export async function submitHumanPromptInTransaction(
     throw new SessionControlConflictError();
   }
 
-  const storedSession = await lockSession(db, input.workspaceId, input.sessionId);
+  // The canonical prefix already holds the session semantic lock and its
+  // event cursor through this transaction. Receipt reservation and control
+  // projection above do not mutate either row. Keep the late Site and RLS
+  // visibility checks, but reuse the validated row instead of fetching its
+  // full payload and locking the same event cursor again.
+  await lockSiteRuntimeAdmission(db, input.workspaceId, [input.sessionId]);
+  const [visibleSession] = await db
+    .select({ id: schema.sessions.id })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
+      ),
+    )
+    .for("no key update");
+  if (!visibleSession || !promptTarget) {
+    throw new Error(`Session not found: ${input.sessionId}`);
+  }
+  const storedSession = promptTarget;
   const [session] = await withEffectiveSessionPolicy(db, input.workspaceId, [storedSession]);
   if (!session) throw new Error("Session disappeared during prompt admission");
   if (session.status === "cancelled") {
@@ -1901,7 +2574,11 @@ export async function submitHumanPromptInTransaction(
     );
   }
 
-  const draft =
+  // Send carries its own content and is never refused because of the draft.
+  // The draft only decides what happens to itself afterwards (see
+  // `draftHoldsSent`) and, at the revision the sender last saw, which queued
+  // message a resubmitted edit replaces.
+  const storedDraft =
     input.expectedDraftRevision === null || input.expectedDraftRevision === undefined
       ? null
       : await getComposerDraftInTransaction(db, {
@@ -1910,27 +2587,102 @@ export async function submitHumanPromptInTransaction(
           subjectId: input.subjectId,
           lock: true,
         });
+  // The draft as the sender last saw it. A newer draft from another device is
+  // not what this Send was composed in, so it never turns this Send into an
+  // edit of a message that device withdrew.
+  const draft = storedDraft?.revision === input.expectedDraftRevision ? storedDraft : null;
   const isQueueEditSubmission = draft?.sourceTurnId !== null && draft?.sourceTurnId !== undefined;
+
+  // Only its owner can start work on a personal machine. Another person's
+  // message there waits for the owner (`machine-owner-wait.ts`): it is queued
+  // as a plain Send that never steers, interrupts or resumes anything, and the
+  // owner's next own message takes it in.
+  const actorInitiator = await frozenInitiatorForCommandActor(
+    db,
+    input.workspaceId,
+    input.actor,
+    input.subjectLabel,
+  );
+  // A queue edit stays its sender's message only when they resubmit it. When
+  // someone else edits it, it becomes their own new message, run with their
+  // own accounts and allowance, never the original sender's.
+  const editKeepsSourceSender = draft?.sourceTurnId
+    ? await queueEditSourceSentBy(db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        sourceTurnId: draft.sourceTurnId,
+        editor: actorInitiator,
+      })
+    : false;
+  const machineOwner = await sessionMachineOwnerSubject(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+  });
+  const waitsForMachineOwner =
+    machineOwner !== null &&
+    (await promptCausalHuman(db, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sourceTurnId: editKeepsSourceSender ? (draft?.sourceTurnId ?? null) : null,
+      actorInitiator,
+    })) !== machineOwner;
 
   // A normal Send received while the active branch is waiting in
   // `requires_action` is the human choosing to continue conversationally
-  // instead of through the pending decision surface. Promote only that active
-  // wait to Steer semantics so the frozen wait is cancelled and the new prompt
-  // runs next. A queue-edit submission preserves the identity and placement of
-  // already accepted queued work, so it must never cancel an unrelated active
-  // wait. An explicitly paused branch remains inert until Resume or an explicit
-  // Steer; running, recovering, and capacity-waiting work also retain ordinary
+  // instead of through the pending decision surface. A turn parked in
+  // `waiting_capacity` (a usage limit, an account that needs reconnecting)
+  // has no live attempt either: the person already saw it stop, and their new
+  // message, often on another model, must not sit behind a wait that can last
+  // until a quota resets. Promote only those ownerless active waits to Steer
+  // semantics so the wait is cancelled (a capacity waiter goes with its
+  // superseded turn) and the new prompt runs next on its own accepted model.
+  // A queue-edit submission preserves the identity and placement of already
+  // accepted queued work, so it must never cancel an unrelated active wait. An
+  // explicitly paused branch remains inert until Resume or an explicit Steer;
+  // running and recovering work, and agent or machine input, retain ordinary
   // queue semantics.
-  const effectiveDelivery =
-    input.delivery === "send" &&
-    (input.actor.type === "human" || input.actor.type === "operator") &&
+  //
+  // `steer_or_send` is decided here, under the same locks as the turn state it
+  // reads, so a sender's stale view of the session never changes where the
+  // message goes. It steers whenever an active branch has a current turn
+  // (running, recovering, or one of the ownerless waits above) or accepted
+  // work about to start, and otherwise is an ordinary Send: an idle chat
+  // starts a turn, and a paused chat, a chat held by used-up allowance, a
+  // queue edit, and a message waiting for the machine's owner keep their
+  // ordinary queueing.
+  const steerOrSendCanSteer =
+    input.delivery === "steer_or_send" &&
+    !waitsForMachineOwner &&
     !isQueueEditSubmission &&
     before.state === "active" &&
-    session.status === "requires_action" &&
-    !session.admissionBlock &&
-    session.activeTurnId !== null
-      ? "steer"
-      : input.delivery;
+    !session.admissionBlock;
+  // A turn accepted but not yet claimed (or the next one, between turns) is
+  // about to start. The message steers it as soon as it does.
+  const steersStartingTurn =
+    steerOrSendCanSteer &&
+    session.activeTurnId === null &&
+    (await runnableQueuedTurnExists(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sources: ["user", "api"],
+    }));
+  const effectiveDelivery: "send" | "steer" = waitsForMachineOwner
+    ? "send"
+    : input.delivery === "steer_or_send"
+      ? steerOrSendCanSteer && (session.activeTurnId !== null || steersStartingTurn)
+        ? "steer"
+        : "send"
+      : input.delivery === "send" &&
+          (input.actor.type === "human" || input.actor.type === "operator") &&
+          !isQueueEditSubmission &&
+          before.state === "active" &&
+          sendTakesOverActiveWait(session.status) &&
+          !session.admissionBlock &&
+          session.activeTurnId !== null
+        ? "steer"
+        : input.delivery;
   const resumed =
     effectiveDelivery === "send"
       ? {
@@ -1950,51 +2702,48 @@ export async function submitHumanPromptInTransaction(
           observedControlEtag: input.controlEtag ?? null,
           admission,
         });
-  if (input.expectedDraftRevision !== null && input.expectedDraftRevision !== undefined) {
-    const actualRevision = draft?.revision ?? 0;
-    if (actualRevision !== input.expectedDraftRevision) {
-      throw new QueueCommandConflictError("DRAFT_CHANGED", "Composer draft changed", {
-        queueVersion: session.queueVersion,
-        draftRevision: actualRevision,
-      });
-    }
-    if (
-      draft &&
-      canonicalSessionCommandHash({
-        text: draft.text,
-        annotations: DraftTimelineAnnotations.parse(draft.annotations),
-        resources: withCanonicalResourceMountPaths(draft.resources),
-        model: draft.model,
-        reasoningEffort: draft.reasoningEffort,
-        latencyMode: draft.latencyMode,
-      }) !==
+  // After this Send is accepted, clear the draft only while it still holds
+  // what was sent: it is still at the revision the sender saw, or it holds
+  // exactly the sent content (and no other withdrawn message). Otherwise
+  // another device saved something newer, and that stays as the draft.
+  const draftHoldsSent =
+    storedDraft !== null &&
+    (draft !== null ||
+      (storedDraft.sourceTurnId === null &&
         canonicalSessionCommandHash({
-          text: input.text,
-          annotations: annotations.map(({ ordinal: _ordinal, ...annotation }) => annotation),
-          resources: withCanonicalResourceMountPaths(
-            input.composerDraftResources ?? input.resources,
-          ),
-          model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
-          reasoningEffort:
-            input.turnExecutionPolicy?.reasoningEffort ??
-            input.reasoningEffort ??
-            (session.reasoningEffort as ReasoningEffort),
-          latencyMode:
-            input.turnExecutionPolicy?.latencyMode ??
-            input.latencyMode ??
-            (session.latencyMode as LatencyMode),
-        })
-    ) {
-      throw new QueueCommandConflictError(
-        "DRAFT_CHANGED",
-        "Submitted content is not the saved draft",
-        {
-          queueVersion: session.queueVersion,
-          draftRevision: draft.revision,
-        },
-      );
-    }
-  }
+          text: storedDraft.text,
+          annotations: DraftTimelineAnnotations.parse(storedDraft.annotations),
+          resources: withCanonicalResourceMountPaths(storedDraft.resources),
+          // A draft that follows the chat's settings holds the chat's current
+          // effective policy, which is what a Send without a model runs with.
+          ...(storedDraft.policyFollowsSession
+            ? {
+                model: session.model,
+                reasoningEffort: session.reasoningEffort,
+                latencyMode: session.latencyMode,
+              }
+            : {
+                model: storedDraft.model,
+                reasoningEffort: storedDraft.reasoningEffort,
+                latencyMode: storedDraft.latencyMode,
+              }),
+        }) ===
+          canonicalSessionCommandHash({
+            text: input.text,
+            annotations: annotations.map(({ ordinal: _ordinal, ...annotation }) => annotation),
+            resources: withCanonicalResourceMountPaths(
+              input.composerDraftResources ?? input.resources,
+            ),
+            model: input.turnExecutionPolicy?.productModelId ?? input.model ?? session.model,
+            reasoningEffort:
+              input.turnExecutionPolicy?.reasoningEffort ??
+              input.reasoningEffort ??
+              (session.reasoningEffort as ReasoningEffort),
+            latencyMode:
+              input.turnExecutionPolicy?.latencyMode ??
+              input.latencyMode ??
+              (session.latencyMode as LatencyMode),
+          })));
 
   let editedSourceTurn: QueuedTurnRow | undefined;
   let editedSourceModelContext: string | null | undefined;
@@ -2038,6 +2787,9 @@ export async function submitHumanPromptInTransaction(
     editedSourceTurn = sourceTurn;
     editedSourceModelContext = sourceTurn.modelContext ?? null;
   }
+  // The withdrawn message whose accepted authority this prompt keeps: only
+  // its own sender's resubmission. See `editKeepsSourceSender`.
+  const inheritedSourceTurn = editKeepsSourceSender ? editedSourceTurn : undefined;
 
   for (const update of input.mcpCredentialUpdates ?? []) {
     const [server] = await db
@@ -2060,8 +2812,8 @@ export async function submitHumanPromptInTransaction(
 
   const now = new Date();
   let frozenInitiator: FrozenTurnInitiator;
-  if (input.delivery === "send" && draft?.sourceTurnId) {
-    const sourceTurn = editedSourceTurn;
+  if (input.delivery === "send" && draft?.sourceTurnId && editKeepsSourceSender) {
+    const sourceTurn = inheritedSourceTurn;
     if (!sourceTurn) {
       throw new SessionControlInvariantError("Edited prompt source turn is missing");
     }
@@ -2074,18 +2826,32 @@ export async function submitHumanPromptInTransaction(
       context: sourceTurn.initiatorContext ?? {},
     };
   } else {
-    frozenInitiator = await frozenInitiatorForCommandActor(
-      db,
-      input.workspaceId,
-      input.actor,
-      input.subjectLabel,
-    );
+    frozenInitiator =
+      actorInitiator ??
+      (await frozenInitiatorForCommandActor(
+        db,
+        input.workspaceId,
+        input.actor,
+        input.subjectLabel,
+      ));
   }
-  const acceptedInitiatingHumanSubjectId = editedSourceTurn
-    ? (editedSourceTurn.initiatingHumanSubjectId ??
-      (editedSourceTurn.initiatorKind === "subject" ? editedSourceTurn.initiatorSubjectId : null))
+  const acceptedInitiatingHumanSubjectId = inheritedSourceTurn
+    ? (inheritedSourceTurn.initiatingHumanSubjectId ??
+      (inheritedSourceTurn.initiatorKind === "subject"
+        ? inheritedSourceTurn.initiatorSubjectId
+        : null))
     : (frozenInitiator.initiatingHumanSubjectId ??
       (frozenInitiator.initiator.kind === "subject" ? frozenInitiator.initiator.subjectId : null));
+  if (
+    waitsForMachineOwner !==
+    (machineOwner !== null && (acceptedInitiatingHumanSubjectId?.trim() || null) !== machineOwner)
+  ) {
+    throw new SessionControlInvariantError("Prompt sender changed during admission");
+  }
+  assertPersonalSessionInitiator({
+    session: storedSession,
+    initiatingHumanSubjectId: acceptedInitiatingHumanSubjectId,
+  });
   if (
     (input.personalConnectionDelegations ?? []).length > 0 ||
     input.personalResourceAttachment !== undefined
@@ -2101,27 +2867,111 @@ export async function submitHumanPromptInTransaction(
       )`,
     );
   }
-  const xaiProviderAccountAuthoritySnapshot = editedSourceTurn
+  // Edits copy their source turn. A human resolves their own current pool.
+  // Agent-submitted work takes the receiving session's pool (never the
+  // sender's). Service/operator actors, organization API keys and bridges have
+  // no exact accepting human, so they resolve the organization or workspace
+  // pool and can never select a personal pool.
+  const nonHumanAuthority =
+    inheritedSourceTurn || input.actor.type === "human"
+      ? null
+      : input.actor.type === "agent_attempt"
+        ? await receiverSubscriptionAuthorityInTransaction(db, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            causalHumanSubjectId: acceptedInitiatingHumanSubjectId,
+          }).then((authority) => ({
+            xai: authority.xai.snapshot,
+            claude: authority.claude.snapshot,
+          }))
+        : await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(db, input.workspaceId);
+  const xaiProviderAccountAuthoritySnapshot = inheritedSourceTurn
     ? XaiProviderAccountAuthoritySnapshotV1.parse(
-        editedSourceTurn.xaiProviderAccountAuthoritySnapshot,
+        inheritedSourceTurn.xaiProviderAccountAuthoritySnapshot,
       )
-    : input.actor.type === "human"
-      ? await resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
+    : // SuperGrok's v1 value is never computed from live state after its
+      // cutover: a human's new work writes the column default (design 5.3,
+      // "v1 columns after a provider's cutover").
+      (nonHumanAuthority?.xai ?? WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1);
+  const claudeProviderAccountAuthoritySnapshot = inheritedSourceTurn
+    ? ClaudeProviderAccountAuthoritySnapshotV1.parse(
+        inheritedSourceTurn.claudeProviderAccountAuthoritySnapshot,
+      )
+    : (nonHumanAuthority?.claude ?? WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1);
+  // Codex v2 accepted authority (M3 PR 2a, 3b): an edit keeps its source
+  // turn's frozen value; a human prompt, whether sent or steered, resolves
+  // that human's own owner-caused authority; agent-submitted work copies the
+  // receiving session's value exactly as its v1 pools do (EP-T14); every
+  // other actor (service, operator, API key) freezes none. NULL until the
+  // account's Codex cutover is enabled. Reads the cutover row on every
+  // non-edit prompt (one indexed lookup).
+  const subscriptionAuthority = inheritedSourceTurn
+    ? (inheritedSourceTurn.subscriptionAuthority ?? null)
+    : input.actor.type === "agent_attempt"
+      ? await receiverSubscriptionAuthorityV2InTransaction(db, {
+          accountId: input.accountId,
           workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          causalHumanSubjectId: acceptedInitiatingHumanSubjectId,
         })
-      : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+      : await coreSubscriptionAuthorityV2ForAcceptanceInTransaction(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          acceptingSubjectId:
+            input.actor.type === "human" ? acceptedInitiatingHumanSubjectId : null,
+        });
+  await input.beforeFreshPromptCommit?.(db, {
+    claudeProviderAccountAuthoritySnapshot,
+    ...(inheritedSourceTurn
+      ? { claudeAcceptedSource: { kind: "session_turn" as const, turnId: inheritedSourceTurn.id } }
+      : input.actor.type === "agent_attempt"
+        ? {
+            claudeAcceptedSource: {
+              kind: "receiving_session" as const,
+              sessionId: input.sessionId,
+            },
+          }
+        : {}),
+  });
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
+  // An edit copies its source turn's accounts and a voice session hands off
+  // with the accounts frozen when voice started. Either may name a shared
+  // account disconnected or reconnected since; the prompt runs without it
+  // instead of the turn fence refusing the whole prompt.
+  const acceptedAccounts = await withoutLapsedWorkspaceAccountBindings(
+    db as unknown as Database,
+    input.workspaceId,
+    inheritedSourceTurn
+      ? inheritedSourceTurn.mcpAccountBindings
+      : parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
+  );
+  const acceptedTurnMetadata =
+    acceptedAccounts.gaps.length > 0
+      ? { ...input.turnMetadata, connectionAccountGaps: acceptedAccounts.gaps.slice(0, 32) }
+      : input.turnMetadata;
   const effectiveModelContext =
     editedSourceModelContext !== undefined
       ? editedSourceModelContext
       : (input.modelContext ?? null);
   const existingQueued = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
+  // Messages waiting for the machine's owner are not ahead of anyone: the
+  // owner's message runs next and takes them in.
+  const queuedAhead =
+    machineOwner === null || existingQueued.length === 0
+      ? existingQueued.length > 0
+      : await runnableQueuedTurnExists(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          sources: ["user", "api"],
+        });
   const routing: SessionPromptRouting =
     effectiveDelivery === "steer"
       ? "accepted_for_steering"
-      : before.state === "paused" || session.activeTurnId || existingQueued.length > 0
+      : waitsForMachineOwner || before.state === "paused" || session.activeTurnId || queuedAhead
         ? "queued_for_execution"
         : "accepted_for_execution";
   let sequence = session.lastSequence;
@@ -2172,6 +3022,7 @@ export async function submitHumanPromptInTransaction(
           source: input.source,
           // An edit resubmits the same logical message: keep where it entered.
           surface: sessionTurnSurfaceOrNull(editedSourceTurn?.surface) ?? input.surface ?? null,
+          billingOrigin: input.billingOrigin ?? null,
           promptRouting: routing,
           position: effectiveDelivery === "steer" ? 0 : existingQueued.length + 1,
           prompt: input.text,
@@ -2191,18 +3042,28 @@ export async function submitHumanPromptInTransaction(
             (session.latencyMode as LatencyMode),
           sandboxBackend: session.sandboxBackend,
           metadata: input.turnExecutionPolicy
-            ? metadataWithTurnExecutionPolicyV1(input.turnMetadata ?? {}, input.turnExecutionPolicy)
-            : (input.turnMetadata ?? {}),
-          lineage: { actor: input.actor.type },
+            ? metadataWithTurnExecutionPolicyV1(
+                acceptedTurnMetadata ?? {},
+                input.turnExecutionPolicy,
+              )
+            : (acceptedTurnMetadata ?? {}),
+          // An edit names the exact withdrawn turn it copies, so the database
+          // resolves the same source for accepted authority (0716).
+          lineage: inheritedSourceTurn
+            ? { actor: input.actor.type, editedFromTurnId: inheritedSourceTurn.id }
+            : { actor: input.actor.type },
           ...initiatorColumns(frozenInitiator),
           initiatingHumanSubjectId: acceptedInitiatingHumanSubjectId,
-          personalConnectionDelegations: editedSourceTurn
-            ? editedSourceTurn.personalConnectionDelegations
+          personalConnectionDelegations: inheritedSourceTurn
+            ? inheritedSourceTurn.personalConnectionDelegations
             : (input.personalConnectionDelegations ?? []),
-          mcpAccountBindings: editedSourceTurn
-            ? editedSourceTurn.mcpAccountBindings
-            : parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
+          mcpAccountBindings: acceptedAccounts.bindings,
+          connectionAccountIntent: inheritedSourceTurn
+            ? parseConnectionAccountIntent(inheritedSourceTurn.connectionAccountIntent)
+            : parseConnectionAccountIntent(input.connectionAccountIntent),
           xaiProviderAccountAuthoritySnapshot,
+          claudeProviderAccountAuthoritySnapshot,
+          subscriptionAuthority,
           createdAt: now,
           updatedAt: now,
         },
@@ -2212,6 +3073,9 @@ export async function submitHumanPromptInTransaction(
     )
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
+  await copySubscriptionAuthorityCompatInTransaction(db, [
+    { kind: "session_turn", workspaceId: input.workspaceId, id: turn.id },
+  ]);
   await input.captureTurnAuthority?.(db, turn.id);
   let committedTurn = turn;
   const personalResourceExpectedAuthorityEpoch =
@@ -2274,6 +3138,48 @@ export async function submitHumanPromptInTransaction(
     occurredAt: now,
   });
 
+  // Sending the exact saved composer chooses the chat's future policy, not
+  // just this turn's. Keep the write in prompt admission so a failed Send or
+  // replay cannot change defaults. Non-composer API/automated inputs retain
+  // their existing per-turn semantics. The boundary also prevents an older
+  // accepted turn that starts later from restoring the previous policy.
+  // A draft that follows the chat's settings made no choice, so its Send
+  // leaves them as they are (for example as the agent last set them). So does
+  // a Send that names no settings: it runs on the chat's current ones.
+  // (`turnExecutionPolicy` is always resolved for the turn, so it says nothing
+  // about whether the person picked a setting.)
+  const sendNamesPolicy =
+    (input.model ?? null) !== null ||
+    (input.reasoningEffort ?? null) !== null ||
+    (input.latencyMode ?? null) !== null;
+  const composerPolicy =
+    storedDraft &&
+    draftHoldsSent &&
+    sendNamesPolicy &&
+    !storedDraft.policyFollowsSession &&
+    (input.actor.type === "human" || input.actor.type === "operator")
+      ? {
+          model: turn.model,
+          reasoningEffort: turn.reasoningEffort,
+          latencyMode: turn.latencyMode,
+        }
+      : null;
+  if (composerPolicy) {
+    eventValues.push({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sequence: ++sequence,
+      type: "session.model_settings.updated",
+      payload: {
+        ...composerPolicy,
+        effectiveFrom: "future_turns",
+        receiptId: reserved.receipt.id,
+      },
+      occurredAt: now,
+    });
+  }
+
   const supersession =
     effectiveDelivery === "steer"
       ? await supersedeSessionCurrentDirectionInTransaction(db, {
@@ -2292,6 +3198,7 @@ export async function submitHumanPromptInTransaction(
           replacedTurn: null,
           liveCurrentTurnId: null,
           deferredUntilCompaction: false,
+          deferredUntilModelStep: false,
           lastSequence: session.lastSequence,
         };
   // Ownerless Steer settlement may have appended interrupted tool results.
@@ -2304,6 +3211,7 @@ export async function submitHumanPromptInTransaction(
   const replacedAttemptId = supersession.replacedTurn?.activeAttemptId ?? null;
   const liveCurrentTurnId = supersession.liveCurrentTurnId;
   const deferredUntilCompaction = supersession.deferredUntilCompaction;
+  const deferredUntilModelStep = supersession.deferredUntilModelStep;
   // Durable provenance for the queue projection. Until the superseded attempt
   // loses inference, user-visible output, and workspace-persistence authority,
   // its exact first-class attempt has no quiescence receipt. Pairing that
@@ -2321,7 +3229,7 @@ export async function submitHumanPromptInTransaction(
           replacedTurnId,
           replacedAttemptId,
           interruptionCount,
-          ...(deferredUntilCompaction ? { deferredUntilCompaction: true } : {}),
+          ...steerDeferralFacts(supersession),
         },
         updatedAt: now,
       })
@@ -2366,8 +3274,8 @@ export async function submitHumanPromptInTransaction(
         operationId: reserved.receipt.id,
         targetTurnId: turnId,
         replacedTurnId,
-        stopping: liveCurrentTurnId !== null && !deferredUntilCompaction,
-        ...(deferredUntilCompaction ? { deferredUntilCompaction: true } : {}),
+        stopping: liveCurrentTurnId !== null && !steerSupersessionIsDeferred(supersession),
+        ...steerDeferralFacts(supersession),
       },
       occurredAt: now,
     });
@@ -2378,12 +3286,16 @@ export async function submitHumanPromptInTransaction(
   // intent) resumes in this same commit; a user/API/agent/limits pause is never
   // touched here. Goal row FOR UPDATE follows the session and turn locks above,
   // the order the claim transaction uses.
-  const goalAutoResumed = await autoResumeGoalPausedByCapInTransaction(db, {
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    cause: { kind: "human_prompt", turnId },
-    now,
-  });
+  // A message waiting for the machine's owner is not input the goal can act
+  // on yet.
+  const goalAutoResumed = waitsForMachineOwner
+    ? null
+    : await autoResumeGoalPausedByCapInTransaction(db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        cause: { kind: "human_prompt", turnId },
+        now,
+      });
   if (goalAutoResumed) {
     eventValues.push({
       accountId: input.accountId,
@@ -2397,7 +3309,11 @@ export async function submitHumanPromptInTransaction(
   }
 
   const ordered =
-    effectiveDelivery === "steer" ? [turn, ...existingQueued] : [...existingQueued, turn];
+    effectiveDelivery !== "steer"
+      ? [...existingQueued, turn]
+      : steersStartingTurn
+        ? steerStartingTurnOrder(turn, existingQueued, machineOwner)
+        : steerQueueOrder(turn, existingQueued, supersession);
   await normalizeQueuePositions(
     db,
     input.workspaceId,
@@ -2406,9 +3322,12 @@ export async function submitHumanPromptInTransaction(
   );
   const noCurrentAfter =
     effectiveDelivery === "steer" ? liveCurrentTurnId === null : !session.activeTurnId;
-  const nextStatus = noCurrentAfter
-    ? "queued"
-    : (session.admissionBlock?.previousStatus ?? session.status);
+  // A waiting message is not work the chat can start, so it leaves the
+  // status alone.
+  const nextStatus =
+    noCurrentAfter && !waitsForMachineOwner
+      ? "queued"
+      : (session.admissionBlock?.previousStatus ?? session.status);
   if (nextStatus !== session.status) {
     eventValues.push({
       accountId: input.accountId,
@@ -2422,7 +3341,13 @@ export async function submitHumanPromptInTransaction(
   }
   const eventRows = await db
     .insert(schema.sessionEvents)
-    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+    .values(
+      withLosslessContentWriteVersion(
+        withBoundSessionEventPayloads(eventValues),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning();
   // Shared acceptance boundary covers ordinary Send/Steer and realtime. Only the
   // verified human command can share original uploads; inherited agent identity
@@ -2460,7 +3385,7 @@ export async function submitHumanPromptInTransaction(
         delivery: effectiveDelivery,
         routing,
         acceptedEventId,
-        instruction: "OpenGeni accepted and routed this user input; do not delegate it again.",
+        instruction: "Opengeni accepted and routed this user input; do not delegate it again.",
       },
       now,
     });
@@ -2469,7 +3394,11 @@ export async function submitHumanPromptInTransaction(
   await db
     .update(schema.sessions)
     .set({
+      ...composerPolicy,
       resources: mergeResourceRefs(session.resources as ResourceRef[], input.resources),
+      ...(repositoryAdmission.changed
+        ? { removedRepositories: repositoryAdmission.removedRepositories }
+        : {}),
       tools: session.tools,
       activeTurnId: effectiveDelivery === "steer" ? liveCurrentTurnId : session.activeTurnId,
       status: nextStatus,
@@ -2481,25 +3410,38 @@ export async function submitHumanPromptInTransaction(
       updatedAt: now,
     })
     .where(eq(schema.sessions.id, input.sessionId));
-  const [nextDraft] = draft
+  const [nextDraft] = draftHoldsSent
     ? await db
         .update(schema.composerDrafts)
         .set({
-          revision: draft.revision + 1,
+          revision: storedDraft.revision + 1,
           text: "",
           annotations: [],
           resources: [],
           tools: [],
           toolsProvided: false,
+          // The next message follows the chat's settings again. Store the
+          // ones this Send ran with, which are now the chat's current ones.
+          model: turn.model,
+          reasoningEffort: turn.reasoningEffort,
+          latencyMode: turn.latencyMode,
+          policyFollowsSession: true,
           sourceTurnId: null,
           sourceTurnVersion: null,
           updatedAt: now,
         })
-        .where(eq(schema.composerDrafts.id, draft.id))
+        .where(eq(schema.composerDrafts.id, storedDraft.id))
         .returning()
     : [undefined];
-  if (draft && !nextDraft) {
+  if (draftHoldsSent && !nextDraft) {
     throw new SessionControlInvariantError("Accepted composer draft did not rotate");
+  }
+  if (nextDraft) {
+    await notifyActorDraftChanged(db, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      sessionId: input.sessionId,
+    });
   }
   const wakeRevision = await registerSessionWorkflowWakeInTransaction(db, {
     accountId: input.accountId,
@@ -2526,6 +3468,7 @@ export async function submitHumanPromptInTransaction(
           replacedTurnId,
           interruptionCount,
           deferredUntilCompaction,
+          deferredUntilModelStep,
           ...(input.turnExecutionPolicy
             ? turnExecutionPolicyAuditMetadata(input.turnExecutionPolicy, turnId)
             : {}),
@@ -2571,8 +3514,10 @@ export async function submitHumanPromptInTransaction(
       interruptionCount,
       replacedTurnId,
       deferredUntilCompaction,
+      deferredUntilModelStep,
       workspaceControlEventId: resumed.workspaceControlEventId,
       routing,
+      ...(waitsForMachineOwner ? { waitsForMachineOwner: true } : {}),
       ...(input.turnExecutionPolicy
         ? {
             executionPolicy: turnExecutionPolicyAuditMetadata(input.turnExecutionPolicy, turnId),
@@ -2592,13 +3537,16 @@ export async function submitHumanPromptInTransaction(
     accepted,
     events,
     turn: mapSubmittedPromptTurn(committedTurn),
-    draft: nextDraft ?? null,
+    // The cleared draft, or the newer one another device saved, which stays
+    // (shown with the chat's current settings, as a read shows it).
+    draft: nextDraft ?? (await withEffectiveComposerDraftPolicy(db, storedDraft ?? null)),
     acceptedEventId,
     eventIds,
     turnId,
     wakeRevision,
     interruptionCount,
     workspaceControlEventId: resumed.workspaceControlEventId,
+    waitsForMachineOwner,
     replay: false,
   };
 }
@@ -2681,10 +3629,20 @@ export async function sendAgentMessageInTransaction(
     input.actor,
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
-  const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
+  const subscriptionCausalHuman = await subscriptionCausalHumanForAgentActor(
+    db,
+    input.workspaceId,
+    input.actor,
+  );
+  const sourceInitiator = await frozenInitiatorForCommandActor(
+    db as Database,
+    input.workspaceId,
+    input.actor,
+  );
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
   if (session.importedArchiveImportId)
     throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
+  if (session.contentArchiveState || session.archivedAt) throw new SessionArchivedError();
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -2692,6 +3650,19 @@ export async function sendAgentMessageInTransaction(
       { queueVersion: session.queueVersion },
     );
   }
+  // The pool belongs to the receiving session's accepted work, not the sender.
+  const receiverAuthority = await receiverSubscriptionAuthorityInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    causalHumanSubjectId: subscriptionCausalHuman,
+  });
+  // Codex v2 (M3 PR 3b): the same receiving source, copied (EP-T14).
+  const receiverAuthorityV2 = await receiverSubscriptionAuthorityV2InTransaction(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    causalHumanSubjectId: subscriptionCausalHuman,
+  });
   const effective = await evaluateSessionControl(db, input.workspaceId, input.targetSessionId, {
     workspaceControl,
   });
@@ -2725,17 +3696,27 @@ export async function sendAgentMessageInTransaction(
               callerTurnId: input.actor.turnId,
               callerAttemptId: input.actor.attemptId,
               callerExecutionGeneration: input.actor.executionGeneration,
+              ...(sourceInitiator.context.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : {}),
               ...(inheritedConnectionAuthority.connectionAuthoritySubjectId
                 ? {
                     connectionAuthoritySubjectId:
                       inheritedConnectionAuthority.connectionAuthoritySubjectId,
                   }
                 : {}),
-              ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
+              ...(subscriptionCausalHuman
+                ? {
+                    xaiAuthoritySubjectId: subscriptionCausalHuman,
+                    claudeAuthoritySubjectId: subscriptionCausalHuman,
+                  }
+                : {}),
             },
             personalConnectionDelegations,
             mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
-            xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
+            xaiProviderAccountAuthoritySnapshot: receiverAuthority.xai.snapshot,
+            claudeProviderAccountAuthoritySnapshot: receiverAuthority.claude.snapshot,
+            subscriptionAuthority: receiverAuthorityV2,
             state: "pending",
           },
           "summary",
@@ -2747,6 +3728,9 @@ export async function sendAgentMessageInTransaction(
     )
     .returning({ id: schema.sessionSystemUpdates.id });
   if (!update) throw new SessionControlInvariantError("Agent message was not inserted");
+  await copySubscriptionAuthorityCompatInTransaction(db, [
+    { kind: "session_system_update", workspaceId: input.workspaceId, id: update.id },
+  ]);
   // An Agent message is external input for the target's goal. A goal paused
   // only by its continuation ceiling (`max_auto_continuations`, pacing rather
   // than intent) resumes in this same commit; any other pause stays. Goal row
@@ -2787,7 +3771,13 @@ export async function sendAgentMessageInTransaction(
   ];
   const insertedEvents = await db
     .insert(schema.sessionEvents)
-    .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
+    .values(
+      withLosslessContentWriteVersion(
+        withBoundSessionEventPayloads(eventValues),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning({ id: schema.sessionEvents.id });
   if (insertedEvents.length !== eventValues.length) {
     throw new SessionControlInvariantError("Agent message event was not inserted");
@@ -2940,7 +3930,37 @@ export async function steerAgentSessionInTransaction(
     input.actor,
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
-  const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
+  const subscriptionCausalHuman = await subscriptionCausalHumanForAgentActor(
+    db,
+    input.workspaceId,
+    input.actor,
+  );
+  const sourceInitiator = await frozenInitiatorForCommandActor(
+    db as Database,
+    input.workspaceId,
+    input.actor,
+  );
+  // Only its owner can start work on a personal machine, so a Steer from
+  // anyone else's work could only stop the owner's turn and then never run.
+  // Refuse it before anything changes; a message waits for the owner instead.
+  const machineOwner = await sessionMachineOwnerSubject(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+  });
+  if (
+    machineOwner !== null &&
+    causalHuman(
+      sourceInitiator.initiatingHumanSubjectId,
+      sourceInitiator.initiator.kind,
+      sourceInitiator.initiator.kind === "subject" ? sourceInitiator.initiator.subjectId : null,
+    ) !== machineOwner
+  ) {
+    throw new AgentCommandAuthorityError(
+      "PERSONAL_MACHINE_OWNER_REQUIRED",
+      "The target session runs on another person's personal machine; only its owner can steer it",
+    );
+  }
   const resumed = await autoResumeSessionBranchInTransaction(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,
@@ -2951,6 +3971,7 @@ export async function steerAgentSessionInTransaction(
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
   if (session.importedArchiveImportId)
     throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
+  if (session.contentArchiveState || session.archivedAt) throw new SessionArchivedError();
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -2958,6 +3979,19 @@ export async function steerAgentSessionInTransaction(
       { queueVersion: session.queueVersion },
     );
   }
+  // The pool belongs to the receiving session's accepted work, not the sender.
+  const receiverAuthority = await receiverSubscriptionAuthorityInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    causalHumanSubjectId: subscriptionCausalHuman,
+  });
+  // Codex v2 (M3 PR 3b): the same receiving source, copied (EP-T14).
+  const receiverAuthorityV2 = await receiverSubscriptionAuthorityV2InTransaction(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    causalHumanSubjectId: subscriptionCausalHuman,
+  });
   const now = new Date();
   const updateId = crypto.randomUUID();
   // An Agent Steer is external input for the target's goal. A goal paused only
@@ -3019,17 +4053,27 @@ export async function steerAgentSessionInTransaction(
               callerTurnId: input.actor.turnId,
               callerAttemptId: input.actor.attemptId,
               callerExecutionGeneration: input.actor.executionGeneration,
+              ...(sourceInitiator.context.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : {}),
               ...(inheritedConnectionAuthority.connectionAuthoritySubjectId
                 ? {
                     connectionAuthoritySubjectId:
                       inheritedConnectionAuthority.connectionAuthoritySubjectId,
                   }
                 : {}),
-              ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
+              ...(subscriptionCausalHuman
+                ? {
+                    xaiAuthoritySubjectId: subscriptionCausalHuman,
+                    claudeAuthoritySubjectId: subscriptionCausalHuman,
+                  }
+                : {}),
             },
             personalConnectionDelegations,
             mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
-            xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
+            xaiProviderAccountAuthoritySnapshot: receiverAuthority.xai.snapshot,
+            claudeProviderAccountAuthoritySnapshot: receiverAuthority.claude.snapshot,
+            subscriptionAuthority: receiverAuthorityV2,
             state: "pending",
           },
           "summary",
@@ -3041,6 +4085,9 @@ export async function steerAgentSessionInTransaction(
     )
     .returning({ id: schema.sessionSystemUpdates.id });
   if (!update) throw new SessionControlInvariantError("Agent Steer instruction was not inserted");
+  await copySubscriptionAuthorityCompatInTransaction(db, [
+    { kind: "session_system_update", workspaceId: input.workspaceId, id: update.id },
+  ]);
   let sequence = supersession.lastSequence;
   const events: SessionEventInsertWithPayload[] = [];
   if (supersession.replacedTurn && !supersession.liveCurrentTurnId) {
@@ -3071,8 +4118,9 @@ export async function steerAgentSessionInTransaction(
         targetUpdateId: update.id,
         replacedTurnId: supersession.replacedTurn?.id ?? null,
         actorSessionId: input.actor.sessionId,
-        stopping: supersession.liveCurrentTurnId !== null && !supersession.deferredUntilCompaction,
-        ...(supersession.deferredUntilCompaction ? { deferredUntilCompaction: true } : {}),
+        stopping:
+          supersession.liveCurrentTurnId !== null && !steerSupersessionIsDeferred(supersession),
+        ...steerDeferralFacts(supersession),
       },
       occurredAt: now,
     },
@@ -3121,7 +4169,13 @@ export async function steerAgentSessionInTransaction(
   }
   const insertedEvents = await db
     .insert(schema.sessionEvents)
-    .values(withLosslessContentWriteVersion(events, "payload", "payloadCodecVersion"))
+    .values(
+      withLosslessContentWriteVersion(
+        withBoundSessionEventPayloads(events),
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
     .returning({
       id: schema.sessionEvents.id,
     });
@@ -3164,6 +4218,7 @@ export async function steerAgentSessionInTransaction(
           controlRevision: resumed.revision,
           interruptionCount: supersession.interruptionCount,
           deferredUntilCompaction: supersession.deferredUntilCompaction,
+          deferredUntilModelStep: supersession.deferredUntilModelStep,
           workspaceControlEventId: resumed.workspaceControlEventId,
         },
       },
@@ -3181,6 +4236,7 @@ export async function steerAgentSessionInTransaction(
       workflowId,
       interruptionCount: supersession.interruptionCount,
       deferredUntilCompaction: supersession.deferredUntilCompaction,
+      deferredUntilModelStep: supersession.deferredUntilModelStep,
     },
   });
   return {

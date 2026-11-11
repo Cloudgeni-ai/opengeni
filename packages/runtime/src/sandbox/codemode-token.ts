@@ -49,7 +49,7 @@ export function shellCodemodePath(value: string): string {
  * Derive the per-session token file beside the legacy manifest pointer.
  *
  * The manifest pointer stays box-global so an already-warm shared sandbox does
- * not receive an illegal environment delta. Every OpenGeni command overrides
+ * not receive an illegal environment delta. Every Opengeni command overrides
  * that pointer with this deterministic path. The hash is path hygiene and
  * avoids disclosing host/session ids in filenames; filesystem paths are not an
  * authorization boundary. The delegated bearer's session claim remains the
@@ -97,7 +97,7 @@ export function withCodemodeTokenEnvironment(
   ].join("\n");
 }
 
-/** Preserve provider identity/capabilities while decorating command creation. */
+/** Decorate command creation without changing identity, capabilities or trailing options. */
 export function withCodemodeTokenSession<T extends object>(
   session: T,
   tokenFile: string,
@@ -108,14 +108,18 @@ export function withCodemodeTokenSession<T extends object>(
     get(target, property, receiver) {
       if (property === "exec" || property === "execCommand") {
         const command = Reflect.get(target, property, target) as
-          | ((args: ExecCommandArgs) => Promise<unknown>)
+          | ((args: ExecCommandArgs, ...callArgs: unknown[]) => Promise<unknown>)
           | undefined;
         if (!command) return undefined;
-        return async (args: ExecCommandArgs) =>
-          await command.call(target, {
-            ...args,
-            cmd: withCodemodeTokenEnvironment(args.cmd, tokenFile, codemodeUrl, clientDirectory),
-          });
+        return async (args: ExecCommandArgs, ...callArgs: unknown[]) =>
+          await command.call(
+            target,
+            {
+              ...args,
+              cmd: withCodemodeTokenEnvironment(args.cmd, tokenFile, codemodeUrl, clientDirectory),
+            },
+            ...callArgs,
+          );
       }
       const value = Reflect.get(target, property, receiver) as unknown;
       return typeof value === "function" ? value.bind(target) : value;

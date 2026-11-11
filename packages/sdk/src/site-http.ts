@@ -8,7 +8,8 @@ export type SiteHttpRequest = {
   path: string;
   method: string;
   headers: [string, string][];
-  body?: string;
+  /** Text for JSON requests; bytes for Site Data file uploads. */
+  body?: string | ArrayBuffer;
 };
 
 import { siteSessionPath } from "@opengeni/contracts/site-session-http";
@@ -23,7 +24,7 @@ export function isSiteHttpRequest(value: unknown): value is SiteHttpRequest {
     typeof v.path === "string" &&
     typeof v.method === "string" &&
     /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(v.method) &&
-    (v.body === undefined || typeof v.body === "string") &&
+    (v.body === undefined || typeof v.body === "string" || v.body instanceof ArrayBuffer) &&
     Array.isArray(v.headers) &&
     v.headers.every(
       (h) => Array.isArray(h) && h.length === 2 && h.every((x) => typeof x === "string"),
@@ -96,7 +97,15 @@ export async function sitePortFetch(
   siteSessionPath(path, SITE_WORKSPACE, request.method);
   const channel = new MessageChannel();
   const requestId = crypto.randomUUID();
-  const body = request.body ? await request.text() : undefined;
+  const binary =
+    init?.body instanceof ArrayBuffer ||
+    ArrayBuffer.isView(init?.body) ||
+    (typeof Blob !== "undefined" && init?.body instanceof Blob);
+  const body = request.body
+    ? binary
+      ? await request.arrayBuffer()
+      : await request.text()
+    : undefined;
   return await new Promise<Response>((resolve, reject) => {
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
     let finished = false;

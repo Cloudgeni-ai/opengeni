@@ -23,7 +23,7 @@ describe("@opengeni/react compiled CSS in Chromium", () => {
         </div>
         <div class="shadow-lg" id="shadow"></div>
         <div class="ring-2 ring-og-accent" id="ring"></div>
-        <div class="blur" id="blur"></div>
+        <div class="backdrop-blur" id="blur"></div>
         <div class="border border-og-border" id="border"></div>
         <div class="bg-og-bg text-og-menu" id="defaults"></div>
       </div>
@@ -83,13 +83,43 @@ describe("@opengeni/react compiled CSS in Chromium", () => {
           <button class="og-realtime-model-trigger" id="wide-realtime-trigger"></button>
         </div>
       </div>
-      <div class="border blur shadow-lg" id="outside"></div>
+      <div class="border backdrop-blur shadow-lg" id="outside"></div>
     `);
   });
 
   afterAll(async () => {
     await browser?.close();
   });
+
+  test.each([
+    { hasTouch: true, expectedGap: "10px" },
+    { hasTouch: false, expectedGap: "6px" },
+  ])(
+    "attachment gap uses the published CSS for touch=$hasTouch",
+    async ({ hasTouch, expectedGap }) => {
+      const context = await browser.newContext({ hasTouch });
+      const gapPage = await context.newPage();
+      try {
+        await gapPage.setContent(`
+        <style>${compiledCss}</style>
+        <div class="og-root">
+          <div id="attachments" class="flex flex-wrap gap-1.5 pointer-coarse:gap-2.5"></div>
+        </div>
+        <div id="outside" class="flex flex-wrap gap-1.5 pointer-coarse:gap-2.5"></div>
+      `);
+        const styles = await gapPage.evaluate(() => ({
+          coarse: matchMedia("(pointer: coarse)").matches,
+          inside: getComputedStyle(document.getElementById("attachments")!).gap,
+          outside: getComputedStyle(document.getElementById("outside")!).gap,
+        }));
+        expect(styles.coarse).toBe(hasTouch);
+        expect(styles.inside).toBe(expectedGap);
+        expect(styles.outside).toBe("normal");
+      } finally {
+        await context.close();
+      }
+    },
+  );
 
   test("transform, shadow, ring, blur, and border utilities keep valid computed styles", async () => {
     const styles = await page.evaluate(() => {
@@ -99,7 +129,7 @@ describe("@opengeni/react compiled CSS in Chromium", () => {
         childTranslateVariable: computed("transform-child").getPropertyValue("--tw-translate-x"),
         shadow: computed("shadow").boxShadow,
         ring: computed("ring").boxShadow,
-        blur: computed("blur").filter,
+        blur: computed("blur").backdropFilter,
         borderStyle: computed("border").borderTopStyle,
         borderWidth: computed("border").borderTopWidth,
       };
@@ -138,7 +168,7 @@ describe("@opengeni/react compiled CSS in Chromium", () => {
           .backgroundColor,
         rootDensity: getComputedStyle(document.getElementById("root-density-override")!).fontSize,
         outsideBorder: outside.borderTopWidth,
-        outsideFilter: outside.filter,
+        outsideFilter: outside.backdropFilter,
         outsideShadow: outside.boxShadow,
       };
     });

@@ -1,45 +1,50 @@
+import { FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE } from "./provider-recovery-policy";
 import {
-  requestSessionTurnRecovery,
-  getSessionGoal,
-  armXaiCapacityWait,
-  reconcileXaiCapacityWait,
-  listCodexAccountStatuses,
-  quarantineCodexCredentialForLease,
+  findJsonStringifyRefusal,
+  unsupportedProtocolValueFailure,
+} from "./protocol-value-failure";
+import { recordSessionUsageLimitEvent } from "@opengeni/core";
+import { reportSessionPersistenceFailure } from "./persistence-diagnostic";
+import { shouldFallbackModelSocket } from "./persistent-transport-recovery";
+import {
+  requestSessionTurnRecovery as persistSessionTurnRecovery,
+  readSessionTurnSandboxBoxNotSaved,
   recordUsageEvent,
   getActiveSessionHistoryItemsPaged,
-  recheckCodexCredentialPlan,
-  settleCodexCredentialLeaseLoss,
-  settleCodexCredentialFailover,
   readLease,
   SandboxLeaseSupersededError,
   isSessionEventPersistenceError,
-  type CodexLeaseAccountStatus,
+  SANDBOX_SETUP_RECOVERY_LIMIT,
+  SubscriptionCoreCodexAccessLostError,
+  SubscriptionCoreCodexSourceDisconnectedError,
+  SubscriptionCoreCodexRequestOutcomeUnknownError,
+  isSubscriptionCoreCodexSourceDisconnected,
+  SubscriptionCoreCodexLeaseLostError,
+  readSessionTurnToolProgressRecoveryState,
+  isSessionCompactionRequested,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { maxTurnsExceededRunState } from "@opengeni/runtime";
-import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
-  authoritativeCodexCapacityResetAt,
-  classifyCodexPin,
-  selectCodexCredentialLeaseForTurn,
-  type CodexRotationStrategy,
-} from "../codex-rotation";
+  maxTurnsExceededRunState,
+  isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
+  isProviderCommandObservationUnavailableError,
+  isRoutingMutationOutcomeUnknownError,
+  toolCallCommandNotStartedCallIds,
+  UnsupportedProtocolJsonValueError,
+} from "@opengeni/runtime";
+import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
+
 import { TurnExecutionPolicyDefinitionMismatchError, type Settings } from "@opengeni/config";
 import {
+  CodexReloginRequired,
+  CodexStreamingTerminalError,
   classifyCodexEncryptedArtifactRejection,
   classifyCodexEntitlementRejection,
   classifyCodexUsageLimitError,
   isCodexTransportError,
-  type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
-import {
-  assessCodexPlanEntitlement,
-  codexAccountDisplayLabel,
-  codexPlanEntitlementFailurePayload,
-  codexRequestRejectedFailurePayload,
-  type CodexPlanEntitlementFailurePayload,
-  type CodexRequestRejectedFailurePayload,
-} from "./codex-plan-entitlement";
+
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { deliverFailedChildTurnToParent } from "../parent-wake";
 import type {
@@ -48,26 +53,49 @@ import type {
   RunAgentTurnResult,
 } from "../types";
 import { CodexCredentialLeaseLostError, createTurnCredentialLeases } from "./credential-leases";
-import { createTurnHistorySink } from "./history-sink";
-
-import { BudgetExhaustedError } from "./admission";
 import {
+  SubscriptionCoreCodexTurnError,
+  subscriptionCoreAccountRefusedFailure,
+  subscriptionCoreLeaseBusyChain,
+  subscriptionCoreLeaseBusyDelayMs,
+  subscriptionCoreLeaseBusyExhaustedFailure,
+} from "./codex-core-errors";
+import { recordCoreCodexRefusal } from "./codex-core-settlement";
+import { failOverCoreCodexTurn } from "./codex-core-failover";
+import { createTurnHistorySink } from "./history-sink";
+import { SandboxBoxNotSavedError } from "./sandbox-setup-agent-failure";
+
+import { BudgetExhaustedError, sessionUsageLimitStopEvents } from "./admission";
+import {
+  SESSION_USAGE_CUSTODY_PENDING,
+  SESSION_USAGE_CUSTODY_RECHECK_MS,
+  sessionUsageCustodyPending,
+} from "./session-usage-custody";
+import {
+  automaticRecoveryUnavailableFailure,
   providerRecoveryExhaustedFailure,
+  withModelRoutePresentation,
   postClaimDatabaseRecoveryFailure,
   providerRecoveryResult,
+  providerRecoveryCode,
+  providerRecoveryLimit,
+  PROVIDER_OVERLOAD_RECOVERY_CODE,
+  modelSocketFallbackRecoveryLimit,
   providerRetryAfterMs,
   escapedMcpTimeoutRecoveryFailure,
   preClaimAdmissionFailure,
   isWorkerShutdownCancellation,
+  isSandboxMachineReplacing,
   sandboxLifecycleTransitionDiagnostic,
   sandboxRouteTransitionCode,
   safeErrorDiagnostic,
-  classifyXaiCredentialFailure,
   agentRunFailurePayload,
-  codexCredentialCooldownUntil,
+  agentRunRecoveryFailurePayload,
   classifyCodexCredentialFailure,
   codexUsageLimitFailurePayload,
-  type CodexCredentialFailure,
+  compactionFailureTurnEventPayload,
+  compactionFailureReason,
+  compactionFailureReasonFromError,
 } from "./errors";
 import { selectRejectedProviderArtifactHistoryIds } from "./history";
 import { waitForTurnFinalizerStep, turnFinalizerCancellationSignal } from "./quiescence";
@@ -79,12 +107,27 @@ import {
 import type {
   AttemptIdentityState,
   BillingState,
+  CodexSubscriptionCoreTurn,
   EventingState,
   ProviderTurnState,
   TurnControlState,
 } from "./turn-context";
-import type { CodexCredentialPolicySnapshotV1 } from "@opengeni/contracts";
-import { armAndReconcileCodexCapacityWait } from "../codex-capacity";
+import type { createCoreCodexRequests } from "./codex-core-requests";
+import {
+  XAI_CORE_REFUSAL,
+  xaiCoreLanesRecoverAfterCheckpoint,
+  xaiCoreRequestOutcomeUnknown,
+} from "./xai-core";
+import { settleCoreSubscriptionRefusal } from "./subscription-core-settlement";
+import { claudeCoreRefusal, claudeCoreRequestOutcomeUnknown } from "./claude-core";
+import { coreLanesRecoverAfterCheckpoint } from "./subscription-core-requests";
+
+import {
+  providerRecoveryCause,
+  recordProviderRecoveryOutcome,
+  turnRecoveryCauseForCode,
+} from "./provider-recovery-metrics";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type TurnFailureDeps = {
   error: unknown;
@@ -94,6 +137,8 @@ export type TurnFailureDeps = {
   bus: ActivityServices["bus"];
   observability: ActivityServices["observability"];
   wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
+  /** Typed capacity-wake signals of core waiters (a refusal's joined observations may wake them). */
+  signalCodexCapacityWorkflow?: ActivityServices["signalCodexCapacityWorkflow"];
   cancellationSignal: AbortSignal | undefined;
   sandboxRotationController: AbortController;
   noteCancellationRequested: () => void;
@@ -118,146 +163,42 @@ export type TurnFailureDeps = {
 
 export type CodexDefinitiveFailureDisposition = "failover" | "wait" | "terminal";
 
-type CodexCapacityWaitFailurePayload = {
-  error: string;
-  code: string;
-  detail?: string;
-  retryable: false;
-};
-
-/**
- * Pure policy for a definitive serving-credential refusal. A policy-constrained
- * account and an all-unavailable pool wait for the same selected capacity to
- * recover; only a truly empty/non-allocatable pool makes an auth/forbidden
- * failure terminal. A different eligible account under rotation-on policy may
- * recover the same durable turn immediately.
- */
-export function codexDefinitiveFailureDisposition(input: {
-  failureKind: CodexCredentialFailure["kind"];
-  rotationEnabled: boolean;
-  pinDisposition: "manual" | "sharded" | "clearStale" | "unpinned";
-  decisionKind: "active" | "allCapped" | "none";
-  decisionCredentialId: string | null;
-  servingCredentialId: string;
-}): CodexDefinitiveFailureDisposition {
-  const alternateAvailable =
-    input.rotationEnabled &&
-    input.pinDisposition !== "manual" &&
-    input.decisionKind === "active" &&
-    input.decisionCredentialId !== null &&
-    input.decisionCredentialId !== input.servingCredentialId;
-  if (alternateAvailable) return "failover";
-  // A plan that no longer includes the model does not recover by itself, and
-  // a manual pin or rotation-off pointer names exactly that account. Only a
-  // rotation-on pool whose OTHER accounts are temporarily capped is worth a
-  // durable wait; everything else fails the turn with typed copy.
-  if (input.failureKind === "plan_entitlement") {
-    return input.decisionKind === "allCapped" &&
-      input.rotationEnabled &&
-      input.pinDisposition !== "manual"
-      ? "wait"
-      : "terminal";
-  }
-  if (
-    input.failureKind === "quota" ||
-    input.failureKind === "rate_limit" ||
-    input.decisionKind === "allCapped" ||
-    !input.rotationEnabled ||
-    input.pinDisposition === "manual"
-  ) {
-    return "wait";
-  }
-  return "terminal";
-}
-
-/**
- * Bound one turn to the alternate credentials that policy actually permits.
- * The effective account list is already workspace/organization scoped;
- * allocator-disabled rows must not enlarge the retry budget. The database
- * requires a positive bound even though one-account paths never fail over.
- */
-export function codexCredentialFailoverLimit(
-  accounts: ReadonlyArray<{ id: string; allocatorEnabled: boolean }>,
-  servingCredentialId: string,
-): number {
-  const allocatableAccounts = accounts.filter((account) => account.allocatorEnabled).length;
-  const servingIsAllocatable = accounts.some(
-    (account) => account.id === servingCredentialId && account.allocatorEnabled,
-  );
-  return Math.max(1, allocatableAccounts - (servingIsAllocatable ? 1 : 0));
-}
-
-/** Build the durable waiter payload without collapsing quota refusals into 403. */
-export function codexCapacityWaitFailurePayload(input: {
-  failureKind: CodexCredentialFailure["kind"];
-  usageLimit: { resetsInSeconds: number | null } | null;
-  cooldownSeconds: number | null;
-  detail: string;
-  allAccounts: boolean;
-  planEntitlement?: CodexPlanEntitlementFailurePayload | null;
-}): CodexCapacityWaitFailurePayload {
-  if (input.failureKind === "plan_entitlement") {
-    return {
-      error:
-        input.planEntitlement?.error ??
-        "The serving ChatGPT account's plan does not include this model. OpenGeni is waiting for another connected account to become available.",
-      code: "codex_plan_entitlement",
-      detail: input.detail,
-      retryable: false,
-    };
-  }
-  if (input.failureKind === "quota") {
-    return codexUsageLimitFailurePayload(
-      input.usageLimit ?? { resetsInSeconds: input.cooldownSeconds },
-      input.detail,
-      input.allAccounts ? { allAccounts: true } : undefined,
-    );
-  }
-  if (input.failureKind === "rate_limit") {
-    return {
-      error: "The serving Codex subscription is temporarily rate limited.",
-      code: "codex_account_rate_limited",
-      detail: input.detail,
-      retryable: false,
-    };
-  }
-  if (input.failureKind === "auth") {
-    return {
-      error: "The serving Codex account requires reconnection.",
-      code: "codex_relogin_required",
-      detail: "the same accepted turn is waiting for the selected account to recover",
-      retryable: false,
-    };
-  }
-  return {
-    error: "The serving Codex account is not authorized for this request.",
-    code: "codex_account_forbidden",
-    detail: "the same accepted turn is waiting for the selected account to recover",
-    retryable: false,
-  };
-}
-
-function codexLeaseAccountsForSelection(
-  accounts: Awaited<ReturnType<typeof listCodexAccountStatuses>>,
-): CodexLeaseAccountStatus[] {
-  return accounts.map((account) => ({
-    ...account,
-    activeLeaseCount: 0,
-    selectionCount: 0,
-    lastSelectedAt: null,
-  }));
-}
-
-function acceptedCodexPolicySnapshot(
-  providerTurn: ProviderTurnState,
-): CodexCredentialPolicySnapshotV1 {
-  if (!providerTurn.codexPolicySnapshot) {
-    throw new Error("Codex accepted policy snapshot is missing after durable lease acquisition");
-  }
-  return providerTurn.codexPolicySnapshot;
-}
-
 export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgentTurnResult> {
+  try {
+    return await settleTurnFailureInAttempt(deps);
+  } catch (error) {
+    if (
+      deps.control.activityStatus === "recovering" &&
+      error instanceof ApplicationFailure &&
+      error.type === "OpenGeniPostClaimDatabaseRecovery"
+    )
+      throw error;
+    // Connectivity can disappear while settling an unrelated run error too.
+    // Do not overwrite a possibly committed settlement; the control lane
+    // re-reads exact ownership and becomes a stale no-op if it already closed.
+    if (deps.attempt.turnId && deps.attempt.triggerEventId) {
+      const recovery = postClaimDatabaseRecoveryFailure({
+        // A failed rollback/terminal write must not erase no-replay evidence
+        // from the failure we were settling (notably unknown tool effects).
+        error: new AggregateError([error, deps.error], "Turn failure settlement failed"),
+        turnId: deps.attempt.turnId,
+        triggerEventId: deps.attempt.triggerEventId,
+        executionGeneration: deps.attempt.executionGeneration,
+        requireDatabaseProvenance: true,
+      });
+      if (recovery) {
+        deps.control.activityStatus = "recovering";
+        deps.control.turnMetricOutcome = "recovering";
+        deps.control.turnRecoveryCause = "database";
+        deps.control.activityError = error;
+        throw recovery;
+      }
+    }
+    throw error;
+  }
+}
+
+async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAgentTurnResult> {
   if (deps.settings.environment === "local" && deps.error instanceof Error) {
     // Keep local startup failures diagnosable without logging error messages,
     // absolute host paths, prompts, credentials, or provider response bodies.
@@ -269,7 +210,6 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     console.error(JSON.stringify({ message: "Local turn failure source locations", locations }));
   }
   const {
-    error,
     input,
     settings,
     db,
@@ -292,35 +232,29 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     acknowledgeLostAttemptOwnership,
     acknowledgeRecoveryQuiescence,
   } = deps;
+  // A turn whose own box replacement cannot be saved stops instead of
+  // waiting (see sandboxBoxNotSavedStop).
+  const error = await sandboxBoxNotSavedStop(deps);
+  // A refused socket applies to the entire logical turn, including recovery
+  // caused later by a lease, tool, or worker interruption rather than a model.
+  const requestTurnRecovery: typeof persistSessionTurnRecovery = (
+    database,
+    workspaceId,
+    recovery,
+  ) =>
+    persistSessionTurnRecovery(database, workspaceId, {
+      ...recovery,
+      ...(providerTurn.persistentModelTransportHttpOnly
+        ? { persistentModelTransportHttpOnly: true as const }
+        : {}),
+    });
   // Capture before any recovery/checkpoint DB operation can fail again.
   if (isSessionEventPersistenceError(error)) {
-    try {
-      const diagnosticId = observability.recordFailureDiagnostic({
-        code: error.details.code,
-        stage:
-          error.details.stage === "session_events.append_generic"
-            ? "session_events.append_generic"
-            : error.details.stage === "session_events.append_for_turn_attempt"
-              ? "session_events.append_for_turn_attempt"
-              : error.details.stage === "session_attempts.claim"
-                ? "session_attempts.claim"
-                : "failure_settlement",
-        retryDecision: error.details.retryOutcome,
-        error,
-        sessionId: input.sessionId,
-        ...(attempt.turnId ? { turnId: attempt.turnId } : {}),
-        attemptId: input.attemptId,
-        attempts: error.details.attempts,
-        eventTypes: error.details.eventTypes,
-        sqlState: error.details.sqlState,
-        ...(error.details.database.constraint
-          ? { constraint: error.details.database.constraint }
-          : {}),
-      });
-      observability.error("session event persistence failed", { correlationId: diagnosticId });
-    } catch {
-      // Failure settlement must not depend on telemetry availability.
-    }
+    reportSessionPersistenceFailure(observability, error, {
+      sessionId: input.sessionId,
+      ...(attempt.turnId ? { turnId: attempt.turnId } : {}),
+      attemptId: input.attemptId,
+    });
   }
   // Graceful worker shutdown (deploy / rollout restart): checkpoint the
   // same current inference for a new fenced attempt instead of failing the
@@ -335,11 +269,93 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // back to the workflow-claimed turn when the local lookup had not
   // finished yet.
   const recoveryTurnId = attempt.turnId;
+  // Unlike proven pre-dispatch failure, a genuine SDK Start/Wait uncertainty
+  // cannot reconstruct setup on a replacement attempt. The exact command and
+  // writer remain retained by sandbox-runtime; the logical turn is parked as
+  // recovering with a durable no-replay marker, not failed or completed.
+  const observationUnavailable = isProviderCommandObservationUnavailableError(error);
+  if (
+    (isModalCommandStartOutcomeUnknownError(error) || observationUnavailable) &&
+    recoveryTurnId &&
+    attempt.triggerEventId &&
+    attempt.executionGeneration > 0
+  ) {
+    let recovery: Awaited<ReturnType<typeof requestTurnRecovery>>;
+    try {
+      if (eventing.turnStartedPublished) {
+        await flushRuntimeBatcher();
+        await historySink.reconcileConversationTruth({ requireDurable: true });
+      }
+      recovery = await requestTurnRecovery(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId,
+        attemptId: input.attemptId,
+        reason: observationUnavailable
+          ? "sandbox_command_observation_unavailable"
+          : "sandbox_command_start_outcome_unknown",
+        sandboxSetupOutcomeUnknown: true,
+        detail: {
+          code: observationUnavailable
+            ? "sandbox_command_observation_unavailable"
+            : "sandbox_command_start_outcome_unknown",
+          retryable: false,
+          setupOutcome: "unknown",
+          replay: "blocked",
+          providerRecoveryCount: attempt.providerRecoveryCount,
+        },
+      });
+    } catch (checkpointError) {
+      const databaseRecovery = postClaimDatabaseRecoveryFailure({
+        error: checkpointError,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId,
+        executionGeneration: attempt.executionGeneration,
+        sandboxSetupOutcomeUnknown: true,
+      });
+      if (!databaseRecovery) throw checkpointError;
+      control.activityStatus = "recovering";
+      control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "database";
+      control.activityError = error;
+      throw databaseRecovery;
+    }
+    if (recovery.action === "stale") {
+      acknowledgeLostAttemptOwnership();
+      control.activityStatus = "cancelled";
+      control.turnMetricOutcome = "cancelled";
+      return claimedResult({ status: "cancelled" });
+    }
+    acknowledgeRecoveryQuiescence();
+    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+    control.activityStatus = "recovering";
+    control.turnMetricOutcome = "recovering";
+    control.turnRecoveryCause = "sandbox";
+    control.activityError = error;
+    return claimedResult({ status: "recovering", deferredUntilWake: true });
+  }
+  // Call-scoped proof that an in-flight exec_command never dispatched its
+  // command: the provider's typed pre-dispatch refusal in the error, or a call
+  // whose every operation was still waiting for (or had failed in) sandbox
+  // resolution, which settling closes so it never dispatches later. Those
+  // calls settle as not started (replay safe), never unknown, whether this
+  // turn recovers or fails.
+  const commandCallsNotStarted = (): string[] =>
+    isRoutingMutationOutcomeUnknownError(error)
+      ? []
+      : [
+          ...new Set([
+            ...toolCallCommandNotStartedCallIds(error),
+            ...(eventing.toolCancellationFenceRef?.current?.settleCommandCallsNotStarted?.() ?? []),
+          ]),
+        ];
   // A true epoch supersession and a provider lifecycle transition are both
   // recoverable control-plane states, never session failures. A rotation
   // persists an exact group/epoch wait marker so the workflow parks before
   // another turn-worker dispatch; shorter non-rotation transitions retain
-  // their existing paced retry.
+  // their existing paced retry. A command still waiting for the box (for
+  // example while setup found it could not start programs and asked for its
+  // replacement) never reached it, so it settles as not started.
   const lifecycleTransition = sandboxLifecycleTransitionDiagnostic(error);
   const leaseControlError =
     error instanceof SandboxLeaseSupersededError ? error : lifecycleTransition;
@@ -364,7 +380,12 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             reason: "rotation_in_progress" as const,
           }
         : undefined;
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      const transitionRetryAfterMs =
+        transitionPending && !sandboxLifecycleWait
+          ? sandboxDeadlineRotationRecoveryDelayMs(settings)
+          : undefined;
+      const notStartedToolCallIds = commandCallsNotStarted();
+      const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
@@ -389,6 +410,8 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             }
           : {}),
         ...(sandboxLifecycleWait ? { sandboxLifecycleWait } : {}),
+        ...(transitionRetryAfterMs !== undefined ? { retryAfterMs: transitionRetryAfterMs } : {}),
+        ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
       });
       if (recovery.action === "stale") {
         acknowledgeLostAttemptOwnership();
@@ -400,12 +423,11 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "sandbox";
       return claimedResult({
         status: "recovering",
-        ...(transitionPending && !sandboxLifecycleWait
-          ? {
-              continueDelayMs: sandboxDeadlineRotationRecoveryDelayMs(settings),
-            }
+        ...(transitionRetryAfterMs !== undefined
+          ? { continueDelayMs: transitionRetryAfterMs }
           : {}),
       });
     } catch (recoveryError) {
@@ -419,11 +441,78 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // and continue the SAME logical turn in a fresh attempt. That next attempt
   // starts from the committed pointer and establishes its route normally.
   const routeTransitionCode = sandboxRouteTransitionCode(error);
+  // An earlier single model call in this task still owes its usage receipt
+  // (a fenced custody marker, or an open one past the overdue window). This
+  // is a wait for the owner to fill it or for maintenance to disclose it as
+  // unpriced, never a turn failure: keep the turn and its durable history,
+  // park it as recovering, and let the replacement attempt re-check
+  // admission (database reads only) with the workflow's bounded backoff.
+  // The blocked request was never sent, so nothing is replayed.
+  if (
+    sessionUsageCustodyPending(error) &&
+    recoveryTurnId &&
+    attempt.triggerEventId &&
+    eventing.publish &&
+    eventing.turnStartedPublished
+  ) {
+    recordSessionUsageLimitEvent(observability, "between_calls", "unavailable");
+    let recovery: Awaited<ReturnType<typeof requestTurnRecovery>>;
+    try {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+      recovery = await requestTurnRecovery(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId,
+        attemptId: input.attemptId,
+        reason: SESSION_USAGE_CUSTODY_PENDING,
+        retryAfterMs: SESSION_USAGE_CUSTODY_RECHECK_MS,
+        detail: {
+          code: SESSION_USAGE_CUSTODY_PENDING,
+          retryable: true,
+          continueDelayMs: SESSION_USAGE_CUSTODY_RECHECK_MS,
+        },
+      });
+    } catch (recoveryError) {
+      const postClaimRecovery = postClaimDatabaseRecoveryFailure({
+        error: recoveryError,
+        turnId: recoveryTurnId,
+        triggerEventId: attempt.triggerEventId,
+        executionGeneration: attempt.executionGeneration,
+      });
+      if (postClaimRecovery) {
+        control.activityStatus = "recovering";
+        control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "database";
+        control.activityError = error;
+        throw postClaimRecovery;
+      }
+      throw recoveryError;
+    }
+    if (recovery.action === "stale") {
+      acknowledgeLostAttemptOwnership();
+      control.activityStatus = "cancelled";
+      control.turnMetricOutcome = "cancelled";
+      return claimedResult({ status: "cancelled" });
+    }
+    if (recovery.action === "recovering") {
+      acknowledgeRecoveryQuiescence();
+      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+      control.activityStatus = "recovering";
+      control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "control";
+      control.activityError = error;
+      return claimedResult({
+        status: "recovering",
+        continueDelayMs: SESSION_USAGE_CUSTODY_RECHECK_MS,
+      });
+    }
+  }
   if (routeTransitionCode && recoveryTurnId && eventing.publish && eventing.turnStartedPublished) {
     try {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
@@ -447,6 +536,11 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      // A swap or detach moved the active sandbox mid-turn: continuing on the
+      // new route is the designed boundary, not a fault. Only a home backend
+      // that still needs recovery is a sandbox problem.
+      control.turnRecoveryCause =
+        routeTransitionCode === "home_backend_recovery_pending" ? "sandbox" : "route_change";
       control.activityError = error;
       return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
@@ -464,7 +558,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
       const rotation = sandboxRotationController.signal.reason;
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
@@ -491,6 +585,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "sandbox";
       return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
       console.error(
@@ -513,7 +608,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       // action crosses the durable execution-admission fence before provider
       // invocation, so a consumed step resumes as already-executed or
       // outcome-unknown rather than calling MCP again.
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
@@ -530,6 +625,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "worker";
       return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
       // The database transition is atomic. If it could not commit, surface
@@ -574,6 +670,28 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     // competing cancellation or mutate the turn/session on its own.
     control.turnMetricOutcome = "cancelled";
     throw cancellationFailure;
+  }
+  if (attempt.turnId && attempt.triggerEventId && attempt.executionGeneration > 0) {
+    const recoveryFailure = postClaimDatabaseRecoveryFailure({
+      error,
+      turnId: attempt.turnId,
+      triggerEventId: attempt.triggerEventId,
+      executionGeneration: attempt.executionGeneration,
+      requireDatabaseProvenance: eventing.turnStartedPublished || attempt.modelRequestStarted,
+    });
+    if (recoveryFailure) {
+      // Stop this non-retryable activity without terminal logical settlement.
+      // Do not retry a delta/tool-ledger mutation with an unknown commit, nor
+      // claim that DB-down cleanup proved writer exit. Finally still drains
+      // the physical writers; the existing DB-only workflow lane closes this
+      // exact owner after connectivity returns and admission waits for its
+      // ordinary durable quiescence/writer fences.
+      control.activityStatus = "recovering";
+      control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "database";
+      control.activityError = error;
+      throw recoveryFailure;
+    }
   }
   // The SDK's per-segment turn cap is a pacing valve, not a failure: end
   // the turn gracefully and idle the session so an active goal continues
@@ -623,112 +741,151 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     control.activityStatus = "idle";
     return claimedResult({ status: "idle" });
   }
-  const settleLostCodexAttempt = async (
-    lostTurnId: string,
-    holderId: string,
-    generation: number,
-    historyCheckpointDurable = false,
-  ): Promise<RunAgentTurnResult> => {
-    let checkpointDurable = historyCheckpointDurable;
-    try {
-      if (!historyCheckpointDurable) {
-        await flushRuntimeBatcher();
-        await historySink.reconcileConversationTruth({ requireDurable: true });
-      }
-      checkpointDurable = true;
-    } catch {
-      observability.warn("Codex lease-loss checkpoint failed; refusing automatic turn replay", {
-        errorClass: "CodexCheckpointOperationError",
-        errorCode: "codex_lease_loss_checkpoint_failed",
-        origin: "worker",
-      });
-    }
-
-    const settlement = await settleCodexCredentialLeaseLoss(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: lostTurnId,
-      attemptId: input.attemptId,
-      holderId,
-      generation,
-      expectedRedispatches: attempt.redispatchesAtDispatch,
-      checkpointDurable,
-      recoveryPayload: {
-        triggerEventId: attempt.triggerEventId!,
-        reason: "codex_lease_lost",
-        credentialId: providerTurn.effectiveCodexCredentialId,
-      },
-      failedPayload: {
-        error:
-          "The Codex credential lease was lost and the latest conversation checkpoint could not be persisted. Automatic replay was refused.",
-        code: "codex_lease_checkpoint_failed",
-        retryable: false,
-      },
-    });
-    leases.codex.held = false;
-    observability.incrementCounter({
-      name: "opengeni_codex_lease_loss_settlements_total",
-      help: "Fenced Codex lease-loss settlements by outcome.",
-      labels: {
-        workspace_key: codexWorkspaceKey,
-        outcome: settlement.action,
-      },
-    });
-    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, settlement.events);
-    control.activityError = error;
-    if (settlement.action === "failed") {
-      control.activityStatus = "failed";
-      control.turnMetricOutcome = "failed";
-      await deliverFailedChildTurnToParent(
-        { db, bus, settings, observability, wakeSessionWorkflow },
-        input.workspaceId,
-        input.sessionId,
-        lostTurnId,
-      );
-      return claimedResult({ status: "failed" });
-    }
-    control.activityStatus = "recovering";
-    control.turnMetricOutcome = "recovering";
-    return claimedResult({ status: "recovering" });
-  };
-
   // A missing/expired/superseded lease is an execution-ownership failure,
   // not a provider failure. Settle it before credential quarantine or the
   // generic terminal path: the DB transaction marks a still-current turn
   // recoverable, but a successor attempt or worker recovery makes this activity
   // stale and unable to clobber the shared turn/session.
-  if (
-    (leases.codex.lost || error instanceof CodexCredentialLeaseLostError) &&
-    billingState.isCodexTurn &&
-    eventing.publish &&
-    attempt.turnId &&
-    eventing.turnStartedPublished &&
-    leases.codex.holderId &&
-    leases.codex.generation !== null
-  ) {
-    return await settleLostCodexAttempt(
-      attempt.turnId,
-      leases.codex.holderId,
-      leases.codex.generation,
-    );
+  // Codex refusal, quota attribution and failover belong exclusively to the
+  // exact core placement and its generation fence.
+  const coreCodex = billingState.isCodexTurn ? (providerTurn.codexSubscriptionCore ?? null) : null;
+  // A SuperGrok turn on the shared core: refusals settle through the shared
+  // core (X1b) instead of the legacy SuperGrok wait below.
+  const coreXai = billingState.isXaiTurn ? (providerTurn.xaiSubscriptionCore ?? null) : null;
+  // A Claude turn runs only on the shared core (the legacy Claude runtime is
+  // deleted): its refusals, unknown outcomes and lease loss settle there.
+  const coreClaude = billingState.isClaudeTurn
+    ? (providerTurn.claudeSubscriptionCore ?? null)
+    : null;
+  // A stream reader that stops on an error event (an overload, a server
+  // error) cancels the response without waiting, so the error can arrive
+  // here while the transport is still recording that request's outcome.
+  // Join this attempt's started settlements before reading any lane: an
+  // overload refused before any content, or this attempt's own interrupted
+  // request, otherwise looks unsettled and fails the turn for good instead
+  // of recovering it.
+  await Promise.all(
+    [coreCodex, coreXai, coreClaude].map((core) => core?.requests?.settlementsRecorded?.()),
+  );
+  // The transport may settle an ambiguous request before the SDK throws a plain
+  // HTTP error. That custody evidence must survive classification.
+  //
+  // When the ambiguity is this attempt's own interrupted request (a stream
+  // that dropped or stalled before its terminal event, or a gateway timeout),
+  // the same turn recovers from its durable checkpoint within the bounded
+  // provider-recovery budget, for every core provider. Function tools only
+  // run after a complete response, so a replay can at most repeat
+  // provider-hosted work (a hosted web search) and spend more quota. A
+  // refusal by the durable admission fence, an unsettled request, or a
+  // deterministic provider terminal stays a terminal unknown-outcome failure,
+  // as does an interruption combined with a lost lease, lost access or a
+  // disconnected source.
+  //
+  // The parallel session-title request never fences replay: it is a plain,
+  // tool-less request whose text only ever becomes the session title, and it
+  // is cancelled and joined before settlement. Its custody row keeps its
+  // outcome; the replacement attempt's new generation is admitted past it.
+  const interruptedCore = coreCodex
+    ? { core: coreCodex, displayName: "Codex", leaseLost: leases.codex.lost }
+    : coreXai
+      ? { core: coreXai, displayName: "SuperGrok", leaseLost: leases.xai.lost }
+      : coreClaude
+        ? { core: coreClaude, displayName: "Claude", leaseLost: leases.claude.lost }
+        : null;
+  const coreUnknownRecoveryFailure =
+    interruptedCore &&
+    !interruptedCore.leaseLost &&
+    !hasErrorInCauseChain(error, CodexCredentialLeaseLostError) &&
+    !hasErrorInCauseChain(error, SubscriptionCoreCodexLeaseLostError) &&
+    !coreDispatchAuthorityLost(error)
+      ? ownInterruptedCoreRequestRecovery(error, interruptedCore.core, {
+          displayName: interruptedCore.displayName,
+          isCodexTurn: billingState.isCodexTurn,
+        })
+      : null;
+  const coreRequestOutcomeUnknown = coreUnknownRecoveryFailure
+    ? null
+    : hasErrorInCauseChain(error, SubscriptionCoreCodexRequestOutcomeUnknownError) ||
+        coreCodex?.requests?.hasUnknownOutcome()
+      ? new SubscriptionCoreCodexRequestOutcomeUnknownError()
+      : coreXai
+        ? xaiCoreRequestOutcomeUnknown(error, coreXai)
+        : coreClaude
+          ? claudeCoreRequestOutcomeUnknown(error, coreClaude)
+          : null;
+  const coreCodexLeaseLost =
+    coreCodex !== null &&
+    !coreRequestOutcomeUnknown &&
+    (leases.codex.lost ||
+      error instanceof CodexCredentialLeaseLostError ||
+      error instanceof SubscriptionCoreCodexLeaseLostError);
+  let coreCodexLeaseRecoverable = false;
+  let coreLeaseCheckpointFailed = false;
+  if (coreCodexLeaseLost && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
+    try {
+      // A completed response still owns a pending reservation until its
+      // history commits. Test replay safety after that rendezvous, not before.
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+      await coreCodex.requests?.checkpoint();
+      coreCodexLeaseRecoverable = !coreCodex.requests || coreCodex.requests.canRecover();
+    } catch {
+      coreLeaseCheckpointFailed = true;
+      observability.incrementCounter({
+        name: "opengeni_codex_failover_checkpoints_total",
+        help: "Durable Codex failover checkpoint attempts by outcome.",
+        labels: { workspace_key: codexWorkspaceKey, outcome: "failed" },
+      });
+    }
   }
-  if (
-    leases.xai.lost &&
+  // A core SuperGrok turn recovers a lost lease only once every request it
+  // dispatched is settled and its committed responses are checkpointed.
+  const xaiLeaseRecoverable =
     billingState.isXaiTurn &&
-    eventing.publish &&
-    attempt.turnId &&
-    eventing.turnStartedPublished
-  ) {
-    await flushRuntimeBatcher();
-    await historySink.reconcileConversationTruth({ requireDurable: true });
-    const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+    leases.xai.lost &&
+    coreXai !== null &&
+    !coreRequestOutcomeUnknown &&
+    eventing.turnStartedPublished &&
+    (await xaiCoreLanesRecoverAfterCheckpoint(coreXai, async () => {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+    }));
+  // The same for a core Claude turn.
+  const claudeLeaseRecoverable =
+    coreClaude !== null &&
+    leases.claude.lost &&
+    !coreRequestOutcomeUnknown &&
+    eventing.turnStartedPublished &&
+    (await coreLanesRecoverAfterCheckpoint(coreClaude, async () => {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+    }));
+  const scopedLeaseLost = claudeLeaseRecoverable
+    ? "claude"
+    : xaiLeaseRecoverable
+      ? "xai"
+      : coreCodexLeaseRecoverable
+        ? "codex"
+        : null;
+  if (scopedLeaseLost && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
+    if (scopedLeaseLost !== "codex") {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+    }
+    const recovery = await requestTurnRecovery(db, input.workspaceId, {
       sessionId: input.sessionId,
       turnId: attempt.turnId,
       triggerEventId: attempt.triggerEventId!,
       attemptId: input.attemptId,
-      reason: "xai_lease_lost",
-      detail: { provider: "supergrok-subscription" },
+      reason: scopedLeaseLost + "_lease_lost",
+      detail: {
+        provider:
+          scopedLeaseLost === "claude"
+            ? "claude-subscription"
+            : scopedLeaseLost === "codex"
+              ? "codex-subscription"
+              : "supergrok-subscription",
+      },
     });
     if (recovery.action === "stale") {
       acknowledgeLostAttemptOwnership();
@@ -740,6 +897,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
     control.activityStatus = "recovering";
     control.turnMetricOutcome = "recovering";
+    control.turnRecoveryCause = "provider";
     return claimedResult({ status: "recovering" });
   }
   // Definitive Codex credential/account refusals are the only provider
@@ -749,753 +907,227 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // 5xx does not classify here and therefore cannot consume another
   // subscription or duplicate a side effect.
   const usageLimit = isCodexTransportError(error) ? classifyCodexUsageLimitError(error) : null;
-  let codexCredentialFailure: CodexCredentialFailure | null =
-    billingState.isCodexTurn && providerTurn.effectiveCodexCredentialId
-      ? classifyCodexCredentialFailure(error)
-      : null;
-  // Plan entitlement evidence (an explicit plan refusal, or an HTTP 400 with no
-  // body) is ambiguous until the serving account's CURRENT plan is re-read. A
-  // proven loss becomes a definitive `plan_entitlement` refusal for this model
-  // only and walks the pool through the same checkpointed failover below; an
-  // unexplained rejection stays terminal with typed copy. Nothing retries the
-  // rejected request itself.
-  let codexTerminalFailure:
-    | CodexPlanEntitlementFailurePayload
-    | CodexRequestRejectedFailurePayload
-    | null = null;
-  let codexPlanEntitlement: {
-    modelId: string;
-    planType: string | null;
-    planObserved: boolean;
-    credentialVersion: number | null;
-    waitPayload: CodexPlanEntitlementFailurePayload;
-  } | null = null;
-  const codexEntitlementRejection =
-    billingState.isCodexTurn && providerTurn.effectiveCodexCredentialId && !codexCredentialFailure
-      ? classifyCodexEntitlementRejection(error)
-      : null;
-  if (
-    codexEntitlementRejection &&
-    providerTurn.effectiveCodexCredentialId &&
-    eventing.publish &&
-    attempt.turnId &&
-    eventing.turnStartedPublished &&
-    leases.codex.holderId &&
-    leases.codex.generation !== null
-  ) {
-    const servingCredentialId = providerTurn.effectiveCodexCredentialId;
-    const servingAccount = (
-      await listCodexAccountStatuses(db, input.workspaceId, attempt.turnId).catch(() => [])
-    ).find((account) => account.id === servingCredentialId);
-    const accountLabel = codexAccountDisplayLabel(servingAccount);
-    const recheck = await recheckCodexCredentialPlan(
-      db,
-      settings,
-      input.workspaceId,
-      servingCredentialId,
-      {
-        turnId: attempt.turnId,
-        holderId: leases.codex.holderId,
-        generation: leases.codex.generation,
-      },
-    ).catch(() => null);
-    const modelId = providerTurn.codexProductModelId ?? null;
-    const assessment = recheck
-      ? assessCodexPlanEntitlement(codexEntitlementRejection, recheck, modelId)
-      : codexEntitlementRejection.evidence === "plan_entitlement"
-        ? {
-            kind: "entitlement_lost" as const,
-            planType: servingAccount?.planType ?? null,
-            planObserved: false,
-            planChanged: false,
-            credentialVersion: null,
-          }
-        : { kind: "unexplained" as const, planType: null };
-    observability.incrementCounter({
-      name: "opengeni_codex_plan_rechecks_total",
-      help: "Codex plan re-checks after an entitlement-shaped rejection, by outcome.",
-      labels: {
-        workspace_key: codexWorkspaceKey,
-        evidence: codexEntitlementRejection.evidence,
-        outcome: assessment.kind,
-        source: recheck?.source ?? "none",
-      },
-    });
-    if (assessment.kind === "entitlement_lost") {
-      const payloadInput = {
-        accountLabel,
-        // Name a plan only when the provider just reported it; a recorded
-        // plan may be the very one that changed.
-        planType: assessment.planObserved ? assessment.planType : null,
-        planChanged: assessment.planChanged,
-        modelId,
-        rejection: codexEntitlementRejection,
-      };
-      codexTerminalFailure = codexPlanEntitlementFailurePayload(payloadInput);
-      if (modelId) {
-        codexCredentialFailure = { kind: "plan_entitlement", cooldownSeconds: null };
-        codexPlanEntitlement = {
-          modelId,
-          planType: assessment.planType,
-          planObserved: assessment.planObserved,
-          credentialVersion: assessment.credentialVersion,
-          waitPayload: codexPlanEntitlementFailurePayload({ ...payloadInput, waiting: true }),
-        };
-      }
-    } else {
-      codexTerminalFailure = codexRequestRejectedFailurePayload({
-        accountLabel,
-        planType: recheck?.planType ?? null,
-        rejection: codexEntitlementRejection,
-      });
+  // A definitive account refusal on a core turn becomes a typed terminal
+  // failure that idles the session (settled below).
+  let coreAccountRefusal: SubscriptionCoreCodexTurnError | null = null;
+  if (coreCodex && !coreRequestOutcomeUnknown && !coreLeaseCheckpointFailed) {
+    // Core turns record the refusal against the leased connection (failure
+    // receipt, plus the quota, health or model-cooldown state that keeps
+    // placement away from it) and re-place the same turn within the per-turn
+    // failover bound (M3 PR 2a). Without a recorded refusal or a durable
+    // checkpoint they settle through the typed paths below instead.
+    const coreFailure = classifyCodexCredentialFailure(error);
+    // Only explicit plan evidence is an entitlement refusal; an unexplained
+    // 400 keeps the generic typed "request rejected" copy.
+    const planEntitlement =
+      !coreFailure && classifyCodexEntitlementRejection(error)?.evidence === "plan_entitlement";
+    const refusal =
+      coreFailure ??
+      (planEntitlement ? { kind: "plan_entitlement" as const, cooldownSeconds: null } : null);
+    // Only a pre-dispatch lifecycle fence or a definite refusal can enter
+    // graceful recovery. A concurrent disconnect never upgrades a timeout,
+    // partial stream, missing response, or failed checkpoint into replay proof.
+    const disconnected =
+      hasErrorInCauseChain(error, SubscriptionCoreCodexSourceDisconnectedError) ||
+      (!!refusal &&
+        (await isSubscriptionCoreCodexSourceDisconnected(
+          db,
+          coreCodex.identity,
+          coreCodex.connectionId,
+        )));
+    if (disconnected) {
+      const settled = await failOverCoreCodexTurn(deps, coreCodex, "source_disconnected");
+      if (settled) return settled;
     }
+    if (refusal && !disconnected) {
+      const recorded = await recordCoreCodexRefusal({
+        db,
+        core: coreCodex,
+        lease: leases.codex,
+        failure: refusal,
+        credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+        modelId: providerTurn.codexProductModelId ?? null,
+      }).catch(() => ({ receipt: false, health: false }));
+      if (recorded.receipt && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
+        const settled = await failOverCoreCodexTurn(deps, coreCodex, refusal);
+        if (settled) return settled;
+      }
+    }
+    coreAccountRefusal =
+      disconnected || hasErrorInCauseChain(error, SubscriptionCoreCodexAccessLostError)
+        ? subscriptionCoreAccountRefusedFailure("access_lost")
+        : refusal?.kind === "auth" || hasErrorInCauseChain(error, CodexReloginRequired)
+          ? subscriptionCoreAccountRefusedFailure("sign_in")
+          : refusal?.kind === "forbidden"
+            ? subscriptionCoreAccountRefusedFailure("forbidden")
+            : refusal?.kind === "plan_entitlement"
+              ? subscriptionCoreAccountRefusedFailure("entitlement")
+              : null;
   }
+  // A definitive SuperGrok account refusal on a core turn: recorded against
+  // the leased connection, then the same turn re-places within the shared
+  // bound, or fails with typed copy that idles the session (settled below).
+  let coreXaiRefusal: SubscriptionCoreCodexTurnError | null = null;
+  if (coreXai && !coreRequestOutcomeUnknown && !leases.xai.lost) {
+    const settled = await settleCoreSubscriptionRefusal(deps, coreXai, XAI_CORE_REFUSAL);
+    if (settled.result) return settled.result;
+    coreXaiRefusal = settled.failure;
+  }
+  // The same for a Claude core turn: a sign-in refusal (after the transport's
+  // one forced refresh) or a model rate limit re-places the same turn; 529
+  // stays in the overload lane below and 403 fails the turn, neither moving
+  // it to another account. The bound counts the core's turn-failure
+  // receipts (the legacy `claudeAuthRecovery` marker is never read here).
+  let coreClaudeRefusal: SubscriptionCoreCodexTurnError | null = null;
+  if (coreClaude && !coreRequestOutcomeUnknown && !leases.claude.lost) {
+    const settled = await settleCoreSubscriptionRefusal(
+      deps,
+      coreClaude,
+      claudeCoreRefusal(coreClaude.productModelId),
+    );
+    if (settled.result) return settled.result;
+    coreClaudeRefusal = settled.failure;
+  }
+
+  // The leased credential path above normally quarantines quota state and
+  // either recovers the same turn or arms a durable capacity wait. This narrow
+  // fallback covers failures before a credential lease existed, or a failed
+  // durable checkpoint where replay would be unsafe. Keep the session usable,
+  // but never synthesize another turn or walk an unfenced legacy pointer.
+  // A lease-busy chain that outlived its bound becomes a terminal failure.
+  const leaseBusyChain =
+    error instanceof SubscriptionCoreCodexTurnError &&
+    error.payload.code === "subscription_lease_busy" &&
+    error.payload.retryable
+      ? subscriptionCoreLeaseBusyChain(
+          attempt.subscriptionLeaseBusy,
+          attempt.executionGeneration,
+          Date.now(),
+        )
+      : null;
+  // An older attempt of this turn still holds its core lease. Retry right
+  // after that lease can expire, outside the provider recovery budget: this
+  // is ownership handover, not provider backpressure. The chain is bounded
+  // above (SUBSCRIPTION_CORE_LEASE_BUSY_MAX_MS).
+  let leaseBusyNotRecoverable = false;
   if (
-    codexCredentialFailure &&
-    providerTurn.effectiveCodexCredentialId &&
+    leaseBusyChain &&
+    !leaseBusyChain.exhausted &&
+    error instanceof SubscriptionCoreCodexTurnError &&
     eventing.publish &&
     attempt.turnId &&
     eventing.turnStartedPublished
   ) {
-    observability.incrementCounter({
-      name: "opengeni_codex_credential_failures_total",
-      help: "Definitive Codex credential failures classified for safe failover.",
-      labels: {
-        workspace_key: codexWorkspaceKey,
-        kind: codexCredentialFailure.kind,
-        outcome: "classified",
-      },
-    });
-    const failoverStartedAt = performance.now();
-    let checkpointDurable = false;
+    const continueDelayMs = subscriptionCoreLeaseBusyDelayMs(
+      error.payload.resetsAt,
+      Date.now(),
+      Math.random(),
+    );
+    let recovery: Awaited<ReturnType<typeof requestTurnRecovery>>;
     try {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
-      checkpointDurable = true;
-    } catch {
-      observability.incrementCounter({
-        name: "opengeni_codex_failover_checkpoints_total",
-        help: "Durable Codex failover checkpoint attempts by outcome.",
-        labels: { workspace_key: codexWorkspaceKey, outcome: "failed" },
-      });
-      observability.warn("Codex failover checkpoint failed; refusing automatic replay", {
-        errorClass: "CodexCheckpointOperationError",
-        errorCode: "codex_failover_checkpoint_failed",
-        origin: "worker",
-      });
-    }
-
-    if (checkpointDurable) {
-      observability.incrementCounter({
-        name: "opengeni_codex_failover_checkpoints_total",
-        help: "Durable Codex failover checkpoint attempts by outcome.",
-        labels: { workspace_key: codexWorkspaceKey, outcome: "completed" },
-      });
-      const now = new Date();
-      const before = await listCodexAccountStatuses(db, input.workspaceId, attempt.turnId).catch(
-        () => [],
-      );
-      const servingCached = before.find(
-        (account) => account.id === providerTurn.effectiveCodexCredentialId,
-      );
-      const usageSnapshot = providerTurn.latestCodexUsage as CodexUsageHeaderSnapshot | null;
-      const serving = servingCached
-        ? {
-            ...servingCached,
-            ...(usageSnapshot
-              ? {
-                  primaryUsedPercent: usageSnapshot.primaryUsedPercent,
-                  primaryResetAt: usageSnapshot.primaryResetAt,
-                  secondaryUsedPercent: usageSnapshot.secondaryUsedPercent,
-                  secondaryResetAt: usageSnapshot.secondaryResetAt,
-                }
-              : {}),
-          }
-        : null;
-      const cooldownUntil = codexCredentialCooldownUntil(codexCredentialFailure, serving, now);
-      // A plan re-check may itself have rotated tokens (same family, version
-      // CAS-advanced by this holder); fence the quarantine on that version.
-      const quarantineCredentialVersion =
-        codexPlanEntitlement?.credentialVersion ?? providerTurn.effectiveCodexCredentialVersion;
-      const quarantineResult =
-        leases.codex.holderId &&
-        leases.codex.generation !== null &&
-        quarantineCredentialVersion !== null
-          ? await quarantineCodexCredentialForLease(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: attempt.turnId,
-              attemptId: input.attemptId,
-              executionGeneration: attempt.executionGeneration,
-              workflowId: input.workflowId,
-              workflowRunId: input.workflowRunId,
-              dispatchId: attempt.dispatchId,
-              expectedRedispatches: attempt.redispatchesAtDispatch,
-              credentialId: providerTurn.effectiveCodexCredentialId,
-              credentialVersion: quarantineCredentialVersion,
-              holderId: leases.codex.holderId,
-              generation: leases.codex.generation,
-              maxFailovers: providerTurn.codexCredentialFailoverLimit,
-              quarantine:
-                codexCredentialFailure.kind === "auth"
-                  ? {
-                      kind: "status",
-                      status: "needs_relogin",
-                      lastError: "model request remained unauthorized after refresh",
-                    }
-                  : codexCredentialFailure.kind === "forbidden"
-                    ? {
-                        kind: "status",
-                        status: "error",
-                        lastError: "model request was forbidden for this credential",
-                      }
-                    : codexCredentialFailure.kind === "plan_entitlement"
-                      ? {
-                          kind: "plan_entitlement",
-                          modelId: codexPlanEntitlement!.modelId,
-                          planType: codexPlanEntitlement!.planType,
-                          planObserved: codexPlanEntitlement!.planObserved,
-                        }
-                      : {
-                          kind: "cooldown",
-                          until: cooldownUntil!,
-                          cooldownKind: codexCredentialFailure.kind,
-                        },
-            })
-          : null;
-      if (
-        quarantineResult?.action === "credential_changed" &&
-        leases.codex.holderId &&
-        leases.codex.generation !== null
-      ) {
-        const recovery = await settleCodexCredentialLeaseLoss(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: attempt.turnId,
-          attemptId: input.attemptId,
-          holderId: leases.codex.holderId,
-          generation: leases.codex.generation,
-          expectedRedispatches: attempt.redispatchesAtDispatch,
-          checkpointDurable: true,
-          recoveryPayload: {
-            triggerEventId: attempt.triggerEventId!,
-            reason: "codex_credential_version_changed",
-          },
-          failedPayload: {},
-        });
-        if (recovery.action === "recovering") {
-          leases.codex.held = false;
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            recovery.events,
-          );
-          control.activityStatus = "recovering";
-          control.turnMetricOutcome = "recovering";
-          return claimedResult({ status: "recovering" });
-        }
-        acknowledgeLostAttemptOwnership();
-        control.activityStatus = "cancelled";
-        control.turnMetricOutcome = "cancelled";
-        return claimedResult({ status: "cancelled" });
-      }
-      const statePersisted = quarantineResult?.action === "recorded";
-      if (!statePersisted && leases.codex.holderId && leases.codex.generation !== null) {
-        leases.codex.lost = true;
-        return await settleLostCodexAttempt(
-          attempt.turnId,
-          leases.codex.holderId,
-          leases.codex.generation,
-          true,
-        );
-      }
-      if (
-        quarantineResult?.action === "recorded" &&
-        quarantineResult.exhausted &&
-        leases.codex.holderId &&
-        leases.codex.generation !== null
-      ) {
-        const settlement = await settleCodexCredentialFailover(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: attempt.turnId,
-          attemptId: input.attemptId,
-          holderId: leases.codex.holderId,
-          generation: leases.codex.generation,
-          expectedRedispatches: attempt.redispatchesAtDispatch,
-          maxFailovers: quarantineResult.maxFailovers,
-          recoveryPayload: {
-            triggerEventId: attempt.triggerEventId!,
-            reason: "codex_credential_failover",
-            credentialId: providerTurn.effectiveCodexCredentialId,
-            failureKind: codexCredentialFailure.kind,
-          },
-          failedPayload: {
-            error:
-              "Automatic Codex credential failover stopped after every bounded account attempt was consumed. Send a new message after checking account health or capacity.",
-            code: "codex_credential_failover_exhausted",
-            retryable: false,
-            recovery: "user_message",
-            failoverCount: quarantineResult.failoverCount,
-            maxFailovers: quarantineResult.maxFailovers,
-          },
-        });
-        if (settlement.action === "limit_exceeded") {
-          leases.codex.held = false;
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            settlement.events,
-          );
-          control.activityError = error;
-          control.activityStatus = "idle";
-          control.turnMetricOutcome = "failed";
-          await deliverFailedChildTurnToParent(
-            { db, bus, settings, observability, wakeSessionWorkflow },
-            input.workspaceId,
-            input.sessionId,
-            attempt.turnId,
-          );
-          return claimedResult({ status: "idle" });
-        }
-        if (settlement.action === "stale") {
-          acknowledgeLostAttemptOwnership();
-          control.activityStatus = "cancelled";
-          control.turnMetricOutcome = "cancelled";
-          return claimedResult({ status: "cancelled" });
-        }
-        throw new Error("Exhausted Codex failover receipt unexpectedly recovered");
-      }
-      let accounts: Awaited<ReturnType<typeof listCodexAccountStatuses>>;
-      try {
-        accounts = await listCodexAccountStatuses(db, input.workspaceId, attempt.turnId);
-      } catch (metadataError) {
-        // Current account health/cooldown metadata is still required after
-        // quarantine. Operational database failures re-enter the existing
-        // exact-attempt recovery lane; no policy choice is made from partial
-        // account state.
-        const recoveryFailure = postClaimDatabaseRecoveryFailure({
-          error: metadataError,
-          turnId: attempt.turnId,
-          triggerEventId: attempt.triggerEventId!,
-          executionGeneration: attempt.executionGeneration,
-        });
-        if (recoveryFailure) {
-          control.activityStatus = "recovering";
-          control.turnMetricOutcome = "recovering";
-          control.activityError = metadataError;
-          throw recoveryFailure;
-        }
-        throw metadataError;
-      }
-      const acceptedPolicy = acceptedCodexPolicySnapshot(providerTurn);
-      const selected = selectCodexCredentialLeaseForTurn({
-        context: {
-          accounts: codexLeaseAccountsForSelection(accounts),
-          activeCredentialId: acceptedPolicy.activeCredentialId,
-          rotationEnabled: acceptedPolicy.rotationEnabled,
-          rotationStrategy: acceptedPolicy.rotationStrategy,
-          existingCredentialId: null,
-          failedCredentialIds: [providerTurn.effectiveCodexCredentialId],
-          ...(providerTurn.codexProductModelId
-            ? { modelId: providerTurn.codexProductModelId }
-            : {}),
-          policyScope: null,
-          unavailableDiagnostics: [],
+      recovery = await requestTurnRecovery(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId: attempt.turnId,
+        triggerEventId: attempt.triggerEventId!,
+        attemptId: input.attemptId,
+        reason: "subscription_lease_busy",
+        subscriptionLeaseBusy: {
+          startedAt: new Date(leaseBusyChain.startedAt).toISOString(),
+          executionGeneration: leaseBusyChain.executionGeneration,
         },
-        sessionId: input.sessionId,
-        sessionPinnedCredentialId: acceptedPolicy.pinnedCredentialId,
-        sessionPinSource: acceptedPolicy.pinSource,
-        sessionLastCredentialId: acceptedPolicy.lastCredentialId,
-        now,
+        retryAfterMs: continueDelayMs,
+        detail: { ...error.payload, continueDelayMs },
       });
-      const decisionKind =
-        selected.decision.kind === "allocatorDisabled" ? "allCapped" : selected.decision.kind;
-      const pinDisposition = classifyCodexPin({
-        pinnedCredentialId: acceptedPolicy.pinnedCredentialId,
-        pinSource: acceptedPolicy.pinSource,
-        strategy: acceptedPolicy.rotationStrategy as CodexRotationStrategy,
-        rotationEnabled: acceptedPolicy.rotationEnabled,
+    } catch (recoveryError) {
+      // Keep the turn recoverable across a transient database failure, as
+      // the provider recovery path does.
+      const postClaimRecovery = postClaimDatabaseRecoveryFailure({
+        error: recoveryError,
+        turnId: attempt.turnId,
+        triggerEventId: attempt.triggerEventId!,
+        executionGeneration: attempt.executionGeneration,
       });
-      const failureDisposition = codexDefinitiveFailureDisposition({
-        failureKind: codexCredentialFailure.kind,
-        rotationEnabled: acceptedPolicy.rotationEnabled,
-        pinDisposition,
-        decisionKind,
-        decisionCredentialId: selected.decision.kind === "active" ? selected.credentialId : null,
-        servingCredentialId: providerTurn.effectiveCodexCredentialId,
-      });
-      const maxFailovers = providerTurn.codexCredentialFailoverLimit;
-
-      if (
-        statePersisted &&
-        failureDisposition === "failover" &&
-        leases.codex.holderId &&
-        leases.codex.generation !== null
-      ) {
-        const settlement = await settleCodexCredentialFailover(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: attempt.turnId,
-          attemptId: input.attemptId,
-          holderId: leases.codex.holderId,
-          generation: leases.codex.generation,
-          expectedRedispatches: attempt.redispatchesAtDispatch,
-          maxFailovers,
-          recoveryPayload: {
-            triggerEventId: attempt.triggerEventId!,
-            reason: "codex_credential_failover",
-            credentialId: providerTurn.effectiveCodexCredentialId,
-            failureKind: codexCredentialFailure.kind,
-            ...(cooldownUntil ? { cooldownUntil: cooldownUntil.toISOString() } : {}),
-          },
-          failedPayload: {
-            error:
-              "Automatic Codex credential failover stopped after every bounded account attempt was consumed. Send a new message after checking account health or capacity.",
-            code: "codex_credential_failover_exhausted",
-            retryable: false,
-            recovery: "user_message",
-            failoverCount: quarantineResult.failoverCount,
-            maxFailovers: quarantineResult.maxFailovers,
-          },
-        });
-        observability.incrementCounter({
-          name: "opengeni_codex_failover_settlements_total",
-          help: "Atomic Codex failover settlements by outcome.",
-          labels: {
-            workspace_key: codexWorkspaceKey,
-            outcome: settlement.action,
-          },
-        });
-        if (settlement.action === "recovering") {
-          leases.codex.held = false;
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            settlement.events,
-          );
-          observability.observeHistogram({
-            name: "opengeni_codex_failover_recovery_seconds",
-            help: "Time from credential refusal to durable same-turn recovery.",
-            labels: {
-              workspace_key: codexWorkspaceKey,
-              kind: codexCredentialFailure.kind,
-            },
-            value: Math.max(0, (performance.now() - failoverStartedAt) / 1000),
-          });
-          control.activityStatus = "recovering";
-          control.turnMetricOutcome = "recovering";
-          return claimedResult({ status: "recovering" });
-        }
-        if (settlement.action === "stale") {
-          // One transaction proves both exact-holder recovery (including a
-          // just-expired or reaped lease row) and successor/control-gate
-          // rejection. Cross the hard tool fence so a control-gate loss can
-          // write its quiescence receipt; a successor-only loss is a no-op.
-          acknowledgeLostAttemptOwnership();
-          control.activityStatus = "cancelled";
-          control.turnMetricOutcome = "cancelled";
-          return claimedResult({ status: "cancelled" });
-        }
-        if (settlement.action === "limit_exceeded") {
-          leases.codex.held = false;
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            settlement.events,
-          );
-          control.activityError = error;
-          control.activityStatus = "idle";
-          control.turnMetricOutcome = "failed";
-          await deliverFailedChildTurnToParent(
-            { db, bus, settings, observability, wakeSessionWorkflow },
-            input.workspaceId,
-            input.sessionId,
-            attempt.turnId,
-          );
-          return claimedResult({ status: "idle" });
-        }
-      }
-
-      if (
-        statePersisted &&
-        failureDisposition === "wait" &&
-        leases.codex.holderId &&
-        leases.codex.generation !== null
-      ) {
-        let goal: Awaited<ReturnType<typeof getSessionGoal>>;
-        try {
-          goal = await getSessionGoal(db, input.workspaceId, input.sessionId);
-        } catch (metadataError) {
-          const recoveryFailure = postClaimDatabaseRecoveryFailure({
-            error: metadataError,
-            turnId: attempt.turnId,
-            triggerEventId: attempt.triggerEventId!,
-            executionGeneration: attempt.executionGeneration,
-          });
-          if (recoveryFailure) {
-            control.activityStatus = "recovering";
-            control.turnMetricOutcome = "recovering";
-            control.activityError = metadataError;
-            throw recoveryFailure;
-          }
-          throw metadataError;
-        }
-        const activeGoal = goal?.status === "active" ? goal : null;
-        const exactProviderReset =
-          codexCredentialFailure.cooldownSeconds !== null &&
-          Number.isFinite(codexCredentialFailure.cooldownSeconds) &&
-          codexCredentialFailure.cooldownSeconds > 0;
-        const policyCredentialId =
-          pinDisposition === "manual" && acceptedPolicy.pinnedCredentialId
-            ? acceptedPolicy.pinnedCredentialId
-            : !acceptedPolicy.rotationEnabled
-              ? acceptedPolicy.activeCredentialId
-              : null;
-        const capacityAccounts = policyCredentialId
-          ? accounts.filter((account) => account.id === policyCredentialId)
-          : accounts;
-        const authoritativeResetAt =
-          exactProviderReset || codexCredentialFailure.kind === "plan_entitlement"
-            ? (authoritativeCodexCapacityResetAt(capacityAccounts, now) ?? cooldownUntil)
-            : null;
-        const allAccounts =
-          acceptedPolicy.rotationEnabled &&
-          pinDisposition !== "manual" &&
-          decisionKind === "allCapped";
-        const failurePayload = codexCapacityWaitFailurePayload({
-          failureKind: codexCredentialFailure.kind,
-          usageLimit,
-          cooldownSeconds: codexCredentialFailure.cooldownSeconds,
-          detail:
-            codexCredentialFailure.kind === "quota"
-              ? error instanceof Error
-                ? error.message
-                : String(error)
-              : "the same accepted turn is waiting for eligible credential capacity",
-          allAccounts,
-          planEntitlement: codexPlanEntitlement?.waitPayload ?? null,
-        });
-        const evaluated = await armAndReconcileCodexCapacityWait(
-          { db, bus },
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: attempt.turnId,
-            attemptId: input.attemptId,
-            workflowId: input.workflowId,
-            goalId: activeGoal?.id ?? null,
-            goalVersion: activeGoal?.version ?? null,
-            earliestResetAt: authoritativeResetAt,
-            // plan_entitlement waits only on OTHER capped accounts, so it keeps
-            // their reset/bounded-refresh cadence rather than a mutation-only wait.
-            resetKind: authoritativeResetAt
-              ? "authoritative"
-              : codexCredentialFailure.kind === "auth" ||
-                  codexCredentialFailure.kind === "forbidden"
-                ? "mutation_only"
-                : "bounded_refresh",
-            failurePayload,
-            leaseFence: {
-              holderId: leases.codex.holderId,
-              generation: leases.codex.generation,
-            },
-            expectedRedispatches: attempt.redispatchesAtDispatch,
-          },
-          { onArmed: () => (leases.codex.held = false) },
-        );
-        control.activityError = error;
-        if (evaluated.action === "stopped") {
-          control.activityStatus = evaluated.sessionStatus === "queued" ? "idle" : "failed";
-          control.turnMetricOutcome = "failed";
-          return claimedResult({ status: control.activityStatus });
-        }
-        if (evaluated.action === "resumed") {
-          control.activityStatus = "recovering";
-          control.turnMetricOutcome = "recovering";
-          return claimedResult({ status: "recovering" });
-        }
-        if (evaluated.action === "waiting") {
-          control.activityError = error;
-          control.activityStatus = "waiting_capacity";
-          control.turnMetricOutcome = "recovering";
-          return claimedResult({
-            status: "waiting_capacity",
-            capacityWait: {
-              waiterId: evaluated.waiter.id,
-              generation: evaluated.waiter.generation,
-              nextCheckAt: evaluated.waiter.nextCheckAt.toISOString(),
-              wakeRevision: evaluated.waiter.wakeRevision,
-            },
-          });
-        }
-        acknowledgeLostAttemptOwnership();
-        control.activityStatus = "cancelled";
-        control.turnMetricOutcome = "cancelled";
-        return claimedResult({ status: "cancelled" });
-      }
-    }
-  }
-  const xaiCredentialFailure =
-    billingState.isXaiTurn && providerTurn.effectiveXaiCredentialId
-      ? classifyXaiCredentialFailure(error)
-      : null;
-  if (
-    xaiCredentialFailure &&
-    providerTurn.effectiveXaiCredentialId &&
-    providerTurn.xaiAuthoritySnapshot &&
-    leases.xai.subjectId &&
-    leases.xai.holderId &&
-    leases.xai.generation !== null &&
-    eventing.publish &&
-    attempt.turnId &&
-    eventing.turnStartedPublished
-  ) {
-    await flushRuntimeBatcher();
-    await historySink.reconcileConversationTruth({ requireDurable: true });
-    const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
-    const activeGoal = goal?.status === "active" ? goal : null;
-    const now = new Date();
-    const cooldownUntil =
-      xaiCredentialFailure.kind === "rate_limit"
-        ? new Date(now.getTime() + Math.max(1, xaiCredentialFailure.cooldownMs ?? 60_000))
-        : null;
-    const failurePayload = {
-      error:
-        xaiCredentialFailure.kind === "auth"
-          ? "The serving SuperGrok account requires reconnection"
-          : xaiCredentialFailure.kind === "forbidden"
-            ? "The serving SuperGrok account is not authorized for this request"
-            : "The serving SuperGrok account is temporarily rate limited",
-      code:
-        xaiCredentialFailure.kind === "auth"
-          ? "xai_relogin_required"
-          : xaiCredentialFailure.kind === "forbidden"
-            ? "xai_account_forbidden"
-            : "xai_account_rate_limited",
-      detail: "the same accepted turn is waiting for another eligible account",
-    };
-    const armed = await armXaiCapacityWait(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: leases.xai.subjectId,
-      sessionId: input.sessionId,
-      turnId: attempt.turnId,
-      attemptId: input.attemptId,
-      workflowId: input.workflowId,
-      authoritySnapshot: providerTurn.xaiAuthoritySnapshot,
-      goalId: activeGoal?.id ?? null,
-      goalVersion: activeGoal?.version ?? null,
-      earliestResetAt: cooldownUntil,
-      failurePayload,
-      leaseFence: {
-        holderId: leases.xai.holderId,
-        generation: leases.xai.generation,
-      },
-      credentialQuarantine:
-        xaiCredentialFailure.kind === "auth"
-          ? {
-              kind: "status",
-              status: "needs_relogin",
-              lastError: "model request remained unauthorized after refresh",
-            }
-          : xaiCredentialFailure.kind === "forbidden"
-            ? {
-                kind: "status",
-                status: "error",
-                lastError: "model request was forbidden for this credential",
-              }
-            : { kind: "cooldown", until: cooldownUntil! },
-      now,
-    });
-    if (armed.action === "waiting") {
-      leases.xai.held = false;
-      providerTurn.xaiCredentialQuarantined = true;
-      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
-      const evaluated = await reconcileXaiCapacityWait(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        waiterId: armed.waiter.id,
-        generation: armed.waiter.generation,
-        now,
-      });
-      if (evaluated.events.length > 0) {
-        await publishDurableSessionEvents(
-          bus,
-          input.workspaceId,
-          input.sessionId,
-          evaluated.events,
-        );
-      }
-      control.activityError = error;
-      if (evaluated.action === "resumed") {
+      if (postClaimRecovery) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
-        return claimedResult({ status: "recovering" });
+        control.turnRecoveryCause = "database";
+        control.activityError = error;
+        throw postClaimRecovery;
       }
-      if (evaluated.action === "waiting") {
-        control.activityStatus = "waiting_capacity";
-        control.turnMetricOutcome = "recovering";
-        return claimedResult({
-          status: "waiting_capacity",
-          capacityWait: {
-            provider: "xai",
-            waiterId: evaluated.waiter.id,
-            generation: evaluated.waiter.generation,
-            nextCheckAt: evaluated.waiter.nextCheckAt.toISOString(),
-            wakeRevision: evaluated.waiter.wakeRevision,
-          },
-        });
-      }
-      acknowledgeLostAttemptOwnership();
-      control.activityStatus = "cancelled";
-      control.turnMetricOutcome = "cancelled";
-      return claimedResult({ status: "cancelled" });
+      throw recoveryError;
     }
-
-    const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
-      sessionId: input.sessionId,
-      turnId: attempt.turnId,
-      triggerEventId: attempt.triggerEventId!,
-      attemptId: input.attemptId,
-      reason: "xai_credential_recheck",
-      detail: failurePayload,
-    });
     if (recovery.action === "stale") {
       acknowledgeLostAttemptOwnership();
       control.activityStatus = "cancelled";
       control.turnMetricOutcome = "cancelled";
       return claimedResult({ status: "cancelled" });
     }
-    acknowledgeRecoveryQuiescence();
-    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
-    control.activityStatus = "recovering";
-    control.turnMetricOutcome = "recovering";
-    control.activityError = error;
-    return claimedResult({ status: "recovering" });
+    if (recovery.action === "recovering") {
+      acknowledgeRecoveryQuiescence();
+      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+      control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "provider";
+      control.activityStatus = "recovering";
+      control.activityError = error;
+      return claimedResult({ status: "recovering", continueDelayMs });
+    }
+    leaseBusyNotRecoverable = true;
   }
-  // The leased credential path above normally quarantines quota state and
-  // either recovers the same turn or arms a durable capacity wait. This narrow
-  // fallback covers failures before a credential lease existed, or a failed
-  // durable checkpoint where replay would be unsafe. Keep the session usable,
-  // but never synthesize another turn or walk an unfenced legacy pointer.
+  // A shared-core placement outcome (no capacity, a waiting explicit choice,
+  // a paused cutover, or a consumer not yet on the core) or a definitive
+  // refusal from the leased account fails this turn with its typed copy and
+  // keeps the session usable for the next message.
+  const coreTurnFailure =
+    leaseBusyChain?.exhausted || leaseBusyNotRecoverable
+      ? // The chain exists only for a lease-busy core error: keep its provider.
+        subscriptionCoreLeaseBusyExhaustedFailure(
+          error instanceof SubscriptionCoreCodexTurnError ? error.displayName : undefined,
+        )
+      : error instanceof SubscriptionCoreCodexTurnError
+        ? error
+        : (coreAccountRefusal ?? coreXaiRefusal ?? coreClaudeRefusal);
+  if (
+    coreTurnFailure &&
+    !coreTurnFailure.payload.retryable &&
+    eventing.publish &&
+    attempt.turnId &&
+    eventing.turnStartedPublished
+  ) {
+    await flushRuntimeBatcher();
+    await historySink.reconcileConversationTruth();
+    if (
+      !(await eventing.settle!({
+        events: [
+          {
+            type: "turn.failed",
+            payload: { ...coreTurnFailure.payload, recovery: "user_message" },
+          },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+        turnStatus: "failed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+      }))
+    ) {
+      return claimedResult({ status: "cancelled" });
+    }
+    control.turnMetricOutcome = "failed";
+    control.activityStatus = "idle";
+    control.activityError = error;
+    await deliverFailedChildTurnToParent(
+      { db, bus, settings, observability, wakeSessionWorkflow },
+      input.workspaceId,
+      input.sessionId,
+      attempt.turnId,
+    );
+    return claimedResult({ status: "idle" });
+  }
   if (usageLimit && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
     await flushRuntimeBatcher();
     await historySink.reconcileConversationTruth();
-    const failurePayload = codexUsageLimitFailurePayload(
-      usageLimit,
-      error instanceof Error ? error.message : String(error),
-    );
+    const failurePayload = codexUsageLimitFailurePayload(usageLimit, errorMessage(error));
     if (
       !(await eventing.settle!({
         events: [
@@ -1520,6 +1152,70 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     control.activityError = error;
     return claimedResult({ status: "idle" });
   }
+  // A protocol JSON boundary refused a value this turn prepared. Retrying the
+  // same turn refuses it again, so end the turn with a typed failure and keep
+  // the session usable for the next message instead of failing it.
+  //
+  // An unknown core request outcome or a failed lease checkpoint keeps its
+  // own terminal handling. After a model request started, this turn's items
+  // must be durably saved before the session takes another message; when they
+  // cannot be (the same value may be refused again while saving), the generic
+  // path below fails the session instead of continuing on a history that lost
+  // completed work. The goal does not continue into the same refusal: it waits
+  // for new input.
+  const protocolValueFailure = unsupportedProtocolValueFailure(
+    findInCauseChain(error, UnsupportedProtocolJsonValueError) ?? findJsonStringifyRefusal(error),
+  );
+  let protocolValueHistorySaved = false;
+  if (
+    protocolValueFailure &&
+    !coreRequestOutcomeUnknown &&
+    !coreLeaseCheckpointFailed &&
+    eventing.publish &&
+    attempt.turnId &&
+    eventing.turnStartedPublished
+  ) {
+    await flushRuntimeBatcher();
+    const requireDurable = attempt.modelRequestStarted || coreUnknownRecoveryFailure !== null;
+    try {
+      await historySink.reconcileConversationTruth(requireDurable ? { requireDurable } : undefined);
+      protocolValueHistorySaved = true;
+    } catch (saveError) {
+      console.error(
+        "protocol value failure could not save turn history",
+        safeErrorDiagnostic(saveError),
+      );
+    }
+  }
+  if (protocolValueFailure && protocolValueHistorySaved && attempt.turnId) {
+    if (
+      !(await eventing.settle!({
+        events: [
+          {
+            type: "turn.failed",
+            payload: { ...protocolValueFailure, recovery: "user_message" },
+          },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+        turnStatus: "failed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        suppressGoalContinuation: true,
+      }))
+    ) {
+      return claimedResult({ status: "cancelled" });
+    }
+    control.turnMetricOutcome = "failed";
+    control.activityStatus = "idle";
+    control.activityError = error;
+    await deliverFailedChildTurnToParent(
+      { db, bus, settings, observability, wakeSessionWorkflow },
+      input.workspaceId,
+      input.sessionId,
+      attempt.turnId,
+    );
+    return claimedResult({ status: "idle" });
+  }
   // Budget/limit exhaustion between model calls is account state, not an
   // agent failure: idle the session for goal-bearing and goal-less runs
   // alike (a failed session would reject the user's next message after a
@@ -1533,28 +1229,48 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   ) {
     await flushRuntimeBatcher();
     await historySink.reconcileConversationTruth();
+    if (error.sessionUsageLimit) {
+      recordSessionUsageLimitEvent(observability, "between_calls", "reached");
+    }
     if (
-      !(await eventing.settle!({
-        events: [
-          ...(error.allowance
-            ? [{ type: "usage.exhausted" as const, payload: error.allowance }]
-            : []),
-          {
-            type: "turn.completed",
-            payload: {
-              output: "",
-              segmentLimit: "budget_exhausted",
-              detail: error.message,
-              ...(error.allowance ?? {}),
+      !(await eventing.settle!(
+        error.sessionUsageLimit
+          ? {
+              // the task's usage limit was reached between model
+              // calls. Already admitted usage is recorded; history is kept.
+              events: sessionUsageLimitStopEvents(error.sessionUsageLimit),
+              turnStatus: "completed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+              allowanceGoalPause: {
+                rationale: error.sessionUsageLimit.message,
+                reason: "session_usage_limit",
+              },
+            }
+          : {
+              events: [
+                ...(error.allowance
+                  ? [{ type: "usage.exhausted" as const, payload: error.allowance }]
+                  : []),
+                {
+                  type: "turn.completed",
+                  payload: {
+                    output: "",
+                    segmentLimit: "budget_exhausted",
+                    detail: error.message,
+                    ...(error.allowance ?? {}),
+                  },
+                },
+                { type: "session.status.changed", payload: { status: "idle" } },
+              ],
+              turnStatus: "completed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+              ...(error.allowance
+                ? { allowanceGoalPause: { rationale: error.allowance.message } }
+                : {}),
             },
-          },
-          { type: "session.status.changed", payload: { status: "idle" } },
-        ],
-        turnStatus: "completed",
-        sessionStatus: "idle",
-        activeTurnId: null,
-        ...(error.allowance ? { allowanceGoalPause: { rationale: error.allowance.message } } : {}),
-      }))
+      ))
     ) {
       return claimedResult({ status: "cancelled" });
     }
@@ -1586,7 +1302,10 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // fall through to the terminal path rather than resend an equivalent
   // request forever.
   const encryptedArtifactRejection =
-    billingState.isCodexTurn && providerTurn.effectiveCodexCredentialId
+    !coreRequestOutcomeUnknown &&
+    !coreLeaseCheckpointFailed &&
+    billingState.isCodexTurn &&
+    providerTurn.effectiveCodexCredentialId
       ? classifyCodexEncryptedArtifactRejection(error)
       : null;
   if (
@@ -1613,7 +1332,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       providerTurn.lastCodexRequestOpaqueArtifacts.length > 0
         ? historySink.providerArtifactCandidates.runStateId
         : undefined;
-    const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+    const recovery = await requestTurnRecovery(db, input.workspaceId, {
       sessionId: input.sessionId,
       turnId: attempt.turnId,
       triggerEventId: attempt.triggerEventId!,
@@ -1639,6 +1358,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       acknowledgeRecoveryQuiescence();
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "provider";
       control.activityStatus = "recovering";
       control.activityError = error;
       return claimedResult({ status: "recovering" });
@@ -1660,42 +1380,144 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     !!attempt.turnId &&
     !!attempt.triggerEventId &&
     attempt.executionGeneration > 0;
-  let failure = (
-    earlyDefinitionMismatch
-      ? { error: error.message, code: error.code, retryable: true }
-      : (codexTerminalFailure ??
-        agentRunFailurePayload(error, {
-          isCodexTurn: billingState.isCodexTurn,
-        }))
-  ) as ReturnType<typeof agentRunFailurePayload>;
+  const earlyCommandStartUnavailable =
+    isModalTaskExecStartPreDispatchUnavailableError(error) &&
+    !attempt.modelRequestStarted &&
+    !eventing.turnStartedPublished &&
+    !!attempt.turnId &&
+    !!attempt.triggerEventId &&
+    attempt.executionGeneration > 0;
+  const earlyRecoverableSetup = earlyDefinitionMismatch || earlyCommandStartUnavailable;
+  const notStartedToolCallIds = commandCallsNotStarted();
+  // Custody decides whether replay is safe, not what caused the failure. Keep
+  // the existing diagnostic in the permission-controlled terminal event;
+  // never copy it into logs or use its retry classification for admission.
+  let unknownOutcomeDetail: string | undefined;
+  if (coreRequestOutcomeUnknown) {
+    try {
+      const sourceFailure = agentRunFailurePayload(error, {
+        isCodexTurn: billingState.isCodexTurn,
+      });
+      unknownOutcomeDetail = sourceFailure.detail ?? sourceFailure.error;
+    } catch {
+      // Diagnostic extraction cannot prevent durable failure settlement.
+    }
+  }
+  let failure = withModelRoutePresentation(
+    (coreRequestOutcomeUnknown
+      ? {
+          error: coreRequestOutcomeUnknown.message,
+          code: coreRequestOutcomeUnknown.code,
+          retryable: false,
+          ...(unknownOutcomeDetail && unknownOutcomeDetail !== coreRequestOutcomeUnknown.message
+            ? { detail: unknownOutcomeDetail }
+            : {}),
+        }
+      : earlyDefinitionMismatch
+        ? { error: error.message, code: error.code, retryable: true }
+        : (coreUnknownRecoveryFailure ??
+          agentRunFailurePayload(error, {
+            isCodexTurn: billingState.isCodexTurn,
+          }))) as ReturnType<typeof agentRunFailurePayload>,
+    attempt.modelRoutePresentation,
+  );
+  const coreLaneRecoverable = (lane: ReturnType<typeof createCoreCodexRequests> | undefined) =>
+    !lane || lane.canRecover() || (!!coreUnknownRecoveryFailure && lane.unknownIsOwnAndSettled());
+  // A core lane holds the answered request that asked for a tool until the
+  // next model call checkpoints it, so a retryable failure thrown while a
+  // tool runs (a command that never started, an MCP transport failure) or a
+  // paused search's refused continuation finds an answered, unsettled
+  // request. Commit the history durably and checkpoint first, as the
+  // lease-lost and failover paths do, so the failure can recover. Nothing is
+  // replayed: a lane without every response stays unrecoverable. This holds
+  // for every core provider: a lane's answered request is complete regardless
+  // of who serves it.
+  const placedCore = coreClaude ?? coreCodex ?? coreXai;
+  if (
+    placedCore &&
+    attempt.turnId &&
+    !coreRequestOutcomeUnknown &&
+    !coreLeaseCheckpointFailed &&
+    failure.retryable &&
+    eventing.publish &&
+    eventing.turnStartedPublished &&
+    !coreLaneRecoverable(placedCore.requests)
+  ) {
+    await coreLanesRecoverAfterCheckpoint(placedCore, async () => {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+    });
+  }
   if (
     attempt.turnId &&
-    (earlyDefinitionMismatch ||
+    !coreRequestOutcomeUnknown &&
+    !coreLeaseCheckpointFailed &&
+    coreLaneRecoverable(coreCodex?.requests) &&
+    coreLaneRecoverable(coreXai?.requests) &&
+    coreLaneRecoverable(coreClaude?.requests) &&
+    (earlyRecoverableSetup ||
       (failure.retryable && eventing.publish && eventing.turnStartedPublished))
   ) {
-    const nextProviderRecoveryCount = attempt.providerRecoveryCount + 1;
+    const recoveryCode = providerRecoveryCode(error, failure);
+    const internalMcpWait = recoveryCode === FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE;
+    // A recovery that interrupts a running tool is followed by a successful
+    // model response before the tool runs again, which resets the in-memory
+    // budget. Count those recoveries since the turn's last tool progress so
+    // the same bounded backoff and limit still apply.
+    const toolProgress =
+      earlyRecoverableSetup || internalMcpWait || recoveryCode === PROVIDER_OVERLOAD_RECOVERY_CODE
+        ? null
+        : await readSessionTurnToolProgressRecoveryState(db, input.workspaceId, {
+            sessionId: input.sessionId,
+            turnId: attempt.turnId,
+          }).catch(() => null);
+    const nextProviderRecoveryCount =
+      (toolProgress?.toolCallInFlight
+        ? Math.max(attempt.providerRecoveryCount, toolProgress.toolInterruptedRecoveries)
+        : attempt.providerRecoveryCount) + 1;
     const recoveryResult = providerRecoveryResult({
-      failureCode: failure.code,
+      failureCode: recoveryCode,
       attemptNumber: nextProviderRecoveryCount,
+      recoveryStartedAt:
+        attempt.providerRecoveryCount > 0 ? attempt.providerRecoveryStartedAt : undefined,
       retryAfterMs: providerRetryAfterMs(error),
+      jitterSample: Math.random(),
     });
+    if (
+      shouldFallbackModelSocket({
+        error,
+        recovery: recoveryResult,
+        httpOnly: providerTurn.persistentModelTransportHttpOnly === true,
+        nextRecoveryCount: nextProviderRecoveryCount,
+        recoveryLimit: modelSocketFallbackRecoveryLimit(recoveryCode),
+      })
+    ) {
+      providerTurn.persistentModelTransportHttpOnly = true;
+    }
+    const setupRecoveryExhausted =
+      earlyCommandStartUnavailable &&
+      recoveryResult.status === "exhausted" &&
+      attempt.providerRecoveryCount === SANDBOX_SETUP_RECOVERY_LIMIT;
     try {
-      if (recoveryResult.status === "recovering") {
-        if (!earlyDefinitionMismatch) {
-          await flushRuntimeBatcher();
-          await historySink.reconcileConversationTruth({ requireDurable: true });
-        }
-        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+      if (setupRecoveryExhausted) {
+        // This is positive pre-dispatch proof, not an ambiguous command. Park
+        // the SAME accepted turn without resetting or advancing its budget.
+        const recovery = await requestTurnRecovery(db, input.workspaceId, {
           sessionId: input.sessionId,
           turnId: attempt.turnId,
           triggerEventId: attempt.triggerEventId!,
           attemptId: input.attemptId,
-          reason: failure.code ?? "provider_unavailable",
-          providerRecoveryCount: nextProviderRecoveryCount,
+          reason: "sandbox_command_start_recovery_exhausted",
+          sandboxSetupRecoveryExhausted: true,
           detail: {
-            ...failure,
-            continueDelayMs: recoveryResult.continueDelayMs,
-            providerRecoveryCount: nextProviderRecoveryCount,
+            code: failure.code,
+            error:
+              "Automatic sandbox setup recovery exhausted after five retries; the accepted turn remains parked without starting a command.",
+            retryable: false,
+            setupOutcome: "not_started",
+            replay: "blocked",
+            recoveryExhausted: true,
+            providerRecoveryCount: SANDBOX_SETUP_RECOVERY_LIMIT,
           },
         });
         if (recovery.action === "stale") {
@@ -1707,20 +1529,89 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         acknowledgeRecoveryQuiescence();
         await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "sandbox";
         control.activityStatus = "recovering";
         control.activityError = error;
+        return claimedResult({ status: "recovering" });
+      }
+      if (recoveryResult.status === "recovering") {
+        if (!earlyRecoverableSetup) {
+          await flushRuntimeBatcher();
+          await historySink.reconcileConversationTruth({ requireDurable: true });
+        }
+        const recovery = await requestTurnRecovery(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: attempt.turnId,
+          triggerEventId: attempt.triggerEventId!,
+          attemptId: input.attemptId,
+          reason: recoveryCode ?? "provider_unavailable",
+          // Internal setup waits do not spend or reset the model-provider budget.
+          ...(!internalMcpWait ? { providerRecoveryCount: nextProviderRecoveryCount } : {}),
+          retryAfterMs: recoveryResult.continueDelayMs,
+          ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
+          detail: {
+            ...agentRunRecoveryFailurePayload(error, failure),
+            continueDelayMs: recoveryResult.continueDelayMs,
+            ...(internalMcpWait
+              ? {
+                  code: FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE,
+                  error:
+                    "Opengeni's tool service is temporarily unavailable. This turn will continue automatically when it returns.",
+                }
+              : {
+                  providerRecoveryCount: nextProviderRecoveryCount,
+                  maxProviderRecoveryCount: providerRecoveryLimit(recoveryCode),
+                }),
+          },
+        });
+        if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
+          control.activityStatus = "cancelled";
+          control.turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
+        }
+        acknowledgeRecoveryQuiescence();
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = turnRecoveryCauseForCode(recoveryCode);
+        control.activityStatus = "recovering";
+        control.activityError = error;
+        const recoveryCause = providerRecoveryCause(recoveryCode);
+        if (recoveryCause) {
+          recordProviderRecoveryOutcome(observability, {
+            route: attempt.modelMetricRoute,
+            cause: recoveryCause,
+            outcome: "scheduled",
+            delayMs: recoveryResult.continueDelayMs,
+          });
+        }
         return claimedResult(recoveryResult);
       }
       failure = providerRecoveryExhaustedFailure(failure, recoveryResult);
-      if (earlyDefinitionMismatch) {
+      const recoveryCause = providerRecoveryCause(recoveryCode);
+      if (recoveryCause) {
+        recordProviderRecoveryOutcome(observability, {
+          route: attempt.modelMetricRoute,
+          cause: recoveryCause,
+          outcome: "exhausted",
+          ...(attempt.providerRecoveryObservation
+            ? { elapsedMs: Date.now() - attempt.providerRecoveryObservation.startedAt }
+            : {}),
+        });
+      }
+      if (earlyRecoverableSetup) {
         // Setup has no eventing sink yet. Carry only the fixed, safe diagnostic
         // through Temporal into exact-attempt workflow failure settlement.
         control.activityStatus = "failed";
         control.turnMetricOutcome = "failed";
         control.activityError = error;
         throw ApplicationFailure.create({
-          message: `${error.message}. Automatic same-turn configuration recovery exhausted after ${recoveryResult.providerRecoveryCount} retries.`,
-          type: "TurnExecutionPolicyDefinitionMismatchError",
+          message: earlyDefinitionMismatch
+            ? `${error.message}. Automatic same-turn configuration recovery exhausted after ${recoveryResult.providerRecoveryCount} retries.`
+            : failure.error,
+          type: earlyDefinitionMismatch
+            ? "TurnExecutionPolicyDefinitionMismatchError"
+            : "SandboxCommandStartUnavailableError",
           nonRetryable: true,
         });
       }
@@ -1742,6 +1633,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       if (escaped) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "tool";
         control.activityError = error;
         throw escaped;
       }
@@ -1753,38 +1645,31 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
               triggerEventId: attempt.triggerEventId!,
               executionGeneration: attempt.executionGeneration,
               providerRecovery: {
-                failureCode: failure.code ?? "provider_unavailable",
+                failureCode: recoveryCode ?? "provider_unavailable",
                 providerRecoveryCount: nextProviderRecoveryCount,
+                ...(recoveryCode === PROVIDER_OVERLOAD_RECOVERY_CODE ||
+                recoveryCode === FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE
+                  ? { continueDelayMs: recoveryResult.continueDelayMs }
+                  : {}),
               },
             })
-          : null;
+          : setupRecoveryExhausted
+            ? postClaimDatabaseRecoveryFailure({
+                error: recoveryError,
+                turnId: attempt.turnId,
+                triggerEventId: attempt.triggerEventId!,
+                executionGeneration: attempt.executionGeneration,
+                sandboxSetupRecoveryExhausted: true,
+              })
+            : null;
       if (postClaimRecovery) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "database";
         control.activityError = error;
         throw postClaimRecovery;
       }
       throw recoveryError;
-    }
-  }
-  if (
-    attempt.turnId &&
-    attempt.triggerEventId &&
-    attempt.executionGeneration > 0 &&
-    !eventing.turnStartedPublished &&
-    !attempt.modelRequestStarted
-  ) {
-    const recoveryFailure = postClaimDatabaseRecoveryFailure({
-      error,
-      turnId: attempt.turnId,
-      triggerEventId: attempt.triggerEventId,
-      executionGeneration: attempt.executionGeneration,
-    });
-    if (recoveryFailure) {
-      control.activityStatus = "recovering";
-      control.turnMetricOutcome = "recovering";
-      control.activityError = error;
-      throw recoveryFailure;
     }
   }
   control.activityStatus = "failed";
@@ -1795,13 +1680,23 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   if (!eventing.publish || !eventing.turnStartedPublished) {
     throw error;
   }
+  // Automatic recovery was not authorized for this attempt. A terminal record
+  // never promises a retry that will not happen.
+  if (failure.retryable === true) failure = automaticRecoveryUnavailableFailure(failure);
   // A partial/malformed stream may have emitted assistant/tool items (and
   // external side effects) before its terminal error. Persist every item the
   // SDK state observed before marking the turn failed so a later user revive
   // never replays work from an incomplete history. This does not retry or
   // rotate the ambiguous request.
   await flushRuntimeBatcher();
-  await historySink.reconcileConversationTruth();
+  if (coreRequestOutcomeUnknown || coreUnknownRecoveryFailure) {
+    await historySink.reconcileConversationTruth({ requireDurable: true });
+  } else {
+    await historySink.reconcileConversationTruth();
+  }
+  if (attempt.triggerType === "session.context.compaction.requested") {
+    return await settleFailedCompactionCheckpoint(deps, error, failure.code, notStartedToolCallIds);
+  }
   if (
     !(await eventing.settle!({
       events: [
@@ -1811,6 +1706,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       turnStatus: "failed",
       sessionStatus: "failed",
       activeTurnId: null,
+      ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
     }))
   ) {
     return claimedResult({ status: "cancelled" });
@@ -1830,4 +1726,225 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     attempt.turnId,
   );
   return claimedResult({ status: "failed" });
+}
+
+/**
+ * A compaction checkpoint (the idle one after a person's turn, or `/compact`)
+ * is maintenance: when it fails for any reason, the chat itself is still fine.
+ * Settle it as a failed compaction, exactly as a failed summary is: the
+ * session returns to idle instead of failed, and a still-pending request is
+ * consumed with its `skipped` landmark so it is not claimed again. The
+ * person's next turn compacts at its usual threshold.
+ */
+async function settleFailedCompactionCheckpoint(
+  deps: TurnFailureDeps,
+  error: unknown,
+  failureCode: string | undefined,
+  notStartedToolCallIds: readonly string[],
+): Promise<RunAgentTurnResult> {
+  const { input, db, control, eventing, claimedResult, observability } = deps;
+  // The turn records a short reason; the classification goes to telemetry.
+  // Error class names only: never the message, which may hold content.
+  const diagnostic = safeErrorDiagnostic(error);
+  // Many error subclasses keep the inherited name "Error"; their class name
+  // says more.
+  const errorName =
+    error instanceof Error ? error.constructor.name || error.name || "Error" : typeof error;
+  observability.warn("Compaction checkpoint failed", {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    attemptId: input.attemptId,
+    failureCode: failureCode ?? "unknown",
+    errorName,
+    ...(diagnostic.status !== undefined ? { status: diagnostic.status } : {}),
+  });
+  // A provider, quota or summary failure keeps its own reason. Anything else
+  // happened before or around the summary, so say the checkpoint could not run
+  // and name the error class rather than a bare "unexpected Error".
+  const unclassifiedReason = compactionFailureReason(
+    `unexpected ${error instanceof Error && error.name ? error.name : "unknown error"}`,
+  );
+  const payload =
+    compactionFailureReasonFromError(error) === unclassifiedReason
+      ? compactionFailureTurnEventPayload(error, {
+          error: compactionFailureReason(`the checkpoint could not run (${errorName})`),
+        })
+      : compactionFailureTurnEventPayload(error);
+  // Consuming needs the request to still be pending (settlement is stale
+  // otherwise); a checkpoint that already started has consumed it. A failed
+  // read throws into the post-claim database recovery like any settlement
+  // error: settling idle with the request pending would claim it again.
+  const requestPending = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+  if (
+    !(await eventing.settle!({
+      events: [
+        { type: "turn.failed", payload },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      ...(requestPending ? { consumeRequestedCompactionFailure: true } : {}),
+      ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
+    }))
+  ) {
+    return claimedResult({ status: "cancelled" });
+  }
+  control.turnMetricOutcome = "failed";
+  control.activityStatus = "idle";
+  return claimedResult({ status: "idle" });
+}
+
+/** An error of the given class, directly or anywhere in the cause chain. */
+function hasErrorInCauseChain(
+  error: unknown,
+  type: abstract new (...args: never[]) => Error,
+): boolean {
+  let current = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof type) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+function findInCauseChain<T extends Error>(
+  error: unknown,
+  type: abstract new (...args: never[]) => T,
+): T | null {
+  let current = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof type) return current;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+/** An error code anywhere in the cause chain. */
+function hasErrorCodeInCauseChain(error: unknown, matches: (code: string) => boolean): boolean {
+  let current = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && matches(code)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+const CORE_DISPATCH_AUTHORITY_LOST_CODES = new Set([
+  "subscription_core_lease_lost",
+  "subscription_core_access_lost",
+  "subscription_core_source_disconnected",
+]);
+
+/**
+ * The core turn lost the authority to dispatch on its account (its lease, its
+ * access or its source), for any provider: an interruption alongside it is
+ * settled by that path, never by an in-turn replay.
+ */
+function coreDispatchAuthorityLost(error: unknown): boolean {
+  return hasErrorCodeInCauseChain(
+    error,
+    (code) =>
+      CORE_DISPATCH_AUTHORITY_LOST_CODES.has(code) || code.endsWith("_credential_lease_lost"),
+  );
+}
+
+/**
+ * Failure codes that mean the response stream broke (ended without its
+ * terminal event, or went silent after it began) rather than a provider
+ * answer. Each provider classifies them as terminal on their own; with this
+ * attempt's own settled request as the only obstacle they are recovered.
+ */
+const INTERRUPTED_RESPONSE_CODES = new Set([
+  "invalid_sse_terminal",
+  "codex_response_timeout",
+  "xai_response_stream_idle_timeout",
+  "xai_hosted_tool_continuation_stalled",
+  "anthropic_stream_interrupted",
+]);
+
+/**
+ * Classify a core subscription failure (Codex, SuperGrok or Claude) whose
+ * only replay obstacle is this attempt's own interrupted request. Returns the
+ * retryable failure the bounded provider recovery should use, or null when
+ * the unknown outcome must stay terminal.
+ */
+export function ownInterruptedCoreRequestRecovery(
+  error: unknown,
+  core: Pick<CodexSubscriptionCoreTurn, "requests">,
+  options: { displayName: string; isCodexTurn: boolean },
+): ReturnType<typeof agentRunFailurePayload> | null {
+  const lane = core.requests;
+  if (!lane?.hasUnknownOutcome()) return null;
+  if (lane.admissionRefused()) return null;
+  if (!lane.unknownIsOwnAndSettled()) return null;
+  // A complete provider terminal that is incomplete (for example the output
+  // token limit) would end the same way again.
+  if (findInCauseChain(error, CodexStreamingTerminalError)?.code === "response_incomplete") {
+    return null;
+  }
+  const interrupted = {
+    error: `The ${options.displayName} response was interrupted before it finished`,
+    code: "provider_unavailable",
+    retryable: true,
+  };
+  // After an interrupted request the tracker refuses the SDK's own retry with
+  // the native unknown-outcome error; the SDK retried, so the cause was
+  // transient.
+  if (
+    hasErrorCodeInCauseChain(
+      error,
+      (code) =>
+        code === "subscription_core_request_outcome_unknown" ||
+        INTERRUPTED_RESPONSE_CODES.has(code),
+    )
+  ) {
+    return interrupted;
+  }
+  let failure: ReturnType<typeof agentRunFailurePayload>;
+  try {
+    failure = agentRunFailurePayload(error, { isCodexTurn: options.isCodexTurn });
+  } catch {
+    return null;
+  }
+  if (failure.code && INTERRUPTED_RESPONSE_CODES.has(failure.code)) return interrupted;
+  return failure.retryable === true ? failure : null;
+}
+
+/**
+ * A turn waiting on the replacement of a Modal box that could not start
+ * programs, released because a drain could not save that box (see
+ * releaseSandboxProcessStartReplacementWaiters), comes back fenced by the same
+ * rotation. It stops with clear copy instead of waiting on saves that keep
+ * failing, and so does a person's retry fenced by the same box; the box stays
+ * fenced, so no turn reuses it. Any other failure, including the attempt that
+ * requested the replacement, is returned as is.
+ */
+export async function sandboxBoxNotSavedStop(
+  deps: Pick<TurnFailureDeps, "error" | "db" | "input"> & {
+    attempt: Pick<TurnFailureDeps["attempt"], "turnId">;
+  },
+  reader: typeof readSessionTurnSandboxBoxNotSaved = readSessionTurnSandboxBoxNotSaved,
+): Promise<unknown> {
+  const { error, db, input, attempt } = deps;
+  const transition = sandboxLifecycleTransitionDiagnostic(error);
+  // The box stays fenced by its rotation, or by a drain capture retrying.
+  if (
+    !transition ||
+    transition.reason === "provider_recovery_in_progress" ||
+    !attempt.turnId ||
+    isSandboxMachineReplacing(error)
+  ) {
+    return error;
+  }
+  const replaced = await reader(db, input.workspaceId, {
+    sessionId: input.sessionId,
+    turnId: attempt.turnId,
+  }).catch(() => null);
+  return replaced &&
+    replaced.sandboxGroupId === transition.sandboxGroupId &&
+    replaced.leaseEpoch === transition.leaseEpoch
+    ? new SandboxBoxNotSavedError()
+    : error;
 }

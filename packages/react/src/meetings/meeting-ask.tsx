@@ -1,0 +1,120 @@
+/**
+ * "Ask about this meeting": one line at the bottom of the Summary and
+ * Transcript tabs. The host answers it, usually by starting a chat with the
+ * meeting attached; the input clears once the host has taken the question.
+ */
+import { useOpenGeniText } from "../messages/runtime";
+import { useEffect, useId, useRef, useState } from "react";
+import { ArrowUpIcon, LoaderCircleIcon } from "lucide-react";
+import { toast } from "sonner";
+import { userErrorText } from "../ui/api-error";
+
+import { Button } from "../ui/button";
+import { TextInput } from "../ui/field";
+import { StickyBarEdge } from "./sticky-bar-edge";
+
+/** False when the host couldn't take the question and has already said why. */
+export type MeetingAskResult = void | boolean;
+
+/**
+ * A question from elsewhere in the app, such as the ⌘K menu: asked as if
+ * typed here, or, with none, the cursor put in the field.
+ */
+export type MeetingAskRequest = { question: string | null; nonce: number };
+
+export function MeetingAsk({
+  onAsk,
+  request = null,
+  onRequestTaken,
+}: {
+  /**
+   * Takes the question. Resolving false keeps it in the input (the host has
+   * said why); a rejection keeps it and says the chat couldn't start.
+   */
+  onAsk: (question: string) => MeetingAskResult | Promise<MeetingAskResult>;
+  request?: MeetingAskRequest | null;
+  /** The request has been taken, so it isn't acted on again. */
+  onRequestTaken?: () => void;
+}) {
+  const msg = useOpenGeniText();
+  const id = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [question, setQuestion] = useState("");
+  const [asking, setAsking] = useState(false);
+  const trimmed = question.trim();
+  const submit = async (text: string = trimmed) => {
+    if (!text || asking) return;
+    setAsking(true);
+    try {
+      if ((await onAsk(text)) !== false) setQuestion("");
+    } catch (error) {
+      toast.error(msg("meetings.ask.couldNotAsk"), {
+        description: error instanceof Error ? userErrorText(error) : undefined,
+      });
+    } finally {
+      setAsking(false);
+    }
+  };
+  const submitRef = useRef(submit);
+  submitRef.current = submit;
+  const takenRef = useRef(onRequestTaken);
+  takenRef.current = onRequestTaken;
+  useEffect(() => {
+    if (!request) return;
+    takenRef.current?.();
+    const text = request.question?.trim();
+    if (text) {
+      setQuestion(text);
+      void submitRef.current(text);
+      return;
+    }
+    inputRef.current?.focus({ preventScroll: true });
+    inputRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [request]);
+  return (
+    // Stays in reach at the bottom of the window while the tab scrolls. It ends
+    // its column, so the page under it is covered all the way to the window's edge.
+    <form
+      aria-label={msg("meetings.ask.placeholder")}
+      className="sticky bottom-0 z-10 -mx-1 bg-bg px-1 pt-3 pb-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+    >
+      <StickyBarEdge edge="bottom" />
+      <div className="relative">
+        <label htmlFor={id} className="sr-only">
+          {msg("meetings.ask.placeholder")}
+        </label>
+        <TextInput
+          ref={inputRef}
+          id={id}
+          value={question}
+          maxLength={4000}
+          autoComplete="off"
+          disabled={asking}
+          placeholder={msg("meetings.ask.placeholder")}
+          onChange={(event) => setQuestion(event.target.value)}
+          className="h-11 rounded-[14px]! pr-12 shadow-og-sm"
+        />
+        <Button
+          type="submit"
+          size="icon-sm"
+          disabled={!trimmed || asking}
+          aria-label={msg("meetings.ask.send")}
+          className="absolute top-1/2 right-1.5 size-8 -translate-y-1/2 rounded-[10px] pointer-coarse:size-9"
+        >
+          {asking ? (
+            <LoaderCircleIcon
+              aria-hidden="true"
+              className="animate-spin motion-reduce:animate-none"
+            />
+          ) : (
+            <ArrowUpIcon aria-hidden="true" />
+          )}
+        </Button>
+      </div>
+    </form>
+  );
+}

@@ -17,11 +17,8 @@ import {
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { sql } from "drizzle-orm";
 import { Hono } from "hono";
 import postgres from "postgres";
@@ -315,6 +312,102 @@ describe("shared Skill HTTP authority and retained history", () => {
       ('preference_registry_preferences','preference_registry_revisions','preference_registry_events','skill_source_bindings','skill_write_receipts')`;
     expect(posture).toHaveLength(5);
     expect(posture.every((table) => table.relrowsecurity && table.relforcerowsecurity)).toBe(true);
+  });
+
+  test("organization owners choose where an organization Skill works, and people still find it elsewhere", async () => {
+    const key = crypto.randomUUID();
+    const alice = await workspace(key, `${key}-one`, `user:alice-${key}`);
+    const aliceOtherWorkspace = await workspace(key, `${key}-two`, alice.subjectId);
+    const otherAccount = await workspace(`${key}-other`, `${key}-other`, alice.subjectId);
+    const organization = saveRequest("organization");
+    const local = saveRequest();
+    await save(alice, organization, accountAdmin);
+    await save(alice, local);
+    const reachPath = (skillId: string) => `/skills/content/${skillId}/reach`;
+    const onlyOne = { allowedWorkspaceIds: [alice.workspaceId], allowPersonalWorkspaces: false };
+    expect(
+      (
+        await request(alice, reachPath(organization.skillId), {
+          method: "PUT",
+          permissions: workspaceAdmin,
+          body: onlyOne,
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      await json(
+        await request(aliceOtherWorkspace, reachPath(organization.skillId), {
+          method: "PUT",
+          permissions: accountAdmin,
+          body: onlyOne,
+        }),
+      ),
+    ).toEqual({ reach: onlyOne });
+    const listed = async (grant: AccessGrant) =>
+      (await json(await request(grant, "/skills/content"))).skills.find(
+        (skill: Json) => skill.id === organization.skillId,
+      );
+    expect(await listed(alice)).toMatchObject({ reach: onlyOne, availableHere: true });
+    expect(await listed(aliceOtherWorkspace)).toMatchObject({
+      reach: onlyOne,
+      availableHere: false,
+    });
+    expect(
+      await json(await request(aliceOtherWorkspace, `/skills/content/${organization.skillId}`)),
+    ).toMatchObject({ id: organization.skillId, availableHere: false });
+    const refused = async (response: Response, status: number) => {
+      expect(response.status).toBe(status);
+      return await response.text();
+    };
+    expect(
+      await refused(
+        await request(alice, reachPath(local.skillId), {
+          method: "PUT",
+          permissions: accountAdmin,
+          body: onlyOne,
+        }),
+        409,
+      ),
+    ).toContain("Only an organization Skill");
+    expect(
+      await refused(
+        await request(alice, reachPath(organization.skillId), {
+          method: "PUT",
+          permissions: accountAdmin,
+          body: { allowedWorkspaceIds: [otherAccount.workspaceId], allowPersonalWorkspaces: true },
+        }),
+        422,
+      ),
+    ).toContain(otherAccount.workspaceId);
+    await refused(
+      await request(alice, reachPath(organization.skillId), {
+        method: "PUT",
+        permissions: accountAdmin,
+        body: { allowedWorkspaceIds: "everywhere" },
+      }),
+      422,
+    );
+    await refused(
+      await request(alice, reachPath(crypto.randomUUID()), {
+        method: "PUT",
+        permissions: accountAdmin,
+        body: onlyOne,
+      }),
+      404,
+    );
+    expect(
+      (
+        await request(otherAccount, reachPath(organization.skillId), {
+          method: "PUT",
+          permissions: accountAdmin,
+          body: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
+        })
+      ).status,
+    ).toBe(404);
+    expect(await listed(aliceOtherWorkspace)).toMatchObject({
+      reach: onlyOne,
+      availableHere: false,
+    });
   });
 
   test("retains exact file history and fences saves and restores after a scope change", async () => {

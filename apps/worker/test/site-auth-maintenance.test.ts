@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { SiteAuthMaintenanceClaim } from "@opengeni/db";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createSiteAuthMaintenanceActivities } from "../src/activities/site-auth-maintenance";
 import type { ActivityServices } from "../src/activities/types";
 
@@ -71,7 +72,7 @@ describe("site auth maintenance", () => {
             createdBy: {
               kind: "service",
               subjectId: "site-auth-maintenance",
-              label: "OpenGeni authentication maintenance",
+              label: "Opengeni authentication maintenance",
             },
             createdByContext: {
               opengeniSiteAuthConnectionId: claim.siteAuthConnectionId,
@@ -105,10 +106,14 @@ describe("site auth maintenance", () => {
       requestedSessionId: claim.sessionId,
       createIdempotencyKey: `site-auth-maintenance:${claim.operationId}`,
       firstPartyMcpTools: expect.arrayContaining(["browser_open", "browser_auth"]),
-      // OpenGeni's own periodic check, not a person's request.
+      // Opengeni's own periodic check, not a person's request.
       surface: "system",
     });
     expect(String(createInput?.["initialMessage"])).toContain("Purpose: repair");
+    // Only provider-managed connections remain; the agent signs in through them.
+    expect(String(createInput?.["initialMessage"])).toContain(
+      "external_provider) authority with browser_auth advance_external",
+    );
     expect(String(createInput?.["initialMessage"])).toContain(claim.preferredNetworkRouteId!);
     expect(recordUsage).toHaveBeenCalledTimes(1);
   });

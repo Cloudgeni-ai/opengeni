@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, mkdir, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, chmod, mkdir, rm, stat } from "node:fs/promises";
 import { connect, createServer } from "node:net";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { Readable } from "node:stream";
 import { InteractionControllerError } from "@opengeni/interaction";
+import { readWindowsSeat } from "./cua/windows-seat";
+import { UnsettledCleanupError } from "./cleanup-error";
+import type { LinuxDesktopSessionFinder } from "./linux-desktop-session";
 
 const START_TIMEOUT_MS = 10_000;
 const STOP_TIMEOUT_MS = 3_000;
@@ -46,6 +50,7 @@ export type LinuxVirtualComputerEnvironmentOptions = {
   depth?: number;
   dpi?: number;
   windowManagerBinary?: string | null;
+  compositing?: boolean;
 };
 
 /** One isolated X11, D-Bus and AT-SPI envelope per managed Linux ComputerSession. */
@@ -55,6 +60,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
   private readonly depth: number;
   private readonly dpi: number;
   private readonly windowManagerBinary: string | null;
+  private readonly compositing: boolean;
 
   constructor(options: LinuxVirtualComputerEnvironmentOptions = {}) {
     this.width = boundedInteger(options.width ?? 1_440, 320, 8_192, "virtual display width");
@@ -62,6 +68,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
     this.depth = boundedInteger(options.depth ?? 24, 16, 32, "virtual display depth");
     this.dpi = boundedInteger(options.dpi ?? 96, 48, 384, "virtual display DPI");
     this.windowManagerBinary = options.windowManagerBinary ?? "xfwm4";
+    this.compositing = options.compositing ?? false;
   }
 
   async allocate(context: ComputerEnvironmentContext): Promise<ComputerEnvironmentLease> {
@@ -71,11 +78,16 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
         "isolated virtual ComputerSessions require Linux",
       );
     }
+    await assertDesktopProgramsInstalled(
+      ["Xvfb", "dbus-daemon", this.windowManagerBinary, "xterm", "x11vnc"],
+      context.baseEnvironment.PATH,
+    );
     const environmentDigest = createHash("sha256")
       .update(`${context.computerSessionId}\0${context.controllerGeneration}`)
       .digest("hex")
       .slice(0, 32);
     const runtimeDirectory = join("/tmp", `opengeni-cs-${environmentDigest}`);
+    const homeDirectory = join(context.sessionDirectory, "gui-home");
     const cacheDirectory = join(context.sessionDirectory, "gui-cache");
     const configDirectory = join(context.sessionDirectory, "gui-config");
     const dataDirectory = join(context.sessionDirectory, "gui-data");
@@ -85,6 +97,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
     const temporaryDirectory = join("/tmp", `ogct-${environmentDigest}`);
     const directories = [
       runtimeDirectory,
+      homeDirectory,
       cacheDirectory,
       configDirectory,
       dataDirectory,
@@ -137,14 +150,18 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       const displayId = `:${displayNumber}`;
       const sessionEnvironment: NodeJS.ProcessEnv = {
         ...baseEnvironment,
+        HOME: homeDirectory,
         DISPLAY: displayId,
+        WAYLAND_DISPLAY: undefined,
+        XAUTHORITY: undefined,
+        AT_SPI_BUS_ADDRESS: undefined,
         XDG_RUNTIME_DIR: runtimeDirectory,
         XDG_CACHE_HOME: cacheDirectory,
         XDG_CONFIG_HOME: configDirectory,
         XDG_DATA_HOME: dataDirectory,
         TMPDIR: temporaryDirectory,
         NO_AT_BRIDGE: "0",
-        GTK_A11Y: "1",
+        GTK_A11Y: "atspi",
         GTK_MODULES: "gail:atk-bridge",
         QT_ACCESSIBILITY: "1",
         GDK_BACKEND: "x11",
@@ -183,11 +200,17 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       sessionEnvironment.DBUS_SESSION_BUS_ADDRESS = busAddress;
 
       if (this.windowManagerBinary) {
-        const windowManager = spawn(this.windowManagerBinary, ["--replace", "--compositor=off"], {
-          detached: true,
-          env: sessionEnvironment,
-          stdio: ["ignore", "ignore", "pipe"],
-        });
+        // CUA window captures need backing buffers so its overlay cannot
+        // obscure the application's pixels in an otherwise bare X11 seat.
+        const windowManager = spawn(
+          this.windowManagerBinary,
+          ["--replace", `--compositor=${this.compositing ? "on" : "off"}`],
+          {
+            detached: true,
+            env: sessionEnvironment,
+            stdio: ["ignore", "ignore", "pipe"],
+          },
+        );
         trackProcess(processes, windowManager);
         drain(windowManager.stderr);
         // XFWM must be ready before the first client maps. Otherwise a late
@@ -207,7 +230,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
           "-geometry",
           "112x34+28+28",
           "-title",
-          "OpenGeni Sandbox",
+          "Opengeni Sandbox",
           "-bg",
           "#101318",
           "-fg",
@@ -275,31 +298,30 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       drain(rfb.stderr);
       await waitForLoopbackPort(rfbPort, rfb, "virtual RFB server");
 
-      let closed = false;
+      let closePromise: Promise<void> | null = null;
       return {
         seatId: `linux-virtual:${context.computerSessionId}`,
         displayId,
         rfbPort,
         environment: sessionEnvironment,
         async close() {
-          if (closed) return;
-          closed = true;
-          const failures = await stopProcessGroups([...processes].reverse());
-          if (failures.length === 0) failures.push(...(await removeDirectories(directories)));
-          if (failures.length > 0) {
-            throw new AggregateError(failures, "virtual ComputerSession cleanup failed");
-          }
+          closePromise ??= (async () => {
+            const failures = await stopProcessGroups([...processes].reverse());
+            if (failures.length === 0) failures.push(...(await removeDirectories(directories)));
+            if (failures.length > 0)
+              throw new UnsettledCleanupError(failures, "virtual ComputerSession cleanup failed");
+          })();
+          await closePromise;
         },
       };
     } catch (error) {
       const cleanup = await stopProcessGroups([...processes].reverse());
       if (cleanup.length === 0) cleanup.push(...(await removeDirectories(directories)));
       if (cleanup.length > 0) {
-        const failure = new Error("virtual ComputerSession allocation and cleanup failed", {
-          cause: error,
-        });
-        Object.defineProperty(failure, "errors", { value: [error, ...cleanup] });
-        throw failure;
+        throw new UnsettledCleanupError(
+          [error, ...cleanup],
+          "virtual ComputerSession allocation and cleanup failed",
+        );
       }
       throw error;
     }
@@ -318,25 +340,114 @@ async function removeDirectories(directories: readonly string[]): Promise<unknow
   return failures;
 }
 
+/** The Debian and Ubuntu package that provides each program the virtual desktop runs. */
+const DESKTOP_PROGRAM_PACKAGES: Readonly<Record<string, string>> = {
+  Xvfb: "xvfb",
+  "dbus-daemon": "dbus",
+  xfwm4: "xfwm4",
+  xterm: "xterm",
+  x11vnc: "x11vnc",
+};
+
+/**
+ * Starting a program that isn't installed only fails once the seat is half
+ * built, as an opaque startup error. Check every program first, so the person
+ * and the agent learn exactly what to install.
+ */
+async function assertDesktopProgramsInstalled(
+  programs: readonly (string | null)[],
+  searchPath: string | undefined,
+): Promise<void> {
+  const missing: string[] = [];
+  for (const program of programs) {
+    if (program && !(await findExecutable(program, searchPath))) missing.push(program);
+  }
+  if (missing.length === 0) return;
+  const names = missing.map((program) => program.split("/").pop() ?? program);
+  const packages = [...new Set(names.map((name) => DESKTOP_PROGRAM_PACKAGES[name] ?? name))];
+  const listed =
+    names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  throw new InteractionControllerError(
+    "resource_unavailable",
+    `this machine can't start a virtual desktop because ${listed} ${
+      names.length === 1 ? "isn't" : "aren't"
+    } installed. On Debian or Ubuntu, install with: sudo apt install ${packages.join(" ")}`,
+  );
+}
+
+async function findExecutable(program: string, searchPath: string | undefined): Promise<boolean> {
+  const candidates = program.includes("/")
+    ? [program]
+    : (searchPath ?? "")
+        .split(delimiter)
+        .filter((directory) => directory.length > 0)
+        .map((directory) => join(directory, program));
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, constants.X_OK);
+      if ((await stat(candidate)).isFile()) return true;
+    } catch {
+      // Not here; keep looking.
+    }
+  }
+  return false;
+}
+
 /** Existing physical/login seat used by connected machines and macOS. */
 export class ExistingComputerEnvironmentAllocator implements ComputerEnvironmentAllocator {
+  constructor(
+    private readonly options: {
+      allowWindows?: boolean;
+      /** Finds the person's Linux desktop when this controller inherited none. */
+      findLinuxDesktop?: LinuxDesktopSessionFinder;
+    } = {},
+  ) {}
+
   async allocate(context: ComputerEnvironmentContext): Promise<ComputerEnvironmentLease> {
-    const environment = nativeComputerEnvironment(context.baseEnvironment);
+    let environment = nativeComputerEnvironment(context.baseEnvironment);
     const platform = process.platform;
+    if (platform === "win32" && this.options.allowWindows) {
+      const seat = await readWindowsSeat();
+      return { ...seat, rfbPort: null, environment, async close() {} };
+    }
     if (platform !== "darwin" && platform !== "linux") {
       throw new InteractionControllerError(
         "unsupported",
         "the native ComputerSession adapter supports macOS and Linux",
       );
     }
-    const displayId = platform === "darwin" ? "aqua" : environment.DISPLAY;
+    // A Wayland session without Xwayland still has a seat: the native adapter
+    // drives GNOME through Mutter and explains other compositors itself.
+    let displayId =
+      platform === "darwin" ? "aqua" : environment.DISPLAY || environment.WAYLAND_DISPLAY;
+    const waylandOnly = Boolean(environment.WAYLAND_DISPLAY) && !environment.DISPLAY;
+    if (platform === "linux" && !waylandOnly && this.options.findLinuxDesktop) {
+      // This controller may have started before anyone signed in, or inherited
+      // a DISPLAY an earlier login left behind: join the desktop there now. The
+      // lookup runs with the session's own environment, the one the native
+      // adapter gets. When the lookup itself fails, the adapter still applies
+      // the same session rules to the inherited display when it opens.
+      const session = await this.options.findLinuxDesktop(environment).catch((error: unknown) => {
+        console.error("computer desktop session lookup failed", error);
+        return null;
+      });
+      if (session && "unavailable" in session) {
+        throw new InteractionControllerError("resource_unavailable", session.unavailable, true);
+      }
+      if (session) {
+        environment = {
+          ...environment,
+          DISPLAY: session.display,
+          ...(session.xauthority ? { XAUTHORITY: session.xauthority } : {}),
+        };
+        displayId = session.display;
+      }
+    }
     if (!displayId) {
       throw new InteractionControllerError(
-        environment.WAYLAND_DISPLAY ? "unsupported" : "resource_unavailable",
-        environment.WAYLAND_DISPLAY
-          ? "the current Linux ComputerSession adapter requires an X11 or XWayland display"
-          : "connected Linux ComputerSession has no active graphical display",
-        !environment.WAYLAND_DISPLAY,
+        "resource_unavailable",
+        "connected Linux ComputerSession has no active graphical display",
+        true,
       );
     }
     return {
@@ -420,6 +531,8 @@ export function nativeComputerEnvironment(input: NodeJS.ProcessEnv): NodeJS.Proc
     "DISPLAY",
     "WAYLAND_DISPLAY",
     "XAUTHORITY",
+    // The agent's own virtual desktop, which the helper must not fall back from.
+    "OPENGENI_VIRTUAL_DISPLAY",
     "XDG_RUNTIME_DIR",
     "XDG_CACHE_HOME",
     "XDG_CONFIG_HOME",
@@ -437,6 +550,17 @@ export function nativeComputerEnvironment(input: NodeJS.ProcessEnv): NodeJS.Proc
     "GDK_BACKEND",
     "QT_QPA_PLATFORM",
     "__CF_USER_TEXT_ENCODING",
+    "SystemRoot",
+    "SYSTEMROOT",
+    "WINDIR",
+    "windir",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "TEMP",
+    "TMP",
+    "ComSpec",
+    "COMSPEC",
   ]);
   const environment: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(input)) {

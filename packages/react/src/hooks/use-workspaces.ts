@@ -1,9 +1,10 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { CreateWorkspaceRequest, UpdateWorkspaceRequest, Workspace } from "@opengeni/sdk";
 import { useCallback } from "react";
 import { useOpenGeniClient, type ClientOverride } from "../provider";
 import { useMutationRunner, usePolledValue } from "./internal";
 
-export type UseWorkspacesOptions = Pick<ClientOverride, "client"> & {
+export type UseWorkspacesOptions = Pick<ClientOverride<ChatClient>, "client"> & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
 };

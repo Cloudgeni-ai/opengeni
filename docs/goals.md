@@ -32,15 +32,39 @@ updates coalesced into that turn are attached as ordinary message context. It ne
 agent-instruction prefix or exists only in activity memory, so later requests
 extend the same prompt-cache prefix and recovery replays identical authority.
 
+## Unattended single requests
+
+A top-level API create with `unattended: true` and an `initialMessage` that
+names no `goal` gets one from the create itself: "Complete the request in this
+session's first message.", with success criteria that everything that message
+asks for is done and checked where practical, leaving only steps that need a
+person, and that the goal already stands for the whole request, so it needs no
+`goal_update` to restate it. The goal names the request instead of copying it, because the goal
+snapshot travels with the first message and every continuation. It is an
+ordinary `api`-created goal: a `goal.set` event, the first turn's
+`goal_snapshot`, continuation when the agent stops without completing or
+pausing (within the deployment's continuation and budget limits), and
+`goal_update` for refinement. Compaction keeps that first message: goal
+continuations never crowd it out of the retained messages. Because the text is fixed, a keyed
+create retry resolves the same goal. Interactive sessions, child sessions,
+Slack chats, scheduled and event-started runs, sessions without the `goals`
+capability and creates passing `goal: null` get none. When the resulting
+first-party grant cannot carry a goal (no `goals:manage` or no goal tools), the
+session is created without it instead of failing.
+
 ## Report delivery
 
-Agents answer in chat by default, including summaries and reports. A native
-document Artifact is the deliverable when the user asks for a document or file,
-or when the result is large (multi-page) or clearly meant to be kept or shared.
+Agents answer in chat by default, including summaries, reports, briefs, letters
+and plans written on request. A native document Artifact is the deliverable when
+the user asks for a document, asks to edit an existing document artifact, or
+when the result is too long to read comfortably in chat (several pages). A Word,
+Excel, PDF or PowerPoint file the user sends to be changed, or asks for in a
+format the artifact exporter does not serve, is made or edited in the sandbox
+with ordinary tools and published instead; it is not a report deliverable.
 That can include a secondary output such as an audit produced while organizing
 Knowledge. The chat reply then gives a short summary and the artifact link
 rather than restating the document. Routing lives in the provider-neutral
-operational instructions; the bundled `opengeni-documents` Skill owns the
+operational instructions; the bundled `documents` Skill owns the
 authoring procedure. The artifact is the working document from the start, not a
 published copy of a sandbox Markdown or DOCX report.
 
@@ -170,24 +194,43 @@ A goal is `active`, `paused`, or `completed`.
   and mutation commit atomically. A recovered attempt can therefore reconcile
   a lost response without applying the update twice; replaying an older key
   returns its stored result and never overwrites a newer goal revision.
-- `goal_complete { evidence }` is terminal for the goal, not the current turn.
-  Only a new `goal_set` can replace a completed goal. Its agent-facing evidence
-  has an explicit 8192-character limit and is a short ledger proof, not the
-  deliverable. The agent must still send the requested final answer (or summary
-  and retained artifact link) in the same turn. The tool receipt reminds it to
-  do so. Late child results remain context to integrate and deliver, not a
-  command to stay silent or restart completed work.
+- `goal_complete { evidence, reply? }` is terminal for the goal. Only a new
+  `goal_set` can replace a completed goal. Its agent-facing evidence has an
+  explicit 8192-character limit and is a short ledger proof, not the
+  deliverable. The optional `reply` is the requested final answer (or summary
+  and retained artifact link). Once the completion succeeds, the runtime ends
+  the turn at that tool batch with the reply as the turn's final output, the
+  same tool-boundary mechanic `wait_for_input` uses: one `agent.message.completed`
+  (`final_answer` phase, message id `goal_complete:reply:<attemptId>`) and
+  `turn.completed.output` equal to the reply, which is also what a parent
+  receives as the child's `payload.finalAnswer`. The ledger never stores the
+  reply. A failed completion (for example a missing report delivery) never ends
+  the turn. A `reply` passed in the same model response as other client tool
+  calls is refused before anything is completed, at most twice per attempt, so
+  the model sees those results first. Without `reply`, the turn continues and
+  the agent must still send the final answer in the same turn; the tool receipt
+  reminds it to. Completion is never inferred from final text. Late child
+  results remain context to integrate and deliver, not a command to stay silent
+  or restart completed work.
   If one same-turn reply reminder still produces an empty final, the turn
   completes with a typed `emptyFinalReply: true` notice, not `turn.failed`.
   The goal is untouched: active goals can continue, and later child results
   remain deliverable. The marker records missing answer delivery, not success
   of the requested output.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
-  replaced.
+  replaced. A missing permission or required human decision justifies an
+  immediate pause. A task that seems infeasible, missing data or a result the
+  agent cannot verify is not by itself a reason to pause: the agent tries the
+  plausible in-scope alternatives and, if it still pauses, names the ones it
+  tried in the rationale.
 - `goal_resume {}` reactivates any paused goal regardless of pause actor or
   reason, preserves its objective, resets continuation counters, and arms its
   durable wake. Already-active calls succeed unchanged. Existing sessions with
   `goal_pause` also receive `goal_resume` within the deployment tool ceiling.
+  A session with an agent configuration receives it once it has a goal, in
+  any state, as frozen with the turn: before that the tool could only fail, so
+  neither it nor its prompt sentence is sent. Pausing or resuming a goal never
+  changes the tool list, so the cached prompt stays the same across both.
   The agent is told to resume only when the user asks it to continue or the
   blocker it paused for has cleared. A user's question alone is not a reason:
   the agent answers it and leaves the goal paused. An active goal still
@@ -304,7 +347,7 @@ The locked decision applies these rules:
    next evaluation as ordinary input. The API projects the pacing delay as
    `scheduled` / `backoff_pending` with `nextAttemptAt` at the deadline.
 5. Budget/admission policy can pause the goal visibly with reason `limits`.
-   OpenGeni does not infer progress or blockage from tool/event shape; the
+   Opengeni does not infer progress or blockage from tool/event shape; the
    model explicitly completes or pauses the goal under the continuation
    instructions, and a user can control it directly.
 6. Goals are NOT capped by continuation count by default - runs legitimately
@@ -318,7 +361,8 @@ The locked decision applies these rules:
    pacing, not user intent: every external input producer resumes the goal
    automatically in the same commit as that input: child results
    (`child_terminal_result`), scheduled occurrences (`scheduled_occurrence`),
-   media results (`media_generation_result`), Agent messages
+   media results (`media_generation_result`), finished capability setups
+   (`capability_setup_completed`), Agent messages
    (`agent_message`), Agent Steer (`agent_steer_instruction`), and human/API
    Send/Steer. Each emits `goal.resumed` (`actor: "system"`,
    `reason: "external_input"`, and the causing update or turn) at its next
@@ -400,13 +444,16 @@ The resulting internal-update inference is an ordinary billed run: it meters
 `agent_run.created` with source `session_system_update` and streams like a
 user-triggered inference without appearing in the prompt queue. If billing or
 usage limits would block another run, the goal pauses visibly
-(`goal.paused`, `reason: "limits"`) instead of failing the session; the limits
+(`goal.paused`, with `credits`, `allowance`, `budget` for model spending, or
+`usage_limit` for agent run quotas) instead of failing the session; the limits
 gate is applied inside the same locked decision, before the counter bump, so a
 budget pause never consumes continuation budget. Re-arming a goal (resume or
 replace) starts a fresh continuation epoch: counters and the
 previous-continuation pointers are cleared together. A worker can re-dispatch a
 recovering logical goal turn under a new fenced attempt after death; that is
 recovery of the same turn, not creation or charging of another continuation.
+An embedding host's funding refusal uses `usage_policy`: its private meter can
+deny for reasons other than credits, so Opengeni does not invent a balance diagnosis.
 
 ## Pauses and failures
 
@@ -420,6 +467,17 @@ recovery of the same turn, not creation or charging of another continuation.
   a goal that the user paused. Only a goal paused by the continuation ceiling
   (`max_auto_continuations`) is resumed by new input, because that pause is
   pacing rather than intent.
+- Terminal sessions skip catalog/model validation entirely. An eligible goal
+  whose inherited model is missing, retired, disallowed, or no longer supports
+  the selected latency mode pauses visibly with
+  `model_unavailable` or `model_policy` and an actionable rationale. Goal admission
+  uses the same scoped catalog as ordinary turns, including organization and
+  workspace connections. Catalog membership never grants credential authority:
+  the exact causal turn's accepted snapshots and credential ceiling remain in force.
+  The existing goal tooltip and panel show the stored rationale; legacy `limits`
+  pauses remain neutral rather than being mislabeled as spending limits.
+  It never silently chooses another
+  model or retries a deterministic selection error through Temporal.
 - Provider backpressure persists a capacity waiter. It blocks goal
   materialization until authoritative allocator re-evaluation records recovery;
   no model polling or synthetic human message is used.
@@ -442,7 +500,10 @@ recovery of the same turn, not creation or charging of another continuation.
   `session.created`.
 - `GET /v1/workspaces/:id/sessions/:sessionId/goal` returns the goal plus a
   `continuation` projection from one repeatable-read Postgres snapshot
-  (`sessions:read`; 404 when the session has no goal). The projection reports
+  (`sessions:read`; 404 when the session has no goal, or 200 `null` when the
+  client opts in with `?absent=null` - the SDK's `findGoal`, which
+  `useGoal` prefers so a goal-less chat logs no failed browser request; a
+  missing session is always 404). The projection reports
   `inactive`, `scheduled`, `running`, `blocked`, or `invariant_broken`, with a
   typed reason, wake/observed revisions, optional next-attempt time, the
   latest workflow-wake error, and (for `held_for_input`) the agent's stated
@@ -458,7 +519,13 @@ recovery of the same turn, not creation or charging of another continuation.
 - `PATCH /v1/workspaces/:id/sessions/:sessionId/goal` with
   `{ status: "paused" | "active", rationale? }` is the operator override
   (`sessions:control`). Pausing emits `goal.paused` (`actor: "api"`). Resuming
-  is only valid from `paused`: it resets the counters, emits `goal.resumed`
+  is only valid from `paused`: model and funding admission are checked under
+  the control/session/goal locks first, using the effective model and exact
+  active causal human, or the latest-finished causal human when idle. A rejected
+  Resume returns an actionable 422
+  and preserves the paused goal, counters, event sequence and wake revisions.
+  The agent Resume tool uses the same validation. An admitted Resume resets
+  the counters, emits `goal.resumed`
   (`actor: "api"`, `reason: "api"`), and wakes the session workflow - resume
   works even on a fully idle session because `signalWithStart` restarts a
   completed workflow. Invalid transitions (e.g. resuming a completed goal)
@@ -526,7 +593,7 @@ arguments is rejected as `IDEMPOTENCY_KEY_REUSED`.
 | `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` | _(unset - no cap)_ | Optional hard ceiling on consecutive no-input continuation turns per goal arming. Unset by default, so a run can legitimately span days. When set, it is a ceiling that a per-goal `maxAutoContinuations` can only lower; reaching it pauses the goal until new external input resumes it. |
 | `OPENGENI_GOAL_IDLE_BACKOFF_MS` | `3000,30000,120000,300000` | Comma-separated pacing delays (ms) before the n-th consecutive no-input continuation, measured from when the previous continuation turn finished; the last entry repeats. Not a cap: any new input wakes the session immediately. |
 | `OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS` | `600000` | Upper bound on every idle-backoff delay; schedule entries above it are rejected at boot. |
-| `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` | `false` | Produce the child lifecycle notices (`child_requires_action`, its resolution, `child_paused`, `child_waiting_capacity`, `child_progress`) for parent sessions. Enable only after the whole fleet runs an image that understands the new kinds. The goal-continuation prompt teaches the orchestrator what each notice means and, when `session_human_input_respond` is in its effective first-party selection, that it may answer a worker's blocking question itself. |
+| `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` | `true` | Produce the child lifecycle notices (`child_requires_action`, its resolution, `child_paused`, `child_waiting_capacity` for a long capacity wait, `child_progress`) for parent sessions. Set it to false only while a fleet still runs an image from before August 2026, which does not understand the kinds. The goal-continuation prompt teaches the orchestrator what each notice means and, when `session_human_input_respond` is in its effective first-party selection, that it may answer a worker's blocking question itself. |
 
 
 ### Interpreting wake delivery

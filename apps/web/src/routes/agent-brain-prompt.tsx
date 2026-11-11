@@ -1,10 +1,8 @@
-import { useNavigate } from "@tanstack/react-router";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { SparklesIcon } from "lucide-react";
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { useAppContext } from "@/context";
-import { resolveAgentBrainPromptModel } from "@/lib/agent-brain-prompt-model";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type AgentKnowledgePromptKind = "company_profile" | "skill" | "workspace_instructions";
 
@@ -39,7 +37,7 @@ export function promptCopy(
       openingMessage: (request) =>
         `Help me create or update the instructions for agents working in this workspace.\n\nWhat I want:\n${request}`,
       instructions:
-        "Help the user turn a natural-language request into the shortest useful global workspace instruction: one imperative rule, normally 1–3 sentences and no more than 600 characters. Include only behavior that should apply to nearly every agent task. Remove rationale, examples, repeated defaults, and procedural detail; split unrelated rules and route conditional procedures or reusable how-to guidance to focused Skills. Route facts, decisions, incidents, bug fixes, and outcomes to retrievable Knowledge. Ask only essential follow-up questions. Before every change, read the current instruction and activation version with instruction_policy_get. Preserve every unrelated existing command exactly: use instruction_policy_save with editMode=append for a new rule, or edit with one localized exact oldText match for an update or removal. Agents cannot replace the complete instruction; direct a whole-policy rewrite to the manual editor. Use the exact baseline returned by the read. Agent learning settings govern publication: Automatic activates it, Review first saves a pending revision without interrupting the chat, and Off prevents agent changes. Report the actual receipt and direct pending changes to Knowledge > Review. Do not ask a second approval question. Do not duplicate the content in Knowledge or Skills. If the instruction tools are unavailable, say so briefly and leave the final proposed text ready for the manual editor.",
+        "Help the user turn a natural-language request into the shortest useful global workspace instruction: one imperative rule, normally 1–3 sentences. Use the same size limit as the manual editor. Include only behavior that should apply to nearly every agent task. Remove rationale, examples, repeated defaults, and procedural detail; split unrelated rules and route conditional procedures or reusable how-to guidance to focused Skills. Route facts, decisions, incidents, bug fixes, and outcomes to retrievable Knowledge. Ask only essential follow-up questions. Before every change, read the current instruction and activation version with instruction_policy_get. Preserve every unrelated existing command exactly: use instruction_policy_save with editMode=append for a new rule, or edit with one localized exact oldText match for an update or removal. Agents cannot replace the complete instruction; direct a whole-policy rewrite to the manual editor. Use the exact baseline returned by the read. Agent learning settings govern publication: Automatic activates it, Review first saves a pending revision without interrupting the chat, and Off prevents agent changes. Report the actual receipt and direct pending changes to Knowledge > Review. Do not ask a second approval question. Do not duplicate the content in Knowledge or Skills. If the instruction tools are unavailable, say so briefly and leave the final proposed text ready for the manual editor.",
     };
   }
   if (personalWorkspace) {
@@ -62,7 +60,7 @@ export function promptCopy(
     openingMessage: (request) =>
       `Help me turn this into a reusable Skill for Opengeni agents.\n\nWhat I want:\n${request}`,
     instructions:
-      "Help the user create one focused reusable Skill for this workspace: a conditional procedure or how-to agents fetch when relevant. A Skill is a folder containing SKILL.md and optional supporting text files. Give it a clear name, stable key, one-sentence always-visible summary, and concise full instructions with one trigger and outcome. Include only necessary prerequisites, executable steps, verification, and important failure handling; omit background, repetition, generic advice, and decorative examples, and split unrelated workflows into separate Skills. Facts, decisions, incidents, bug fixes, and outcomes belong in retrievable Knowledge; universal always-on rules belong in the shortest possible workspace instruction. Use skill_read for existing content and discover the lazy skill_save tool to create or update files without a sandbox. Read opengeni-skills when it is listed for the detailed workflow. Agent learning settings govern the write: Automatic publishes a valid authorized change, Review first leaves it pending in Knowledge > Review while the chat continues, and Off prevents agent authoring. Report the actual receipt; do not call remember, remember_confirm, or a confirmation-question tool for Skill writes, and do not treat a user request as a settings override. A private chat or personal workspace saves personal Skills for its initiating user; a shared chat saves workspace Skills. Organization Skill administration remains in its authorized manual editor. Do not duplicate the content in Knowledge or workspace instructions.",
+      "Help the user create one focused reusable Skill for this workspace: a conditional procedure or how-to agents fetch when relevant. A Skill is a folder containing SKILL.md and optional supporting text files. Give it a clear name, stable key, one-sentence always-visible summary, and concise full instructions with one trigger and outcome. Include only necessary prerequisites, executable steps, verification, and important failure handling; omit background, repetition, generic advice, and decorative examples, and split unrelated workflows into separate Skills. Facts, decisions, incidents, bug fixes, and outcomes belong in retrievable Knowledge; universal always-on rules belong in the shortest possible workspace instruction. Use skill_read for existing content and discover the lazy skill_save tool to create or update files without a sandbox. Read skill-management when it is listed for the detailed workflow. Agent learning settings govern the write: Automatic publishes a valid authorized change, Review first leaves it pending in Knowledge > Review while the chat continues, and Off prevents agent authoring. Report the actual receipt; do not call remember, remember_confirm, or a confirmation-question tool for Skill writes, and do not treat a user request as a settings override. A private chat or personal workspace saves personal Skills for its initiating user; a shared chat saves workspace Skills. Organization Skill administration remains in its authorized manual editor. Do not duplicate the content in Knowledge or workspace instructions.",
   };
 }
 
@@ -107,7 +105,7 @@ export function useAgentBrainPromptCatalog(workspaceId: string): CatalogState & 
             workspaceId,
             models: [],
             loading: false,
-            error: caught instanceof Error ? caught.message : String(caught),
+            error: errorMessage(caught),
           });
         }
       }
@@ -124,136 +122,4 @@ export function useAgentBrainPromptCatalog(workspaceId: string): CatalogState & 
   return state.workspaceId === workspaceId
     ? { ...state, refresh }
     : { workspaceId, models: [], loading: true, error: null, refresh };
-}
-
-export function AgentKnowledgePrompt({
-  kind,
-  workspaceId,
-  personalWorkspace = false,
-}: {
-  kind: AgentKnowledgePromptKind;
-  workspaceId: string;
-  personalWorkspace?: boolean;
-}) {
-  const context = useAppContext();
-  const navigate = useNavigate();
-  const copy = promptCopy(kind, personalWorkspace);
-  const [request, setRequest] = useState("");
-  const [starting, setStarting] = useState(false);
-  const modelCatalog = useAgentBrainPromptCatalog(workspaceId);
-  const modelSelection = useMemo(
-    () =>
-      modelCatalog.loading || modelCatalog.error
-        ? null
-        : resolveAgentBrainPromptModel(modelCatalog.models, {
-            model: context.model,
-            reasoningEffort: context.reasoningEffort,
-            latencyMode: context.latencyMode,
-          }),
-    [
-      modelCatalog.loading,
-      modelCatalog.error,
-      modelCatalog.models,
-      context.model,
-      context.reasoningEffort,
-      context.latencyMode,
-    ],
-  );
-  const noModelAvailable =
-    !modelCatalog.loading && modelCatalog.error === null && modelSelection === null;
-  const canSubmit =
-    Boolean(request.trim()) &&
-    !starting &&
-    !context.busy &&
-    !modelCatalog.loading &&
-    modelSelection !== null;
-
-  const start = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault();
-    const trimmed = request.trim();
-    if (!trimmed || starting || context.busy || modelCatalog.loading || !modelSelection) return;
-    setStarting(true);
-    try {
-      const created = await context.startSession(
-        workspaceId,
-        {
-          text: copy.openingMessage(trimmed),
-          model: modelSelection.model,
-          reasoningEffort: modelSelection.reasoningEffort,
-          latencyMode: modelSelection.latencyMode,
-        },
-        { instructions: copy.instructions },
-      );
-      if (created) {
-        await navigate({
-          to: "/workspaces/$workspaceId/sessions/$sessionId",
-          params: { workspaceId, sessionId: created.id },
-        });
-      }
-    } finally {
-      setStarting(false);
-    }
-  };
-
-  return (
-    <form
-      className="grid gap-3 rounded-lg border border-border bg-surface p-4"
-      onSubmit={(event) => void start(event)}
-    >
-      <label className="grid gap-2 text-sm font-medium text-fg">
-        <span className="flex items-center gap-2">
-          <SparklesIcon className="size-4 text-brand" />
-          {copy.label}
-        </span>
-        <textarea
-          className="min-h-28 rounded-md border border-border bg-surface px-3 py-2 text-sm leading-6 text-fg outline-none focus:border-brand"
-          value={request}
-          placeholder={copy.placeholder}
-          onChange={(event) => setRequest(event.target.value)}
-        />
-      </label>
-      <p className="text-xs leading-5 text-fg-subtle">
-        {kind === "company_profile"
-          ? "Uses your organization’s review setting."
-          : "Uses your Agent learning settings."}
-      </p>
-      {modelSelection ? (
-        <p className="text-xs leading-5 text-fg-subtle" role="status">
-          Model: <span className="font-medium text-fg">{modelSelection.label}</span>
-          {" · "}
-          {modelSelection.paymentSource}
-        </p>
-      ) : null}
-      {noModelAvailable ? (
-        <p className="text-xs leading-5 text-status-error" role="status">
-          No model is available for this workspace. Check the workspace model policy and provider
-          credentials.
-        </p>
-      ) : null}
-      {modelCatalog.error ? (
-        <p className="flex flex-wrap items-center gap-2 text-xs leading-5 text-fg-subtle">
-          <span>
-            Could not resolve an allowed workspace model: {modelCatalog.error}. Retry before
-            creating with Opengeni.
-          </span>
-          <button
-            type="button"
-            className="rounded-md border border-border px-2 py-0.5 text-xs font-medium text-fg hover:bg-surface-muted"
-            onClick={() => void modelCatalog.refresh()}
-          >
-            Retry
-          </button>
-        </p>
-      ) : null}
-      <div>
-        <button
-          type="submit"
-          className="rounded-md border border-primary-border bg-primary text-primary-foreground hover:bg-primary-hover px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={!canSubmit}
-        >
-          {starting ? "Starting…" : copy.button}
-        </button>
-      </div>
-    </form>
-  );
 }

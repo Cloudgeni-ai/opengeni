@@ -13,6 +13,10 @@ export type SandboxCodemodeAuthority = {
   turnId: string;
   attemptId: string;
   executionGeneration: number;
+  credentialRestriction?: "developer_setup";
+  /** The machine that runs the process holding this token, when it is not the
+   *  session's active sandbox (a `run_on` exec). Paths resolve there. */
+  executionSandboxId?: string;
 };
 
 export type MintedSandboxCodemodeToken = {
@@ -45,6 +49,10 @@ export async function mintSandboxCodemodeToken(
     turnId: authority.turnId,
     attemptId: authority.attemptId,
     executionGeneration: authority.executionGeneration,
+    ...(authority.credentialRestriction
+      ? { credentialRestriction: authority.credentialRestriction }
+      : {}),
+    ...(authority.executionSandboxId ? { executionSandboxId: authority.executionSandboxId } : {}),
     principalKind: "agent_attempt",
     exp: expiresAtSeconds,
   });

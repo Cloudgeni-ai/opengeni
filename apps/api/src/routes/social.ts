@@ -6,6 +6,7 @@ import {
   SocialOAuthStartRequest,
 } from "@opengeni/contracts";
 import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
+import { withDesktopAppReturnPath } from "../desktop-app-return";
 import {
   createSocialConnection,
   createSocialPost,
@@ -17,7 +18,11 @@ import {
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  requireWorkspaceSettingsGrant,
+} from "@opengeni/core";
 import {
   assertPersonalConnectionOwnerPrincipal,
   isPersonalConnectionOwnerPrincipal,
@@ -26,7 +31,9 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { completeSocialOAuthCallback, startSocialOAuth } from "../integrations/social-oauth";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestBody, parseRequestJson } from "../http/request-body";
+import { disconnectAuditActor } from "../http/disconnect-audit-actor";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings, observability } = deps;
@@ -44,9 +51,11 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  // A workspace-owned social account is a workspace setting: workspace admins
+  // manage it, and so does the owner of a Personal workspace.
   app.post("/v1/workspaces/:workspaceId/social/connections", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = await parseRequestJson(c, CreateSocialConnectionRequest);
     try {
       return c.json(
@@ -86,7 +95,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     const existing = await getSocialConnection(db, workspaceId, connectionId, grant.subjectId);
     if (!existing) throw new HTTPException(404, { message: "social connection not found" });
     if (existing.ownership === "workspace")
-      await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+      await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const connection = await updateSocialConnectionCredential(db, {
       workspaceId,
       connectionId,
@@ -94,6 +103,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
       credentialEncrypted: null,
       status: "disabled",
       tokenMetadata: {},
+      audit: disconnectAuditActor(c, { subjectId: grant.subjectId, grant }),
     });
     if (!connection) {
       throw new HTTPException(404, { message: "social connection not found" });
@@ -106,19 +116,14 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
   // callback is unauthenticated (browser redirect) but bound by signed state.
   app.post("/v1/workspaces/:workspaceId/social/oauth/start", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const parsed = SocialOAuthStartRequest.safeParse(await c.req.json());
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: parsed.error.issues[0]?.message ?? "invalid social OAuth start request",
-      });
-    }
-    const payload = parsed.data;
-    const access = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      payload.ownership === "workspace" ? "workspace:admin" : "workspace:read",
-    );
+    const parsed = parseRequestBody(SocialOAuthStartRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid social OAuth start request",
+    });
+    const payload = parsed;
+    if (payload.ownership === "workspace")
+      await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
     // The contract already defaults this request to workspace ownership; an
     // explicit personal choice still needs a human who can own it.
     requireLegacyOAuthActor(access);
@@ -135,7 +140,7 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
         subjectId: grant.subjectId,
         personalOwnershipAllowed,
         requestUrl: c.req.url,
-        payload,
+        payload: withDesktopAppReturnPath(c, payload),
       },
     );
     return c.json(OAuthStartResponse.parse(result));
@@ -176,8 +181,19 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/social/posts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    // Recording a post on your own account is yours to do; a workspace-owned
+    // account is a workspace setting, as when connecting it.
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const payload = await parseRequestJson(c, CreateSocialPostRequest);
+    const connection = await getSocialConnection(
+      db,
+      workspaceId,
+      payload.connectionId,
+      grant.subjectId,
+    );
+    if (!connection) throw new HTTPException(404, { message: "social connection not found" });
+    if (connection.ownership !== "personal")
+      await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     try {
       return c.json(
         await createSocialPost(db, {
@@ -234,7 +250,7 @@ function socialHttpException(error: unknown): HTTPException {
   if (error instanceof OrganizationIntegrationDeniedError) {
     return new HTTPException(403, { message: error.message });
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   if (message.includes("not found")) {
     return new HTTPException(404, { message });
   }

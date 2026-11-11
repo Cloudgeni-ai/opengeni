@@ -1,19 +1,21 @@
 import { afterAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { OpenGeniApiError, type BillingPlanBalance } from "@opengeni/sdk";
 import { act, StrictMode, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import * as RouterPackage from "@tanstack/react-router";
 import * as SonnerPackage from "sonner";
 
-import * as DestructiveModule from "@/components/ui/destructive-confirm";
-import * as DropdownModule from "@/components/ui/dropdown-menu";
-import type { OrganizationAdminIdentity } from "@/lib/organization-admin";
+import * as DestructiveModule from "@opengeni/react/app/components/ui/destructive-confirm";
+import * as DropdownModule from "@opengeni/react/ui/dropdown-menu";
+import type { OrganizationAdminIdentity } from "@opengeni/react/app/lib/organization-admin";
 import type {
   OrganizationAdministrationOverview,
   OrganizationInvitation,
   OrganizationMember,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 const toastSuccess = mock((_message: string, _options?: unknown) => undefined);
 const toastError = mock((_message: string, _options?: unknown) => undefined);
@@ -32,7 +34,7 @@ mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
   useNavigate: () => navigate,
 }));
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   ...DropdownModule,
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -44,7 +46,7 @@ mock.module("@/components/ui/dropdown-menu", () => ({
   ),
   DropdownMenuSeparator: () => <hr />,
 }));
-mock.module("@/components/ui/destructive-confirm", () => ({
+mock.module("@opengeni/react/app/components/ui/destructive-confirm", () => ({
   ...DestructiveModule,
   showUndoToast: undoToast,
   DestructiveConfirm: ({
@@ -223,12 +225,22 @@ function makeClient(overrides: Record<string, unknown> = {}) {
       ...invitation("member"),
       status: "revoked",
     })),
+    listOrganizationMemberNames: mock(async () => ({
+      available: true,
+      members: [
+        { id: "maria", name: "Maria Chen", you: true },
+        { id: "owner", name: "Olivia Owner", you: false },
+        { id: "nameless", name: null, you: false },
+      ],
+    })),
     ...overrides,
   };
 }
 
 type Client = ReturnType<typeof makeClient>;
-type InvitationRequest = Parameters<OpenGeniBrowserClient["createOrganizationInvitation"]>[1] &
+type InvitationRequest = Parameters<
+  ChatClient<OpenGeniBrowserClient>["createOrganizationInvitation"]
+>[1] &
   Pick<OrganizationInvitation, "role" | "initialWorkspaceIds">;
 
 async function flush() {
@@ -267,7 +279,7 @@ function Provider({
 }) {
   return (
     <OrganizationDirectoryProvider
-      client={client as unknown as OpenGeniBrowserClient}
+      client={client as unknown as ChatClient<OpenGeniBrowserClient>}
       identity={identity}
       actorRole={actorRole}
       managedSession
@@ -571,9 +583,466 @@ describe("organization directory", () => {
     expect(first.initialWorkspaceIds).toEqual(["ws-platform"]);
     await view.unmount();
   });
+
+  test.each(["seat_limit_reached", "payment_required"])(
+    "%s survives directory projection alongside partial invite success",
+    async (code) => {
+      const create = mock(async (_org: string, request: { email: string }) => {
+        if (request.email === "full@example.test")
+          throw Object.assign(new Error("Your plan has no seats left"), {
+            status: 402,
+            body: JSON.stringify({ error: code }),
+          });
+        return { ...invitation("member"), id: "new-seat", targetEmail: request.email };
+      });
+      const plan = {
+        key: "free",
+        label: "Free",
+        status: "active",
+        seatsUsed: 4,
+        seatLimit: 5,
+        creditGrantedMicros: 0,
+        creditRemainingMicros: 0,
+        periodResetAt: null,
+        cancelAtPeriodEnd: false,
+      } satisfies BillingPlanBalance;
+      const client = makeClient({
+        createOrganizationInvitation: create,
+        getBilling: mock(async () => ({ balance: { plan } })),
+        getBillingSubscriptionPlans: mock(async () => ({ plan })),
+      });
+      const view = mount(null);
+      await view.render(
+        <Provider client={client}>
+          <Capture />
+        </Provider>,
+      );
+      await flush();
+      let result!: Awaited<ReturnType<NonNullable<typeof captured>["invite"]>>;
+      await act(async () => {
+        result = await captured!.invite({
+          emails: ["fits@example.test", "full@example.test"],
+          role: "member",
+          workspaceIds: [],
+        });
+      });
+      expect(result.sent.map((item) => item.targetEmail)).toEqual(["fits@example.test"]);
+      expect(result.failed[0]).toMatchObject({
+        email: "full@example.test",
+        seatLimitReached: true,
+      });
+      await view.unmount();
+    },
+  );
 });
 
 describe("People page", () => {
+  test.each(["seat_limit_reached", "payment_required", "status-only"])(
+    "%s refusal shows the upgrade action with the verified full plan",
+    async (code) => {
+      const plan: BillingPlanBalance = {
+        key: "free",
+        label: "Free",
+        status: "active",
+        creditGrantedMicros: 10_000_000,
+        creditRemainingMicros: 0,
+        periodResetAt: null,
+        seatsUsed: 5,
+        seatLimit: 5,
+        cancelAtPeriodEnd: false,
+      };
+      let resolveBilling!: (value: { balance: { plan: BillingPlanBalance } }) => void;
+      const billing = new Promise<{ balance: { plan: BillingPlanBalance } }>((resolve) => {
+        resolveBilling = resolve;
+      });
+      // Typed errors work even before billing arrives; old generic/status-only
+      // refusals use the already verified seat context, not 402 alone.
+      if (code !== "seat_limit_reached") resolveBilling({ balance: { plan } });
+      const client = makeClient({
+        getBilling: mock(() => billing),
+        getBillingSubscriptionPlans: mock(async () => ({ plan })),
+        createOrganizationInvitation: mock(async () => {
+          if (code === "status-only")
+            throw Object.assign(new Error("Request failed."), { status: 402 });
+          throw new OpenGeniApiError(
+            402,
+            JSON.stringify({
+              error: {
+                status: 402,
+                code,
+                message: "Organization seat limit reached. Upgrade your plan to add people.",
+                retryable: false,
+                details: { action: { type: "upgrade", href: "/billing" } },
+              },
+            }),
+            { mutation: true },
+          );
+        }),
+      });
+      const view = mount(null);
+      try {
+        await view.render(
+          <Provider client={client}>
+            <OrganizationPeoplePage workspaceId="workspace-a" view="invite" />
+          </Provider>,
+        );
+        await flush();
+        const paste = new Event("paste", { bubbles: true, cancelable: true });
+        Object.defineProperty(paste, "clipboardData", {
+          value: { getData: () => "new@example.test," },
+        });
+        await act(async () =>
+          view.container.querySelector("input[type=email]")!.dispatchEvent(paste),
+        );
+        await act(async () =>
+          view.container
+            .querySelector("form")!
+            .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+        );
+        await flush();
+        if (code === "seat_limit_reached") {
+          expect(view.container.textContent).toContain("Couldn't send the invitation");
+          expect(view.container.textContent).not.toContain("View upgrade options");
+          await act(async () => resolveBilling({ balance: { plan } }));
+          await flush();
+        }
+        expect(view.container.textContent).toContain("5 / 5 seats used");
+        expect(view.container.textContent).toContain("View upgrade options");
+        expect(view.container.textContent).not.toContain("Couldn't send the invitation");
+        expect(view.container.textContent).toContain("new@example.test");
+        await act(async () => button(view.container, "View upgrade options").click());
+        expect(navigate).toHaveBeenCalledWith(
+          expect.objectContaining({ search: { section: "billing" } }),
+        );
+      } finally {
+        await view.unmount();
+      }
+    },
+  );
+
+  // Bendik's limits: Free 1, Pro 2, Max 10, Enterprise unlimited.
+  const seatCatalog = [
+    { key: "free", label: "Free", price: 0, seats: 1, selfService: false },
+    { key: "pro", label: "Pro", price: 20_000_000, seats: 2, selfService: true },
+    { key: "max", label: "Max", price: 100_000_000, seats: 10, selfService: true },
+    { key: "enterprise", label: "Enterprise", price: null, seats: null, selfService: false },
+  ].map((item) => ({
+    key: item.key,
+    label: item.label,
+    monthlyPriceMicros: item.price,
+    monthlyCreditMicros: 0,
+    seatLimit: item.seats,
+    freeCredit: item.key === "free",
+    stripePriceId: item.selfService ? `price_${item.key}` : null,
+    selfService: item.selfService,
+  }));
+  function seatPlan(key: string, seatsUsed: number): BillingPlanBalance {
+    const item = seatCatalog.find((each) => each.key === key)!;
+    return {
+      key,
+      label: item.label,
+      status: "active",
+      creditGrantedMicros: 0,
+      creditRemainingMicros: 0,
+      periodResetAt: null,
+      seatsUsed,
+      seatLimit: item.seatLimit,
+      cancelAtPeriodEnd: false,
+    };
+  }
+  async function invitePage(plan: BillingPlanBalance, canManageBilling: boolean, create?: unknown) {
+    const client = makeClient({
+      getBilling: mock(async () => ({ balance: { plan } })),
+      getBillingSubscriptionPlans: mock(async () => ({ plan, plans: seatCatalog })),
+      ...(create ? { createOrganizationInvitation: create } : {}),
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationPeoplePage
+          workspaceId="workspace-a"
+          view="invite"
+          canManageBilling={canManageBilling}
+        />
+      </Provider>,
+    );
+    await flush();
+    return view;
+  }
+
+  test("a full plan names the one plan that adds a seat before anyone is invited", async () => {
+    const view = await invitePage(seatPlan("pro", 2), true);
+    try {
+      expect(view.container.textContent).toContain("2 / 2 seats used");
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+      expect(view.container.textContent).not.toContain("View upgrade options");
+      await act(async () => button(view.container, "Upgrade to Max").click());
+      expect(navigate).toHaveBeenCalledWith(
+        expect.objectContaining({ search: { section: "billing" } }),
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("people without billing access are told to ask an owner, with no upgrade button", async () => {
+    const view = await invitePage(seatPlan("free", 1), false);
+    try {
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+      expect(view.container.textContent).not.toContain("to add more people");
+      expect(view.container.textContent).toContain("Ask an organization owner to upgrade to Pro.");
+      expect(
+        [...view.container.querySelectorAll("button")].some((each) =>
+          /Upgrade to|View upgrade options/.test(each.textContent ?? ""),
+        ),
+      ).toBe(false);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a plan with room shows no notice, and a refusal names the plan the server chose", async () => {
+    const create = mock(async () => {
+      throw new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            status: 402,
+            code: "seat_limit_reached",
+            message: "Upgrade to Max to add more people.",
+            retryable: false,
+            details: {
+              seatLimit: 2,
+              seatsUsed: 2,
+              upgradePlan: "max",
+              upgradePlanLabel: "Max",
+              action: { type: "upgrade", href: "/billing" },
+            },
+          },
+        }),
+        { mutation: true },
+      );
+    });
+    // The directory still believes there is room, as when someone else took the seat.
+    const view = await invitePage(seatPlan("pro", 1), true, create);
+    try {
+      expect(view.container.textContent).toContain("1 / 2 seats used");
+      expect(view.container.textContent).not.toContain("seat limit is reached");
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", {
+        value: { getData: () => "new@example.test," },
+      });
+      await act(async () =>
+        view.container.querySelector("input[type=email]")!.dispatchEvent(paste),
+      );
+      await act(async () =>
+        view.container
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      await flush();
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+      expect(button(view.container, "Upgrade to Max")).toBeDefined();
+      expect(view.container.textContent).toContain("new@example.test");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("several refused people get the plan with room for all of them, not the server's one-seat pick", async () => {
+    const create = mock(async () => {
+      throw new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            status: 402,
+            code: "seat_limit_reached",
+            message: "Upgrade to Pro to add more people.",
+            retryable: false,
+            details: { upgradePlan: "pro", upgradePlanLabel: "Pro" },
+          },
+        }),
+        { mutation: true },
+      );
+    });
+    // One seat used of Free's one; three more people need four seats, which only Max has.
+    const view = await invitePage(seatPlan("free", 1), true, create);
+    try {
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", {
+        value: { getData: () => "a@example.test, b@example.test, c@example.test," },
+      });
+      await act(async () =>
+        view.container.querySelector("input[type=email]")!.dispatchEvent(paste),
+      );
+      await act(async () =>
+        view.container
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      await flush();
+      expect(create).toHaveBeenCalledTimes(3);
+      expect(button(view.container, "Upgrade to Max")).toBeDefined();
+      expect(view.container.textContent).not.toContain("Upgrade to Pro");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  const seatRefusal = () =>
+    new OpenGeniApiError(
+      402,
+      JSON.stringify({
+        error: {
+          status: 402,
+          code: "seat_limit_reached",
+          message: "Upgrade to Pro to add more people.",
+          retryable: false,
+          details: { upgradePlan: "pro", upgradePlanLabel: "Pro" },
+        },
+      }),
+      { mutation: true },
+    );
+  async function submitEmails(container: HTMLElement, text: string) {
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: { getData: () => text } });
+    await act(async () => container.querySelector("input[type=email]")!.dispatchEvent(paste));
+    await act(async () =>
+      container
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await flush();
+  }
+
+  test("while the plan is re-read after invites, the seat notice stays and then shows the server's count", async () => {
+    let seatsUsed = 1;
+    let release: (() => void) | null = null;
+    let hold = false;
+    const create = mock(async (_org: string, request: { email: string }) => {
+      hold = true;
+      if (request.email === "a@example.test") {
+        seatsUsed = 2;
+        return { ...invitation("member"), id: "created-a", targetEmail: request.email };
+      }
+      throw seatRefusal();
+    });
+    const client = makeClient({
+      // Reads after the invitations wait until the test releases them.
+      getBilling: mock(async () => {
+        if (hold) {
+          const previous = release;
+          await new Promise<void>((resolve) => {
+            release = () => {
+              previous?.();
+              resolve();
+            };
+          });
+        }
+        return { balance: { plan: seatPlan("pro", seatsUsed) } };
+      }),
+      getBillingSubscriptionPlans: mock(async () => ({
+        plan: seatPlan("pro", seatsUsed),
+        plans: seatCatalog,
+      })),
+      createOrganizationInvitation: create,
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationPeoplePage workspaceId="workspace-a" view="invite" canManageBilling />
+      </Provider>,
+    );
+    await flush();
+    try {
+      expect(view.container.textContent).toContain("1 / 2 seats used");
+      await submitEmails(view.container, "a@example.test, b@example.test,");
+      expect(create).toHaveBeenCalledTimes(2);
+      // The re-read is in flight: the previous plan keeps the one notice up.
+      expect(release).not.toBeNull();
+      // No local guess at the count: it only changes once the server answers.
+      expect(view.container.textContent).toContain("1 / 2 seats used");
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+      expect(view.container.textContent).not.toContain("Couldn't send the invitation");
+      expect(button(view.container, "Upgrade to Max")).toBeDefined();
+      await act(async () => release!());
+      await flush();
+      expect(view.container.textContent).toContain("2 / 2 seats used");
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("other failures stay visible beside the seat notice, and the plan follows the form", async () => {
+    const create = mock(async (_org: string, request: { email: string }) => {
+      if (request.email === "c@example.test") throw new Error("Request failed.");
+      throw seatRefusal();
+    });
+    // Free is full; with three people still in the form, only Max has room.
+    const view = await invitePage(seatPlan("free", 1), true, create);
+    try {
+      await submitEmails(view.container, "a@example.test, b@example.test, c@example.test,");
+      expect(create).toHaveBeenCalledTimes(3);
+      expect(view.container.textContent).toContain("Your plan's seat limit is reached");
+      expect(button(view.container, "Upgrade to Max")).toBeDefined();
+      expect(view.container.textContent).toContain("Couldn't invite c@example.test");
+      // Down to one person, Pro has room.
+      await act(async () => button(view.container, "Remove b@example.test").click());
+      await act(async () => button(view.container, "Remove c@example.test").click());
+      expect(button(view.container, "Upgrade to Pro")).toBeDefined();
+      expect(view.container.textContent).not.toContain("Upgrade to Max");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a refused restore tells people without billing access to ask an owner", async () => {
+    const plan = seatPlan("pro", 2);
+    const suspended = person("member-x", "Xena Example", "member", { status: "suspended" });
+    const client = makeClient({
+      getBilling: mock(async () => ({ balance: { plan } })),
+      getBillingSubscriptionPlans: mock(async () => ({ plan, plans: seatCatalog })),
+      listOrganizationAdministrationMembers: mock(async () => ({ members: [owner, suspended] })),
+      updateOrganizationMember: mock(async () => {
+        throw new OpenGeniApiError(
+          402,
+          JSON.stringify({
+            error: {
+              status: 402,
+              code: "seat_limit_reached",
+              message: "Upgrade to Max to add more people.",
+              retryable: false,
+              details: { upgradePlan: "max", upgradePlanLabel: "Max" },
+            },
+          }),
+          { mutation: true },
+        );
+      }),
+    });
+    const view = mount(null);
+    try {
+      await view.render(
+        <Provider client={client}>
+          <OrganizationPeoplePage
+            workspaceId="workspace-a"
+            person="member-x"
+            canManageBilling={false}
+          />
+        </Provider>,
+      );
+      await flush();
+      await act(async () => button(view.container, "Restore access").click());
+      await flush();
+      expect(toastError).toHaveBeenCalledWith(
+        "Couldn't restore Xena Example",
+        expect.objectContaining({ description: "Ask an organization owner to upgrade to Max." }),
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("names the person in the suspend confirmation and says access is removed", async () => {
     const client = makeClient();
     const view = mount(null);
@@ -590,6 +1059,10 @@ describe("People page", () => {
     expect(confirm.textContent).toContain("Suspend Maria Chen?");
     expect(confirm.textContent).toContain(
       "Their access to Platform engineering is removed. Restoring doesn't bring it back.",
+    );
+    // The admin learns before confirming that the person's schedules stop.
+    expect(confirm.textContent).toContain(
+      "Schedules they own stop running and pause themselves. Each one says why on its Automations page.",
     );
     await act(async () => button(confirm, "Suspend").click());
     await flush();
@@ -634,6 +1107,71 @@ describe("People page", () => {
     );
     await view.unmount();
   });
+
+  test("a member sees colleagues by name only, never the administration list", async () => {
+    const client = makeClient();
+    const view = mount(null);
+    await view.render(
+      <Provider
+        client={client}
+        actorRole="member"
+        identity={{ ...identityA, subjectId: "user:maria" }}
+      >
+        <OrganizationPeoplePage workspaceId="workspace-a" />
+      </Provider>,
+    );
+    await flush();
+    expect(client.listOrganizationMemberNames).toHaveBeenCalledWith("org-a");
+    expect(client.listOrganizationAdministrationMembers).not.toHaveBeenCalled();
+    expect(client.listOrganizationInvitationsForOrganization).not.toHaveBeenCalled();
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Maria Chen");
+    expect(text).toContain("You");
+    expect(text).toContain("Olivia Owner");
+    expect(text).toContain("Unnamed person");
+    // No emails, roles, invitations or admin actions.
+    expect(text).not.toContain("@example.test");
+    for (const adminText of ["Admin", "Member", "Invite", "Suspend", "Platform engineering"]) {
+      expect(text).not.toContain(adminText);
+    }
+    expect(view.container.querySelector('[role="menuitem"]')).toBeNull();
+    await view.unmount();
+  });
+
+  test("a member sees why the list is empty while the server doesn't offer it", async () => {
+    const client = makeClient({
+      listOrganizationMemberNames: mock(async () => ({ available: false, members: [] })),
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client} actorRole="member">
+        <OrganizationPeoplePage workspaceId="workspace-a" />
+      </Provider>,
+    );
+    await flush();
+    expect(view.container.textContent).toContain(
+      "Only owners and admins can see who's in this organization.",
+    );
+    expect(client.listOrganizationAdministrationMembers).not.toHaveBeenCalled();
+    await view.unmount();
+  });
+
+  test("owners and admins keep the full directory and never load the names list", async () => {
+    for (const actorRole of ["owner", "admin"] as const) {
+      const client = makeClient();
+      const view = mount(null);
+      await view.render(
+        <Provider client={client} actorRole={actorRole}>
+          <OrganizationPeoplePage workspaceId="workspace-a" />
+        </Provider>,
+      );
+      await flush();
+      expect(client.listOrganizationMemberNames).not.toHaveBeenCalled();
+      expect(client.listOrganizationAdministrationMembers).toHaveBeenCalled();
+      expect(view.container.textContent).toContain("maria@example.test");
+      await view.unmount();
+    }
+  });
 });
 
 describe("Workspace page", () => {
@@ -665,6 +1203,145 @@ describe("Workspace page", () => {
     ];
     expect(put[2]).toBe("maria");
     expect(put[3]).toMatchObject({ role: "member", expectedUpdatedAt: null });
+    await view.unmount();
+  });
+
+  test("deleting a workspace names the Slack agents that go with it", async () => {
+    const listOpenGeniSlackAgents = mock(async () => ({
+      routingEnabled: true,
+      agents: [
+        { name: "Data team", targetWorkspaceId: "ws-platform" },
+        { name: "Elsewhere", targetWorkspaceId: "ws-other" },
+        { name: "Release", targetWorkspaceId: "ws-platform" },
+      ],
+    }));
+    const client = makeClient({ listOpenGeniSlackAgents });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationWorkspacesPage workspaceId="workspace-a" workspace="ws-platform" />
+      </Provider>,
+    );
+    await flush();
+    expect(listOpenGeniSlackAgents).not.toHaveBeenCalled();
+    const remove = Array.from(view.container.querySelectorAll('[role="menuitem"]')).find((item) =>
+      item.textContent?.includes("Delete workspace"),
+    ) as HTMLButtonElement;
+    await act(async () => remove.click());
+    await flush();
+    expect(listOpenGeniSlackAgents).toHaveBeenCalledWith("workspace-a");
+    const confirm = view.container.querySelector('[data-testid="confirm"]');
+    expect(confirm?.textContent).toContain(
+      "Its agents stop answering in Slack: Data team, Release.",
+    );
+    expect(confirm?.textContent).not.toContain("Elsewhere");
+    await view.unmount();
+  });
+
+  test("deleting a workspace without Slack agents says nothing about them", async () => {
+    const client = makeClient({
+      listOpenGeniSlackAgents: mock(async () => {
+        throw new Error("unavailable");
+      }),
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationWorkspacesPage workspaceId="workspace-a" workspace="ws-platform" />
+      </Provider>,
+    );
+    await flush();
+    const remove = Array.from(view.container.querySelectorAll('[role="menuitem"]')).find((item) =>
+      item.textContent?.includes("Delete workspace"),
+    ) as HTMLButtonElement;
+    await act(async () => remove.click());
+    await flush();
+    const confirm = view.container.querySelector('[data-testid="confirm"]');
+    expect(confirm?.textContent).toContain("Its chats, files, automations, agents and knowledge");
+    expect(confirm?.textContent).not.toContain("Slack agents");
+    await view.unmount();
+  });
+});
+
+describe("organization with many tenant workspaces", () => {
+  // An embedding product provisions one shared workspace per tenant with its
+  // organization key; none of them has a human member yet.
+  function manyTenants(): OrganizationAdministrationOverview {
+    const base = overview();
+    const tenants = Array.from({ length: 12 }, (_, index) => ({
+      id: `ws-tenant-${index}`,
+      name: `Tenant ${String(index).padStart(2, "0")}`,
+      slug: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      members: [],
+    }));
+    return { ...base, workspaces: [...base.workspaces, ...tenants] };
+  }
+
+  async function search(container: HTMLElement, label: string, value: string) {
+    const input = container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
+    if (!input) throw new Error(`Missing search: ${label}`);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;
+      (
+        input as unknown as Record<
+          string,
+          { onChange: (event: { target: HTMLInputElement }) => void }
+        >
+      )[key]!.onChange({ target: input });
+    });
+    await flush();
+  }
+
+  test("the Workspaces list searches by name and offers Join on a key-created workspace", async () => {
+    const client = makeClient({
+      getOrganizationAdministrationOverview: mock(async () => manyTenants()),
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationWorkspacesPage workspaceId="workspace-a" />
+      </Provider>,
+    );
+    await flush();
+    expect(view.container.textContent).toContain("Tenant 11");
+    await search(view.container, "Search workspaces", "tenant 07");
+    expect(view.container.textContent).toContain("Tenant 07");
+    expect(view.container.textContent).not.toContain("Tenant 11");
+    expect(view.container.textContent).not.toContain("Platform engineering");
+    expect(view.container.textContent).toContain("1 of 13 workspaces");
+
+    // The key-created tenant has no human member, so its owner is offered Join.
+    expect(
+      view.container.querySelectorAll('button[aria-label="Join Tenant 07"]').length,
+    ).toBeGreaterThan(0);
+
+    await search(view.container, "Search workspaces", "nothing like this");
+    expect(view.container.textContent).toContain("No workspaces match");
+    await view.unmount();
+  });
+
+  test("a person's Workspace access lists every shared workspace with a search", async () => {
+    const client = makeClient({
+      getOrganizationAdministrationOverview: mock(async () => manyTenants()),
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationPeoplePage workspaceId="workspace-a" person="owner" />
+      </Provider>,
+    );
+    await flush();
+    const rows = () =>
+      view.container.querySelectorAll('[aria-label="Workspace access for Olivia Owner"] > li');
+    expect(rows()).toHaveLength(13);
+    await search(view.container, "Search workspaces for Olivia Owner", "Tenant 0");
+    expect(rows()).toHaveLength(10);
+    expect(view.container.textContent).toContain("10 of 13 workspaces");
+    await search(view.container, "Search workspaces for Olivia Owner", "zzz");
+    expect(view.container.textContent).toContain("No workspaces match.");
     await view.unmount();
   });
 });

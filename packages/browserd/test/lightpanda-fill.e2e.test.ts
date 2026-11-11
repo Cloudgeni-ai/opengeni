@@ -10,7 +10,6 @@ const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" && binaryPath ? test : tes
 
 e2e("Lightpanda fill replaces existing values and emits native input events", async () => {
   const directory = await mkdtemp("/tmp/ogb-lp-fill-");
-  const socketDirectory = `/tmp/lpf-${randomUUID().slice(0, 8)}`;
   const binary = await resolvePinnedLightpandaBinary({
     binaryPath: binaryPath!,
   });
@@ -52,8 +51,7 @@ e2e("Lightpanda fill replaces existing values and emits native input events", as
   });
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: join(directory, "state"),
-    socketRootDirectory: socketDirectory,
-    lightpandaBinary: binary,
+    lightpandaBinary: async () => binary,
   });
   const reference = {
     browserSessionId: randomUUID(),
@@ -193,39 +191,26 @@ e2e("Lightpanda fill replaces existing values and emits native input events", as
     });
     expect(navigation.state).toBe("completed");
     observation = navigation.observation!;
-    const { action: _action, ...fence } = fillCommand(observation, "#username", "");
-    const protectedReceipt = await supervisor.protectedAuthFill({
-      ...fence,
-      expectedDocumentGeneration: observation.target.documentGeneration!,
-      expectedFrameId: observation.frameId!,
-      actor: { kind: "system", subjectId: "protected-fill-conformance" },
-      authorityId: "fixture-authority",
-      credentialVersion: 1,
-      allowedOrigins: [origin],
-      fields: [
-        {
-          fieldId: "username",
-          locator: { kind: "css", selector: "#username" },
-          purpose: "identifier",
-          value: "new-user",
-        },
-        {
-          fieldId: "password",
-          locator: { kind: "css", selector: "#password" },
-          purpose: "password",
-          value: "new-password",
-        },
-      ],
-      submit: { type: "click", locator: { kind: "css", selector: "#login" } },
+    // Logins are ordinary fill and click actions on the page.
+    for (const [selector, value] of [
+      ["#username", "new-user"],
+      ["#password", "new-password"],
+    ] as const) {
+      const filled = await supervisor.action(fillCommand(observation, selector, value));
+      expect(filled.state).toBe("completed");
+      observation = filled.observation!;
+    }
+    const login = await supervisor.action({
+      ...fillCommand(observation, "#login", ""),
+      action: { type: "click", locator: { kind: "css", selector: "#login" } },
     });
-    expect(protectedReceipt.state).toBe("completed");
+    expect(login.state).toBe("completed");
     expect(new URLSearchParams(submittedBody).get("username")).toBe("new-user");
     expect(new URLSearchParams(submittedBody).get("password")).toBe("new-password");
   } finally {
     page.stop(true);
     await supervisor.close();
     await rm(directory, { recursive: true, force: true });
-    await rm(socketDirectory, { recursive: true, force: true });
   }
 });
 

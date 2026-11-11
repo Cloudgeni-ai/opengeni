@@ -172,7 +172,9 @@ function Harness() {
   const [nextSequence, setNextSequence] = useState(1_120);
 
   const scroller = useCallback(() => {
-    const node = document.querySelector<HTMLElement>("[data-timeline-test] .og-root > div");
+    const node = document.querySelector<HTMLElement>(
+      "[data-timeline-test] [data-og-timeline-scroller]",
+    );
     if (!node) throw new Error("timeline scroller is unavailable");
     return node;
   }, []);

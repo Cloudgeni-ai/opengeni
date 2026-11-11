@@ -73,10 +73,25 @@ describe("sandbox AnyDoc runtime", () => {
     expect(sources).toContain(
       `https://github.com/firecrawl/anydoc/blob/${upstreamCommit}/skills/convert-documents-to-markdown/SKILL.md`,
     );
-    expect(sources).toContain("Modified by OpenGeni");
-    // The hash-pinned curated copy is the same adapted text; the package notice
-    // covers both copies without changing the reviewed library artifact.
-    expect(curated).toBe(skill);
+    expect(sources).toContain("Modified by Opengeni");
+    // The reviewed curated artifact is immutable. Current bundled guidance
+    // differs only in this sentence's product spelling and a closing rule on
+    // reading PDFs page by page; both retain the notice.
+    const historicalSentence =
+      "it does not edit the source or replace OpenGeni's durable artifact tools.";
+    const pageRule = [
+      "7. AnyDoc's Markdown does not mark PDF pages. When page numbers matter, get",
+      "   the count with `pdfinfo file.pdf` and one page's text with",
+      "   `pdftotext -layout -f N -l N file.pdf -`.",
+      "",
+    ].join("\n");
+    expect(curated).toContain(historicalSentence);
+    expect(
+      curated.replace(
+        historicalSentence,
+        "it does not edit the source or replace Opengeni's durable artifact tools.",
+      ) + pageRule,
+    ).toBe(skill);
     expect(notices).toContain(upstreamCommit);
     expect(notices).toContain("src/bundled_default_skills/document-parsing/LICENSE");
     expect(notices).toContain("- src/curated_skill_library/document-parsing");

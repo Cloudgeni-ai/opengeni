@@ -1,13 +1,13 @@
 import { useId, useState, type ReactNode } from "react";
 
-import { Field } from "@/components/ui/field";
+import { Field } from "@opengeni/react/ui/field";
 import {
   ComboboxPanelPreview,
   SelectMenu,
   SelectMenuPanel,
   type SelectMenuVariant,
   type SelectOption,
-} from "@/components/ui/select-menu";
+} from "@opengeni/react/ui/select-menu";
 import {
   currentWorkspace,
   defaultModel,
@@ -264,7 +264,7 @@ export default function SelectSection() {
             preview
             options={[]}
             value={null}
-            emptyMessage="No models yet. Connect a Codex account or add OpenGeni credits in Models."
+            emptyMessage="No models yet. Connect a Codex account or add Opengeni credits in Models."
           />
         </StateCell>
 

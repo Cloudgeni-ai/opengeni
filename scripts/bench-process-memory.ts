@@ -5,19 +5,37 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 type Role = "control" | "turn";
-type Sample = { profile: string; rssMiB: number };
+type Sample = {
+  profile: string;
+  rssMiB: number;
+  heapSizeMiB: number;
+  heapCapacityMiB: number;
+  extraMemoryMiB: number;
+  importMs: number;
+};
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runs = 3;
 const childProgram = String.raw`
+const { heapStats } = await import("bun:jsc");
 const target = process.env.OPENGENI_BENCH_IMPORT;
 const role = process.env.OPENGENI_BENCH_ROLE;
 if (!target) throw new Error("missing benchmark import");
+const started = performance.now();
 const module = await import(target);
 if (role) await module.createDefaultWorkerActivities(role, {});
+const importMs = +(performance.now() - started).toFixed(1);
 Bun.gc(true);
 await Bun.sleep(20);
-process.stdout.write(JSON.stringify({ rssMiB: +(process.memoryUsage.rss() / 1048576).toFixed(1) }));
+const heap = heapStats();
+const mib = (bytes) => +(bytes / 1048576).toFixed(1);
+process.stdout.write(JSON.stringify({
+  rssMiB: mib(process.memoryUsage.rss()),
+  heapSizeMiB: mib(heap.heapSize),
+  heapCapacityMiB: mib(heap.heapCapacity),
+  extraMemoryMiB: mib(heap.extraMemorySize),
+  importMs,
+}));
 `;
 
 const profiles: Array<{ profile: string; path: string; role?: Role; smol?: boolean }> = [
@@ -92,17 +110,21 @@ async function sample(profile: (typeof profiles)[number]): Promise<Sample> {
   });
   const stdout = await new Response(child.stdout).text();
   if ((await child.exited) !== 0) throw new Error(`${profile.profile} child failed`);
-  const result = JSON.parse(stdout) as { rssMiB: number };
-  return { profile: profile.profile, rssMiB: result.rssMiB };
+  const result = JSON.parse(stdout) as Omit<Sample, "profile">;
+  return { profile: profile.profile, ...result };
 }
 
 const samples = new Map<string, number[]>();
+const detailedSamples = new Map<string, Sample[]>();
 for (const profile of profiles) {
   for (let run = 0; run < runs; run += 1) {
     const result = await sample(profile);
     const values = samples.get(result.profile) ?? [];
     values.push(result.rssMiB);
     samples.set(result.profile, values);
+    const details = detailedSamples.get(result.profile) ?? [];
+    details.push(result);
+    detailedSamples.set(result.profile, details);
   }
 }
 
@@ -130,7 +152,27 @@ const comparisons = [
 });
 
 process.stdout.write(
-  `${JSON.stringify({ runs, comparisons, samples: Object.fromEntries(samples) }, null, 2)}\n`,
+  `${JSON.stringify(
+    {
+      measurement:
+        "Fresh-process import and activity registration after full GC; not service readiness or steady-state load. Heap counters are engine diagnostics, not additive components of RSS; RSS also includes native code and allocator pages.",
+      runs,
+      comparisons,
+      samples: Object.fromEntries(samples),
+      profiles: Object.fromEntries(
+        [...detailedSamples].map(([profile, values]) => [
+          profile,
+          Object.fromEntries(
+            (
+              ["rssMiB", "heapSizeMiB", "heapCapacityMiB", "extraMemoryMiB", "importMs"] as const
+            ).map((field) => [field, median(values.map((value) => value[field]))]),
+          ),
+        ]),
+      ),
+    },
+    null,
+    2,
+  )}\n`,
 );
 
 if (process.argv.includes("--check")) {

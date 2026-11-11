@@ -8,8 +8,8 @@ import {
   resolveRenameSubmission,
   sessionDisplayTitle,
   useInlineRename,
-} from "./session-rename";
-import type { Session } from "../types";
+} from "@opengeni/react/app/lib/session-rename";
+import type { Session } from "@opengeni/react/app/types";
 
 registerDom();
 
@@ -51,8 +51,6 @@ function session(patch: Partial<Session> = {}): Session {
     rigId: null,
     rigVersionId: null,
     channelId: null,
-    variableSetId: null,
-    environmentId: null,
     firstPartyMcpPermissions: null,
     firstPartyMcpTools: [],
     mcpServers: [],

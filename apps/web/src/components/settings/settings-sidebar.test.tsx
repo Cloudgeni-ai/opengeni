@@ -64,12 +64,17 @@ function shell(currentPage = "General", page: { title: string } | null = { title
               {
                 items: [
                   {
-                    id: "general",
+                    id: "workspace:general",
                     label: "General",
                     icon: SlidersHorizontalIcon,
                     link: <a href="#general" />,
                   },
-                  { id: "models", label: "Models", icon: SparklesIcon, link: <a href="#models" /> },
+                  {
+                    id: "workspace:models",
+                    label: "Models",
+                    icon: SparklesIcon,
+                    link: <a href="#models" />,
+                  },
                 ],
               },
             ],
@@ -92,7 +97,7 @@ function shell(currentPage = "General", page: { title: string } | null = { title
             ],
           },
         ]}
-        activeId={currentPage === "Models" ? "models" : "general"}
+        activeId={currentPage === "Models" ? "workspace:models" : "workspace:general"}
         currentPage={currentPage}
         currentScope="Workspace · Design preview"
         page={page}
@@ -220,5 +225,203 @@ test("a sub-page brings its own header", async () => {
     expect(container.querySelectorAll('main, [role="main"]').length).toBe(1);
   } finally {
     await act(async () => root.unmount());
+  }
+});
+
+/** Classes that would paint an opaque panel over the rail surface. */
+const OPAQUE_FILL = /^(?:bg-(?:bg|canvas|surface(?:-\d)?)|og-rail-glow)$/;
+
+test("the docked settings rail is the main rail's sidebar: same column, clear surface, brand row", async () => {
+  narrow = false;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(shell()));
+    const nav = container.querySelector<HTMLElement>('nav[aria-label="Settings"]')!;
+    // The docked column the macOS app turns into window glass, with the shared
+    // rail surface (the rail glow) as the only background.
+    const column = nav.closest<HTMLElement>("[data-shell-rail]");
+    expect(column).not.toBeNull();
+    expect(column!.classList.contains("border-r")).toBe(true);
+    const surface = nav.closest<HTMLElement>("[data-rail-surface]");
+    expect(surface).not.toBeNull();
+    expect(column!.contains(surface)).toBe(true);
+    expect(surface!.classList.contains("og-rail-glow")).toBe(true);
+    // Nothing inside the surface paints over it: an opaque fill there is the
+    // flat panel, and its edge under the clear window bar the line under the bar.
+    const filled = [nav, ...nav.querySelectorAll<HTMLElement>("*")]
+      .filter((element) => !element.closest("[data-settings-search], [aria-haspopup]"))
+      .flatMap((element) => [...element.classList].filter((name) => OPAQUE_FILL.test(name)));
+    expect(filled).toEqual([]);
+    // The brand row is the main rail's: its empty space moves the desktop window.
+    const brand = nav.querySelector<HTMLElement>("[data-rail-brand]");
+    expect(brand?.hasAttribute("data-window-drag")).toBe(true);
+    expect(brand?.querySelector('a[aria-label="Opengeni home"]')).not.toBeNull();
+    // As wide as the main rail (its default here, without the app's rail state).
+    const frame = container.querySelector<HTMLElement>("[data-window-frame]")!;
+    const { RAIL_DEFAULT_WIDTH } = await import("@opengeni/react/app/components/rail/rail-context");
+    expect(frame.style.getPropertyValue("--og-settings-rail-width")).toBe(
+      `${RAIL_DEFAULT_WIDTH}px`,
+    );
+    expect(frame.className).toContain(
+      "lg:grid-cols-[var(--og-settings-rail-width,15rem)_minmax(0,1fr)]",
+    );
+    expect(frame.className).toContain(
+      "desktop-wide:grid-cols-[var(--og-settings-rail-width,18rem)_minmax(0,1fr)]",
+    );
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("the settings drawer shows the rail on the same surface", async () => {
+  narrow = true;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(shell()));
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Open settings menu"]')!
+        .click();
+    });
+    const nav = document.querySelector<HTMLElement>('[role="dialog"] nav[aria-label="Settings"]')!;
+    expect(nav.closest("[data-rail-surface]")?.classList.contains("og-rail-glow")).toBe(true);
+    expect([...nav.classList].filter((name) => OPAQUE_FILL.test(name))).toEqual([]);
+    // Not a docked column: the drawer keeps its own glow on macOS too.
+    expect(nav.closest("[data-shell-rail]")).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("search finds settings by name and keeps the keyboard in the rail", async () => {
+  narrow = false;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const field = () =>
+    container.querySelector<HTMLInputElement>('input[placeholder="Search settings"]')!;
+  const type = async (value: string) => {
+    await act(async () => {
+      const input = field();
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set?.call(
+        input,
+        value,
+      );
+      // React's change handler, as the deletion tests drive it in this DOM.
+      const propsKey = Object.keys(input).find((name) => name.startsWith("__reactProps$"));
+      const onChange = propsKey
+        ? (
+            input as unknown as Record<
+              string,
+              { onChange?: (event: { target: HTMLInputElement }) => void }
+            >
+          )[propsKey]?.onChange
+        : undefined;
+      if (onChange) onChange({ target: input });
+      else input.dispatchEvent(new Event("input", { bubbles: true }));
+      await Promise.resolve();
+    });
+  };
+  // React's key handlers from the target up, as a bubbling keydown reaches them.
+  const key = async (target: Element, value: string) => {
+    await act(async () => {
+      let defaultPrevented = false;
+      const event = {
+        key: value,
+        target,
+        get defaultPrevented() {
+          return defaultPrevented;
+        },
+        preventDefault: () => {
+          defaultPrevented = true;
+        },
+      };
+      for (let node: Element | null = target; node; node = node.parentElement) {
+        const propsKey = Object.keys(node).find((name) => name.startsWith("__reactProps$"));
+        const handler = propsKey
+          ? (node as unknown as Record<string, { onKeyDown?: (event: unknown) => void }>)[propsKey]
+              ?.onKeyDown
+          : undefined;
+        handler?.(event);
+      }
+      await Promise.resolve();
+    });
+  };
+  const results = () =>
+    Array.from(container.querySelectorAll<HTMLAnchorElement>("[data-settings-search-result]"));
+  try {
+    await act(async () => root.render(shell()));
+    const rail = container.querySelector('nav[aria-label="Settings"]')!;
+    expect(field()).not.toBeNull();
+    expect(rail.querySelectorAll("[data-settings-section]")).toHaveLength(2);
+
+    // Another word for a page finds it, and says where it lives.
+    await type("claude");
+    expect(rail.querySelectorAll("[data-settings-section]")).toHaveLength(0);
+    expect(results().map((result) => result.getAttribute("href"))).toEqual([
+      "#organization-models",
+    ]);
+    expect(results()[0]?.textContent).toBe("ModelsOrganization");
+    expect(rail.querySelector('[role="status"]')?.textContent).toBe("1 result");
+
+    // A setting inside a page, under its page.
+    await type("voice");
+    expect(results().map((result) => result.textContent)).toEqual([
+      "Voice inputWorkspace · General",
+      "Default voice modelOrganization · Models",
+      "ElevenLabsOrganization · Models",
+    ]);
+    expect(results()[0]?.getAttribute("aria-current")).toBeNull();
+    // The page you're on is marked as current.
+    await type("general");
+    expect(results()[0]?.textContent).toBe("GeneralWorkspace");
+    expect(results()[0]?.getAttribute("aria-current")).toBe("page");
+
+    // Down moves into the results, up returns to the field, Escape clears.
+    await type("models");
+    expect(results()).toHaveLength(4);
+    await key(field(), "ArrowDown");
+    expect(document.activeElement).toBe(results()[0]!);
+    await key(results()[0]!, "ArrowDown");
+    expect(document.activeElement).toBe(results()[1]!);
+    await key(results()[1]!, "ArrowUp");
+    await key(results()[0]!, "ArrowUp");
+    expect(document.activeElement).toBe(field());
+    await key(field(), "ArrowDown");
+    await key(results()[0]!, "Escape");
+    expect(field().value).toBe("");
+    expect(document.activeElement).toBe(field());
+    expect(rail.querySelectorAll("[data-settings-section]")).toHaveLength(2);
+
+    // Enter opens the best result, which leaves search.
+    await type("models");
+    const opened: (string | null)[] = [];
+    results()[0]!.addEventListener("click", (event) => {
+      event.preventDefault();
+      opened.push((event.currentTarget as HTMLAnchorElement).getAttribute("href"));
+    });
+    await key(field(), "Enter");
+    expect(opened).toEqual(["#models"]);
+    expect(field().value).toBe("");
+
+    // Nothing found says so, with a way back.
+    await type("zebra");
+    expect(rail.textContent).toContain("No settings match “zebra”.");
+    expect(rail.querySelector('[role="status"]')?.textContent).toBe("0 results");
+    const clear = Array.from(rail.querySelectorAll("button")).find(
+      (button) => button.textContent === "Clear search",
+    )!;
+    await act(async () => clear.click());
+    expect(field().value).toBe("");
+    expect(rail.querySelectorAll("[data-settings-section]")).toHaveLength(2);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
   }
 });

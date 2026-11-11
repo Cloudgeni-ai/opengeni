@@ -33,7 +33,8 @@ test("every agent reconstruction reads durable recovery truth before building in
   if (warning?.init?.type !== "AwaitExpression" || warning.init.argument.type !== "CallExpression")
     throw new Error("Recovery read must be unconditionally awaited");
   const read = warning.init.argument;
-  expect(source.slice(read.callee.start, read.callee.end)).toBe("recoveryAwareSessionInstructions");
+  if (read.callee.type !== "Identifier" || read.callee.name !== "recoveryAwareSessionInstructions")
+    throw new Error("Missing unconditional recovery read");
   expect(read.arguments.map((argument) => source.slice(argument.start, argument.end))).toEqual([
     "db",
     "input.workspaceId",

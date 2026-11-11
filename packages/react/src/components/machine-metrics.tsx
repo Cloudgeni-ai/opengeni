@@ -1,6 +1,7 @@
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
 import type { MetricSample } from "../types/machines";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type MachineMetricsProps = {
   /** The latest metric sample, or null when the machine hasn't reported yet. */
@@ -79,6 +80,7 @@ function StatTriple({
   load15: number;
   runQueue: number;
 }) {
+  const t = useOpenGeniText();
   const stats: Array<{ label: string; value: number }> = [
     { label: "1m", value: load1 },
     { label: "5m", value: load5 },
@@ -88,7 +90,7 @@ function StatTriple({
     <div className="flex items-center justify-between gap-3" data-metric="load">
       <div className="flex min-w-0 flex-col gap-1">
         <span className="text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">
-          Load
+          {t("machineMetrics.load")}
         </span>
         <div className="flex items-baseline gap-3">
           {stats.map((s) => (
@@ -108,7 +110,7 @@ function StatTriple({
           className="flex shrink-0 items-baseline gap-1.5 rounded-og-sm bg-og-surface-2 px-2 py-1 text-[11px] text-og-fg-subtle"
           data-metric="runqueue"
         >
-          <span className="font-medium uppercase tracking-wide">Queue</span>
+          <span className="font-medium uppercase tracking-wide">{t("machineMetrics.queue")}</span>
           <span className="font-og-mono tabular-nums text-og-fg-muted">{runQueue}</span>
         </div>
       ) : null}
@@ -121,12 +123,17 @@ function StatTriple({
  * present. Renders the M2 `machine_metrics_latest` sample. When `metrics` is
  * null the panel shows a quiet "no samples yet" placeholder (offline / just
  * enrolled). GPU rows only render when `gpuUtilPct` is non-null.
+ *
+ * The compact card keeps to memory, disk and CPU, which anyone can read. Load
+ * average and run queue are an operator's numbers: only the full density shows
+ * them, and the machine detail charts load over time.
  */
 export function MachineMetrics({ metrics, density = "compact", className }: MachineMetricsProps) {
+  const t = useOpenGeniText();
   if (!metrics) {
     return (
       <div className={cn("text-[11px] text-og-fg-subtle", className)} data-metrics-empty>
-        No metrics yet
+        {t("machineMetrics.noMetricsYet")}
       </div>
     );
   }
@@ -146,13 +153,13 @@ export function MachineMetrics({ metrics, density = "compact", className }: Mach
       {/* Resources — used/total ratios with real 0..100% bars. */}
       <div className={cn("grid gap-x-4 gap-y-2.5", ratioGridClass)}>
         <Meter
-          label="Memory"
+          label={t("machineMetrics.memory")}
           value={`${formatBytes(metrics.memUsedBytes)} / ${formatBytes(metrics.memTotalBytes)}`}
           fillPct={memPct}
           tone={toneFor(memPct)}
         />
         <Meter
-          label="Disk"
+          label={t("machineMetrics.disk")}
           value={`${formatBytes(metrics.diskUsedBytes)} / ${formatBytes(metrics.diskTotalBytes)}`}
           fillPct={diskPct}
           tone={toneFor(diskPct)}
@@ -162,14 +169,14 @@ export function MachineMetrics({ metrics, density = "compact", className }: Mach
       {/* Utilization — CPU% (and GPU% when present) as honest percent gauges. */}
       <div className="grid grid-cols-2 gap-x-4 gap-y-2.5">
         <Meter
-          label="CPU"
+          label={t("machineMetrics.cpu")}
           value={`${metrics.cpuPct.toFixed(0)}%`}
           fillPct={metrics.cpuPct}
           tone={toneFor(metrics.cpuPct)}
         />
         {hasGpu ? (
           <Meter
-            label="GPU"
+            label={t("machineMetrics.gpu")}
             value={
               gpuMemLabel
                 ? `${metrics.gpuUtilPct!.toFixed(0)}% · ${gpuMemLabel}`
@@ -182,12 +189,14 @@ export function MachineMetrics({ metrics, density = "compact", className }: Mach
       </div>
 
       {/* Activity — load average as labeled mini-stats (no fake bar) + run queue. */}
-      <StatTriple
-        load1={metrics.load1}
-        load5={metrics.load5}
-        load15={metrics.load15}
-        runQueue={metrics.runQueue}
-      />
+      {density === "full" ? (
+        <StatTriple
+          load1={metrics.load1}
+          load5={metrics.load5}
+          load15={metrics.load15}
+          runQueue={metrics.runQueue}
+        />
+      ) : null}
     </div>
   );
 }

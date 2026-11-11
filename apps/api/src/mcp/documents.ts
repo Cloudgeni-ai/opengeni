@@ -1,6 +1,6 @@
 import { searchKnowledgeEntries } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
-import { KnowledgeEntryListRequest } from "@opengeni/contracts";
+import { KnowledgeSearchToolRequest } from "@opengeni/contracts";
 import type { DocumentServices } from "@opengeni/documents";
 import {
   getKnowledgeEntry,
@@ -28,12 +28,8 @@ export function buildDocumentsMcpServer(
     "knowledge_search",
     {
       description:
-        "Search published structured Knowledge and retained source text in the current authorized scope. Use a concise subject or entity name first (for example Acme); omit scope to search all authorized scopes. If a query returns no entries, retry the key name alone in the same scope or browse groups before concluding the information is absent.",
-      inputSchema: KnowledgeEntryListRequest.omit({
-        view: true,
-        sessionId: true,
-        reviewBatchId: true,
-      }).shape,
+        "Find published Knowledge by subject or entity name across authorized scopes. Returns 5 matches by default; use cursor for more. Open matches with knowledge_get for full text and revision IDs. If empty, retry the key name alone or browse groups.",
+      inputSchema: KnowledgeSearchToolRequest.omit({ view: true }).shape,
     },
     async (input) => ({
       content: [

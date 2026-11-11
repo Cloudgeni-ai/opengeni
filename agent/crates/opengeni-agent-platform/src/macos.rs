@@ -37,7 +37,8 @@ pub(crate) fn os() -> Os {
 /// falling back to `/bin/sh`). Identical contract to the Linux path — macOS ships
 /// a POSIX shell, so the cross-platform exec path needs no special casing.
 pub(crate) fn shell_command(parts: &[String]) -> tokio::process::Command {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    // `$SHELL`, else `/bin/sh`, else dash or bash when that is gone.
+    let shell = crate::system_shell::environment_shell();
     let mut cmd = tokio::process::Command::new(shell);
     cmd.arg("-c").arg(parts.join(" "));
     cmd
@@ -125,6 +126,13 @@ pub fn request_desktop_grants() {
     macffi::request_grants();
 }
 
+/// Fires one permission's consent prompt, for a desktop app that asks for them
+/// one at a time.
+#[cfg(feature = "macos-desktop")]
+pub fn request_desktop_permission(permission: macffi::DesktopPermission) {
+    macffi::request_permission(permission);
+}
+
 /// How many times [`MacosDesktop::capture`] retries a TRANSIENT capture miss (a
 /// null image / timeout on a warming ScreenCaptureKit stream) before giving up.
 /// Small: a real capture lands on the first or second frame; more attempts just
@@ -140,6 +148,12 @@ const CAPTURE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_milli
 #[cfg(feature = "macos-desktop")]
 #[async_trait]
 impl DesktopBackend for MacosDesktop {
+    fn can_offer_display(&self) -> bool {
+        // CoreGraphics display metadata does not require Screen Recording. A
+        // pending TCC grant must not hide enrollment's explicit control consent.
+        macffi::list_displays().is_ok_and(|displays| !displays.is_empty())
+    }
+
     fn probe(&self) -> Option<v1::Display> {
         let info = macffi::probe_display()?;
         Some(v1::Display {
@@ -155,7 +169,7 @@ impl DesktopBackend for MacosDesktop {
     async fn capture(&self) -> PlatformResult<CapturedFrame> {
         // The leaf capture blocks on a ScreenCaptureKit completion handler; keep
         // it (and the PNG encode) off the async runtime like the Linux path does.
-        tokio::task::spawn_blocking(|| {
+        crate::spawn_blocking_reserved(|| {
             // A ScreenCaptureKit stream can hand back a null image / time out on the
             // FIRST frame right after the display wakes or the stream warms up — a
             // transient miss, not a real failure. Retry a bounded few times with a
@@ -175,6 +189,15 @@ impl DesktopBackend for MacosDesktop {
                         });
                     }
                     Err(err) => {
+                        if matches!(err, macffi::MacFfiError::TimedOut(_)) {
+                            // SCK retains its completion callback after our
+                            // bounded wait. Timeout is not native completion.
+                            if let Some(reservation) = crate::current_work_reservation() {
+                                reservation.mark_unsettled(format!(
+                                    "ScreenCaptureKit callback still pending: {err}"
+                                ));
+                            }
+                        }
                         let terminal = !macffi::screen_capture_granted();
                         last_err = Some(map_ffi_err(err));
                         if terminal || attempt + 1 >= CAPTURE_MAX_ATTEMPTS {
@@ -202,7 +225,7 @@ impl DesktopBackend for MacosDesktop {
             ));
         }
         let event = map_input(input)?;
-        tokio::task::spawn_blocking(move || macffi::inject(&event).map_err(map_ffi_err))
+        crate::spawn_blocking_reserved(move || macffi::inject(&event).map_err(map_ffi_err))
             .await
             .map_err(|e| PlatformError::os(format!("macOS inject task join: {e}")))?
     }
@@ -215,7 +238,7 @@ impl DesktopBackend for MacosDesktop {
         // cannot perform.
         if !macffi::screen_capture_granted() {
             return Some(
-                "Screen Recording permission not granted — enable it for OpenGeni in \
+                "Screen Recording permission not granted — enable it for Opengeni in \
                  System Settings → Privacy & Security → Screen & System Audio Recording, \
                  availability refreshes automatically after permission is granted."
                     .to_string(),
@@ -225,12 +248,31 @@ impl DesktopBackend for MacosDesktop {
             Ok(true) => {
                 return Some("This Mac is locked. Unlock it to use desktop capture.".into())
             }
-            Err(_) => return Some("The macOS login session is unavailable.".into()),
+            Err(_) => {
+                // The session dictionary is missing both when no one is signed
+                // in and when the agent runs outside the signed-in user's
+                // window-server session (for example as a system daemon).
+                return Some(
+                    "No desktop login session is available to this agent: no one is signed in to \
+                     this Mac, or the agent runs outside the signed-in user's session. Sign in at \
+                     the Mac and run the agent as that user's LaunchAgent (the default install) \
+                     to use desktop capture."
+                        .into(),
+                );
+            }
             Ok(false) => {}
         }
-        macffi::list_displays().err().map(|_| {
-            "No active macOS display is available. Wake the displays to use desktop capture.".into()
-        })
+        // `probe` offers the main display. With every display asleep the active
+        // list is empty rather than an error; without this the machine would
+        // report no desktop and no reason, which reads as a headless machine.
+        match macffi::list_displays() {
+            Ok(displays) if displays.iter().any(|display| display.is_main) => None,
+            _ => Some(
+                "This Mac's displays are asleep or off. Wake them (or keep them awake) to use \
+                 desktop capture."
+                    .into(),
+            ),
+        }
     }
 }
 

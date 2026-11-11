@@ -1,4 +1,4 @@
-import { SessionEvent } from "@opengeni/contracts";
+import type { SessionEvent } from "@opengeni/contracts";
 
 export type ParsedSseEvent = {
   id?: string;
@@ -15,9 +15,12 @@ export async function collectSse(
   },
 ): Promise<SessionEvent[]> {
   const abort = new AbortController();
+  const onAbort = () => abort.abort();
   const timeout = setTimeout(() => abort.abort(), options.timeoutMs ?? 20_000);
-  options.signal?.addEventListener("abort", () => abort.abort(), { once: true });
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  if (options.signal?.aborted) onAbort();
   try {
+    const { SessionEvent: SessionEventSchema } = await import("@opengeni/contracts");
     const response = await fetch(url, { signal: abort.signal });
     if (!response.ok || !response.body) {
       throw new Error(`SSE request failed: ${response.status}`);
@@ -39,7 +42,7 @@ export async function collectSse(
         if (!parsed?.data || parsed.data.startsWith(":")) {
           continue;
         }
-        out.push(SessionEvent.parse(JSON.parse(parsed.data)));
+        out.push(SessionEventSchema.parse(JSON.parse(parsed.data)));
         if (out.length >= options.count) {
           abort.abort();
           break;
@@ -49,6 +52,7 @@ export async function collectSse(
     return out;
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", onAbort);
   }
 }
 

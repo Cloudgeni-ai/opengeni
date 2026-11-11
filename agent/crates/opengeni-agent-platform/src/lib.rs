@@ -1,4 +1,4 @@
-//! Per-OS platform abstraction for the OpenGeni self-hosted agent.
+//! Per-OS platform abstraction for the Opengeni self-hosted agent.
 //!
 //! This crate defines the [`Platform`] trait — the single seam between the
 //! agent's transport/dispatch layer and the host operating system. Channel-A
@@ -31,15 +31,32 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-platform")]
 
 mod cgroup;
+pub mod command_activity;
+mod continuous_clock;
 mod desktop;
 mod error;
+#[cfg(unix)]
+mod exec_handover;
 mod native;
+#[cfg(unix)]
+mod null_device;
+#[cfg(unix)]
+mod process_cleanup;
 mod pty;
+pub mod run_as;
 pub mod service;
+mod shell_tools;
+#[cfg(target_os = "linux")]
+pub mod signal_sender;
+#[cfg(unix)]
+mod system_shell;
 pub mod transactional_write;
+mod work_scope;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_session;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
@@ -55,17 +72,35 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use opengeni_agent_proto::v1;
 
+pub use continuous_clock::continuous_time;
+pub use opengeni_agent_engine::update_drain::WorkReservation;
+pub use work_scope::{
+    current_work_reservation, spawn_blocking_reserved, spawn_reserved, with_work_reservation,
+    with_work_reservation_sync,
+};
+
 pub use cgroup::{establish_oom_isolation, OpCgroupConfig, OpCgroupConfigError, OpCgroups};
 pub use desktop::{
     fit_frame_to_budget, resolve_desktop, CapturedFrame, DesktopBackend, FittedFrame, NoDesktop,
+    ReopeningDesktop, TurnedOffDesktop,
 };
 #[cfg(target_os = "linux")]
 pub use desktop::{
-    validate_linux_named_key_chord, LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
+    linux_layout_text_keysyms, linux_named_key_chord_keys, validate_linux_named_key_chord,
+    CompositorKey, CompositorLayout, KeymapNames, LinuxDesktop, LinuxPasteOffer, LinuxPasteOutcome,
+    LinuxPreviousClipboard, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect, X11Display, XServerCheck,
 };
 pub use error::{PlatformError, PlatformResult};
-pub use native::{assemble_git_response, spawn_contained, ContainedExec, NativePlatform};
+#[cfg(unix)]
+pub use exec_handover::{
+    discard_inherited_fd, keep_inherited_fd_private, ExecHandover, OpCgroupHandover, ProcHandover,
+};
+pub use native::{
+    adopt_workspace_working_directory, resolve_workspace_root, spawn_contained, ContainedExec,
+    NativePlatform,
+};
 pub use pty::{spawn_pty, PtyProcess};
+pub use shell_tools::{path_with_shell_tools, set_shell_tools_directory, shell_tools_directory};
 
 /// macOS TCC-grant helpers (feature `macos-desktop`, macOS-only): read the Screen
 /// Recording + Accessibility + Input Monitoring state without prompting ([`desktop_grants`])
@@ -73,7 +108,11 @@ pub use pty::{spawn_pty, PtyProcess};
 /// startup/enroll seam uses these to request display capability on a real Mac; a
 /// denied grant degrades cleanly to `display_unavailable`.
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
-pub use macos::{desktop_grants, request_desktop_grants, DesktopGrants};
+pub use macos::{
+    desktop_grants, request_desktop_grants, request_desktop_permission, DesktopGrants,
+};
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+pub use opengeni_agent_macos_ffi::DesktopPermission;
 
 /// Reported OS/arch identity of the host the agent runs on, folded into the
 /// connect [`Hello`](opengeni_agent_proto::v1::Hello).
@@ -85,12 +124,18 @@ pub struct HostIdentity {
     pub arch: v1::Arch,
 }
 
+/// Largest total size of the response headers a controller request may return.
+/// The reply body budget subtracts it, so headers never push a reply past the
+/// transport's negotiated payload.
+pub const BROWSER_CONTROL_HTTP_MAX_HEADER_BYTES: usize = 16 * 1024;
+
 /// Loopback endpoint of one agent-supervised browser controller sidecar.
 ///
 /// This is deliberately process-local: the control plane never receives the
 /// browserd authority or connects to this port directly. Browser control RPCs
-/// reach it through the connected-machine execution adapter, while frame bytes
-/// are copied into an authenticated relay channel by [`StreamRegistry`].
+/// reach it through the scope-resolved `browser_control_http` op (or, for an
+/// older control plane, the connected-machine execution adapter), while frame
+/// bytes are copied into an authenticated relay channel by [`StreamRegistry`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserControlEndpoint {
     /// Loopback TCP port selected by browserd.
@@ -99,16 +144,53 @@ pub struct BrowserControlEndpoint {
     pub sidecar_generation: String,
 }
 
-/// Host-owned lifecycle seam for browserd.
-///
-/// The agent binary implements this because it owns installation paths,
-/// configuration storage, and child-process shutdown. The platform and relay
-/// crates depend only on this narrow capability, never on Bun/browserd details.
+/// Content-free evidence about work that must survive or finish before update.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateBlocker {
+    /// Stable category; never command text, URLs or filesystem paths.
+    pub kind: String,
+    /// Opaque session/operation identity, when known.
+    #[serde(default)]
+    pub resource_id: String,
+    /// Number of retained owners in this category.
+    pub count: u32,
+}
+
+/// One atomic controller admission proof and its retained owners.
+#[derive(Debug, Clone)]
+pub struct UpdateAdmission {
+    /// True only when restart preserves all owned work.
+    pub idle: bool,
+    /// Diagnostic evidence, not authorization to end the named work.
+    pub blockers: Vec<UpdateBlocker>,
+}
+
+/// Host-owned lifecycle seam for browserd. The agent binary owns installation,
+/// configuration and child-process shutdown; platform/relay crates depend only
+/// on this boundary, never on Bun/browserd details.
 #[async_trait]
 pub trait BrowserControlBackend: Send + Sync {
     /// Proves every owned browser/computer controller is idle before restart.
     /// Unavailable or incompatible state must fail closed, never mean idle.
     async fn is_idle(&self) -> PlatformResult<bool>;
+
+    /// Atomically fence new controller requests and prove existing work ended.
+    /// Older controllers cannot provide this proof and must fail closed.
+    async fn begin_update(&self, operation_id: &str) -> PlatformResult<UpdateAdmission> {
+        let _ = operation_id;
+        Err(PlatformError::Unsupported(
+            "controller update admission is unavailable".into(),
+        ))
+    }
+
+    /// Reopen only the fence owned by this exact failed/deferred update.
+    async fn release_update(&self, operation_id: &str) -> PlatformResult<()> {
+        let _ = operation_id;
+        Err(PlatformError::Unsupported(
+            "controller update admission is unavailable".into(),
+        ))
+    }
 
     /// Ensures the exact authority scope and attached-browser generation is live.
     async fn ensure(
@@ -122,6 +204,39 @@ pub trait BrowserControlBackend: Send + Sync {
         scope_id: &str,
         scope_generation: &str,
     ) -> PlatformResult<BrowserControlEndpoint>;
+
+    /// Whether [`Self::http`] and [`Self::http_read`] are served. Advertised to
+    /// the control plane, which otherwise keeps its legacy exec transport.
+    fn http_supported(&self) -> bool {
+        false
+    }
+
+    /// Sends one loopback request to the controller of the exact scope and
+    /// generation. A body larger than `inline_limit` is returned in part and the
+    /// remainder is spooled for [`Self::http_read`]; the request is never sent
+    /// twice. `None` means the reply size is unbounded.
+    async fn http(
+        &self,
+        req: &v1::BrowserControlHttpRequest,
+        inline_limit: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpResponse> {
+        let _ = (req, inline_limit);
+        Err(PlatformError::Unsupported(
+            "browser controller requests are unavailable".into(),
+        ))
+    }
+
+    /// Reads the next part of a spooled controller response.
+    async fn http_read(
+        &self,
+        req: &v1::BrowserControlHttpReadRequest,
+        max_bytes: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpReadResponse> {
+        let _ = (req, max_bytes);
+        Err(PlatformError::Unsupported(
+            "browser controller requests are unavailable".into(),
+        ))
+    }
 }
 
 /// The host-facing capability surface of a connected agent.
@@ -210,48 +325,16 @@ pub trait Platform: Send + Sync {
         self.spawn_exec(req)
     }
 
-    /// Spawns the git invocation described by a `GitRequest` inside the shared
-    /// containment primitive WITHOUT waiting or assembling a reply — the
-    /// engine-job path for git. Same argv construction and cwd resolution as
-    /// [`Platform::git`] (which is implemented over this on the native
-    /// platform), so git children get the process-group kill AND the per-op
-    /// OOM cgroup leaf (#351's flagged git-boundary follow-up: a clone's page
-    /// cache bills to the op, not the runner).
+    /// Takes over an exec a predecessor process image of this agent handed
+    /// over across an in-place update. The default keeps process-group
+    /// containment only; a platform with operation cgroups re-adopts the leaf.
     ///
     /// # Errors
     ///
-    /// The spawn IO failure mapped to a typed [`PlatformError`], or
-    /// `Unsupported` from the default impl.
-    fn spawn_git(&self, req: &v1::GitRequest) -> PlatformResult<ContainedExec> {
-        let _ = req;
-        Err(PlatformError::Unsupported(
-            "streaming git is not supported by this platform".to_string(),
-        ))
-    }
-
-    /// Policy-aware git spawn. As with exec, an explicit policy is never silently
-    /// dropped by a platform implementation that has not opted into enforcement.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PlatformError::Unsupported`] when a non-empty policy is supplied
-    /// to the default implementation; otherwise forwards [`Platform::spawn_git`]
-    /// errors.
-    fn spawn_git_with_policy(
-        &self,
-        req: &v1::GitRequest,
-        policy: Option<&v1::OperationResourcePolicy>,
-    ) -> PlatformResult<ContainedExec> {
-        if policy.is_some_and(|policy| {
-            policy.memory_max_bytes.is_some()
-                || policy.memory_high_bytes.is_some()
-                || policy.cpu_max_millicores.is_some()
-        }) {
-            return Err(PlatformError::Unsupported(
-                "operation resource policy is not supported by this platform".to_string(),
-            ));
-        }
-        self.spawn_git(req)
+    /// See [`ContainedExec::adopt`].
+    #[cfg(unix)]
+    fn adopt_exec(&self, handover: &ExecHandover) -> std::io::Result<ContainedExec> {
+        ContainedExec::adopt(handover, None)
     }
 
     // --- Channel-A: filesystem -------------------------------------------
@@ -266,6 +349,13 @@ pub trait Platform: Send + Sync {
 
     /// Whether this platform implements the transactional upload contract.
     fn transactional_fs_write_supported(&self) -> bool {
+        false
+    }
+
+    /// Whether this platform honors a request's `run_as` (Hello
+    /// `Capabilities.run_as`). Platforms that do not must refuse a non-empty
+    /// `run_as` instead of ignoring it.
+    fn run_as_supported(&self) -> bool {
         false
     }
 
@@ -297,13 +387,6 @@ pub trait Platform: Send + Sync {
 
     /// Removes a path (optionally recursively for directories).
     async fn fs_remove(&self, req: &v1::FsRemoveRequest) -> PlatformResult<v1::FsRemoveResponse>;
-
-    // --- Channel-A: git ---------------------------------------------------
-
-    /// Runs a git operation against the repo rooted at the request's `cwd` (or
-    /// the workspace root). Returns structured status for `GIT_OP_STATUS`,
-    /// otherwise raw stdout/stderr.
-    async fn git(&self, req: &v1::GitRequest) -> PlatformResult<v1::GitResponse>;
 
     // --- M8: terminal + desktop streams -----------------------------------
     //
@@ -348,6 +431,40 @@ pub trait Platform: Send + Sync {
             port: u32::from(endpoint.port),
             sidecar_generation: endpoint.sidecar_generation,
         })
+    }
+
+    /// Whether this runner serves in-process controller requests.
+    fn browser_control_http_supported(&self) -> bool {
+        self.browser_control_backend()
+            .is_some_and(|backend| backend.http_supported())
+    }
+
+    /// Sends one request to a placement-scoped controller without a process.
+    async fn browser_control_http(
+        &self,
+        req: &v1::BrowserControlHttpRequest,
+        inline_limit: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpResponse> {
+        let backend = self.browser_control_backend().ok_or_else(|| {
+            PlatformError::Unsupported(
+                "browser_control_http: browser controller sidecar is unavailable".to_string(),
+            )
+        })?;
+        backend.http(req, inline_limit).await
+    }
+
+    /// Reads the next part of a spooled controller response.
+    async fn browser_control_http_read(
+        &self,
+        req: &v1::BrowserControlHttpReadRequest,
+        max_bytes: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpReadResponse> {
+        let backend = self.browser_control_backend().ok_or_else(|| {
+            PlatformError::Unsupported(
+                "browser_control_http_read: browser controller sidecar is unavailable".to_string(),
+            )
+        })?;
+        backend.http_read(req, max_bytes).await
     }
 
     /// Opens a browser-native frame subscription over the existing relay plane.
@@ -456,7 +573,7 @@ pub trait Platform: Send + Sync {
         // (the desktop capture/inject calls already do the same, §10.6).
         let probed = {
             let desktop = Arc::clone(&desktop);
-            tokio::task::spawn_blocking(move || desktop.probe())
+            spawn_blocking_reserved(move || desktop.probe())
                 .await
                 .map_err(|e| PlatformError::os(format!("desktop probe task join: {e}")))?
         };
@@ -625,13 +742,135 @@ fn host_arch() -> v1::Arch {
     }
 }
 
+/// The commit email Git falls back to for commands this agent runs when
+/// nothing else names one (the same address the sandbox and desktop images
+/// configure at Git's system level).
+pub const DEFAULT_GIT_EMAIL: &str = "agent@opengeni.invalid";
+
+/// The `EMAIL` a child process receives: [`DEFAULT_GIT_EMAIL`] only when
+/// neither the request nor the agent's own environment sets `EMAIL` and Git
+/// cannot guess an address on this machine. Git reads `EMAIL` after
+/// `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL` and every `user.email` setting
+/// (system, global, repository), so an identity the machine, its user or a
+/// repository configures always wins, and a machine whose hostname gives Git a
+/// usable address (a typical laptop) keeps committing with it. Without it,
+/// `git commit` fails in a container whose hostname has no domain.
+#[must_use]
+pub(crate) fn default_git_email<'a>(
+    request_env: impl IntoIterator<Item = &'a String>,
+) -> Option<&'static str> {
+    default_git_email_with(
+        request_env.into_iter().any(|name| names_email(name)),
+        std::env::var_os("EMAIL").as_deref(),
+        git_guesses_email,
+    )
+}
+
+/// Environment names are case-insensitive on Windows.
+fn names_email(name: &str) -> bool {
+    if cfg!(windows) {
+        name.eq_ignore_ascii_case("EMAIL")
+    } else {
+        name == "EMAIL"
+    }
+}
+
+fn default_git_email_with(
+    request_sets_email: bool,
+    ambient: Option<&std::ffi::OsStr>,
+    git_guesses_email: impl FnOnce() -> Option<bool>,
+) -> Option<&'static str> {
+    if request_sets_email || ambient.is_some() {
+        return None;
+    }
+    (git_guesses_email() == Some(false)).then_some(DEFAULT_GIT_EMAIL)
+}
+
+/// A discarded stdio stream: the agent's retained null device on Unix, so a
+/// machine whose `/dev/null` was removed can still start the program. Use it
+/// for every stream a program the agent starts does not need, including stdin
+/// before `Command::output`, which otherwise opens `/dev/null` by path.
+#[must_use]
+pub fn discarded_stdio() -> std::process::Stdio {
+    #[cfg(unix)]
+    {
+        null_device::null_stdio()
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::Stdio::null()
+    }
+}
+
+/// Whether Git, with no identity configured anywhere, derives a usable commit
+/// email on this machine: `git var GIT_COMMITTER_IDENT` with a name supplied
+/// and every email source removed fails exactly when the hostname guess is
+/// unusable. Asked once per process; `None` (Git is not installed) is not
+/// remembered, so a Git installed later is still asked. On macOS without the
+/// command-line developer tools Git is never run (see below).
+pub(crate) fn git_guesses_email() -> Option<bool> {
+    static GUESSES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if let Some(guesses) = GUESSES.get() {
+        return Some(*guesses);
+    }
+    // Without the developer tools, macOS's `/usr/bin/git` is a placeholder that
+    // opens an install dialog; `xcode-select -p` only reports. With no working
+    // Git there is nothing to commit with, so `EMAIL` stays unset.
+    #[cfg(target_os = "macos")]
+    {
+        static DEVELOPER_TOOLS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let installed = *DEVELOPER_TOOLS.get_or_init(|| {
+            std::process::Command::new("xcode-select")
+                .arg("-p")
+                .stdin(discarded_stdio())
+                .stdout(discarded_stdio())
+                .stderr(discarded_stdio())
+                .status()
+                .is_ok_and(|status| status.success())
+        });
+        if !installed {
+            return None;
+        }
+    }
+    let unconfigured = std::env::temp_dir().join("opengeni-git-identity-probe-unconfigured");
+    let mut probe = std::process::Command::new("git");
+    probe
+        .args(["var", "GIT_COMMITTER_IDENT"])
+        .current_dir(std::env::temp_dir())
+        .env("GIT_COMMITTER_NAME", "Opengeni identity probe")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &unconfigured)
+        .env("HOME", &unconfigured)
+        .env("XDG_CONFIG_HOME", &unconfigured)
+        .env("USERPROFILE", &unconfigured)
+        .env_remove("EMAIL")
+        .env_remove("GIT_COMMITTER_EMAIL")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_DIR")
+        .stdin(discarded_stdio())
+        .stdout(discarded_stdio())
+        .stderr(discarded_stdio());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        probe.creation_flags(CREATE_NO_WINDOW);
+    }
+    let guesses = probe.status().ok()?.success();
+    Some(*GUESSES.get_or_init(|| guesses))
+}
+
 /// The platform's default login-shell argv (used when a PTY open names no
 /// command): `$SHELL` (or `/bin/sh`) on unix, `cmd.exe` on Windows.
 #[must_use]
 pub(crate) fn default_shell() -> Vec<String> {
     #[cfg(unix)]
     {
-        vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())]
+        // `$SHELL`, else `/bin/sh`, else dash or bash when that is gone.
+        vec![system_shell::environment_shell()
+            .to_string_lossy()
+            .into_owned()]
     }
     #[cfg(windows)]
     {
@@ -664,8 +903,35 @@ pub(crate) fn shell_command(parts: &[String]) -> tokio::process::Command {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         // A generic POSIX fallback for any other unix-like target.
-        let mut cmd = tokio::process::Command::new("/bin/sh");
+        let mut cmd = tokio::process::Command::new(system_shell::environment_shell());
         cmd.arg("-c").arg(parts.join(" "));
         cmd
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn default_git_email_fills_only_an_unset_email_git_cannot_guess() {
+        let unguessable = || Some(false);
+        assert_eq!(
+            default_git_email_with(false, None, unguessable),
+            Some(DEFAULT_GIT_EMAIL)
+        );
+        assert_eq!(default_git_email_with(true, None, unguessable), None);
+        assert_eq!(
+            default_git_email_with(false, Some(OsStr::new("me@example.com")), unguessable),
+            None
+        );
+        // A machine whose hostname gives Git an address keeps it.
+        assert_eq!(default_git_email_with(false, None, || Some(true)), None);
+        // Without Git there is nothing to commit with.
+        assert_eq!(default_git_email_with(false, None, || None), None);
+        assert!(names_email("EMAIL"));
+        assert_eq!(names_email("Email"), cfg!(windows));
+        assert_eq!(DEFAULT_GIT_EMAIL, "agent@opengeni.invalid");
     }
 }

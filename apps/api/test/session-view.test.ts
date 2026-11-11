@@ -208,9 +208,6 @@ function sessionFixture(overrides: Partial<Session> = {}): Session {
     activeSandboxId: null,
     activeEpoch: 0,
     workingDir: null,
-    variableSetIds: [],
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     rigVersionId: null,
     firstPartyMcpPermissions: null,
@@ -336,26 +333,6 @@ describe("boundSessionDetailMcp", () => {
     });
     expect(session.effectiveToolPolicy!.inheritedFromSessionId).toBe(hiddenId);
     expect(JSON.stringify(boundSessionDetailMcp(projected))).not.toContain(hiddenId);
-  });
-
-  test("preserves the complete ordered Variable Set selection and derives legacy aliases", () => {
-    const variableSetIds = [
-      "00000000-0000-4000-8000-000000000011",
-      "00000000-0000-4000-8000-000000000012",
-    ];
-    const result = boundSessionDetailMcp(
-      sessionFixture({
-        variableSetIds,
-        // Deliberately inconsistent input proves the model-facing legacy fields
-        // are derived from the canonical ordered selection.
-        variableSetId: variableSetIds[0]!,
-        environmentId: variableSetIds[0]!,
-      }),
-    );
-
-    expect(result.variableSetIds).toEqual(variableSetIds);
-    expect(result.variableSetId).toBe(variableSetIds[1]);
-    expect(result.environmentId).toBe(variableSetIds[1]);
   });
 
   test("reports selected, mandatory, and effective tool policy separately", () => {
@@ -501,10 +478,6 @@ describe("boundRigDetailMcp", () => {
           command: huge,
         })),
         credentialHooks: Array.from({ length: 100 }, () => huge),
-        defaultVariableSetIds: Array.from(
-          { length: 100 },
-          (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
-        ),
         changelog: huge,
         createdBy: "session:test",
         active: true,

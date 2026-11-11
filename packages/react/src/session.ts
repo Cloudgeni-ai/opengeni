@@ -1,7 +1,7 @@
 // @opengeni/react/session — session state and pure timeline projection.
 //
 // This entry deliberately excludes styled components, workbench surfaces, CSS,
-// and their optional peers. Hosts keep OpenGeni's session semantics while
+// and their optional peers. Hosts keep Opengeni's session semantics while
 // rendering their own product UI.
 
 export type {
@@ -30,6 +30,27 @@ export type {
 } from "./embedded-session-client";
 
 export { useSession, isTitleEvent } from "./hooks/use-session";
+export { useRetainedReads } from "./hooks/shared-query";
+export { readClientConfig } from "./lib/client-config-read";
+export { useSessionConversation } from "./hooks/use-session-conversation";
+export { useSessionStartupTimeline } from "./lib/session-startup-timeline";
+export {
+  useSessionReadAcknowledgement,
+  type SessionAttentionClientLike,
+  type UseSessionReadAcknowledgementInput,
+} from "./hooks/use-session-read-acknowledgement";
+export { useNewConversation } from "./hooks/use-new-conversation";
+export type {
+  NewConversationController,
+  UseNewConversationOptions,
+  NewConversationCreateOptions,
+  CreatedConversation,
+} from "./hooks/use-new-conversation";
+export type {
+  PendingPrompt,
+  SessionConversationController,
+  UseSessionConversationOptions,
+} from "./hooks/use-session-conversation";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export { useSessionEvents } from "./hooks/use-session-events";
 export type {
@@ -47,24 +68,49 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type {
+  ComposerBusySend,
   ComposerControllerState,
   ComposerPolicy,
+  InitialComposerDraft,
   ComposerSendExtras,
   ComposerState,
   UseComposerOptions,
 } from "./hooks/use-composer";
-export { useFileAttachments } from "./hooks/use-file-attachments";
+export { uploadScopeForSession, useFileAttachments } from "./hooks/use-file-attachments";
 export type {
   FileAttachment,
   UseFileAttachmentsOptions,
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
+export {
+  isStoredImage,
+  readStoredFile,
+  readStoredFilePreviewUrl,
+  useStoredFilePreview,
+  useStoredFiles,
+} from "./stored-file-preview";
+export type {
+  StoredFileClientLike,
+  StoredFilePreview,
+  StoredFileSource,
+  StoredFiles,
+} from "./stored-file-preview";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
+  QueueRecallResult,
   UseTurnQueueOptions,
   UseTurnQueueResult,
 } from "./hooks/use-turn-queue";
+export {
+  latestRecallableQueuedTurn,
+  shouldRecallQueuedOnKey,
+  useQueuedPromptRecall,
+} from "./hooks/use-queued-prompt-recall";
+export type {
+  ComposerQueuedRecall,
+  QueuedPromptRecallOutcome,
+} from "./hooks/use-queued-prompt-recall";
 export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
 export { useSessionLineage, isLineageRefreshEvent } from "./hooks/use-session-lineage";
@@ -74,6 +120,7 @@ export type {
 } from "./hooks/use-session-lineage";
 export { useSessionControl } from "./hooks/use-session-control";
 export type {
+  ApprovalDecisionOptions,
   UseSessionControlOptions,
   UseSessionControlResult,
 } from "./hooks/use-session-control";
@@ -86,7 +133,11 @@ export type {
   UseSessionMcpApprovalPolicyResult,
 } from "./hooks/use-session-mcp-approval-policy";
 
-export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
+export {
+  approvalsDecidable,
+  approvalsFromRequiresAction,
+  projectPendingApprovals,
+} from "./approvals";
 export type { PendingApproval } from "./approvals";
 
 export { humanInputRequestFromEvent, projectPendingHumanInputRequests } from "./human-input";
@@ -98,14 +149,23 @@ export type {
 } from "./hooks/use-human-input";
 
 export {
+  automationRunOutcomesOnly,
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
+  timelineLivePause,
+  timelinePauseSpans,
   toolDisplayName,
 } from "./timeline/projection";
-export type { GroupTimelineOptions } from "./timeline/projection";
+export type {
+  GroupTimelineOptions,
+  TimelineLivePause,
+  TimelinePauseSpan,
+} from "./timeline/projection";
+export { useTimelinePauses } from "./timeline/use-timeline-pauses";
 export type {
   ActivityItem,
   AgentMessageItem,
@@ -120,12 +180,51 @@ export type {
   ReasoningItem,
   SandboxItem,
   SessionStatusItem,
+  SessionUsageLimitStop,
   TimelineGroup,
   TimelineItem,
   TurnOutcome,
   ToolCallItem,
+  ToolOutputPreview,
   TurnEndItem,
+  TurnStepsItem,
+  TurnStepsState,
+  TimelineAnnotationSourceDescriptor,
   UserMessageItem,
   WorkerCompletionItem,
   WorkerItem,
 } from "./timeline/types";
+
+// Why a message can't start (an admission block, or a chat on somebody else's
+// personal machine) and the allowed ways forward, for any renderer. Styled web
+// surfaces live in `@opengeni/react/session-ui` (`SessionStartNotice`).
+export { useSessionStart } from "./hooks/use-session-start";
+export type { UseSessionStartOptions, UseSessionStartResult } from "./hooks/use-session-start";
+export {
+  allowMachineForChat,
+  admissionControlNeedsRefresh,
+  admissionRecheckControl,
+  currentSessionMachineAccess,
+  isMachineComputeSelectable,
+  personalMachineCopy,
+  recheckSessionAdmission,
+  runSavedMessageOnMachine,
+  savedMessageApprovedMachines,
+  savedMessageMachineChoices,
+  sessionAdmissionApprovedElsewhere,
+  sessionAdmissionApprovedElsewhereCopy,
+  sessionAdmissionCopy,
+  sessionAdmissionMachineAccessCopy,
+  sessionAdmissionMachineChangedCopy,
+  sessionAdmissionNeedsDifferentMachine,
+  sessionAdmissionNeedsMachineAccess,
+  sessionAdmissionReason,
+} from "./session-admission-model";
+export type {
+  AllowMachineClient,
+  ApprovedElsewhereCopy,
+  ApprovedMachineChoice,
+  PersonalMachineCopy,
+  SessionAdmissionCopy,
+  SessionAdmissionReason,
+} from "./session-admission-model";

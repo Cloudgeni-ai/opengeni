@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import * as db from "@opengeni/db";
+import * as coreSettlement from "../src/activities/agent-turn/codex-core-settlement";
 import type { Settings } from "@opengeni/config";
 import {
   finalizeTurnAttempt,
@@ -9,13 +9,9 @@ import { createTurnContext } from "../src/activities/agent-turn/turn-context";
 
 test("finalization flushes scraped usage with its exact cleanup authority before releasing the lease", async () => {
   const order: string[] = [];
-  const write = spyOn(db, "recordCodexAccountUsageForFinalization").mockImplementation(async () => {
+  const write = spyOn(coreSettlement, "finalizeCoreCodexUsage").mockImplementation(async () => {
     order.push("usage");
-    return { result: true, wakeTargets: [] };
-  });
-  const release = spyOn(db, "releaseCodexCredentialLease").mockImplementation(async () => {
-    order.push("release");
-    return true;
+    return { capacityRecovered: false } as never;
   });
   const settings = { workspaceCaptureEnabled: false } as Settings;
   const context = createTurnContext({ settings, cancellationRequestedAt: null });
@@ -25,6 +21,7 @@ test("finalization flushes scraped usage with its exact cleanup authority before
   context.attempt.executionGeneration = 7;
   context.providerTurn.effectiveCodexCredentialId = "credential-1";
   context.providerTurn.effectiveCodexCredentialVersion = 3;
+  context.providerTurn.codexSubscriptionCore = { connectionId: "credential-1" } as never;
   context.providerTurn.latestCodexUsage = {
     checkedAt: new Date(),
     primaryUsedPercent: 21,
@@ -55,7 +52,16 @@ test("finalization flushes scraped usage with its exact cleanup authority before
       recordWorkerActivity() {},
     },
     leases: {
-      codex: { held: true, holderId: "holder-1", generation: 2, stopHeartbeat() {} },
+      codex: {
+        held: true,
+        holderId: "holder-1",
+        generation: 2,
+        releaseCurrent: async () => {
+          order.push("release");
+          return true;
+        },
+        stopHeartbeat() {},
+      },
       xai: { held: false, stopHeartbeat() {} },
     },
     machineOpObserver: { drainEvents: () => [] },
@@ -65,24 +71,16 @@ test("finalization flushes scraped usage with its exact cleanup authority before
   } as unknown as TurnFinalizationDeps;
   try {
     await finalizeTurnAttempt(deps);
-    expect(write).toHaveBeenCalledWith(
-      deps.db,
-      "workspace-1",
-      "credential-1",
-      context.providerTurn.latestCodexUsage,
-      {
-        turnId: "turn-1",
-        sessionId: "session-1",
-        attemptId: "attempt-1",
-        executionGeneration: 7,
-        holderId: "holder-1",
-        generation: 2,
-        credentialVersion: 3,
-      },
-    );
+    expect(write).toHaveBeenCalledWith({
+      db: deps.db,
+      core: context.providerTurn.codexSubscriptionCore,
+      lease: deps.leases.codex,
+      usage: context.providerTurn.latestCodexUsage,
+      credentialVersion: 3,
+      modelCallCompletedAt: null,
+    });
     expect(order).toEqual(["usage", "release"]);
   } finally {
     write.mockRestore();
-    release.mockRestore();
   }
 });

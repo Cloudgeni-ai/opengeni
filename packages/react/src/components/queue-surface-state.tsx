@@ -1,6 +1,8 @@
 import { Loader2Icon, RotateCwIcon } from "lucide-react";
 
 import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
+import { useErrorMessage } from "../lib/error-message";
+import { useOpenGeniText } from "../messages/runtime";
 
 type QueueStateProps = {
   queue: UseTurnQueueResult;
@@ -27,6 +29,7 @@ export function QueueStoppingStatus({
   queue,
   dividerAfter = false,
 }: QueueStateProps & { dividerAfter?: boolean }) {
+  const t = useOpenGeniText();
   return (
     <div
       role="status"
@@ -43,13 +46,13 @@ export function QueueStoppingStatus({
       <span className="min-w-0">
         <span className="font-medium">
           {queue.effectiveControl?.state === "paused"
-            ? "Stopping current attempt…"
-            : "Stopping previous attempt…"}
+            ? t("queueSurfaceState.stoppingCurrentAttempt")
+            : t("queueSurfaceState.stoppingPreviousAttempt")}
         </span>{" "}
         <span className="text-fg-muted">
           {queue.effectiveControl?.state === "paused"
-            ? "Queued work stays saved until you resume."
-            : "Queued work is saved and starts automatically."}
+            ? t("queueSurfaceState.queuedWorkStaysSavedUntil")
+            : t("queueSurfaceState.queuedWorkIsSavedAnd")}
         </span>
       </span>
     </div>
@@ -60,6 +63,8 @@ export function QueueErrorAlert({
   queue,
   dividerBefore = false,
 }: QueueStateProps & { dividerBefore?: boolean }) {
+  const t = useOpenGeniText();
+  const formatError = useErrorMessage();
   return (
     <div className={`${dividerBefore ? "border-t border-border" : ""} p-2`}>
       <div
@@ -68,13 +73,13 @@ export function QueueErrorAlert({
       >
         <span
           role="region"
-          aria-label="Queue error details"
+          aria-label={t("queueSurfaceState.queueErrorDetails")}
           tabIndex={0}
           className="max-h-[min(5rem,20dvh)] min-w-0 max-w-full flex-[1_1_5rem] overflow-auto overscroll-contain whitespace-pre-wrap rounded-sm outline-hidden [overflow-wrap:anywhere] [unicode-bidi:plaintext] focus-visible:ring-2 focus-visible:ring-ring/40"
           data-testid="queue-error-message"
           dir="auto"
         >
-          {(queue.mutationError ?? queue.error)?.message}
+          {formatError(queue.mutationError ?? queue.error)}
         </span>
         <button
           type="button"
@@ -82,8 +87,8 @@ export function QueueErrorAlert({
             queue.clearMutationError();
             void queue.refresh();
           }}
-          aria-label="Dismiss queue error and retry"
-          title="Retry loading the queue"
+          aria-label={t("queueSurfaceState.dismissQueueErrorAndRetry")}
+          title={t("queueSurfaceState.retryLoadingTheQueue")}
           className="ms-auto inline-flex size-7 shrink-0 items-center justify-center self-start rounded-md outline-hidden transition-colors hover:bg-surface-3 focus-visible:ring-2 focus-visible:ring-ring/40 motion-reduce:transition-none pointer-coarse:size-[44px]"
         >
           <RotateCwIcon className="size-3.5" />

@@ -8,7 +8,7 @@ import {
   codexSubscriptionFetch,
   type CodexRequestContext,
 } from "@opengeni/codex";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildModelInstance,
   buildOpenGeniAgent,

@@ -3,9 +3,12 @@ import type { CapabilityCatalogItem, SessionEvent } from "@opengeni/sdk";
 import { CapabilityCatalogItem as CapabilitySchema } from "@opengeni/contracts";
 import { buildTimeline } from "../src/timeline/projection";
 import { sessionAuthRecommendation } from "../src/session-auth-recommendation";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 test("personal alias recovery uses explicit canonical identity with hidden connection ids", () => {
-  const [item] = buildTimeline([
+  const [item] = buildTimeline(englishText, [
     {
       id: "event",
       workspaceId: "workspace",
@@ -39,15 +42,22 @@ test("personal alias recovery uses explicit canonical identity with hidden conne
   expect(item.canonicalServerId).toBe("mail");
   expect(item.connectionId).toBeNull();
   expect(item.connectionSubjectScope).toBe("subject");
-  expect(sessionAuthRecommendation(item, catalog)?.capability?.id).toBe("mail-capability");
+  expect(sessionAuthRecommendation(englishText, item, catalog)?.capability?.id).toBe(
+    "mail-capability",
+  );
   expect(
-    sessionAuthRecommendation({ ...item, connectionSubjectScope: null }, catalog),
-  ).toBeUndefined();
-  expect(
-    sessionAuthRecommendation({ ...item, connectionSubjectScope: "workspace" }, catalog),
+    sessionAuthRecommendation(englishText, { ...item, connectionSubjectScope: null }, catalog),
   ).toBeUndefined();
   expect(
     sessionAuthRecommendation(
+      englishText,
+      { ...item, connectionSubjectScope: "workspace" },
+      catalog,
+    ),
+  ).toBeUndefined();
+  expect(
+    sessionAuthRecommendation(
+      englishText,
       {
         ...item,
         serverId: `account-${"b".repeat(64)}`,
@@ -57,12 +67,16 @@ test("personal alias recovery uses explicit canonical identity with hidden conne
       catalog,
     )?.capability?.id,
   ).toBe("mail-capability");
-  expect(sessionAuthRecommendation({ ...item, canonicalServerId: null }, catalog)).toBeUndefined();
   expect(
-    sessionAuthRecommendation({ ...item, canonicalServerId: "other" }, catalog),
+    sessionAuthRecommendation(englishText, { ...item, canonicalServerId: null }, catalog),
   ).toBeUndefined();
-  expect(sessionAuthRecommendation({ ...item, authoritySource: "host" }, catalog)).toBeUndefined();
   expect(
-    sessionAuthRecommendation(item, [...catalog, { ...catalog[0]!, id: "ambiguous" }]),
+    sessionAuthRecommendation(englishText, { ...item, canonicalServerId: "other" }, catalog),
+  ).toBeUndefined();
+  expect(
+    sessionAuthRecommendation(englishText, { ...item, authoritySource: "host" }, catalog),
+  ).toBeUndefined();
+  expect(
+    sessionAuthRecommendation(englishText, item, [...catalog, { ...catalog[0]!, id: "ambiguous" }]),
   ).toBeUndefined();
 });

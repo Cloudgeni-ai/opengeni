@@ -3,6 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { publishedAgentReleasesFor, stableAgentVersion } from "../sandbox/agent-release";
 
 // The get.<domain> install-serving routes. These are
 // UNAUTHENTICATED (see http/auth.ts isAuthExempt — the `installExemptPaths` set)
@@ -85,8 +86,8 @@ async function loadAsset(file: string): Promise<string> {
 }
 
 // "The agent ships inside the control-plane" (cont.): the committed install
-// scripts default their release-asset base URL to the public archive
-// (get.opengeni.ai) so a from-source / standalone copy still works. But a
+// scripts default their release-asset base URL to the managed application
+// (app.opengeni.ai) so a from-source / standalone copy still works. But a
 // DEPLOYED control plane must serve a script that pulls the agent from ITSELF —
 // the per-SHA binary baked into THIS image, via the /agent/* routes below — so
 // `curl https://<this-host>/install.sh | sh` installs the exact agent that
@@ -102,7 +103,7 @@ type DefaultRewrite = { from: string; to: string };
 const DEFAULT_BASE_REWRITES: Record<string, (base: string) => DefaultRewrite[]> = {
   "install.sh": (base) => [
     {
-      from: 'OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"',
+      from: 'OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"',
       to: `OPENGENI_INSTALL_DEFAULT_BASE_URL="${base}"`,
     },
     {
@@ -112,7 +113,7 @@ const DEFAULT_BASE_REWRITES: Record<string, (base: string) => DefaultRewrite[]> 
   ],
   "install.ps1": (base) => [
     {
-      from: "$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'",
+      from: "$OpengeniInstallDefaultBaseUrl = 'https://app.opengeni.ai'",
       to: `$OpengeniInstallDefaultBaseUrl = '${base}'`,
     },
     {
@@ -158,18 +159,48 @@ function bakedContentType(asset: string): string {
 // BAKED_DIR is a fixed sibling, so the resolved path cannot escape the dir.
 async function readBaked(asset: string): Promise<ArrayBuffer | null> {
   const url = new URL(asset, BAKED_DIR);
-  try {
-    const info = await stat(url);
-    if (!info.isFile()) {
+  const runtime =
+    /^(?:opengeni-computer-native|opengeni-browserd|opengeni-agent)-(.+?)(?:\.(?:sha256|minisig))?$/.exec(
+      asset,
+    );
+  if (runtime) {
+    const target = runtime[1]!;
+    const cohort = ["opengeni-agent", "opengeni-browserd", "opengeni-computer-native"].flatMap(
+      (component) => ["", ".sha256", ".minisig"].map((suffix) => `${component}-${target}${suffix}`),
+    );
+    const members = await Promise.all(
+      cohort.map(async (name) => {
+        try {
+          const info = await stat(new URL(name, BAKED_DIR));
+          return info.isFile() && info.size > 0 ? "complete" : "invalid";
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+          throw new HTTPException(503, { message: "baked interaction runtime is unavailable" });
+        }
+      }),
+    );
+    // A target is either wholly absent or wholly baked. A partial image cannot
+    // combine its agent with helpers or verification sidecars from an archive.
+    if (members.every((member) => member === "absent")) return null;
+    if (members.some((member) => member !== "complete")) {
+      throw new HTTPException(503, { message: "baked interaction runtime is incomplete" });
+    }
+  } else {
+    try {
+      const info = await stat(url);
+      if (!info.isFile()) return null;
+    } catch {
       return null;
     }
-  } catch {
-    return null;
   }
   // Return a standalone ArrayBuffer (a valid Response BodyInit). `readFile`'s
   // Buffer may be a view into a larger pooled allocation, so copy out the exact
   // byte range with `.slice` rather than handing over the backing store.
-  const buf = await readFile(url);
+  const buf = await readFile(url).catch(() => {
+    // Never redirect after selecting a baked cohort, even if a file becomes
+    // unreadable between the completeness check and the byte read.
+    throw new HTTPException(503, { message: "baked interaction runtime is unavailable" });
+  });
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 }
 
@@ -183,7 +214,12 @@ const VERSION_SEG = /^v[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
   const releasesBase = deps.settings.agentReleasesBaseUrl.replace(/\/+$/, "");
-  const stableAgentTag = `agent-v${deps.settings.agentStableVersion}`;
+  const releases = publishedAgentReleasesFor(deps.settings);
+  // The newest published stable release (see createPublishedAgentReleases).
+  // When the release host cannot confirm one, the promoted build is served as
+  // before: a client that reaches the host may still find it.
+  const stableVersion = async (): Promise<string | null> =>
+    (await releases.resolve("stable")) ?? stableAgentVersion(deps.settings);
 
   for (const [path, { file, contentType }] of Object.entries(TEXT_ASSETS)) {
     app.get(path, async (c) => {
@@ -202,12 +238,13 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // Serve a release-binary asset: the BAKED per-SHA file if THIS image carries it
   // (the Linux musl binary + sidecars that match the control plane exactly),
-  // otherwise 302 to the GitHub Release at `redirectUrl` (mac/windows + any
+  // otherwise 302 to the GitHub Release at `redirectTo` (mac/windows + any
   // un-baked asset). The baked path makes the agent the API enrolls against
-  // identical to the API that serves it — no version skew, no extra hop.
+  // identical to the API that serves it — no version skew, no extra hop. A null
+  // `redirectTo` (no stable release is known) is a 404, never a guess.
   async function serveAsset(
     asset: string,
-    redirectUrl: string,
+    redirectTo: string | null | (() => Promise<string | null>),
     allowBaked: boolean,
   ): Promise<Response> {
     const committed = COMMITTED_BINARY_ASSETS[asset];
@@ -238,6 +275,12 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Not baked here → the GitHub Release is the source of truth (the public
     // archive + the documented install.sh fallback). 302 so the client refetches.
+    const redirectUrl = typeof redirectTo === "function" ? await redirectTo() : redirectTo;
+    if (!redirectUrl) {
+      throw new HTTPException(404, {
+        message: "no stable agent release is configured (OPENGENI_AGENT_STABLE_VERSION)",
+      });
+    }
     return new Response(null, {
       status: 302,
       headers: { location: redirectUrl },
@@ -255,24 +298,33 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!ASSET_NAME.test(asset)) {
       throw new HTTPException(400, { message: "invalid asset name" });
     }
-    return serveAsset(asset, `${releasesBase}/download/${stableAgentTag}/${asset}`, true);
+    // A baked asset needs no release, so the host is asked only otherwise.
+    return serveAsset(
+      asset,
+      async () => {
+        const version = await stableVersion();
+        return version ? `${releasesBase}/download/agent-v${version}/${asset}` : null;
+      },
+      true,
+    );
   });
 
   // Signed self-update channel manifests. Each deployment exposes its own
   // immutable promotion pointer, so an enrolled machine never depends on the
   // public get.opengeni.ai hostname. The manifest and signature are ordinary
   // assets on the selected immutable agent release.
-  for (const [channel, version] of [
-    ["stable", deps.settings.agentStableVersion],
-    ["beta", deps.settings.agentBetaVersion],
+  for (const [channel, channelVersion] of [
+    ["stable", stableVersion],
+    ["beta", async () => deps.settings.agentBetaVersion ?? null],
   ] as const) {
-    app.get(`/agent/${channel}/:manifestAsset`, (c) => {
+    app.get(`/agent/${channel}/:manifestAsset`, async (c) => {
       const manifestAsset = c.req.param("manifestAsset");
       if (manifestAsset !== "manifest.json" && manifestAsset !== "manifest.json.minisig") {
         throw new HTTPException(404, {
           message: "update manifest asset not found",
         });
       }
+      const version = await channelVersion();
       if (!version) {
         throw new HTTPException(404, {
           message: `${channel} agent channel is not configured`,

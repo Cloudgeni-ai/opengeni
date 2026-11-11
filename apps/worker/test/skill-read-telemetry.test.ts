@@ -1,13 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Runner } from "@openai/agents";
-import {
-  acquireSharedTestDatabase,
-  assistantMessage,
-  functionCall,
-  ScriptedModel,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { assistantMessage, functionCall, ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -140,20 +135,19 @@ test("Skill-use telemetry reaches the event projection and never what the model 
   };
   const selected = [...builtIns, { id: sessionSkillId, artifact: sessionSkill }];
   // The model-visible index lists the workspace Skill and the built-in only.
-  const indexed = skillCatalogEntryIds(
-    formatSkillCatalog([
-      {
-        id: workspaceSkillId,
-        name: "replica-research",
-        description: "Answer user questions from the replica",
-      },
-      ...builtIns.map((entry) => ({
-        id: entry.id,
-        name: entry.artifact.name,
-        description: entry.artifact.description || entry.artifact.name,
-      })),
-    ]),
-  );
+  const indexDescriptors = [
+    {
+      id: workspaceSkillId,
+      name: "replica-research",
+      description: "Answer user questions from the replica",
+    },
+    ...builtIns.map((entry) => ({
+      id: entry.id,
+      name: entry.artifact.name,
+      description: entry.artifact.description || entry.artifact.name,
+    })),
+  ];
+  const indexed = skillCatalogEntryIds(formatSkillCatalog(indexDescriptors), indexDescriptors);
   const settings = testSettings({ sandboxBackend: "none", mcpServers: [] });
   const observability = createObservability(settings, { component: "worker" });
 

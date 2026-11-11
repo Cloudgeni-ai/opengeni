@@ -4,7 +4,7 @@
  * remain real. The launching command owns cluster/database cleanup. */
 import { mock } from "bun:test";
 import postgres from "postgres";
-import * as testing from "@opengeni/testing";
+import * as testing from "@opengeni/testing/shared-pg";
 
 const adminUrl = process.env.MCP_LEDGER_TEST_ADMIN_URL;
 const ownerUrl = process.env.MCP_LEDGER_TEST_OWNER_URL;
@@ -13,7 +13,7 @@ if (!adminUrl || !ownerUrl)
 if (new URL(adminUrl).pathname !== new URL(ownerUrl).pathname)
   throw new Error("Native owner fixture database mismatch");
 const originalTesting = { ...testing };
-mock.module("@opengeni/testing", () => ({
+mock.module("@opengeni/testing/shared-pg", () => ({
   ...originalTesting,
   acquireSharedTestDatabase: async (): Promise<testing.SharedTestDatabase> => {
     const admin = postgres(adminUrl, { max: 4 });

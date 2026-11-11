@@ -1,6 +1,7 @@
 import {
   materializeRigVersionForAttempt,
   getWorkspaceModelPolicy,
+  getOrganizationModelDefaults,
   getFilesForSubject,
   getWorkspace,
   resolveCompanyBrainContextSelection,
@@ -11,9 +12,9 @@ import {
   getOrCreateWorkspaceInstructionPolicySnapshot,
   PreferenceRegistryInitiatorError,
   resolveSessionAttemptPersonalResources,
+  freezeAgentLearningPolicy,
 } from "@opengeni/db";
 import {
-  projectHistoryForProvider,
   restoreGenericDispatchHistoryItems,
   projectModelInputForCapabilities,
   hasActiveWorkspaceInstructionPolicy,
@@ -22,13 +23,25 @@ import {
 } from "@opengeni/runtime";
 import {
   codeSearchDeploymentPolicy,
+  policyChargesCreditsForModel,
   settingsWithResolvedModelContext,
   type Settings,
 } from "@opengeni/config";
 import { projectReasoningConfigurations, supportsReasoningConfiguration } from "@opengeni/codex";
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
-import { resolveRigProviderImageForRun, settingsWithWorkspaceSandboxImage } from "@opengeni/core";
+import {
+  resolveRigProviderImageForRun,
+  rigProviderImageContentSourceImage,
+  settingsWithWorkspaceSandboxImage,
+} from "@opengeni/core";
+import { requestStaleRigProviderImageRefresh } from "../rig-provider-image-refresh";
+import type { StartRigProviderImageRefresh } from "../types";
 import { createModelHistoryAttachmentProjector } from "../run-input";
+import {
+  loadTurnSearchRecords,
+  projectTurnHistoryForProvider,
+  type TurnSearchRecords,
+} from "../search-record-form";
 import type {
   TurnActivityServices as ActivityServices,
   RunAgentTurnInput,
@@ -44,7 +57,9 @@ import {
 } from "../generated-images";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { retryWhileMissing } from "@opengeni/storage";
+import { measureTurnStartupPhase } from "../../observability-metrics";
 import { WorkspaceModelPolicyBlockedError } from "@opengeni/runtime";
+import { assertTurnModelInferenceResidency } from "./inference-residency-gate";
 import {
   evaluateWorkspaceModelPolicy,
   resolveWorkspaceAgentHumanInputEnabled,
@@ -55,17 +70,21 @@ import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
 
 import { assertWorkspaceHumanInputAllowed } from "./admission";
 import {
+  hostedToolsBillCreditsForTurn,
   lazyToolTransportForTurn,
   openAiHostedImageProviderBindingForTurn,
   modelAttachmentInputPolicyForTurn,
+  resolveAcceptedTurnModel,
 } from "./tool-policy";
 
 import type { ClaimTurnOk } from "./claim";
 import type { EventingState, WorkspaceRefState } from "./turn-context";
 
 export type GovernanceModelDeps = {
+  learningPolicy: Awaited<ReturnType<typeof freezeAgentLearningPolicy>>;
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
   runtime: ActivityServices["runtime"];
   objectStorage: ActivityServices["objectStorage"];
   eventing: EventingState;
@@ -77,6 +96,8 @@ export type GovernanceModelDeps = {
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   humanInputResume: ClaimTurnOk["humanInputResume"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
+  /** The claim's billing class: the accepted model is billed in Opengeni credits. */
+  chargesOpenGeniCredits: boolean;
   requiredGeneratedVideoFiles: Array<{
     operationId: string;
     artifactId: string;
@@ -86,6 +107,8 @@ export type GovernanceModelDeps = {
     sha256: string;
     filename: string;
   }>;
+  /** Optional background rebuild of a stale sandbox environment image. */
+  startRigProviderImageRefresh?: StartRigProviderImageRefresh | null;
 };
 
 export type GovernanceModelOk = {
@@ -106,6 +129,14 @@ export type GovernanceModelOk = {
   workspaceAgentIdentity: string | null;
   workspaceGovernance: ReturnType<typeof renderWorkspaceGovernanceContext>;
   structuredWorkspacePolicyActive: boolean;
+  /** False when the workspace turned Opengeni credits off (model policy). */
+  workspaceCreditModelsAllowed: boolean;
+  /**
+   * Provider-hosted paid tools would run on Opengeni's bill this turn
+   * ({@link hostedToolsBillCreditsForTurn}); tool preparation and agent
+   * construction both read this one value.
+   */
+  hostedToolsBillCredits: boolean;
   workspaceMemory: string | null | undefined;
   buildCompanyBrainContributionReceiptFor: (
     skillCatalogText: string,
@@ -131,6 +162,8 @@ export type GovernanceModelOk = {
   compactionModelHistoryProjector: (
     items: Array<Record<string, unknown>>,
   ) => Promise<Array<Record<string, unknown>>>;
+  /** The turn's hosted web-search record form; turn input settles it. */
+  searchRecords: TurnSearchRecords;
 };
 
 export type GovernanceModelOutcome = { exit: RunAgentTurnResult } | { ok: GovernanceModelOk };
@@ -168,6 +201,7 @@ export async function prepareGovernanceAndModel(
   const {
     input,
     db,
+    observability,
     runtime,
     objectStorage,
     eventing,
@@ -210,6 +244,7 @@ export async function prepareGovernanceAndModel(
     rigMaterialization,
     [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot],
     workspaceModelPolicy,
+    organizationModelDefaults,
   ] = await Promise.all([
     session.rigId && session.rigVersionId
       ? (async () =>
@@ -233,6 +268,7 @@ export async function prepareGovernanceAndModel(
       ),
     ]),
     getWorkspaceModelPolicy(db, input.workspaceId),
+    getOrganizationModelDefaults(db, input.accountId),
   ]);
   const rigVersion = rigMaterialization?.version ?? null;
   // Rig display name for the doctrine block + setup events/errors (only on a
@@ -263,6 +299,9 @@ export async function prepareGovernanceAndModel(
   const companyProfileIncluded = contextSelection.receipt.companyProfileIncluded;
   const workspaceGovernance = renderWorkspaceGovernanceContext(
     {
+      // Learning settings only steer an agent that can save Knowledge,
+      // instructions or Skills; a configured agent without those is not told them.
+      ...(agentCanLearn(session.agent) ? { learningPolicy: deps.learningPolicy } : {}),
       companyProfile: companyProfileSnapshot,
       instructionPolicy: instructionPolicySnapshot,
       preferences: preferenceSnapshot,
@@ -315,6 +354,16 @@ export async function prepareGovernanceAndModel(
     turn.sandboxBackend,
   );
   const providerImageSettings = providerImageSelection.settings;
+  requestStaleRigProviderImageRefresh({
+    selection: providerImageSelection,
+    turnUsesDeploymentBase:
+      rigProviderImageContentSourceImage(logicalSandboxSettings, turn.sandboxBackend) ===
+      rigProviderImageContentSourceImage(capabilitySettings, turn.sandboxBackend),
+    workspaceId: input.workspaceId,
+    versionId: rigVersion?.id ?? null,
+    start: deps.startRigProviderImageRefresh,
+    warn: (message, context) => observability.warn(message, context),
+  });
   const verifiedRigProviderImageId =
     providerImageSelection.reason === "selected"
       ? (providerImageSelection.imageId ?? undefined)
@@ -324,16 +373,25 @@ export async function prepareGovernanceAndModel(
     // provider-native ID is applied only to fresh creation without
     // changing the logical lease image.
     ...providerImageSettings,
-    openaiModel: turn.model,
-    openaiReasoningEffort: turn.reasoningEffort,
+    openaiModel: turnExecutionPolicy.productModelId,
+    openaiReasoningEffort: turnExecutionPolicy.reasoningEffort,
     sandboxBackend: turn.sandboxBackend,
   };
-  const runSettings = await settingsWithSessionMcpServersForRun(
-    db,
-    input.workspaceId,
-    input.sessionId,
-    input.attemptId,
-    baseRunSettings,
+  const runSettings = await measureTurnStartupPhase(
+    observability,
+    {
+      phase: "session_mcp_settings",
+      provider: turnExecutionPolicy.providerId,
+      backend: turn.sandboxBackend,
+    },
+    () =>
+      settingsWithSessionMcpServersForRun(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        input.attemptId,
+        baseRunSettings,
+      ),
   );
 
   // Multi-provider per-turn routing → the provider gating (compaction mode,
@@ -349,21 +407,28 @@ export async function prepareGovernanceAndModel(
   // a chat-only Fireworks model. Resolving against the default-model settings
   // keeps gating consistent with the router. Cost accounting covers registry
   // models via configuredModelPricing.
-  const resolvedModel = runtime.resolveTurnModel(
-    capabilitySettings,
-    turnExecutionPolicy.productModelId,
-  );
+  //
+  // The accepted policy is then projected back onto the resolved shape: a
+  // turn frozen before hosted web search was enabled keeps its frozen tool set
+  // on every attempt, so recovery never adds a tool mid-turn.
+  const resolvedModel = resolveAcceptedTurnModel(runtime, capabilitySettings, turnExecutionPolicy);
   const providerApi = resolvedModel?.provider.api ?? "responses";
+  const hostedToolsBillCredits = hostedToolsBillCreditsForTurn(capabilitySettings, {
+    accountId: input.accountId,
+    chargesOpenGeniCredits: deps.chargesOpenGeniCredits,
+  });
   const nativeImageProviderBinding =
     providerApi === "responses"
-      ? openAiHostedImageProviderBindingForTurn(capabilitySettings, resolvedModel)
+      ? openAiHostedImageProviderBindingForTurn(
+          capabilitySettings,
+          resolvedModel,
+          hostedToolsBillCredits,
+        )
       : null;
   const lazyToolTransport = lazyToolTransportForTurn(resolvedModel);
   const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
-  // Use the proven wire capability, not the catalogue modality alone. Chat
-  // providers may advertise vision, but OpenGeni intentionally has no typed
-  // image transport for that wire yet; exposing view_image there would turn
-  // pixels into a multi-megabyte text/base64 function result.
+  // The shared input policy combines model modality with the supported wire
+  // transport, including typed image projection for vision-capable Chat models.
   const supportsImageInput = modelInputPolicy.supportsImageInput;
   media.modelCanReceiveRetainedSessionImages = supportsImageInput;
   const attachmentProjector = createModelHistoryAttachmentProjector(
@@ -389,7 +454,10 @@ export async function prepareGovernanceAndModel(
     runSettings.reasoningConfigurationUpdatesEnabled &&
     providerApi === "responses" &&
     (resolvedModel?.provider.id === "codex" || resolvedModel?.provider.id === "openai") &&
-    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort);
+    supportsReasoningConfiguration(
+      turnExecutionPolicy.upstreamModelId,
+      turnExecutionPolicy.reasoningEffort,
+    );
   const modelHistoryProjector = async (
     items: Array<Record<string, unknown>>,
     projectionOptions?: Parameters<typeof attachmentProjector>[1],
@@ -407,11 +475,15 @@ export async function prepareGovernanceAndModel(
     collectGeneratedImageReceipts(items, media.generatedImageReceiptsByProviderItemId);
     return projectGeneratedImageHistoryForModel(items);
   };
+  // Compaction reads the same form as the turn's own requests, so its request
+  // shares their cached prefix and the summarizer sees what the model saw.
+  const searchRecords = await loadTurnSearchRecords(db, input.workspaceId, input.sessionId);
   const compactionModelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
     await modelHistoryProjector(
-      projectHistoryForProvider(
+      projectTurnHistoryForProvider(
         await generatedImageHistoryProjector(restoreGenericDispatchHistoryItems(items)),
         providerApi,
+        searchRecords,
       ),
     );
   // Bind the provider/model catalog's context policy to every model-facing
@@ -421,8 +493,21 @@ export async function prepareGovernanceAndModel(
   // catalog values and must reach pre-turn compaction, history guards, and
   // every model call together.
   eventing.modelRunSettings = resolvedModel
-    ? settingsWithResolvedModelContext(runSettings, resolvedModel.configured)
+    ? settingsWithResolvedModelContext(
+        runSettings,
+        resolvedModel.configured,
+        workspace.settings,
+        organizationModelDefaults,
+      )
     : runSettings;
+  // EU-ONLY INFERENCE — the attempt's settings were narrowed right after the
+  // claim (settingsWithTurnInferenceResidency), so resolution above already
+  // refused a non-EU route; refuse an unresolved one too, before any model call.
+  assertTurnModelInferenceResidency({
+    settings: capabilitySettings,
+    resolvedModel,
+    productModelId: turnExecutionPolicy.productModelId,
+  });
   // WORKSPACE MODEL POLICY — the authoritative hard gate. Runs immediately
   // after resolution and BEFORE any model call (the compaction summarizer
   // and the main run both come later in this scope), so a blocked
@@ -436,6 +521,11 @@ export async function prepareGovernanceAndModel(
       const verdict = evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
         providerId: turnExecutionPolicy.providerId,
         modelId: turnExecutionPolicy.productModelId,
+        // The same cost class the claim bills (`chargesOpenGeniCredits`):
+        // the resolved definition when present, else the frozen product id.
+        chargesCredits: resolvedModel
+          ? resolvedModel.configured.cost === "credits"
+          : policyChargesCreditsForModel(capabilitySettings, turnExecutionPolicy.productModelId),
       });
       if (!verdict.allowed) {
         throw new WorkspaceModelPolicyBlockedError(
@@ -496,6 +586,8 @@ export async function prepareGovernanceAndModel(
       workspaceAgentIdentity,
       workspaceGovernance,
       structuredWorkspacePolicyActive,
+      workspaceCreditModelsAllowed: workspaceModelPolicy?.allowCreditModels !== false,
+      hostedToolsBillCredits,
       workspaceMemory,
       buildCompanyBrainContributionReceiptFor,
       logicalSandboxSettings,
@@ -510,6 +602,16 @@ export async function prepareGovernanceAndModel(
       modelHistoryProjector,
       generatedImageHistoryProjector,
       compactionModelHistoryProjector,
+      searchRecords,
     },
   };
+}
+
+/**
+ * Whether the agent has any learning tool the frozen learning policy governs:
+ * Knowledge (Knowledge, task notes and instructions) or Skill management.
+ * Sessions without an agent configuration keep every tool.
+ */
+export function agentCanLearn(agent: ClaimTurnOk["session"]["agent"]): boolean {
+  return !agent || agent.capabilities.knowledge || agent.capabilities.skills === "manage";
 }

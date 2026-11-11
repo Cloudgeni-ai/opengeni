@@ -74,6 +74,12 @@ describe("sandbox file artifact paths", () => {
     for (const path of ["D:/work/project/file.txt", "C:secret.txt", "..\\secret.txt"]) {
       expect(() => sandboxArtifactRelativePath(path, "C:/work/project")).toThrow();
     }
+    // A file elsewhere on the machine is named, with the way forward.
+    expect(() =>
+      sandboxArtifactRelativePath("/Users/me/Downloads/key.p8", "/Users/me/work"),
+    ).toThrow(
+      "sandbox artifact path must name a file inside this session's workspace root /Users/me/work; /Users/me/Downloads/key.p8 is outside it, so copy the file into the workspace first and use that path",
+    );
   });
 
   test("accepts workspace-relative, absolute workspace, and sandbox-link paths", () => {

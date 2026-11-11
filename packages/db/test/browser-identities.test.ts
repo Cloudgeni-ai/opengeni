@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   activateBrowserSession,
   ATTACHED_BROWSER_SESSION_CAPABILITIES,
@@ -26,6 +26,7 @@ import {
   updateBrowserIdentity,
   type BrowserStateArtifactCommitInput,
 } from "../src";
+import { errorMessage } from "@opengeni/contracts/values";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -230,7 +231,7 @@ async function expectDatabaseError(value: PromiseLike<unknown>, pattern: RegExp)
     error = caught;
   }
   expect(error).toBeDefined();
-  expect(error instanceof Error ? error.message : String(error)).toMatch(pattern);
+  expect(errorMessage(error)).toMatch(pattern);
 }
 
 describe("immutable BrowserIdentity lineage", () => {

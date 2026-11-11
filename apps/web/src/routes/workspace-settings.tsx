@@ -2,15 +2,20 @@
 // (components/settings/workspace-settings-shell.tsx): General, Access,
 // API keys and Developer. Models lives in Organization settings (a
 // workspace's Models URL redirects there), as does the org/billing console.
+import { t } from "@opengeni/react/app/lib/console-text";
+import { inferenceFeatureRestriction } from "@opengeni/react";
 import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { PencilIcon, Trash2Icon, UserIcon } from "lucide-react";
 import { lazy, Suspense, useRef, useState } from "react";
 import { toast } from "sonner";
+import { resolveWorkspaceBusySend } from "@opengeni/contracts";
 
 import { AgentActivityRow } from "@/components/settings/agent-activity";
+import { MeetingDefaultsSection } from "@/components/meetings/meeting-defaults-section";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
+import { DefaultMachineRow, MyDefaultMachineRow } from "@/components/settings/default-machine-row";
 import { DefaultSandboxEnvironmentRow } from "@/components/settings/default-sandbox-environment-row";
 import { WorkspaceSandboxImageRow } from "@/components/workspace-sandbox-image-row";
 import {
@@ -21,36 +26,42 @@ import {
   useOrganizationWorkspaceAdministration,
   type OrganizationWorkspaceAdministration,
 } from "@/components/settings/organization-workspace-administration";
-import { VoiceInputPreferenceRow } from "@/components/transcription-settings";
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
+import { VoiceInputPreferenceRow } from "@opengeni/react/app/components/transcription-settings";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
 import {
   DisabledReasonTooltip,
   SettingNavRow,
   SettingRow,
   SettingRowSkeleton,
-} from "@/components/ui/setting-row";
+} from "@opengeni/react/ui/setting-row";
 import { workspaceAgentDefaultsSummary } from "@/lib/agent-defaults-summary";
-import { Field, FieldStack, TextInput } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { Notice } from "@/components/ui/notice";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { accessSearchOf, accessViewOf, type AccessSearch } from "@/lib/access-route";
-import { orgLabel } from "@/lib/org";
+import { orgLabel } from "@opengeni/react/app/lib/org";
 import { useOrganizationName } from "@/lib/use-organization-name";
-import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import {
   completeWorkspaceDeletionFollowUp,
   deleteOrganizationWorkspaceWithReconciliation,
-} from "@/lib/workspace-deletion";
-import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
+} from "@opengeni/react/app/lib/workspace-deletion";
+import {
+  canContributeWorkspaceContent,
+  canManageWorkspaceMembers,
+  canManageWorkspaceSettings,
+  hasWorkspacePermission,
+} from "@opengeni/react/app/lib/permissions";
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
 import type { DeveloperLocation } from "@/lib/developer-route";
-import { hasAccountPermission } from "@/lib/permissions";
+import { openSettingsDestination } from "@/lib/open-settings-destination";
+import { canAdministerOrganization } from "@opengeni/react/app/lib/workspaces";
 import { OrganizationManagedWorkspaceAccess } from "./workspace-managed-access";
 
 export function WorkspaceSettingsRoute({
@@ -141,7 +152,7 @@ function OperationalWorkspaceSettingsRoute({
   // The real name when known (an admin reads it from the organization overview).
   const organizationName = useOrganizationName(accountId, administersOrganization);
   const organizationLabel = accountId
-    ? (organizationName ?? orgLabel(accountId, context.accessContext.accountGrants))
+    ? (organizationName ?? orgLabel(t, accountId, context.accessContext.accountGrants))
     : "Organization";
   const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
   const canManageSettings = canManageWorkspaceSettings(
@@ -149,10 +160,10 @@ function OperationalWorkspaceSettingsRoute({
     activeWorkspace,
     context.managedSelfContext,
   );
-  const canManageMembers = hasWorkspacePermission(
+  const canManageMembers = canManageWorkspaceMembers(
     context.accessContext,
-    workspaceId,
-    "members:manage",
+    activeWorkspace,
+    context.clientConfig.auth.mode === "managedSession",
   );
   const canAdministerWorkspace = hasWorkspacePermission(
     context.accessContext,
@@ -165,7 +176,11 @@ function OperationalWorkspaceSettingsRoute({
   // single-user session.
   const canManageOrganizationIntegrations =
     administersOrganization &&
-    hasAccountPermission(context.accessContext, accountId, "account:admin");
+    canAdministerOrganization({
+      accessContext: context.accessContext,
+      clientConfig: context.clientConfig,
+      accountId,
+    });
 
   return (
     <WorkspaceSettingsContent>
@@ -209,25 +224,47 @@ function OperationalWorkspaceSettingsRoute({
         )
       ) : null}
 
+      {section === "learning" ? (
+        <Suspense fallback={<SettingsRowsFallback label="Loading agent learning" />}>
+          <LazyAgentLearningSettingsPage key={workspaceId} workspaceId={workspaceId} />
+        </Suspense>
+      ) : null}
+
       {section === "usage" ? (
-        personal ? (
-          <Notice tone="muted" title="Budgets apply to shared workspaces">
-            Your Personal workspace uses {organizationLabel}'s credits without a monthly budget.
-          </Notice>
-        ) : (
-          <Suspense fallback={<SettingsRowsFallback label="Loading usage" />}>
-            <LazyWorkspaceUsagePage
-              key={workspaceId}
-              workspaceId={workspaceId}
-              workspaceName={activeWorkspace?.name ?? "this workspace"}
-              organizationId={accountId}
-            />
-          </Suspense>
-        )
+        <Suspense fallback={<SettingsRowsFallback label="Loading usage" />}>
+          <LazyWorkspaceUsagePage
+            key={workspaceId}
+            workspaceId={workspaceId}
+            workspaceName={activeWorkspace?.name ?? "this workspace"}
+            organizationId={accountId}
+            personalOrganizationLabel={personal ? organizationLabel : undefined}
+          />
+        </Suspense>
       ) : null}
 
       {section === "api-keys" ? (
         <WorkspaceApiKeysPage key={workspaceId} workspaceId={workspaceId} keyParam={apiKey} />
+      ) : null}
+
+      {section === "available" ? (
+        <Suspense fallback={<SettingsRowsFallback label="Loading what's available here" />}>
+          <LazyAvailableHere
+            key={workspaceId}
+            client={context.client}
+            workspaceId={workspaceId}
+            workspaceName={activeWorkspace?.name ?? "this workspace"}
+            organizationName={organizationLabel}
+            personal={personal}
+            canOpenModels={personal || canAdministerWorkspace || administersOrganization}
+            onOpen={(destination) => openSettingsDestination(navigate, workspaceId, destination)}
+          />
+        </Suspense>
+      ) : null}
+
+      {section === "mine" ? (
+        <Suspense fallback={<SettingsRowsFallback label="Loading your things" />}>
+          <LazyMyThings key={workspaceId} client={context.client} workspaceId={workspaceId} />
+        </Suspense>
       ) : null}
 
       {section === "developer" ? (
@@ -288,14 +325,22 @@ function WorkspaceGeneralSettings({
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const accountId = activeWorkspace?.accountId ?? "";
-  const canRename =
-    activeWorkspace !== null &&
-    hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
-  const canDeleteWorkspace = hasWorkspacePermission(
+  const canAdminister = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
     "workspace:admin",
   );
+  // Anyone who can start chats in a shared workspace renames it; a Personal
+  // workspace is renamed by whoever manages its settings: its owner, acting as
+  // themselves. Mirrors PATCH /v1/workspaces/:id.
+  const canRename = personal
+    ? canManageSettings
+    : canContributeWorkspaceContent(
+        context.accessContext,
+        activeWorkspace,
+        context.managedSelfContext,
+      );
+  const canDeleteWorkspace = canAdminister;
   // Deleting the account's only workspace is refused server-side; disable the
   // affordance when this is the only workspace in the active account.
   const isOnlyWorkspaceInAccount =
@@ -347,11 +392,15 @@ function WorkspaceGeneralSettings({
           label="Name"
           description={<RowValue>{activeWorkspace.name}</RowValue>}
           control={
-            // A Personal workspace keeps its name: no button that could only
-            // say it isn't allowed.
-            personal ? undefined : (
+            // In a Personal workspace only its owner could ever rename it, so
+            // anyone else gets no button that could only say it isn't allowed.
+            personal && !canRename ? undefined : (
               <DisabledReasonTooltip
-                reason={canRename ? undefined : "Only workspace admins can rename it."}
+                reason={
+                  canRename
+                    ? undefined
+                    : "Only people who can start chats here, acting as themselves, can rename it."
+                }
               >
                 <Button
                   type="button"
@@ -380,7 +429,7 @@ function WorkspaceGeneralSettings({
                 <Link
                   to="/workspaces/$workspaceId/organization"
                   params={{ workspaceId: organizationSettingsWorkspaceId }}
-                  className="text-brand underline-offset-2 hover:underline"
+                  className="og-link"
                 >
                   {organizationLabel}
                 </Link>
@@ -429,27 +478,47 @@ function WorkspaceGeneralSettings({
         />
       </Section>
 
+      <Section title="Chats">
+        <BusySendPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
+      </Section>
+
+      <MeetingDefaultsSection
+        workspaceId={workspaceId}
+        personal={personal}
+        canManage={canManageSettings}
+        onConnectModels={
+          canAddAccounts
+            ? () =>
+                void navigate({
+                  to: "/workspaces/$workspaceId/organization",
+                  params: { workspaceId },
+                  search: { section: "models", workspace: workspaceId },
+                })
+            : undefined
+        }
+      />
+
       <Section
         title="New session defaults"
         description="Applied when someone starts a new session in this workspace."
       >
-        {context.clientConfig.agentConfig?.enabled ? (
-          <SettingNavRow
-            label="Agent"
-            description="What agents can do and who they are."
-            value={workspaceAgentDefaultsSummary(
-              activeWorkspace.settings,
-              context.clientConfig.agentConfig,
-            )}
-            onOpen={() =>
-              void navigate({
-                to: "/workspaces/$workspaceId/settings",
-                params: { workspaceId },
-                search: { section: "general", view: "agent-defaults" },
-              })
-            }
-          />
-        ) : null}
+        <SettingNavRow
+          label="Agent"
+          description="What agents can do and who they are."
+          value={workspaceAgentDefaultsSummary(
+            activeWorkspace.settings,
+            context.clientConfig.agentConfig,
+          )}
+          onOpen={() =>
+            void navigate({
+              to: "/workspaces/$workspaceId/settings",
+              params: { workspaceId },
+              search: { section: "general", view: "agent-defaults" },
+            })
+          }
+        />
+        <DefaultMachineRow workspaceId={workspaceId} />
+        <MyDefaultMachineRow workspaceId={workspaceId} />
         <DefaultSandboxEnvironmentRow workspaceId={workspaceId} />
         <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <VideoGenerationPreferenceRow
@@ -470,7 +539,7 @@ function WorkspaceGeneralSettings({
         <WorkspaceSandboxImageRow
           client={context.client}
           workspaceId={workspaceId}
-          canManage={canRename}
+          canManage={canAdminister}
         />
         <CodeSearchPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <ConnectedAppsDefaultRow workspaceId={workspaceId} canManage={canManageSettings} />
@@ -574,13 +643,82 @@ function RenameWorkspaceDialog({
 }
 
 /**
+ * What Send does while the agent is working, for everyone in this workspace's
+ * console. Steer suits people who should not need to know the difference:
+ * the agent reads the message as soon as it can, usually within seconds,
+ * instead of after the whole turn. The other choice stays beside Send while
+ * the agent works (and on
+ * Cmd/Ctrl+Enter), so it is one tap away on phones too.
+ */
+function BusySendPreferenceRow({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
+  const context = useAppContext();
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const value = resolveWorkspaceBusySend(workspace?.settings);
+  const [saving, setSaving] = useState(false);
+
+  async function choose(next: "queue" | "steer") {
+    if (next === value) return;
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    setSaving(true);
+    try {
+      const updated = await context.updateWorkspaceSettings(workspaceId, { busySend: next });
+      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        toast.success(
+          next === "steer" ? "Send steers a working agent" : "Send queues behind a working agent",
+        );
+      }
+    } catch {
+      if (context.ownsWorkspaceInvocation(workspaceId, acceptedTransition))
+        toast.error("Couldn't update what Send does");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const reason = canManage ? undefined : "Only workspace admins can change this.";
+  return (
+    <SettingRow
+      label="Send while the agent works"
+      description={
+        value === "steer"
+          ? "Steer: the agent reads your message as soon as it can, usually within seconds. A reply it is writing stops, and it answers with your message in mind. Running tools aren't cut off. Queue is next to Send while it works."
+          : "Queue: your message runs after the agent finishes its current work. Steer is next to Send while it works."
+      }
+      controlWidth="auto"
+      control={
+        <SegmentedControl
+          size="sm"
+          value={value}
+          onValueChange={(next) => void choose(next as "queue" | "steer")}
+          options={[
+            { value: "queue", label: "Queue" },
+            { value: "steer", label: "Steer" },
+          ].map((option) => ({
+            ...option,
+            disabled: saving || !canManage,
+            ...(reason ? { disabledReason: reason } : {}),
+          }))}
+        />
+      }
+    />
+  );
+}
+
+/**
  * Jev-backed code_search agent tool. Shown only when the deployment offers it.
  * "Default" follows the deployment (which may give the tool to half of all
  * sessions during an experiment). Each session keeps the choice it was created
  * with, so its cached prompt stays stable; Off also pauses the tool in running
  * sessions until it is switched back.
  */
-function CodeSearchPreferenceRow({
+export function CodeSearchPreferenceRow({
   workspaceId,
   canManage,
 }: {
@@ -589,15 +727,25 @@ function CodeSearchPreferenceRow({
 }) {
   const context = useAppContext();
   const capability = context.clientConfig.codeSearch;
+  // EU-only without an EU decision model: the server reports code search
+  // unavailable and `region_restricted`; shown, switched off. No route at all
+  // (no reason): not shown.
+  const regionRestricted = inferenceFeatureRestriction(t, context.clientConfig, "code_search");
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const explicit = workspace?.settings?.codeSearchEnabled;
-  const value = explicit === true ? "on" : explicit === false ? "off" : "default";
+  const value = regionRestricted
+    ? "off"
+    : explicit === true
+      ? "on"
+      : explicit === false
+        ? "off"
+        : "default";
   const [saving, setSaving] = useState(false);
-  if (capability?.available !== true) return null;
+  if (capability?.available !== true && regionRestricted === null) return null;
   const defaultPhrase =
-    capability.workspaceDefault === "on"
+    capability?.workspaceDefault === "on"
       ? "Default turns it on"
-      : capability.workspaceDefault === "split"
+      : capability?.workspaceDefault === "split"
         ? "Default gives it to half of new sessions"
         : "Default leaves it off";
 
@@ -621,11 +769,17 @@ function CodeSearchPreferenceRow({
     }
   }
 
-  const reason = canManage ? undefined : "Only workspace admins can change this.";
+  // The description already says "Not supported in EU".
+  const reason =
+    regionRestricted || canManage ? undefined : "Only workspace admins can change this.";
   return (
     <SettingRow
       label="Fast code search"
-      description={`Agents find code in one step. ${defaultPhrase}; Off also pauses it in running sessions.`}
+      description={
+        regionRestricted
+          ? `Agents find code in one step. ${regionRestricted}.`
+          : `Agents find code in one step. ${defaultPhrase}; Off also pauses it in running sessions.`
+      }
       controlWidth="auto"
       control={
         <SegmentedControl
@@ -638,7 +792,7 @@ function CodeSearchPreferenceRow({
             { value: "off", label: "Off" },
           ].map((option) => ({
             ...option,
-            disabled: saving || !canManage,
+            disabled: saving || !canManage || regionRestricted !== null,
             ...(reason ? { disabledReason: reason } : {}),
           }))}
         />
@@ -693,7 +847,7 @@ export function DangerZone(props: {
       title="Delete workspace"
       description={
         disabledReason ??
-        `Deletes ${props.workspaceName} for everyone, with its sessions, schedules, variable sets, knowledge, files and API keys.`
+        `Deletes ${props.workspaceName} for everyone, with its sessions, automations, secrets, knowledge, files and API keys.`
       }
       action={
         // When something blocks the delete, the description says what and who
@@ -721,7 +875,7 @@ export function DangerZone(props: {
           variant="type-to-confirm"
           title={`Delete ${props.workspaceName}?`}
           consequences={[
-            `Deletes every session, schedule, variable set, knowledge entry, file and API key in ${props.workspaceName}.`,
+            `Deletes every session, automation, secret, knowledge entry, file and API key in ${props.workspaceName}.`,
             "Everyone loses access to it. Their other workspaces aren't affected.",
             "Running sessions, video generations, background commands and live sandboxes must finish first.",
             "This can't be undone.",
@@ -901,9 +1055,24 @@ const LazySessionDefaultsPage = lazy(async () => {
 });
 
 // Usage reads load only on their page, never with the rest of settings.
+const LazyAgentLearningSettingsPage = lazy(async () => {
+  const module = await import("@/components/settings/agent-learning-page");
+  return { default: module.AgentLearningSettingsPage };
+});
+
 const LazyWorkspaceUsagePage = lazy(async () => {
   const module = await import("@/components/usage/workspace-usage-page");
   return { default: module.WorkspaceUsagePage };
+});
+
+const LazyAvailableHere = lazy(async () => {
+  const module = await import("@/components/settings/available-here");
+  return { default: module.AvailableHere };
+});
+
+const LazyMyThings = lazy(async () => {
+  const module = await import("@opengeni/react/app/components/my-things");
+  return { default: module.MyThings };
 });
 
 const LazyWorkspaceDeveloperSettings = lazy(async () => {

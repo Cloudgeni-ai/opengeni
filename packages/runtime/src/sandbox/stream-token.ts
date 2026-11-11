@@ -37,7 +37,8 @@ export type MintStreamTokenInput = {
    *  swapped off of. One field, two fences — the relay/in-box edge reads it as the
    *  stale-viewer floor either way. */
   leaseEpoch: number;
-  /** v1 is always "view"; "control" is the never-granted raw-input plane. */
+  /** `view` (default) only watches; `control` lets the relay forward this
+   *  viewer's input (PTY keystrokes; typed desktop input on the desktop port). */
   mode?: "view" | "control";
   /** The exposed stream port (noVNC); defaults to 6080. */
   port?: number;
@@ -49,6 +50,10 @@ export type MintStreamTokenInput = {
   subjectId?: string;
   /** The session authority epoch observed at mint (0281). */
   authorityEpoch?: number;
+  /** A Connected Machine relay stream's exact channel. When set, the token's
+   *  workspace is the channel's (where the machine is enrolled) and the relay
+   *  only accepts it for this machine and stream instance. */
+  relayChannel?: { workspaceId: string; agentId: string; channelId: string };
 };
 
 /**
@@ -65,7 +70,7 @@ export async function mintStreamToken(
   const nowSeconds = input.nowSeconds ?? Math.floor(Date.now() / 1000);
   const ttlSeconds = input.ttlSeconds ?? STREAM_TOKEN_DEFAULT_TTL_SECONDS;
   const payload: StreamTokenPayloadType = StreamTokenPayload.parse({
-    workspaceId: input.workspaceId,
+    workspaceId: input.relayChannel?.workspaceId ?? input.workspaceId,
     sessionId: input.sessionId,
     viewerId: input.viewerId,
     leaseEpoch: input.leaseEpoch,
@@ -74,6 +79,9 @@ export async function mintStreamToken(
     exp: nowSeconds + ttlSeconds,
     ...(input.subjectId ? { subjectId: input.subjectId } : {}),
     ...(input.authorityEpoch ? { authorityEpoch: input.authorityEpoch } : {}),
+    ...(input.relayChannel
+      ? { agentId: input.relayChannel.agentId, channelId: input.relayChannel.channelId }
+      : {}),
   });
   return signStreamToken(secret, payload);
 }

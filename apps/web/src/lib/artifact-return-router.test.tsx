@@ -1,3 +1,4 @@
+import "@/navigation-host";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
@@ -11,8 +12,8 @@ import {
 } from "@tanstack/react-router";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
-import { artifactReturnSearch } from "./routes";
+import { ArtifactSessionPage } from "@opengeni/react/app/components/session/artifact-session-page";
+import { artifactReturnSearch } from "@opengeni/react/app/lib/routes";
 
 const workspaceId = "5d929faa-c755-4146-9d60-e55f42251f0d";
 const sessionId = "cf39f8d3-673f-43c0-9f98-c2787fdcf84e";

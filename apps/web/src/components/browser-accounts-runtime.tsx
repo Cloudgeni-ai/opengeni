@@ -4,6 +4,7 @@ import {
   useBrowserAccounts,
   type BrowserAccountTransition,
 } from "@opengeni/react/accounts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { ClientModel } from "@opengeni/sdk";
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -17,17 +18,18 @@ import {
   subscribeManagedActorInvalidation,
   subscribeManagedActorMutationBusy,
 } from "@/api";
-import { Button } from "@/components/ui/button";
-import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { Button } from "@opengeni/react/ui/button";
+import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/common";
+import type { OnboardingDestination } from "@/components/onboarding/developer-setup-step";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { managedAuthModeFromSearch } from "@/lib/managed-auth-url";
 import {
   browserAccountBridgeBlockersSnapshot,
   installBrowserAccountBridgeOperations,
   subscribeBrowserAccountBridgeBlockers,
-} from "@/lib/browser-account-bridge";
+} from "@opengeni/react/app/lib/browser-account-bridge";
 import {
   clearOrganizationInvitationContinuation,
   type OrganizationInvitationContinuation,
@@ -307,14 +309,15 @@ export function BrowserAccountsSignedOutPanel(props: {
 }
 
 export function BrowserAccountsOrganizationOnboardingPanel(props: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;
   modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   activeEmail: string | null;
+  activeName?: string | null;
   invitation: OrganizationInvitationContinuation | null;
-  onComplete: () => void;
+  onComplete: (destination?: OnboardingDestination) => void;
 }) {
   const accounts = useBrowserAccounts();
   const popup = useBrowserAccountPopup();
@@ -365,6 +368,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
       supergrokEnabled={props.supergrokEnabled}
       modelDefaults={props.modelDefaults ?? null}
       activeEmail={props.activeEmail}
+      activeName={props.activeName ?? null}
       invitation={props.invitation}
       onUseInvitedAccount={useInvitedAccount}
       onUseAnotherAccount={() => authenticate("add")}

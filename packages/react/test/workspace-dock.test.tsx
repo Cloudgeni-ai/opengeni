@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { act, type ReactNode, useState } from "react";
-import { WorkspaceDock } from "../src/components/workspace-dock";
+import { WorkspaceDock, useWorkspacePanelOwnsExpand } from "../src/components/workspace-dock";
 import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -296,6 +296,77 @@ describe("WorkspaceDock", () => {
     await rendered.unmount();
   });
 
+  test("a panel with its own expand has that one expand; other panels keep Maximize", async () => {
+    function SitePanel({ showsSite }: { showsSite: boolean }) {
+      useWorkspacePanelOwnsExpand(showsSite);
+      return showsSite ? (
+        <button type="button" aria-label="Expand Site to full window">
+          Site
+        </button>
+      ) : (
+        <div>Artifact list</div>
+      );
+    }
+    function Dock({ showsSite }: { showsSite: boolean }) {
+      const [tab, setTab] = useState("artifacts");
+      return (
+        <WorkspaceDock
+          autoSaveId="og.test.workspace-dock-panel-expand"
+          primary={<div>Chat pane</div>}
+          activeTab={tab}
+          onActiveTabChange={setTab}
+          tabs={[
+            { id: "files", label: "Files", content: <div>Files content</div> },
+            {
+              id: "artifacts",
+              label: "Artifacts",
+              content: <SitePanel showsSite={showsSite} />,
+            },
+          ]}
+        />
+      );
+    }
+    const expands = (container: HTMLElement) =>
+      [...container.querySelectorAll("button")]
+        // What is on screen: not the hidden panels' content.
+        .filter((button) => button.closest("[hidden]") === null)
+        .map((button) => button.getAttribute("aria-label") ?? "")
+        .filter((label) => /maximi[sz]e|expand|full/iu.test(label));
+    const tab = (container: HTMLElement, label: string) =>
+      [...container.querySelectorAll('[role="tab"]')].find(
+        (candidate) => candidate.textContent === label,
+      ) ?? null;
+
+    const rendered = await renderComponent(<Dock showsSite />);
+    // A Site on screen: its own expand only, not the dock's look-alike.
+    expect(expands(rendered.container)).toEqual(["Expand Site to full window"]);
+    expect(rendered.container.querySelector('[title="Hide workspace"]')).not.toBeNull();
+
+    // Another panel keeps the dock's Maximize; the hidden Site panel's claim
+    // does not reach it.
+    await click(tab(rendered.container, "Files"));
+    expect(expands(rendered.container)).toEqual(["Maximize dock"]);
+
+    // Maximized from there, the Site panel still offers Restore.
+    await click(rendered.container.querySelector('[title="Maximize"]'));
+    await click(tab(rendered.container, "Artifacts"));
+    expect(rendered.container.querySelector('[title="Restore (Esc)"]')).not.toBeNull();
+    const restore = rendered.container.querySelector<HTMLElement>('[title="Restore (Esc)"]');
+    restore?.focus();
+    await click(restore);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    expect(expands(rendered.container)).toEqual(["Expand Site to full window"]);
+    // Restore removed its own button; focus stays in the dock's controls.
+    expect(document.activeElement?.getAttribute("title")).toBe("Hide workspace");
+
+    // The list (no Site on screen) gives the dock's Maximize back.
+    await rendered.rerender(<Dock showsSite={false} />);
+    await flush();
+    expect(expands(rendered.container)).toEqual(["Maximize dock"]);
+
+    await rendered.unmount();
+  });
+
   test("an initially open controlled dock restores focus outside its hidden surface", async () => {
     const rendered = await renderComponent(<ControlledDock onCollapsedChange={() => {}} />);
     const hide = rendered.container.querySelector<HTMLElement>('[title="Hide workspace"]');
@@ -395,6 +466,63 @@ describe("WorkspaceDock", () => {
 
     await rendered.unmount();
     window.localStorage.removeItem(storageKey);
+  });
+
+  test("a closed dock stays closed when the window widens past the overlay breakpoint", async () => {
+    const autoSaveId = "og.test.workspace-dock-widen";
+    const storageKey = `react-resizable-panels:${autoSaveId}:primary:dock`;
+    window.localStorage.setItem(storageKey, JSON.stringify({ primary: 66, dock: 34 }));
+    const original = window.matchMedia;
+    const listeners = new Set<() => void>();
+    let narrow = false;
+    window.matchMedia = ((query: string) => ({
+      get matches() {
+        return narrow;
+      },
+      media: query,
+      onchange: null,
+      addEventListener(_type: string, listener: () => void) {
+        listeners.add(listener);
+      },
+      removeEventListener(_type: string, listener: () => void) {
+        listeners.delete(listener);
+      },
+      addListener() {},
+      removeListener() {},
+      dispatchEvent() {
+        return false;
+      },
+    })) as unknown as typeof window.matchMedia;
+    const resize = async (next: boolean) => {
+      narrow = next;
+      await act(async () => {
+        for (const listener of [...listeners]) listener();
+      });
+      await flush(5);
+    };
+    try {
+      const rendered = await renderComponent(
+        <WorkspaceDock
+          autoSaveId={autoSaveId}
+          primary={<div>Chat pane</div>}
+          tabs={[{ id: "run", label: "Run", content: <div>Run content</div> }]}
+          collapsed
+          onCollapsedChange={() => {}}
+        />,
+      );
+      const dockGrow = () =>
+        rendered.container.querySelector<HTMLElement>('[data-panel][id="dock"]')?.style.flexGrow;
+      await flush(5);
+      expect(dockGrow()).toBe("0");
+      await resize(true);
+      expect(rendered.container.querySelector('[data-panel][id="dock"]')).toBeNull();
+      await resize(false);
+      expect(dockGrow()).toBe("0");
+      await rendered.unmount();
+    } finally {
+      window.matchMedia = original;
+      window.localStorage.removeItem(storageKey);
+    }
   });
 
   test("below the breakpoint the dock is a full-screen overlay with no resize splitter", async () => {

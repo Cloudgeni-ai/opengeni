@@ -1,0 +1,663 @@
+# 18. The fleet: one service, leases in Postgres, fences on every write
+
+Status: Accepted, 2026-10-17. Implements [15](0015-placement-and-moves-between-hosts.md).
+Recovery amended by [32](0032-a-lost-hosts-sandboxes-wait-for-it.md): giving
+up on a host keeps its sandboxes its own until it is declared gone.
+
+## Context
+
+[ADR 15](0015-placement-and-moves-between-hosts.md) sets the shape: a
+central store, ownership as a fenced lease, moves while a sandbox sleeps,
+and no slow work in a request's path. This record fixes the parts, so they
+can be built and tested.
+
+## Decision
+
+- **Two crates.** `compute-fleet` is pure, like `compute-core`: placement,
+  host leases, sandbox ownership, recovery and moves, as inputs in and
+  actions out, with a seeded simulation of the whole protocol and a budget
+  test at 5,000 hosts.
+  `compute-control` is the service around it: the store, the host API, the
+  public API and the proxy to hosts.
+- **Postgres is the store.** One database holds hosts (address, zone,
+  memory profile, CPU template, lease epoch and state), sandboxes (owner
+  key, config, metadata, owner host, owner epoch, latest archive) and API
+  keys. Every change is an update conditional on an epoch, so a stale
+  writer changes nothing. Postgres gives conditional writes, transactions
+  and listing by metadata, and is managed on every cloud. The service keeps
+  no state of its own: replicas run behind a load balancer and any of them
+  serves any request.
+- **Hosts renew their lease through the service.** An agent started with a
+  host id and a control address registers, which gives it a host epoch,
+  then renews every 3⅓ s, nine times in the lease time T (30 s), with
+  its capacity:
+  free memory and disk, ready clones per shape, awake sandboxes, and what
+  the host is now (its address, memory, processors, disk and offers, as
+  it registers with them): a restarted agent keeps its registration while
+  what it is configured with may have changed, and the service places on
+  what it says, keeping the name and boot it registered with. A changed
+  class (profile or CPU template) applies to the sandboxes it places from
+  then on; each sandbox keeps the class it was placed under. A
+  renewal is one row update, and capacity changes are sent at most once a
+  second. Replicas read changed host rows every 250 ms into a view in
+  memory; placement reads only that view. The host numbers its renewals
+  under each registration and keeps its lease (epoch, deadline, last
+  number) in a file in `/run`, written before each renewal is sent, so a
+  restarted agent goes on from it. An agent renews from the moment its
+  process starts, before it has taken back its sandboxes, however long
+  that takes, until the process exits, after whatever its stop has to
+  finish; work still on a blocking thread then is abandoned, as a crash
+  would abandon it. So a restart leaves the lease unrenewed only between
+  one process and the next. While it does not serve, its renewals carry no
+  capacity, so the service keeps the last one the host sent, and it
+  refuses every request as unavailable, so the service places elsewhere
+  meanwhile. It registers only while it serves, since a registration
+  lists everything the host holds.
+- **The service gives up on a host by one clock only.** One replica at a
+  time, holding a Postgres advisory lock, watches the hosts' renewal
+  counts on its own monotonic clock, and a host is lost once its count has
+  not moved for T plus a margin (5 s). Marking it lost is conditional on
+  the count it watched (`… where renewals = $seen and state = 'live'`), so
+  a renewal accepted meanwhile saves it. The leader times a count from
+  when the read that showed it returned, never from when it was sent, so
+  a slow read cannot make a renewal look older than it is. A new leader
+  starts with nothing seen and so waits a whole T plus margin. No two
+  clocks are compared;
+  each needs only to run at a rate within a stated bound of true time
+  (below).
+- **Lapsed is when giving up is safe, not when it is worth it.** A host
+  whose renewals stopped has frozen its VMs (below), but one cut off only
+  by the network, as when the link between two clouds drops for half a
+  minute, still holds them, and thaws them once it renews again. Giving
+  up on it costs every sandbox it holds its running programs and what it
+  wrote since its last archive, and resets the whole machine. So while a
+  lapsed host holds sandboxes (by its last report) the leader waits for
+  it, up to `give_up_after` (two minutes by default) from its last
+  renewal, before it fences it and gives up. A host of a cloud group
+  whose instance the cloud reports stopped or gone holds nothing to wait
+  for and goes at once, and so does a host that holds no sandbox. The
+  leader asks the cloud about a waited-for instance at most every five
+  seconds, apart from its own rounds so a slow answer holds up no other
+  host, and a failed read counts as still running. Meanwhile the host's
+  sandboxes stay its own: a wake retries until its own deadline. New
+  sandboxes go to other hosts, since every replica's placement passes
+  over a host it has read no renewal from for three renewal intervals
+  (10 s), or T if that is shorter. The wait trades a truly hung
+  host's recovery time (up to two minutes, not T plus margin) for keeping
+  every program on a host that was only out of reach.
+- **A cut-off host stops its VMs, with or without its agent.** The host's
+  deadline is the boot-clock time it sent its last accepted renewal, plus
+  T; a failed or unanswered renewal never extends it. A guard process, one
+  per host, steps every 100 ms on that clock, and decides each step from
+  the time, the deadline and what the kernel reports alone, never from
+  what an earlier step asked for: from three seconds before the deadline it
+  asks for each VM's own group in the cgroup that holds every VM to freeze
+  until `cgroup.events` reports `frozen 1`; from the deadline, until the
+  VMs are frozen or gone
+  (`populated 0`), it writes `cgroup.kill` on every step into each VM's
+  own group that is neither, and leaves the frozen ones frozen (a VM
+  ending while frozen, deleted or killed, reads `frozen 0` until its
+  memory is released, which is long enough for a step to see; killing
+  every VM for it would end every program on a host whose lease is only
+  late); while the deadline is further off it thaws a freeze it finds.
+  When the VMs cannot be told apart (a process sits in the cgroup
+  itself, or what is inside it cannot be read), or none is a sandbox's
+  only copy (below) and none holds a freeze of its own, it freezes,
+  kills and thaws the cgroup that holds them all instead, as guards
+  before only copies did; a guard asked to stop while the lease runs
+  out leaves the VMs so, frozen as a whole, which is what such a guard
+  expects to find. A
+  frozen VMM cannot answer, so time its group spends frozen does not
+  count toward a request's deadline, and a step under way when the
+  freeze came finishes after the thaw instead of failing. So a guard that
+  restarts after one that froze the VMs and died thaws them once the
+  lease is renewed, and goes on freezing if it is not. The guard also
+  holds the kernel watchdog (`softdog` with `nowayout`, W = 3 s), and feeds
+  it only while the deadline is ahead or every VM it stops is confirmed
+  frozen or gone. So if the guard stalls or dies, or a freeze and a kill
+  both hang,
+  the machine reboots W after the last feed, and stops within S (1 s) of
+  that. The guard is the agent's own program run as a service of its own
+  (`compute-host guard`), in a cgroup beside the VMs' (not inside it, or
+  it would freeze itself, and not in the agent's, so it outlives the agent
+  as the VMs do, [9](0009-vms-outlive-the-agent.md)). It holds a lock
+  while it runs, and an agent refuses to join a fleet unless it finds the
+  lock held. A host without a control address has no deadline and never
+  freezes.
+- **A sandbox's only copy runs on.** Fencing a host keeps a sandbox the
+  service hands to another host from also running here. It also bounds
+  how long a host cut off from the service runs its sandboxes
+  unsupervised, since such a host carries out no delete, timeout or
+  suspension the service decides meanwhile. The service hands a sandbox
+  on only from a copy in object storage it can hand it on from (an adopt
+  starts from the archive's pointer, [25](0025-pointers-in-the-control-service-and-objects-by-day.md),
+  and a sandbox with none waits for its host; a capture's image starts
+  new sandboxes under new ids, not this one), and a host makes such a
+  copy only by archiving or checkpointing it, which starts only while
+  its lease is valid. So a VM whose sandbox has no such copy, and that
+  makes none while it runs, can never run twice, and stopping it would
+  cost its programs for the second protection alone: a CI runner's
+  sandbox, which is never archived (ADR 23), would lose its job to every
+  blip of the control service longer than the lead. The agent marks
+  such a VM, an extended attribute of its group naming the agent
+  process (`user.compute.only-copy`, its number and start time), and the
+  guard and the stop hook leave a marked VM running when the lease runs
+  out. That gives up the bound for it: an only copy on a host that stays
+  cut off runs until the host is back in touch or someone stops it. No
+  limit is set on that time, since reaching one would end the only copy.
+  Nor does the agent adjust memory meanwhile: it decides nothing while
+  its lease is out, so the memory rules of
+  [24](0024-busy-sandboxes-are-slowed-never-frozen.md) stop
+  moving, and an only copy that runs on is held by the limits its group
+  already has and the sandboxes' wall. The fleet's default rules take a
+  sandbox's first checkpoint within a minute (`FIRST_CHECKPOINT`) and
+  then one every ten, so in practice this covers sandboxes
+  that are never checkpointed (runner sandboxes, and sandboxes whose
+  rules ask for no checkpoint), and a default sandbox is its only copy
+  for its first minute at most.
+  A sandbox is its only copy from its create, or its claim from the
+  ready pool, until the first archive or checkpoint of it begins: before
+  that step writes anything, the agent clears its VM's mark (or fails
+  the step if it cannot) and then records that the sandbox has a copy,
+  so no later VM of it is marked. A sandbox taken up from the store is
+  never its only copy. A mark holds only while the agent that set it
+  runs, since only that agent keeps the promise to clear it before a
+  copy: an agent of an earlier release, which knows nothing of marks,
+  may archive a marked VM, and a mark left by an agent that has ended is
+  stopped as any VM is until the next agent's recovery marks it again
+  from its record (an earlier release's agent rewrites a record without
+  the field, so a record that still says so is right), except that,
+  found running past the deadline, it is frozen rather than killed. A
+  mark that cannot be set or read is not there: the VM is stopped as
+  any other, which is safe. A VM starts unmarked, whatever an earlier
+  VM in its group was, since a group whose removal gave up while the
+  kernel still held it keeps its mark. Only copies are still stopped
+  with the rest when the guard cannot tell the VMs apart (they are then
+  frozen and killed as a whole), while one guard hands over to the next
+  (which freezes the VMs as a whole until the new guard takes over), and
+  when the watchdog resets the machine because a VM that is not an only
+  copy could not be stopped. While only copies run past the deadline,
+  the agent counts the time as frozen when it measures its requests'
+  deadlines, which only makes it more lenient. A host in a cloud host
+  group is still reset when the leader gives up on it (below), only
+  copies with it; their disks stay, as every unarchived sandbox's does.
+- **While its lease has run out the agent decides nothing.** It takes no
+  decision of its own (no sampling, no idle sleep, no eviction, no ready
+  clones), its store starts no archive, and the host's own tools get its
+  status only. It still carries out a registering host's rulings: dropping
+  a copy, deleting, and stopping a VM need no lease.
+- **One safety budget, checked when the terms are set.** With every clock
+  within ρ of true time (1 %, a hundred times what NTP-disciplined or
+  even free-running server clocks drift), the latest true time after a
+  renewal's send that a VM can still run is (T + W) / (1 − ρ) + S, and the
+  earliest the leader gives up is (T + M) / (1 + ρ). The terms are valid
+  only if the second is later: `LeaseTerms::validate` refuses any margin
+  below the least that makes it so (4.68 s for T = 30 s; the margin is
+  5 s), any ρ of 10 % or more, a watchdog that is not whole seconds, and
+  fewer than two renewals per term. The guarantee rests on stated
+  assumptions: the kernel's timers run (a kernel hung hard enough to stop
+  them runs no VMs either), and the machine does not sleep without the
+  guard knowing. The watchdog counts on a clock that stops in a suspend
+  and the lease on one that does not, so a host resumed after its
+  deadline would run its VMs until the guard's next step. Hosts therefore
+  mask the sleep targets (`host-setup`), so systemd never suspends them.
+  The guard also honours a mark that a suspend is under way
+  (`/run/compute-host/suspending`): while it is there, the guard treats
+  the lease as run out and freezes every VM that is not its sandbox's
+  only copy, and thaws them once it is gone only if the lease is valid
+  then. No system-sleep hook that leaves the mark ships, since the
+  targets are masked; a suspend forced past them without one is outside
+  the guarantee.
+  A hypervisor that pauses the whole host VM without the guest knowing is
+  outside the guarantee: once it resumes, the old VMs can run before the
+  guard is scheduled, while another host already has their sandboxes.
+  Their writes to object storage are still fenced, but what they run and
+  send over the network is not. Cloud live migration pauses a VM for well
+  under a second, far inside the margin, so only an abnormally long pause
+  matters. For hosts in a cloud host group the leader excludes even that:
+  before it gives up on a lapsed host it fences the instance through the
+  cloud's API and waits for the cloud to confirm it. A running instance is
+  reset, a hard power cycle with no guest shutdown, so its VMs are gone
+  the moment the reset is done, while its local disk, and the sandboxes
+  on it that were never archived, stay for the host to offer back when it
+  registers again. One already stopped or deleted needs nothing; one being
+  created, started or resumed is waited for and reset once it runs (a
+  resuming instance passes through the same states as a starting one,
+  with its memory kept, so neither is taken as fenced); a suspended one is
+  stopped. One whose machine restarted since its host registered is
+  fenced already, since a restart ends every VM, and is left as it is,
+  without the wait for a host holding sandboxes either. As it starts, a
+  host writes its machine's boot to its instance's guest attributes,
+  which only software on the machine can write (the guest network closes
+  the metadata server to sandboxes) and the leader reads through the
+  cloud's API: the kernel's boot id, and the boot's number, counted one
+  past the boot the attribute named before (an agent started again
+  under the same boot keeps it). It names that boot when it registers
+  only once the cloud took it, and its first registration waits until
+  it knows. So while a boot runs, its instance names no other boot
+  numbered higher, and a higher one there proves the registration's boot
+  ended. The order is counted rather than timed, so that no clock set
+  back across a restart can make an earlier boot look later. An earlier
+  or equal number there may have been written before the registration,
+  so it proves nothing, nor does no attribute, one that cannot be read,
+  or a registration that named no boot: the instance is reset as before.
+  The boot compared is the one named by the registration whose renewal
+  count the leader saw stand still, read with that count from the same
+  row, since the give-up applies only at that count: not one from a view
+  that may still show the host's earlier registration. Without this, a
+  machine its watchdog reset, or that crashed, was reset a second time
+  once its old registration lapsed, just as its new host came up. A
+  fence the cloud does not confirm in two minutes, or that fails, keeps
+  the host live and is tried again five seconds later, so nothing is
+  handed on from a host whose VMs might still run. Once given up on, a
+  stopped instance is started again, and the scaling step starts any
+  stopped member whose host is lost or never registered, so the group
+  keeps its size. A member the group is itself acting on (recreating it,
+  as its autohealing does, or deleting or starting it) is left to the
+  group, an instance already deleted is nothing to start, and one that
+  fails to start is tried at the next look without holding up the rest
+  of the step. A member without a registered host counts as booting for
+  a boot allowance (ten minutes by default); one past it keeps its place
+  but no longer stands in for capacity, so the group grows around a
+  member the cloud never gets running. Each place in the group's size
+  counts once, from one look at the group and one read of the hosts: a
+  member brings its host, live or draining; a host the listing does not
+  name takes one of the places asked for and not listed, and brings
+  nothing once none is left (the group has let it go); a member the
+  group is removing holds none; growth adds the usable hosts it is short on top
+  of the places draining and stalled hosts hold; and no shrink is
+  suggested while a member is stalled. Only zonal groups are supported,
+  since a fence must name the instance's zone. Hosts outside a group rely
+  on their deadline, guard and watchdog alone.
+- **T is 30 s, so hosts ride out ordinary blips.** With T at 10 s, a
+  host's renewals had to get through within about 9 s of the last one
+  answered, or the guard froze every VM on it and, a second later, killed
+  the ones it could not freeze. Real hosts missed that: links between
+  sites that drop for 10 to 20 s, a host whose disk stalls (its agent
+  slow for seconds), and the service's own rolling restarts each left
+  hosts unanswered for longer, and busy VMs that would not freeze in time
+  were killed, programs and all. At 30 s a host has nine renewals per
+  term and freezes only after 27 s without an answer. The cost is
+  recovery: the leader gives up on a host that is truly gone 20 s later
+  (T plus margin, 35 s), and a cloud host is fenced through its API
+  before that anyway. Placement does not wait that long: it passes over a
+  host after three missed renewals, as it did before. Renewals never wait
+  on the agent either: they carry the agent's latest reading of what the
+  host can take on, read on a task of its own once a second, so a busy
+  agent cannot hold them up. An agent that has not answered one for a
+  minute is stuck rather than busy: its process stops itself, renewing
+  the lease as any stop does, and the agent systemd starts again takes
+  back the VMs, which run on meanwhile, so a stuck agent neither keeps
+  its sandboxes out of reach for good nor costs their programs. A stop
+  that has not ended a minute later (it waits on writes a stuck disk may
+  never finish) ends the process at once, as systemd's stop timeout
+  would; a host that cannot start its agent again lets its lease lapse,
+  and the service moves its sandboxes. A gap is
+  visible before it costs anything:
+  the host warns once two renewals in a row go unanswered, with how long
+  its lease has left, the service records how long each host went
+  unheard (`compute_fleet_host_renewal_gap_seconds`), and a VM the guard
+  kills raises the host's `fenced` alarm, with the VM's end recorded as
+  `fenced`. A host only re-registers under terms equal to its own, so a
+  release that changes them rolls out service first, hosts promptly
+  after; a host on the old terms renews meanwhile, but one whose lease
+  runs out cannot register again until it is upgraded. The leader gives
+  up on a host after its own term, so the service must never be rolled
+  back below the release while hosts run it: an older leader would give
+  up on a host 20 s before its VMs stop, and wake its sandboxes elsewhere
+  while they still run. Roll hosts back first.
+- **A host that comes back is fenced until it has caught up.** It
+  registers again only once its last registration lapsed (the store
+  refuses while that one is live, since its VMs may still run), and lists
+  what it still has. The answer says, for each sandbox, to keep it, get it
+  back, fetch it again from its archive, or drop it (`reconcile`: only a
+  copy nobody took since it last ran is the newest). The host drops and
+  confirms gone everything the answer does not keep, records the new
+  owner epochs of the rest, and only then writes the new deadline that
+  lets them run again; anything it does not know about stays stopped.
+  A registration is one attempt with its own number (no earlier run of the
+  agent used it; each run numbers on from a random start): the host sends
+  the same request again until it is answered, and the service stores its
+  answer and gives it to every copy of that attempt, so slow answers never
+  make the host start over (which, while the service refuses a second
+  registration, could go on for ever). Only the answer to the host's
+  current attempt counts, and what an attempt lists may only shrink while
+  it is under way.
+  Renewal answers name the registration they renew and change nothing for
+  another.
+- **Writes to object storage are fenced too.** Each sandbox has an owner
+  epoch, raised whenever it changes hands. The host learns it with the
+  sandbox and keeps it in the sandbox's record. Every archive pointer
+  carries a stamp: the owner epoch of the host that wrote it and a number
+  for the change. A pointer is replaced only on condition that it has not
+  changed since it was read
+  ([7](0007-never-delete-the-only-good-copy.md)), and every change decides
+  from the stamp on that very version, at every attempt and retry, by one
+  rule (`compute_fleet::fence`):
+  - a pointer under a later epoch supersedes every change: the host drops
+    its copy;
+  - an archive or a memory forget takes a number of its own, recorded in
+    the sandbox's record before the store sees it, so even a try cut short
+    by a crash never reuses one. Finding its own number there, it is done
+    (a try whose answer was lost); finding a later one, it is moot. A
+    forget always stores its number: over a copy it stores the copy
+    without memory, even when there was none to drop; over no pointer, or
+    only an archive's empty start, it stores an empty pointer. So an
+    archive begun before it, even one whose first write is still in
+    flight, cannot land after it;
+  - a claim (below) keeps the save number under the new epoch, and the new
+    owner counts on from it; claiming nothing stores an empty pointer, so
+    a former owner is fenced even before the first archive;
+  - a delete leaves a tombstone, which is final and stays for good: a
+    later archive or forget learns the sandbox was deleted, never that it
+    is done, and nothing is written over it. Only the tombstone tells a
+    first archive whose write was held up in flight, however long, that
+    the sandbox is gone; with it removed that write would find an empty
+    place and start a copy of a deleted sandbox. A tombstone is a few
+    hundred bytes, so a million of them cost well under a cent a month.
+
+  A new owner's first act is to claim the pointer: it stores it again,
+  unchanged but under its epoch, so an archive a former owner began
+  earlier fails its condition, reads the pointer again, finds the newer
+  epoch and stops, and that host drops its local copy. Within one owner an
+  older change never replaces a newer one, so overlapping archives are
+  harmless, and an archive the agent tries again after a forget can never
+  count as done without its memory. The agent starts no archive once its
+  deadline has passed. Hosts never delete chunks or manifests (only a
+  sweep does), so a former owner cannot take what the new one is waking
+  from.
+- **Requests are bounded in time.** Every request to a host carries the
+  host epoch, the owner epoch, and a stamp: the highest renewal number the
+  store had accepted from that host. A host refuses a request under
+  another registration (`unavailable`), more than two renewals old (about
+  seven seconds; `expired`), or for an older owner epoch than the one it
+  holds (`stale`).
+  Every answer carries when it was given: the host's registration and the
+  number of the last renewal it sent, which it stored before sending, so
+  the number never goes back and is at least the last the service
+  accepted. An answer that the host holds nothing of a
+  sandbox is final only once it shows that no create or adopt sent earlier
+  can still land (a request stamped more than two renewals before it is
+  refused if it arrives later), and that it was given after the last
+  create or adopt the host confirmed for that owner epoch: under a later
+  registration, or after a later renewal. A hand-off that overtakes a
+  create can otherwise answer "not found" before the create's "done" and
+  arrive after it. Until both hold the service waits and asks again. The
+  service sends each create or adopt once per owner epoch; a retry is a
+  new epoch.
+- **The host API gains `adopt` and `hand_off`.** `adopt` claims the
+  sandbox's pointer under the owner epoch the service names and creates a
+  record at Remote from what it names, so the next wake fetches it lazily.
+  `hand_off` hands a sleeping sandbox off: the agent marks it draining
+  (from then wakes are refused as busy, for at most two minutes: a later
+  wake cancels it, ADR 33), archives its latest state, ends
+  the VM and confirms it gone, then forgets the sandbox, keeping the
+  store's copy, and answers. Only the last step is recorded, so a
+  restarted agent finishes a hand-off that reached it; one cut short
+  before leaves the sandbox on the host, and the service, which had no
+  answer and cleared no owner, sends it again. Every request about a
+  sandbox names its owner epoch, which the agent checks against the
+  record before it acts: an earlier one is refused as stale, a later one
+  the host never held as not found, and a create or adopt under a later
+  epoch first drops the copy held under the earlier one. The host API
+  also listens on TCP with mutual TLS for the service, both sides trusting
+  only the hosts' authority, which the service is: it issues hosts their
+  certificates and itself its own (operations.md, Keys and certificates);
+  the Unix socket stays for local tools, which
+  on a host in a fleet never create, adopt, hand off or remove sandboxes.
+  A host with sandboxes it cannot read (blocked) does not register until
+  they are readable or removed, since it cannot rule on them. The
+  exception is a sandbox whose record is sound but whose VM the agent
+  could not take back because the guard holds it frozen, as it does
+  after the lease ran out: only the deadline a registration brings thaws
+  it, so waiting for it to answer would wait for good. The host lists it
+  under the owner epoch its record names. The service rules on it like
+  any other: a drop or a refetch ends its VM (a kill works on a frozen
+  process) before the host answers, and a keep leaves it frozen, taken
+  back once the guard thaws it. Since the deadline is written only after
+  that, nothing the service gave another host thaws here.
+- **Requests.** A create is placed (two random hosts that fit, preferring
+  one with a ready clone of the shape, then the larger share of its room
+  free (the smaller of the shares of its memory and processor time it can
+  still promise, so hosts of different sizes fill evenly), then the most
+  free memory, spread over zones) and recorded with owner epoch 1 while
+  the host creates it.
+  An adopt prefers a host whose memory profile and CPU template match the
+  archived memory image, ahead of ready clones and free memory, since
+  anywhere else the sandbox boots afresh and loses its programs. A
+  host that refuses it (`host_full`, `unavailable`, `expired`) holds
+  nothing of it, so the service gives it to the next candidate under a new
+  epoch. A replica does not ask a host that refused a sandbox as full
+  about it again, or about anything of the same kind that needs at least
+  as much, until the host reports something different, or for ten
+  seconds at most. While no host is left to ask, a try places nothing,
+  reads no archive pointer and writes no row. A sandbox whose owner
+  refused to adopt it under its current epoch is placed again without
+  first being woken there, since that host holds nothing of it. A wake
+  waiting for room looks for it in the view every 250 ms and reads its
+  row once a second.
+  On each replica, one caller at a time places a sandbox nobody owns. The
+  others wait their turn and then find it placed. A wake or connect goes
+  straight to the owner, found in the
+  replica's cache. If the owner answers, finally, that it does not have
+  it, because a hand-off finished before the service heard, or its copy is
+  behind the archive, the service gives it to the same host again under a
+  new epoch and adopts it there from the archive; a late answer about the
+  old epoch then changes nothing. A sandbox with no owner, because its
+  host was lost or it was released, is placed like a create and adopted.
+  A row is never written naming an owner the leader gave up on: the
+  write checks the owner host's state in the same statement, under a
+  share lock on its row, so it is refused (`owner lost`) if the leader
+  marked the host lost after the view placed on it, and the service
+  places the sandbox again elsewhere. A write naming a host the store
+  does not have is refused the same way, so a host given up on is
+  forgotten a day later (its row deleted; replicas' views drop it at
+  their next full read) without anything coming to name it again; a
+  machine that comes back under a forgotten name registers as a new host.
+  The database enforces the same (a sandbox's owner is a foreign key to
+  its host, checked when the write's transaction commits, so a
+  registration may give a new host what it holds before writing the host
+  itself), so a replica of an older build still running during a
+  rollout, whose check lets a missing host pass, has such a write refused
+  too, and rolling back keeps working: older builds never forget hosts.
+- **Recovery.** When the leader marks a host lost (so a late renewal fails
+  and the host must register again), its sandboxes wait for it (ADR 32).
+  Once it is declared gone, the owner epoch of each of its sandboxes is
+  raised and their owner cleared. Each comes back on its next wake,
+  from its latest
+  archive, on another host. A sandbox never archived is lost with its
+  host; checkpoints, below, keep that window short. A lost host that
+  comes back gets back each sandbox nobody adopted since, with its local
+  state, which is at least as new as the archive, and drops the rest.
+- **A lost owner's copy comes back from its files.** A host that releases
+  a sandbox hands its latest state off first, so its archive is the
+  sandbox as it was. A lost host hands nothing off: the archive is the
+  last copy it made, and the sandbox may have run on past it, its
+  programs answering requests and telling others what they did. A guest
+  restored from that copy's memory would run that stretch again, with
+  the same identity and connections, as if it had not happened (an
+  agent that deduplicates requests in memory would take a request it
+  already carried out for a new one). So the adopt that follows a loss
+  does not say `whole`: a host restores a copy's memory only when the
+  adopt (or a refetch verdict) says the copy is whole, and otherwise
+  deletes the memory image from the store's copy as it claims it, under
+  the claim's next save, and the next wake boots the copy's disk, as
+  after a crash. Programs end; files are as the copy left them; a new
+  guest agent starts and connects afresh.
+
+  The row says which copy it may restore whole: `whole_epoch`, the owner
+  epoch under which the store's copy is the sandbox's whole latest state.
+  An adopt or refetch says `whole` only under that very epoch. A create
+  sets it to the first epoch
+  and a hand-off to the epoch it leaves. A change whose owner held
+  nothing of the sandbox carries it on to the change's new epoch: a give
+  (to a host that adopts it, or to another after one refused it outright)
+  and clearing an owner that answered it holds nothing. Every other change
+  raises the epoch past it: a give-up and a reclaim.
+  So a stale copy can never count as whole, while needless boots from
+  files are confined to rare paths: a hand-off whose answer was lost, of
+  a sandbox whose copy was not whole when it was given. The mark names
+  what is whole rather than what is lost, so a change that does not set
+  it costs only a boot from files, never a restore of a stale image; nor
+  can a clear vouch for a copy unless the owner proved it handed the
+  state off, because an owner that held nothing may itself have been
+  given a lost owner's copy. The fleet
+  simulation checks the rule: every adopt that restores memory finds the
+  archive holding every write of the sandbox's latest run.
+
+  Before the host pauses a guest to
+  save or checkpoint it, it asks the guest to write what it holds for
+  its disks to them (`sync` on the notice port), so a disk copied while
+  its guest ran holds what the guest had written. A sandbox asleep in
+  object storage when its host was lost had not run past its copy, but
+  nothing durable says so, and it boots from its files too: telling
+  the two apart would take a mark in the stored copy that every eviction
+  sets and every wake from it clears before the guest runs, one more
+  store write on each.
+- **Checkpoints.** A sandbox whose sleep rules set `checkpoint_every_ms`
+  is copied to object storage while it runs, so losing its host costs
+  only what its files took on since, and its running programs (see the
+  previous item). The fleet sets it to 10 minutes for every
+  sandbox whose create names no sleep rules. Protection starts once a
+  copy is in the store, not when it was captured, and the period counts
+  running time from the later of when its newest copy got there and its
+  last wake, so a sandbox that sleeps and is archived anyway takes none.
+  The period is a scheduling target, not a bound on what a lost host
+  costs. A checkpoint is due once the sandbox has run for the period, and
+  one with no copy yet is due after a minute of running; it protects only
+  once it is published, and on its way it may wait for disk admission and
+  the step limit, for a lazily woken VM to settle, and for its capture,
+  merge and upload, and fail and be tried again later. None of those
+  waits has a bound. Losing its host costs a sandbox everything since
+  the capture of its newest published copy, so that capture's age is its
+  recovery point: the sandbox's status reports it as `backed_up_ms`, and
+  that, not the period, is what to watch and alert on.
+  One created and never run is archived at once, so it survives
+  its host from then on; a wake meanwhile comes first and cancels that
+  archive, and the sandbox is then protected only once its first
+  checkpoint is in the store.
+  - *A coherent bundle.* The step settles a lazily woken VM first (its
+    image whole, its pager holding all of it), then pauses the VM, has
+    its VMM write the pages changed since its last snapshot, and clones
+    the disk sharing every extent once the snapshot has made it durable.
+    The VM then runs again while those pages are merged over its last
+    image into a new self-contained one, and the bundle, which nothing
+    changes any more, is uploaded as the owner's next save under the
+    same owner stamp and fences as an archive. The guest stands still
+    only from the pause to the resume (`compute.paused_us`): the merge
+    and the upload run while it works. A resume the VMM refuses having
+    changed nothing is tried again for as long as the VM lives,
+    cancelled or not, with an error logged once it has failed for
+    30 seconds; giving up would end a VM that may yet run. Only a VM
+    whose resume may have changed something, or that ends while paused,
+    ends the step that way, and the sandbox goes back to its last saved
+    copy.
+  - *Admitted for its disk.* While the clone shares the disk's blocks,
+    any guest write may take a new one, so a running checkpoint books
+    the disk's whole growth bound. A checkpoint starts only when the
+    host's disk can book that on top of everything else; one that
+    cannot waits, without holding up others, while the host makes room
+    as it does for a refused wake, by evicting idle copies already in
+    object storage.
+  - *Still volatile.* The record goes on vouching for no local copy, since
+    the VM moves on: the sandbox stays `Running` and `Volatile`. Only its
+    `backed_up_ms` moves, to when the bundle was captured, and only once
+    the store holds it; protection starts at publication, not when the
+    step began.
+  - *The base moves even if the upload fails.* The new image becomes the
+    VM's base as soon as it is made, so its next save is a diff over it
+    whether or not this upload succeeded; a failed upload is retried
+    after the usual backoff from a fresh bundle, never from the old one.
+    From the snapshot until the image is made the VM's base is unknown,
+    so a merge that fails makes its next save a full one, and so does
+    an agent restart meanwhile: the record of the base an agent
+    restarted beside the VM goes by is withdrawn before the snapshot
+    ([ADR 6](0006-memory-images-and-disks.md)).
+  - *Ordered by the step.* The step runs in the sandbox's single step
+    slot and reserves its save number there, so no later save,
+    retirement or forgetting can touch the bundle while it uploads, and a
+    save captured after it always carries a higher number.
+  - *Use goes on, memory pressure wins.* A request during a checkpoint
+    neither waits for it nor cancels it: the guest is paused only while
+    its state is captured. The guest's own work counts as use from the
+    resume on: the step reads the VM's processor time and traffic for the
+    host agent, which cannot while the step holds the VM, so a guest busy
+    through a long upload is not taken for idle when it ends, and the
+    capture's own work never counts. A host that needs the memory cancels
+    it, as it cancels an archive, and the sandbox is checkpointed again
+    once it runs.
+  - *Fenced like an archive.* A checkpoint that finds a later owner in the
+    store is refused and drops this host's copy, ending its VM.
+  - *Only where extents are shared.* The disk clone needs a state root on
+    a filesystem whose files share extents (XFS, btrfs). A host on any
+    other says so in its status (`about.checkpoints` false) and takes
+    none; a host without a store refuses a sandbox that asks for them, as
+    it refuses an archive. The sleep ladder is unchanged: an idle sandbox
+    pauses, saves and archives as before, and checkpoints never skip it.
+- **Moves while asleep.** To drain or rebalance a host, the service sends
+  `hand_off` for its sleeping sandboxes and clears their owner with a raised
+  epoch once the host answers; the next wake adopts each elsewhere. Live
+  migration stays out of scope. Some sandboxes never sleep (a desktop kept
+  open, a program that never stops), and a drain that waits for them never
+  ends, so the host could only be deleted, losing their programs. Asked
+  to, a drain or move sends `hand_off` with `awake`: the host ends every
+  hold on the sandbox and any wake asked of it (whoever waits for that
+  wake asks again and finds it on its new host), refuses new ones as it
+  refuses wakes, and pauses, saves and archives it where it stands,
+  memory and all, so it carries on after a pause on the host that adopts
+  it, its open connections ended. A sandbox whose VM cannot be saved
+  (its disk may have lost writes) keeps its programs only while that VM
+  lives, so its hand-off fails and it stays. A host that predates
+  `awake` ignores it and refuses as before.
+- **Autoscaling.** The leader compares the fleet's spare memory (free
+  above each host's buffer, per memory profile) with a target, the larger
+  of a fraction of the fleet and room for a few of the largest shapes, and
+  keeps rooms for those shapes counted host by host, since one lands
+  whole on one host; it sets the host group's size through the cloud's
+  scale-set API (Azure
+  virtual machine scale sets, Google managed instance groups). It scales
+  in by draining a host before deleting it.
+- **Checked by simulation.** `compute-fleet`'s seeded simulation runs the
+  whole protocol with the crate's own decisions: hosts with boot clocks
+  drifting as far as the terms allow, partitions, lost and late messages
+  (up to 27 s), stalled agents and guards, agent and guard restarts,
+  suspends, power losses (some for good), stuck freezes and kills,
+  watchdog reboots, guard hand-overs and leader failovers. The guard sees
+  each VM's group with its mark as its sandbox's only copy (orphaned
+  while the agent that set it is down, kept by a group a VM left behind),
+  and some sandboxes, as runners', are never archived but to hand them
+  off. The watchdog counts on the host's clock and stops in a suspend, as
+  `softdog` does. It checks that a sandbox never runs on two hosts or
+  under an older epoch, that a VM marked its sandbox's only copy never
+  runs while a copy of it is in the store, that a host given up on
+  stopped every unmarked VM before, that a pointer's stamp never goes
+  back, that a hand-off loses no write, and that at the end every sandbox
+  runs on its owner, except those whose only copy was on a host that died
+  before their first archive. Each rule above that is not obvious was
+  found missing by it: refusing a second registration while the first may
+  still run, answering only the latest registration, stamping requests,
+  giving a not-found sandbox a new epoch, save numbers in stamps, and
+  ordering a not-found answer after the create it might have overtaken.
+- **Budget.** A wake through the service adds a cache lookup and one proxy
+  hop. A create adds placement and one row insert, done while the host
+  works. Every decision placement, renewals, recovery and registration
+  need stays well under a millisecond at 5,000 hosts and 500,000
+  sandboxes; `compute-fleet`'s budget test checks it, with the numbers in
+  [measurements](../measurements.md).
+
+## Consequences
+
+- A service and a database to run. A host without them works as before.
+- A host cut off for longer than T has its VMs frozen until it renews
+  again. Their programs are lost only if their sandboxes are handed
+  elsewhere, which waits up to `give_up_after` while the host holds
+  sandboxes and its instance may still run them. One whose guard cannot
+  stop them reboots.
+- A host that truly hangs while it holds sandboxes is recovered after
+  `give_up_after`, not after T plus margin.
+- Every host needs the `softdog` module (or a hardware watchdog) and
+  cgroup v2 with `cgroup.kill` (Linux 5.14 or later).
+- Losing a host costs what changed since each sandbox's last archive.
+- Restoring memory on another host needs the same CPU template across a
+  fleet; otherwise the sandbox boots fresh from its files.
+- Open connections do not survive a move or a recovery.

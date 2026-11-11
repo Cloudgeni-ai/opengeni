@@ -53,11 +53,39 @@ describe("session-only entry", () => {
     expect(visited.has(join(packageRoot, "src/session-context.ts"))).toBe(true);
     expect([...visited].some((file) => file.includes("/src/components/"))).toBe(false);
     expect([...visited].some((file) => file.includes("/src/commands/"))).toBe(false);
-    // The synchronous refusal presenter is an explicit schema-runtime-free
-    // SDK leaf, not permission to import contracts/server/workbench barrels.
+    // Refusal copy and the controller's model labels/order are explicit pure
+    // SDK leaves, not permission to import contracts/server/workbench barrels.
     expect([...thirdParty].sort()).toEqual([
+      // Source links shown without hosted-search tracking: a dependency-free leaf.
+      "@opengeni/contracts/citation-urls",
+      // Claude citation tags shown as their text: a dependency-free contracts leaf.
+      "@opengeni/contracts/claude-cite-tags",
+      "@opengeni/contracts/claude-subscription-model-ids",
+      // The shared "Machine access needed" sentence for a refused machine move:
+      // a dependency-free contracts leaf shared with the worker and server.
+      "@opengeni/contracts/machine-access",
+      // The MCP server question on a pending approval: a zod-free model leaf.
+      "@opengeni/contracts/mcp-elicitation-model",
+      // A quiet automation run's NO_REPLY answer stays out of the chat: a dependency-free leaf.
+      "@opengeni/contracts/no-reply",
+      // The archive's stop reason, so an archive never reads as cancelled: a
+      // dependency-free contracts leaf shared with the server.
+      "@opengeni/contracts/session-history",
+      // isRecord and errorMessage: a dependency-free contracts leaf, not a barrel.
+      "@opengeni/contracts/values",
       "@opengeni/sdk",
       "@opengeni/sdk/allowance-refusal",
+      "@opengeni/sdk/learning-refusal",
+      "@opengeni/sdk/model-display",
+      "@opengeni/sdk/model-picker-order",
+      // The new-conversation controller imports only the voice model type.
+      "@opengeni/sdk/realtime",
+      // Unsent answers drop Other on a secret approval card: an id-only leaf.
+      "@opengeni/sdk/secret-use-approval",
+      // The timeline's task usage-limit stop: a zod-free refusal leaf.
+      "@opengeni/sdk/session-usage-limits",
+      // Timeline ordering shared with server-side conversation snapshots.
+      "@opengeni/sdk/timeline-order",
       "react",
     ]);
     expect(visited.size).toBeGreaterThan(5);
@@ -88,6 +116,8 @@ describe("session-only entry", () => {
             "react/jsx-runtime",
             "@opengeni/sdk",
             "@opengeni/sdk/allowance-refusal",
+            "@opengeni/sdk/learning-refusal",
+            "@opengeni/sdk/timeline-order",
           ],
         },
       },
@@ -105,6 +135,7 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/older-history.ts"))).toBe(true);
     expect(reactSources.some((id) => id.includes("/src/components/"))).toBe(false);
     expect(reactSources.some((id) => id.includes("/src/commands/"))).toBe(false);
+    expect(reactSources.some((id) => id.includes("/src/realtime/"))).toBe(false);
     // Keep the session-only closure explicit: adding a source requires reviewing
     // whether it belongs to this provider-neutral public subpath.
     expect(reactSources.some((id) => id.endsWith("/src/conversation-timeline.ts"))).toBe(true);
@@ -113,7 +144,92 @@ describe("session-only entry", () => {
     // Vite transforms the optional resolver even when this fixture tree-shakes
     // its invocation; production browser tests verify its on-click chunk load.
     expect(reactSources.some((id) => id.endsWith("/src/hooks/latest-question.ts"))).toBe(true);
-    expect(reactSources.length).toBe(23);
+    expect(reactSources.some((id) => id.endsWith("/src/lib/error-message.ts"))).toBe(true);
+    // Pure provider-recovery copy used by failure presentation; no React graph.
+    expect(reactSources.some((id) => id.endsWith("/src/lib/provider-recovery.ts"))).toBe(true);
+    // Pure compaction failure copy shared by the projection; no React graph.
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/compaction-copy.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-session-conversation.ts"))).toBe(
+      true,
+    );
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-new-conversation.ts"))).toBe(true);
+    // Host-localizable copy: the dependency-free text runtime and its English defaults.
+    expect(reactSources.some((id) => id.endsWith("/src/messages/runtime.tsx"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/messages/en.ts"))).toBe(true);
+    // Pure single-Send wording overrides for embedders; types only from the runtime.
+    expect(reactSources.some((id) => id.endsWith("/src/messages/single-send.ts"))).toBe(true);
+    // Shared reads: the model catalog store and the deployment config read.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/shared-query.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/lib/client-config-read.ts"))).toBe(true);
+    // Pure refused-save copy shared by the projection; no React graph.
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/learning-refusal-copy.ts"))).toBe(
+      true,
+    );
+    // Retained conversation views for a reopen, on the shared-query store.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/session-view-cache.ts"))).toBe(true);
+    // Custom layouts mark an open conversation read through the shared hook and its pure model.
+    expect(
+      reactSources.some((id) => id.endsWith("/src/hooks/use-session-read-acknowledgement.ts")),
+    ).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/session-attention-model.ts"))).toBe(true);
+    // Dependency-free turnless-output gap signal the live history shares with the terminal.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/turnless-output-gaps.ts"))).toBe(true);
+    // Exact reads of tool outputs a turn's step page delivered as previews.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/tool-output-reads.ts"))).toBe(true);
+    // The live stream's head read joins the conversation's fresh detail read.
+    expect(reactSources.some((id) => id.endsWith("/src/lib/session-detail-read.ts"))).toBe(true);
+    // Dependency-free wake detection: the live stream rejoins after a sleep.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/page-wake.ts"))).toBe(true);
+    // Why a message can't start: the pure admission model, its headless hook and the
+    // provider-neutral machine read it uses to offer allowed machines.
+    expect(reactSources.some((id) => id.endsWith("/src/session-admission-model.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-session-start.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-machines.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/shared-machines-list.ts"))).toBe(true);
+    // Dependency-free unsent-answer store the pending-question read prunes.
+    expect(reactSources.some((id) => id.endsWith("/src/human-input-draft-store.ts"))).toBe(true);
+    // The startup row projection shared by the web app and embedded conversations.
+    expect(reactSources.some((id) => id.endsWith("/src/lib/session-startup-timeline.tsx"))).toBe(
+      true,
+    );
+    // The projection shows a `tool_invoke` call as the tool it ran, reading its
+    // arguments with the pure tool-argument parser (tree-shaken to that read).
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/invoked-tool.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/parsers.ts"))).toBe(true);
+    // The renderer-free transient-failure rules the composer uses to hold a
+    // send calmly while Opengeni is updating.
+    expect(reactSources.some((id) => id.endsWith("/src/lib/transient-retry.ts"))).toBe(true);
+    // Pure rule for questions another agent answered: the projection folds them into work.
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/agent-work-human-input.ts"))).toBe(
+      true,
+    );
+    // Up-arrow recall of the person's latest waiting prompt.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-queued-prompt-recall.ts"))).toBe(
+      true,
+    );
+    // The draft store asks the pure human-input rules which questions offer Other.
+    expect(reactSources.some((id) => id.endsWith("/src/human-input-model.ts"))).toBe(true);
+    // Pure startup-step titles: an unclassified turn failure is named by the
+    // step it failed at ("Sandbox didn't start") instead of its recorded text.
+    expect(
+      reactSources.some((id) => id.endsWith("/src/timeline/platform-activity-presentation.ts")),
+    ).toBe(true);
+    // Pure region-restriction reason helper the model policy reads; types only.
+    expect(reactSources.some((id) => id.endsWith("/src/inference-region.ts"))).toBe(true);
+    // Pure parser for a question the person handed to the agent to decide.
+    expect(reactSources.some((id) => id.endsWith("/src/human-input-delegation.ts"))).toBe(true);
+    // Pure send-destination and run-control rules shared with the console and
+    // native screens (a turn parked on a usage limit does not hold a Send).
+    expect(reactSources.some((id) => id.endsWith("/src/session-status-model.ts"))).toBe(true);
+    // Pause spans for a custom timeline, from its events and live control:
+    // paused time is not work and a paused turn reads "Paused".
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/use-timeline-pauses.ts"))).toBe(
+      true,
+    );
+    // The one way every surface shows an attached image from its stored file
+    // (a restored draft, a queued message, another device).
+    expect(reactSources.some((id) => id.endsWith("/src/stored-file-preview.ts"))).toBe(true);
+    expect(reactSources.length).toBe(65);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

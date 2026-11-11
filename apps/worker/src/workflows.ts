@@ -1,6 +1,10 @@
 export { knowledgeIndexingWorkflow } from "./workflows/knowledge-indexing";
 export { documentIndexWorkflow, type DocumentIndexWorkflowInput } from "./workflows/document-index";
 export {
+  transientObjectDeletionWorkflow,
+  type TransientObjectDeletionWorkflowInput,
+} from "./workflows/transient-object-deletion";
+export {
   approvalDecision,
   codexCapacityChanged,
   sessionControl,
@@ -14,27 +18,48 @@ export {
   scheduledTaskFireWorkflow,
   type ScheduledTaskFireWorkflowInput,
 } from "./workflows/scheduled-tasks";
-export { automationRunWorkflow, type AutomationRunWorkflowInput } from "./workflows/automations";
-export {
-  knowledgeSourceSyncWake,
-  knowledgeSourceSyncWorkflow,
-  knowledgeSourceSyncWorkflowId,
-  type KnowledgeSourceSyncWorkflowInput,
-} from "./workflows/knowledge-source-sync";
 export {
   sandboxDrainWorkflow,
+  sandboxIdleCheckpointSweepWorkflow,
+  sandboxIdleCheckpointWorkflow,
   sandboxReaperMaintenanceWorkflow,
   sandboxReaperWorkflow,
   sandboxReaperWorkflowV2,
 } from "./workflows/sandbox-reaper";
 export { fileUploadReaperWorkflow } from "./workflows/file-upload-reaper";
+export { sessionStorageMaintenanceWorkflow } from "./workflows/session-storage";
+export {
+  sessionArchiveRequestWorkflow,
+  sessionArchiveRestoreWorkflow,
+} from "./workflows/session-archive-request";
+export {
+  browserDeadlineCheckpointWorkflow,
+  browserDeadlineCheckpointSweepWorkflow,
+} from "./workflows/browser-deadline-checkpoint";
 export { siteAuthMaintenanceWorkflow } from "./workflows/site-auth-maintenance";
 export {
   videoGenerationWorkflow,
   videoGenerationWorkflowId,
   type VideoGenerationWorkflowInput,
 } from "./workflows/video-generation";
-export { sessionWorkflowWakeDispatcherWorkflow } from "./workflows/workflow-wake";
+export { sessionTitleWorkflow } from "./workflows/session-title";
+export {
+  browserRecordingVideoWorkflow,
+  browserRecordingVideoWorkflowId,
+  recordingDeletionWorkflow,
+  recordingDeletionWorkflowId,
+  recordingSpeakerScanWorkflow,
+  recordingSpeakerScanWorkflowId,
+  recordingTranscriptWorkflow,
+  recordingTranscriptWorkflowId,
+  type BrowserRecordingVideoWorkflowInput,
+  type RecordingDeletionWorkflowInput,
+  type RecordingTranscriptWorkflowInput,
+} from "./workflows/recordings";
+export {
+  sessionWorkflowWakeDispatcherWorkflow,
+  sessionWorkflowWakeMaintenanceWorkflow,
+} from "./workflows/workflow-wake";
 export {
   rigVerificationWorkflow,
   type RigVerificationWorkflowInput,

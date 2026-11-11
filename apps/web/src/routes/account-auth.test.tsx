@@ -1,12 +1,17 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
+import {
+  BrowserAccountsApiError,
+  type ManagedAuthSessionSetProjection,
+} from "@opengeni/sdk/accounts";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import { storeOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
 
-import { AccountAuthRoute } from "./account-auth";
+import { SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE } from "@/lib/signups-paused";
+
+import { AccountAuthRoute, accountAuthFailureMessage } from "./account-auth";
 
 const TRANSACTION_ID = "00000000-0000-4000-8000-000000000001";
 const SLOT_ID = "00000000-0000-4000-8000-000000000002";
@@ -153,5 +158,222 @@ describe("isolated browser account authentication", () => {
       container.remove();
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test("says an address isn't allowed instead of asking to check the credentials", async () => {
+    const originalFetch = globalThis.fetch;
+    const refusals = [
+      { status: 403, code: "sign_in_email_not_allowed" },
+      { status: 401, code: "invalid_credentials" },
+    ];
+    let attempt = 0;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url =
+        input instanceof Request ? input.url : input instanceof URL ? input.toString() : input;
+      if (new URL(url, "https://opengeni.test").pathname === "/v1/config/client") {
+        return Response.json({
+          auth: { mode: "managedSession", session: "cookie", socialProviders: [] },
+        });
+      }
+      if ((init?.method ?? "GET") === "GET") return Response.json(projection("1"));
+      const refusal = refusals[attempt++]!;
+      return Response.json(
+        {
+          error: {
+            status: refusal.status,
+            code: refusal.status === 401 ? "unauthenticated" : "forbidden",
+            message: refusal.code,
+            retryable: false,
+            details: { managedAuthCode: refusal.code },
+          },
+        },
+        { status: refusal.status },
+      );
+    }) as typeof fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<AccountAuthRoute transactionId={TRANSACTION_ID} />));
+      const email = container.querySelector<HTMLInputElement>("#account-auth-email")!;
+      const password = container.querySelector<HTMLInputElement>("#account-auth-password")!;
+      const submit = async () => {
+        await enter(email, "removed@example.test");
+        await enter(password, "correct horse battery staple");
+        await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+        await flush();
+        return container.querySelector('[role="alert"]')?.textContent;
+      };
+
+      expect(await submit()).toBe("This email can't sign in here. Ask your admin for access.");
+      expect(await submit()).toBe(
+        "Authentication did not complete. Check the credentials and try again.",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("Google gets a background challenge token without a Create a new account switch", async () => {
+    const originalFetch = globalThis.fetch;
+    const socialBodies: Array<Record<string, unknown>> = [];
+    const widgets: Record<string, unknown>[] = [];
+    let socialReplies = 0;
+    window.turnstile = {
+      render: (_element, options) => {
+        widgets.push(options);
+        return String(widgets.length);
+      },
+      execute: () => undefined,
+      remove: () => undefined,
+    };
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url =
+        input instanceof Request ? input.url : input instanceof URL ? input.toString() : input;
+      if (new URL(url, "https://opengeni.test").pathname === "/v1/config/client") {
+        return Response.json({
+          auth: {
+            mode: "managedSession",
+            session: "cookie",
+            socialProviders: ["google"],
+            signupChallengeSiteKey: "test-key",
+          },
+        });
+      }
+      if ((init?.method ?? "GET") === "GET") return Response.json(projection("1"));
+      socialBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      socialReplies++;
+      // The first start loses its response; the retry must replay the same command.
+      if (socialReplies === 1) throw new TypeError("response lost after commit");
+      return Response.json({ code: "unavailable", message: "unavailable" }, { status: 503 });
+    }) as typeof fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const google = () =>
+      Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("Continue with Google"),
+      )!;
+    try {
+      await act(async () => root.render(<AccountAuthRoute transactionId={TRANSACTION_ID} />));
+      await flush();
+      expect(container.textContent).not.toContain("Create a new account");
+      expect(container.querySelector('[role="switch"]')).toBeNull();
+      expect(widgets).toHaveLength(0);
+
+      await act(async () => google().click());
+      expect(widgets[0]).toMatchObject({ execution: "execute", appearance: "interaction-only" });
+      expect(socialBodies).toHaveLength(0);
+      await act(async () => (widgets[0]!.callback as (token: string) => void)("popup-token"));
+      await flush();
+      expect(socialBodies).toHaveLength(1);
+      expect(socialBodies[0]).toMatchObject({
+        provider: "google",
+        signupChallengeToken: "popup-token",
+        expectedGeneration: "1",
+      });
+
+      await act(async () => google().click());
+      await flush();
+      expect(widgets).toHaveLength(1);
+      expect(socialBodies[1]).toEqual(socialBodies[0]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      globalThis.fetch = originalFetch;
+      delete window.turnstile;
+    }
+  });
+
+  test("an email sign-in while the challenge waits for a person cancels the Google click", async () => {
+    const originalFetch = globalThis.fetch;
+    const posts: Array<Record<string, unknown>> = [];
+    const widgets: Record<string, unknown>[] = [];
+    window.turnstile = {
+      render: (_element, options) => {
+        widgets.push(options);
+        return String(widgets.length);
+      },
+      execute: () => undefined,
+      remove: () => undefined,
+    };
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url =
+        input instanceof Request ? input.url : input instanceof URL ? input.toString() : input;
+      if (new URL(url, "https://opengeni.test").pathname === "/v1/config/client") {
+        return Response.json({
+          auth: {
+            mode: "managedSession",
+            session: "cookie",
+            socialProviders: ["google"],
+            signupChallengeSiteKey: "test-key",
+          },
+        });
+      }
+      if ((init?.method ?? "GET") === "GET") return Response.json(projection("1"));
+      posts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ code: "unavailable", message: "unavailable" }, { status: 503 });
+    }) as typeof fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const google = () =>
+      Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("Continue with Google"),
+      )!;
+    try {
+      await act(async () => root.render(<AccountAuthRoute transactionId={TRANSACTION_ID} />));
+      await flush();
+      await act(async () => google().click());
+      await act(async () => (widgets[0]!["before-interactive-callback"] as () => void)());
+      // While a person solves the challenge, the email form stays usable.
+      const email = container.querySelector<HTMLInputElement>("#account-auth-email")!;
+      const password = container.querySelector<HTMLInputElement>("#account-auth-password")!;
+      expect(email.disabled).toBe(false);
+      await enter(email, "existing@example.test");
+      await enter(password, "correct horse battery staple");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      await act(async () => (widgets[0]!.callback as (token: string) => void)("too-late"));
+      await flush();
+      expect(posts.some((body) => body.provider === "google")).toBe(false);
+      expect(posts.length).toBeGreaterThan(0);
+      expect(google().disabled).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      globalThis.fetch = originalFetch;
+      delete window.turnstile;
+    }
+  });
+});
+
+describe("add-account failure messages", () => {
+  const generic = "Authentication did not complete. Check the credentials and try again.";
+
+  test("each refusal the server names gets its own message", () => {
+    const message = (status: number, code: string) =>
+      accountAuthFailureMessage(new BrowserAccountsApiError(status, code));
+    expect(message(403, "sign_in_email_not_allowed")).toBe(SIGN_IN_EMAIL_NOT_ALLOWED_MESSAGE);
+    expect(message(403, "email_not_verified")).toBe("Verify your email before signing in.");
+    expect(message(403, "sign_in_refused")).toBe("This account can't sign in right now.");
+    expect(message(429, "login_transaction_rate_limited")).toBe(
+      "Too many attempts. Wait a while, then try again.",
+    );
+  });
+
+  test("wrong credentials and unexpected failures keep the generic message", () => {
+    expect(accountAuthFailureMessage(new BrowserAccountsApiError(401, "invalid_credentials"))).toBe(
+      generic,
+    );
+    expect(accountAuthFailureMessage(new BrowserAccountsApiError(500, "internal_error"))).toBe(
+      generic,
+    );
+    expect(accountAuthFailureMessage(new Error("network down"))).toBe(generic);
   });
 });

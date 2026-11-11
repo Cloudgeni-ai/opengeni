@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../src/http/api-error";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";

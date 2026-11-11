@@ -7,7 +7,7 @@ import type {
 } from "@opengeni/sdk/usage-allowances";
 import { toast } from "sonner";
 
-import { Section } from "@/components/ui/section";
+import { Section } from "@opengeni/react/ui/section";
 import { CONSOLE_USAGE_AMOUNTS } from "@/lib/usage-allowances";
 
 export type MemberName = { name: string | null; email?: string | null };

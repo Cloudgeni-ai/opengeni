@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   FileAsset,
   NewSessionDraft,
@@ -8,7 +9,7 @@ import type {
 } from "@opengeni/sdk";
 import { stableJson } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { useLayoutEffect, useRef, useState } from "react";
+import { type ReactNode, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   actRun,
@@ -17,18 +18,26 @@ import {
   renderHook,
 } from "../../../../packages/react/test/render-hook";
 import {
+  OpenGeniContext,
+  type OpenGeniContextValue,
+} from "../../../../packages/react/src/session-context";
+import type { WorkspaceDraftsChangedEvent } from "@opengeni/sdk";
+import {
   hydratedNewSessionProjectProvenancePresent,
   initialNewSessionProjectLaunchIntent,
   newSessionProjectSelection,
   nextFocusedNewSessionProjectLaunchIntent,
   nextNewSessionProjectLaunchIntent,
   resolveHydratedNewSessionProjectSelection,
-} from "../routes/sessions-index-hydration";
+} from "@opengeni/react/app/routes/sessions-index-hydration";
 import {
   newSessionDraftOptionsFromSessionDraft,
   sessionDraftFromNewSessionDraftOptions,
-} from "./session-create";
-import { useNewSessionDraft, type NewSessionDraftEditable } from "./use-new-session-draft";
+} from "@opengeni/react/app/lib/session-create";
+import {
+  useNewSessionDraft,
+  type NewSessionDraftEditable,
+} from "@opengeni/react/app/lib/use-new-session-draft";
 
 registerDom();
 
@@ -83,7 +92,10 @@ function asset(id: string, overrides: Partial<FileAsset> = {}): FileAsset {
   };
 }
 
-type DraftClient = Pick<OpenGeniClient, "getNewSessionDraft" | "saveNewSessionDraft" | "getFile">;
+type DraftClient = Pick<
+  ChatClient<OpenGeniClient>,
+  "getNewSessionDraft" | "saveNewSessionDraft" | "getFile"
+>;
 
 type RouteDraftHookProps = {
   launchChannelId: string | null | undefined;
@@ -105,6 +117,43 @@ function renderDraftHook(draftClient: DraftClient, workspaceId = WORKSPACE_A) {
     },
     { client: draftClient, workspaceId },
   );
+}
+
+/** The hook under a host that delivers "your drafts changed" hints. */
+function renderFollowingDraftHook(draftClient: DraftClient) {
+  return renderHook(
+    (_props: { event: WorkspaceDraftsChangedEvent | null }) => {
+      const [value, setValue] = useState(() => editable());
+      const draft = useNewSessionDraft({
+        client: draftClient,
+        workspaceId: WORKSPACE_A,
+        value,
+        onApplyRemote: setValue,
+        restoreReadyFiles: () => {},
+      });
+      return { draft, value, setValue };
+    },
+    { event: null as WorkspaceDraftsChangedEvent | null },
+    { wrapper: DraftsEventHost },
+  );
+}
+
+function DraftsEventHost({
+  props,
+  children,
+}: {
+  props: { event: WorkspaceDraftsChangedEvent | null };
+  children: ReactNode;
+}) {
+  const value = useMemo(
+    () => ({ workspaceDraftsEvent: props.event }) as unknown as OpenGeniContextValue<ChatClient>,
+    [props.event],
+  );
+  return <OpenGeniContext.Provider value={value}>{children}</OpenGeniContext.Provider>;
+}
+
+function newChatDraftChanged(workspaceId = WORKSPACE_A): WorkspaceDraftsChangedEvent {
+  return { type: "workspace.drafts.changed", workspaceId, sessionIds: [], newSession: true };
 }
 
 function renderRouteDraftHook(
@@ -258,13 +307,13 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function conflict(): OpenGeniApiError {
+function conflict(currentRevision = 5): OpenGeniApiError {
   return new OpenGeniApiError(
     409,
     JSON.stringify({
       code: "NEW_SESSION_DRAFT_CONFLICT",
       message: "draft changed",
-      currentRevision: 5,
+      currentRevision,
     }),
   );
 }
@@ -562,7 +611,9 @@ describe("useNewSessionDraft", () => {
       },
       saveNewSessionDraft: async (_workspaceId, request) => {
         requests.push(request);
-        if (request.expectedRevision !== authoritative.revision) throw conflict();
+        if (request.expectedRevision !== authoritative.revision) {
+          throw conflict(authoritative.revision);
+        }
         authoritative = {
           ...remote(request.expectedRevision + 1, request),
           selectionHistory: history,
@@ -593,14 +644,19 @@ describe("useNewSessionDraft", () => {
       selectedProjectChannelId: PROJECT_A,
     });
 
+    // The latest choice wins: the stale save moves onto the newer revision.
     await actRun(() => second.result.current.selectProject(null));
-    expect(await actRun(() => second.result.current.draft.flush())).toBeNull();
-    expect(requests).toHaveLength(2);
+    expect(await actRun(() => second.result.current.draft.flush())).not.toBeNull();
+    expect(requests).toHaveLength(3);
     expect(requests[1]).toMatchObject({
       expectedRevision: 0,
       selectedProjectChannelId: null,
     });
-    expect(second.result.current.draft.conflict).not.toBeNull();
+    expect(requests[2]).toMatchObject({
+      expectedRevision: 1,
+      selectedProjectChannelId: null,
+    });
+    expect(second.result.current.draft.conflict).toBeNull();
 
     await first.unmount();
     await second.unmount();
@@ -631,7 +687,9 @@ describe("useNewSessionDraft", () => {
       getNewSessionDraft: async () => authoritative,
       saveNewSessionDraft: async (_workspaceId, request) => {
         requests.push(request);
-        if (request.expectedRevision !== authoritative.revision) throw conflict();
+        if (request.expectedRevision !== authoritative.revision) {
+          throw conflict(authoritative.revision);
+        }
         authoritative = {
           ...remote(request.expectedRevision + 1, request),
           selectionHistory: history,
@@ -663,10 +721,12 @@ describe("useNewSessionDraft", () => {
     await actRun(() =>
       second.result.current.setValue({ ...second.result.current.value, text: "stale tab edit" }),
     );
-    expect(await actRun(() => second.result.current.draft.flush())).toBeNull();
-    expect(requests).toHaveLength(2);
+    // The latest typing wins: the stale save moves onto the newer revision.
+    expect(await actRun(() => second.result.current.draft.flush())).not.toBeNull();
+    expect(requests).toHaveLength(3);
     expect(requests[1]).toMatchObject({ expectedRevision: 1, text: "stale tab edit" });
-    expect(second.result.current.draft.conflict).not.toBeNull();
+    expect(requests[2]).toMatchObject({ expectedRevision: 2, text: "stale tab edit" });
+    expect(second.result.current.draft.conflict).toBeNull();
 
     await first.unmount();
     await second.unmount();
@@ -1144,7 +1204,7 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
-  test("Send rebases an autosave conflict without replacing the visible message", async () => {
+  test("Send after an autosave conflict keeps the other device's draft and the visible message", async () => {
     let authoritative = remote(2, { text: "initial" });
     const requests: SaveNewSessionDraftRequest[] = [];
     const hook = await renderDraftHook(
@@ -1165,8 +1225,11 @@ describe("useNewSessionDraft", () => {
     expect(hook.result.current.draft.conflict).not.toBeNull();
 
     const sent = await actRun(() => hook.result.current.draft.flushForSend());
-    expect(sent?.revision).toBe(4);
-    expect(requests.at(-1)).toMatchObject({ expectedRevision: 3, text: "what I see" });
+    // Send goes ahead from the last revision this form saw; the server keeps
+    // the other device's newer draft instead of this form saving over it.
+    expect(sent?.revision).toBe(2);
+    expect(requests.some((request) => request.expectedRevision === 3)).toBe(false);
+    expect(authoritative).toMatchObject({ revision: 3, text: "another tab" });
     expect(hook.result.current.value.text).toBe("what I see");
     expect(hook.result.current.draft.conflict).toBeNull();
     await hook.unmount();
@@ -1198,6 +1261,100 @@ describe("useNewSessionDraft", () => {
     expect(requests.at(-1)).toMatchObject({ expectedRevision: 3, text: "visible message" });
     expect(hook.result.current.value.text).toBe("visible message");
     expect(hook.result.current.draft.conflict).toBeNull();
+    await hook.unmount();
+  });
+
+  test("Send after a refused create rereads the draft even once the route cleared the error", async () => {
+    let authoritative = remote(1);
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => authoritative,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (request.expectedRevision !== authoritative.revision) throw conflict();
+          authoritative = remote(authoritative.revision + 1, request);
+          return authoritative;
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "visible message" })));
+    expect((await actRun(() => hook.result.current.draft.flushForSend()))?.revision).toBe(2);
+    authoritative = remote(3, { text: "sibling edit" });
+    // An older server refused the create; the route records it, then clears
+    // the visible error before the person sends again.
+    expect(await actRun(() => hook.result.current.draft.captureConflict(conflict()))).toBe(true);
+    await actRun(() => hook.result.current.draft.clearError());
+
+    const retry = await actRun(() => hook.result.current.draft.flushForSend());
+    expect(retry?.revision).toBe(4);
+    expect(requests.at(-1)).toMatchObject({ expectedRevision: 3, text: "visible message" });
+    expect(hook.result.current.value.text).toBe("visible message");
+    await hook.unmount();
+  });
+
+  test("a refused create stops counting once a later save succeeds", async () => {
+    let authoritative = remote(1);
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => authoritative,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (request.expectedRevision !== authoritative.revision) throw conflict();
+          authoritative = remote(authoritative.revision + 1, request);
+          return authoritative;
+        },
+      }),
+    );
+    await flush();
+    expect(await actRun(() => hook.result.current.draft.captureConflict(conflict()))).toBe(true);
+    await actRun(() => hook.result.current.draft.clearError());
+    await actRun(() => hook.result.current.setValue(editable({ text: "mine" })));
+    await flush(550);
+    expect(authoritative).toMatchObject({ revision: 2, text: "mine" });
+    // The phone saves a newer draft this form never shows.
+    authoritative = remote(3, { text: "typed on my phone" });
+
+    const sent = await actRun(() => hook.result.current.draft.flushForSend());
+    expect(sent?.revision).toBe(2);
+    expect(requests.some((request) => request.expectedRevision === 3)).toBe(false);
+    expect(authoritative).toMatchObject({ revision: 3, text: "typed on my phone" });
+    await hook.unmount();
+  });
+
+  test("an explicit flush saves the box even when it changed behind a running save", async () => {
+    const firstSave = deferred<NewSessionDraft>();
+    const requests: SaveNewSessionDraftRequest[] = [];
+    let authoritative = remote(1);
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => authoritative,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (requests.length === 1) {
+            authoritative = await firstSave.promise;
+            return authoritative;
+          }
+          authoritative = remote(authoritative.revision + 1, request);
+          return authoritative;
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "first" })));
+    await flush(550);
+    expect(requests).toHaveLength(1);
+
+    await actRun(() => hook.result.current.setValue(editable({ text: "start voice" })));
+    const flushing = hook.result.current.draft.flush();
+    // The box changes again while the explicit flush waits behind the save.
+    await actRun(() => hook.result.current.setValue(editable({ text: "start voice now" })));
+    firstSave.resolve(remote(2, { text: "first" }));
+    const flushed = await actRun(() => flushing);
+    expect(flushed?.revision).toBe(3);
+    expect(requests[1]).toMatchObject({ expectedRevision: 2, text: "start voice" });
     await hook.unmount();
   });
 
@@ -1238,7 +1395,9 @@ describe("useNewSessionDraft", () => {
       getNewSessionDraft: async () => authoritative,
       saveNewSessionDraft: async (_workspaceId, request) => {
         requests.push(request);
-        if (request.expectedRevision !== authoritative.revision) throw conflict();
+        if (request.expectedRevision !== authoritative.revision) {
+          throw conflict(authoritative.revision);
+        }
         authoritative = remote(authoritative.revision + 1, request);
         return authoritative;
       },
@@ -1288,7 +1447,7 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
-  test("Send stops retrying persistent draft conflicts and keeps the visible message", async () => {
+  test("Send goes ahead from the last-seen draft when saving keeps conflicting", async () => {
     let reads = 0;
     let saves = 0;
     const hook = await renderDraftHook(
@@ -1305,9 +1464,174 @@ describe("useNewSessionDraft", () => {
     );
     await flush();
     await actRun(() => hook.result.current.setValue(editable({ text: "do not lose this" })));
-    expect(await actRun(() => hook.result.current.draft.flushForSend())).toBeNull();
-    expect(saves).toBe(3);
+    const basis = await actRun(() => hook.result.current.draft.flushForSend());
+    // Send carries the message itself; the draft it was typed over is the basis.
+    expect(basis?.revision).toBe(hook.result.current.draft.revision);
+    // Bounded: a few rebased saves per attempt, never an endless loop.
+    expect(saves).toBeGreaterThan(0);
+    expect(saves).toBeLessThanOrEqual(9);
     expect(hook.result.current.value.text).toBe("do not lose this");
+    expect(hook.result.current.draft.conflict).toBeNull();
+    await hook.unmount();
+  });
+
+  test("Send never saves over a newer draft from another device", async () => {
+    let authoritative = remote(2, { text: "seen here" });
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => authoritative,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (request.expectedRevision !== authoritative.revision) {
+            throw conflict(authoritative.revision);
+          }
+          authoritative = remote(authoritative.revision + 1, request);
+          return authoritative;
+        },
+      }),
+    );
+    await flush();
+    // Another device saved before this form followed it.
+    authoritative = remote(3, { text: "typed on the phone" });
+    const clicked = editable({ text: "sent from here" });
+    await actRun(() => hook.result.current.setValue(clicked));
+    const basis = await actRun(() => hook.result.current.draft.flushForSend(clicked));
+    // Send goes ahead from the draft as seen; the server keeps the newer one.
+    expect(basis?.revision).toBe(2);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ expectedRevision: 2, text: "sent from here" });
+    expect(authoritative).toMatchObject({ revision: 3, text: "typed on the phone" });
+    expect(hook.result.current.draft.conflict).toBeNull();
+    expect(hook.result.current.draft.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a form cleared after Send follows a draft saved on another device", async () => {
+    let stored = remote(1);
+    const hook = await renderFollowingDraftHook(
+      client({
+        getNewSessionDraft: async () => stored,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          stored = remote(stored.revision + 1, request);
+          return stored;
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "first" })));
+    const flushed = await actRun(() =>
+      hook.result.current.draft.flushForSend(editable({ text: "first" })),
+    );
+    // The create clears the draft to its seed, and the route clears the form.
+    stored = remote(3);
+    const acknowledged = await actRun(() =>
+      hook.result.current.draft.acknowledgeConsumed(flushed!),
+    );
+    expect(acknowledged).toEqual({ kind: "consumed" });
+    await actRun(() => hook.result.current.setValue(editable()));
+
+    stored = remote(4, { text: "typed on my laptop" });
+    await hook.rerender({ event: newChatDraftChanged() });
+    await flush();
+    expect(hook.result.current.value.text).toBe("typed on my laptop");
+    expect(hook.result.current.draft.revision).toBe(4);
+    await hook.unmount();
+  });
+
+  test("Send after a sent draft was cleared never saves over another device's unseen draft", async () => {
+    const saves: [number, string][] = [];
+    let stored = remote(1);
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => stored,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          saves.push([request.expectedRevision, request.text]);
+          stored = remote(stored.revision + 1, request);
+          return stored;
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "first" })));
+    const flushed = await actRun(() =>
+      hook.result.current.draft.flushForSend(editable({ text: "first" })),
+    );
+    stored = remote(3);
+    await actRun(() => hook.result.current.draft.acknowledgeConsumed(flushed!));
+    // The person types the next message here while the laptop saves its own.
+    await actRun(() => hook.result.current.setValue(editable({ text: "second" })));
+    stored = remote(4, { text: "typed on my laptop" });
+
+    const next = await actRun(() =>
+      hook.result.current.draft.flushForSend(editable({ text: "second" })),
+    );
+    // Sent from "no draft seen": the server keeps the laptop's draft.
+    expect(next?.revision).toBe(0);
+    expect(saves).toEqual([[1, "first"]]);
+    expect(stored.text).toBe("typed on my laptop");
+    await hook.unmount();
+  });
+
+  test("a form nobody is typing in follows the draft saved on another device", async () => {
+    let authoritative = remote(2, { text: "first idea" });
+    let reads = 0;
+    const hook = await renderFollowingDraftHook(
+      client({
+        getNewSessionDraft: async () => {
+          reads += 1;
+          return authoritative;
+        },
+      }),
+    );
+    await flush();
+    expect(hook.result.current.value.text).toBe("first idea");
+    const readsBefore = reads;
+
+    // A hint for another workspace, or for chats only, is not this form's.
+    authoritative = remote(3, { text: "typed on the phone" });
+    await hook.rerender({ event: newChatDraftChanged(WORKSPACE_B) });
+    await hook.rerender({
+      event: { ...newChatDraftChanged(), sessionIds: ["chat"], newSession: false },
+    });
+    await flush();
+    expect(reads).toBe(readsBefore);
+    expect(hook.result.current.value.text).toBe("first idea");
+
+    await hook.rerender({ event: newChatDraftChanged() });
+    await flush();
+    expect(hook.result.current.value.text).toBe("typed on the phone");
+    expect(hook.result.current.draft.revision).toBe(3);
+    await hook.unmount();
+  });
+
+  test("a form being typed in keeps its text when another device saves, then saves on top", async () => {
+    let authoritative = remote(2, { text: "first idea" });
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderFollowingDraftHook(
+      client({
+        getNewSessionDraft: async () => authoritative,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (request.expectedRevision !== authoritative.revision) {
+            throw conflict(authoritative.revision);
+          }
+          authoritative = remote(authoritative.revision + 1, request);
+          return authoritative;
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "still typing" })));
+    authoritative = remote(3, { text: "typed on the phone" });
+    await hook.rerender({ event: newChatDraftChanged() });
+    await flush();
+    expect(hook.result.current.value.text).toBe("still typing");
+
+    await flush(550);
+    expect(hook.result.current.value.text).toBe("still typing");
+    expect(requests.at(-1)).toMatchObject({ expectedRevision: 3, text: "still typing" });
+    expect(authoritative).toMatchObject({ revision: 4, text: "still typing" });
     await hook.unmount();
   });
 
@@ -1576,16 +1900,19 @@ describe("useNewSessionDraft", () => {
     expect(requests).toHaveLength(1);
     expect(hook.result.current.value.text).toBe("keep this local");
     expect(hook.result.current.draft.revision).toBe(3);
-    expect(hook.result.current.draft.conflict?.message).toContain("another client");
+    // Nothing to resolve: the person's typing stays and saves on top.
+    expect(hook.result.current.draft.conflict).toBeNull();
 
+    // Sending it goes ahead from the draft this form last saved, without
+    // saving over the sibling's draft it never showed: the server keeps that.
     const preserved = await actRun(() => hook.result.current.draft.flushForSend());
-    expect(preserved?.revision).toBe(4);
-    expect(requests[1]).toMatchObject({ expectedRevision: 3, text: "keep this local" });
+    expect(preserved?.revision).toBe(flushed.revision);
+    expect(requests).toHaveLength(1);
     expect(hook.result.current.draft.conflict).toBeNull();
     await hook.unmount();
   });
 
-  test("unchanged sent text never overwrites a newer sibling draft after create", async () => {
+  test("after create, a newer sibling draft is kept and the form shows it", async () => {
     const requests: SaveNewSessionDraftRequest[] = [];
     let reads = 0;
     const hook = await renderDraftHook(
@@ -1606,11 +1933,10 @@ describe("useNewSessionDraft", () => {
     if (!flushed) throw new Error("Expected the submitted draft to flush");
 
     const acknowledged = await actRun(() => hook.result.current.draft.acknowledgeConsumed(flushed));
-    expect(acknowledged).toBeNull();
-    expect(hook.result.current.draft.isCurrentSignature(flushed.signature)).toBe(true);
+    expect(acknowledged).toEqual({ kind: "followed" });
+    expect(hook.result.current.value.text).toBe("sibling's next draft");
+    // The sent text is never saved over the sibling's newer draft.
     expect(requests).toHaveLength(1);
-    // The route navigates to the accepted session without rebasing the sent
-    // text over the sibling's newer draft.
     await hook.unmount();
   });
 
@@ -1738,7 +2064,7 @@ describe("useNewSessionDraft", () => {
     expect(requests).toHaveLength(2);
 
     const acknowledged = await actRun(async () => {
-      staleAutosave.reject(conflict());
+      staleAutosave.reject(conflict(2));
       return await acknowledgement;
     });
     expect(acknowledged).toEqual({

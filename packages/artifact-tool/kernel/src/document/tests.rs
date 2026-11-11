@@ -27,7 +27,7 @@ fn full_typescript_fixture() -> Document {
                 variant: StoryVariant::Default,
             },
             id: id(DocumentIdKind::Paragraph, 8),
-            runs: vec![TextRun::plain("OpenGeni brief")],
+            runs: vec![TextRun::plain("Opengeni brief")],
             style: ParagraphStyle::default(),
         },
     );
@@ -727,7 +727,14 @@ fn section_page_changes_are_validated_and_roll_back_exactly() {
         ]))
         .expect_err("page changes must validate existing tables");
     assert_eq!(narrow_page.command_index, 0);
-    assert_eq!(narrow_page.cause, DocumentError::InvalidTableStyle);
+    assert_eq!(
+        narrow_page.cause,
+        DocumentError::InvalidTableStyle(
+            "widthPt 360 must be at least 1 and fit the page; the usable page width is 192pt \
+             (page 300pt minus margins 54pt and 54pt)"
+                .to_owned()
+        )
+    );
     assert_eq!(
         encode_document_snapshot(&document).expect("after narrow page"),
         before
@@ -934,4 +941,95 @@ fn negative_zero_is_rejected_from_canonical_document_numbers() {
         ]))
         .is_err());
     assert_eq!(encode_document_snapshot(&document).expect("after"), before);
+}
+
+#[test]
+fn table_style_errors_name_the_field_value_and_bound() {
+    let page = PageGeometry::default();
+    let usable = page.width_pt - page.margin_left_pt - page.margin_right_pt;
+    let row = |cells: usize| {
+        vec![(0..cells)
+            .map(|_| vec![TextRun::plain("x")])
+            .collect::<Vec<_>>()]
+    };
+    let cause = |rows: Vec<Vec<Vec<TextRun>>>, style: TableStyle| {
+        let mut document = Document::new(NS).expect("document");
+        document
+            .apply_batch(&DocumentBatch::from_commands(vec![
+                DocumentCommand::AddTable {
+                    target: StoryTarget::Body,
+                    id: id(DocumentIdKind::Table, 8),
+                    rows,
+                    style,
+                },
+            ]))
+            .expect_err("invalid table style")
+            .cause
+            .to_string()
+    };
+    // The shape agents hit: valid colors, column widths wider than the page.
+    let overflow = cause(
+        row(3),
+        TableStyle {
+            column_widths_pt: Some(vec![200.0, 200.0, 200.0]),
+            header_rows: Some(1),
+            border_color: Some("#999999".to_owned()),
+            header_fill: Some("#E8EEF7".to_owned()),
+            ..TableStyle::default()
+        },
+    );
+    assert!(
+        overflow.contains("columnWidthsPt sum to 600pt"),
+        "{overflow}"
+    );
+    assert!(
+        overflow.contains(&format!("usable page width is {usable}pt")),
+        "{overflow}"
+    );
+    let cases = [
+        (
+            TableStyle {
+                column_widths_pt: Some(vec![100.0]),
+                ..TableStyle::default()
+            },
+            "columnWidthsPt has 1 entries but the table has 3 columns",
+        ),
+        (
+            TableStyle {
+                header_rows: Some(2),
+                ..TableStyle::default()
+            },
+            "headerRows 2 exceeds the table's 1 rows",
+        ),
+        (
+            TableStyle {
+                cell_padding_pt: Some(200.0),
+                ..TableStyle::default()
+            },
+            "cellPaddingPt 200 must be between 0 and 144",
+        ),
+        (
+            TableStyle {
+                header_fill: Some("navy".to_owned()),
+                ..TableStyle::default()
+            },
+            "headerFill \"navy\" must be a 6-digit hex color",
+        ),
+        (
+            TableStyle {
+                width_pt: Some(300.0),
+                column_widths_pt: Some(vec![100.0, 100.0, 50.0]),
+                ..TableStyle::default()
+            },
+            "columnWidthsPt sum to 250pt but widthPt is 300pt",
+        ),
+    ];
+    for (style, expected) in cases {
+        let message = cause(row(3), style);
+        assert!(
+            message.starts_with("invalid document table style: "),
+            "{message}"
+        );
+        assert!(message.contains(expected), "{message}");
+    }
 }

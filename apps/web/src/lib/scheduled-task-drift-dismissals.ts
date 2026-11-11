@@ -1,5 +1,5 @@
 import type { ScheduledTaskDriftDismissal } from "@/lib/scheduled-tasks";
-import type { ScheduledTask, ScheduledTaskPolicyDrift } from "@/types";
+import type { ScheduledTask, ScheduledTaskPolicyDrift } from "@opengeni/react/app/types";
 
 /**
  * Per-browser record of the workspace defaults an owner chose to keep off a

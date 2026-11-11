@@ -21,44 +21,44 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DetailSection } from "@/components/ui/detail-sheet";
+} from "@opengeni/react/ui/detail-page";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import {
   EmptyState,
   EmptyStateLink,
   EmptyStateTemplate,
   EmptyStateTemplates,
-} from "@/components/ui/empty-state";
-import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { FormPage } from "@/components/ui/form-dialog";
+} from "@opengeni/react/ui/empty-state";
+import { Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
+import { FormPage } from "@opengeni/react/ui/form-dialog";
 import {
   LineTabs,
   LineTabsContent,
   LineTabsList,
   LineTabsTrigger,
-} from "@/components/ui/line-tabs";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { RevisionHistory, type Revision } from "@/components/ui/revision-history";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { StatusBadge } from "@/components/ui/status-badge";
+} from "@opengeni/react/ui/line-tabs";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { RevisionHistory, type Revision } from "@opengeni/react/ui/revision-history";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import {
   Toolbar,
   ToolbarFilterChips,
@@ -68,7 +68,7 @@ import {
   ToolbarSummary,
   type ToolbarFilterGroup,
   type ToolbarFilterValue,
-} from "@/components/ui/toolbar";
+} from "@opengeni/react/ui/toolbar";
 
 import { KIT_NOW, KIT_TIME_ZONE, organization, type KnowledgeScope } from "../../fixtures";
 import {

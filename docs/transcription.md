@@ -9,61 +9,45 @@ message by itself.
 - The ordinary composer presents **one microphone control** and **one editable
   draft**. Recording chrome exposes separate **Cancel** and **Stop** actions;
   provider preference is chosen in workspace settings; model, credentials, and region remain server-private.
-- The browser writes five-second `MediaRecorder` chunks and SHA-256 integrity
-  metadata to IndexedDB before reporting the audio locally saved. Stop waits for
-  pending writes, finalizes automatically, and appends the resulting text to the
-  draft. Ordinary Send remains a separate user action.
-- New servers and SDK clients use the resumable server path advertised by
-  `ClientConfig.voiceInput.resumable`. Older clients or deployments without that
-  capability retain the existing one-shot multipart path and its 25 MiB / 600
-  second client maximum.
-- The resumable default is two hours, 512 MiB total, 8 MiB per browser chunk, and
-  24-hour server retention. Contract hard limits permit at most eight hours,
-  512 MiB, and 1,000 normalized provider segments.
-- Interrupted upload, segmentation, or transcription reuses the same recording
-  UUID. Duplicate chunks are accepted only when sequence, size, SHA-256, and
-  timing metadata match exactly; conflicting retries fail closed. Retryable API,
-  database, storage, and provider failures stay in a bounded automatic recovery
-  loop, including after reload, until the user explicitly pauses or discards.
-- Workspace voice settings choose a preferred provider and whether automatic
-  fallback is enabled (default true). Selection prefers that configured provider,
-  then the deployment order. Provider ids and billing labels are public; secrets
-  remain server-private.
-- A recording pins its provider before sending a segment. An explicit rejection
-  may advance an untouched recording to the next configured provider. The failure
-  and new pin settle atomically under the attempt fence. A null pre-claim segment
-  pin establishes eligibility; unknown failures keep the pin, so a later auth
-  rejection cannot move a previously uncertain request to another vendor. Legacy
-  pins fail closed. Successful segments also prevent vendor changes.
-- Provider results are persisted server-side so another browser carrying the same
-  exact authenticated subject can list and resume an unexpired recording. The
-  local browser still persists the final transcript before mutating the draft.
-  A retry or reload may finish transcription automatically, but its delayed result
-  is held as an explicit saved-transcript insertion so it cannot mutate a draft
-  whose identity is uncertain.
-- Controlled error codes and retryability cross the API. Raw provider detail,
-  object keys, credentials, provider ids, audio bytes, and transcript bodies are
-  excluded from logs and client capability configuration.
+- Each dictation is a recording with `purpose: "dictation"` (see
+  [recordings.md](recordings.md#dictation)). The client saves one-second chunks
+  on the device, uploads them straight to storage while the person speaks, and
+  finalizes on Stop. The worker transcribes it with the workspace's voice input
+  in pieces of at most 50 seconds and bills each piece as voice input. The
+  client inserts the text into the draft and deletes the dictation; Send
+  remains a separate user action. The worker deletes any dictation still kept
+  a day after it is heard.
+- `ClientConfig.voiceInput.resumable` advertises that the deployment can keep
+  dictations (object storage, ffmpeg and a voice input provider are ready).
+  Without it, or for a client with only `transcribeAudio`, dictation records in
+  memory and uses the one-shot multipart path with its 25 MiB / 600 second
+  client maximum.
+- Closing the tab, killing the phone app, losing the connection or a failed
+  transcription keeps the dictation. The next composer that opens in the
+  workspace lists `purpose=dictation` recordings and offers the text; a failed
+  one can be heard again with a new transcript version. Cancel or Escape keeps
+  anything longer than three seconds. Taking the text deletes the dictation
+  first, so two tabs never insert it twice.
+- That lookup runs in the background and never fails the composer: a list
+  request that fails, or a success answer that is not a recordings list (a
+  host proxy or test double answering the route with another body), means
+  nothing is offered this time, and the dictation stays saved for the next
+  composer. `OpenGeniRecordingsClient.listRecordings` rejects such an answer
+  with `OpenGeniApiError` code `invalid_response` instead of resolving it.
 
 ## Trust boundary and data flow
 
 ```text
-Browser MediaRecorder (5s chunks)
-  -> IndexedDB manifest + Blob chunks + timing + SHA-256
-  -> POST /v1/workspaces/:workspaceId/transcription-recordings
-  -> ordered PUT .../:recordingId/chunks/:chunkNumber
-  -> object storage (tenant-derived opaque keys)
-  -> POST .../:recordingId/finalize
-  -> API ffmpeg: mono 16 kHz PCM WAV segments (bounded to <= 1,000)
-  -> POST .../:recordingId/process-next
-  -> one recording-wide pinned provider
-  -> Postgres segment results + deterministic transcript assembly
-  -> { transcriptText, languages } persisted locally before draft mutation
-  -> editable composer draft
+Device recorder (1s chunks, IndexedDB or the phone's files)
+  -> POST /v1/workspaces/:workspaceId/recordings { purpose: "dictation" }
+  -> presigned PUTs straight to object storage, then finalize
+  -> worker: ffmpeg pieces of <= 50 s -> workspace voice input provider
+  -> transcript version (billed per piece to the dictating person)
+  -> client reads the text, deletes the dictation, edits the draft
   -> ordinary user Send
 ```
 
-Legacy fallback when `voiceInput.resumable` is absent:
+When `voiceInput.resumable` is absent, the client sends one request:
 
 ```text
 IndexedDB chunks
@@ -73,13 +57,6 @@ IndexedDB chunks
   -> one server-selected provider
   -> { text, languages }
 ```
-
-Every resumable route first resolves the normal `sessions:create` access grant.
-Persistence binds the immutable recording id to the exact
-`(accountId, workspaceId, subjectId)` authority tuple. All four recording tables
-use FORCE RLS for both workspace/account visibility and exact subject equality.
-The collection route returns at most 50 unexpired, non-discarded recordings for
-that subject; possession of a recording UUID alone is not authority.
 
 ## Client capability
 
@@ -106,66 +83,26 @@ least one transcription provider are ready. Workspace settings store
 `settings.transcription.enabled` maps forward for one compatibility release;
 new writes use `voiceInput`.
 
-## Server lifecycle
+Client config passes the account from its verified workspace grant into
+`TranscriptionAvailabilityContext`. Subscription providers use that account
+instead of hydrating the workspace again solely to discover its owner. Callers
+without the optional account retain the existing workspace lookup. This is an
+identity hint, not cached readiness or admission: each provider still checks its
+current route, scoped pool and eligible connections. Audio submission keeps its
+independent operation lease and credential checks.
 
-| State | Meaning |
-| --- | --- |
-| `uploading` | Manifest exists; the next contiguous chunk number is authoritative. |
-| `segmenting` | One generation/owner lease is validating chunks and preparing normalized WAV segments. |
-| `ready` | At least one provider segment is pending and no segment call is active. |
-| `transcribing` | One attempt lease owns the next segment. |
-| `complete` | Every segment completed and transcript/languages were assembled in segment order. |
-| `failed` | A typed retryable or terminal assembly/provider failure is persisted. |
-| `discarded` | The user discarded the recording or retention expired. |
-
-Finalization verifies the client totals against durable upload truth, reads every
-chunk from object storage, and checks exact byte length and SHA-256 before ffmpeg
-sees it. Segmentation produces mono 16 kHz PCM WAV output. The segment duration
-is the lower of the OpenGeni 50-second target and the selected service's maximum;
-recordings that would require more than 1,000 segments fail before ffmpeg starts.
-Generation and pre-provider attempt leases become reclaimable after 15 minutes.
-Immediately before a provider call, the server refreshes the durable attempt
-lease origin and persists an absolute 10-minute server-owned provider deadline.
-After that refresh transaction returns, the service computes the remaining time
-against the persisted deadline and arms its AbortController for only that
-remaining duration; if the deadline has already passed, it refuses to invoke
-the provider. Reclaim is therefore impossible until at least five minutes after
-that provider deadline, even when object reads, handler setup, or refresh/commit
-latency consumed most of the original lease.
-Request/network aborts do not cancel this server-owned provider work: the same
-recording UUID remains retryable and its objects remain retained. Only explicit
-Discard is destructive. Stale callbacks cannot settle a successor generation or
-attempt.
-
-Each `process-next` request claims at most one segment. The first claim persists
-the recording-wide provider pin. Retryable `network`, `timeout`, `unavailable`,
-and `provider` failures retain the same segment, pin, object, and recording UUID.
-Successful segment text is stored separately; final assembly sorts by segment
-number, trims empty text, joins nonempty segments with a blank line, and preserves
-the first occurrence of each nonempty language.
-
-## Retention and cleanup
-
-- Chunk and normalized segment objects are registered in a durable object ledger
-  before upload. Object keys include account/workspace/recording lineage and a
-  sequence/hash component, but keys never appear in client responses.
-- Completion, explicit discard, and non-retryable failure make every remaining
-  object immediately cleanup-eligible. The request path attempts deletion and
-  settles each object independently; a partial provider outage never marks an
-  undeleted object cleaned.
-- Abandoned recordings become cleanup-eligible at
-  `OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS` (24 hours by default).
-  The existing Temporal file-upload reaper claims recording rows before object
-  rows with `SKIP LOCKED`, uses reclaimable claim ids/timeouts, deletes one object
-  at a time, and settles only successful provider deletes.
-- After retention plus the reaper grace window, a bounded security-definer purge
-  removes an expired recording only when no uncleaned object remains. That purge
-  deletes chunk/segment metadata, the private provider pin, and persisted
-  transcript/language results. A metadata purge can never hide an object that
-  still requires provider cleanup.
-- Server transcript state is only the resumable recovery/result record. It is not
-  appended to session history, documents, knowledge, memory, or an agent turn;
-  only the user's later ordinary Send can create message truth.
+The real-PostgreSQL test
+`apps/api/test/transcription-readiness-scope-postgres.test.ts` checks empty,
+active, revoked and maintenance pools, crossed-account/deleted-workspace refusal,
+the authenticated HTTP context, and statement savings. Its opt-in diagnostic
+(`OPENGENI_BENCH_VOICE_READINESS=1 bun test` on that file) alternates 20 measured
+config-request pairs after five warmups for organization keys and external
+actors. It removes only the optional hint for the baseline, exercising the
+unchanged fallback on the same fixture. With both subscription providers enabled
+and empty pools, responses are byte-identical and the hint saves 12 statements
+and two transactions per request. This local result is not a production latency
+claim; enabled providers, pool sizes and preference/fallback settings affect the
+total request budget.
 
 ## Provider paths
 
@@ -242,15 +179,144 @@ available independently when a provider is ready.
 
 | Concern | Canonical source |
 | --- | --- |
-| Public contracts and limits | `packages/contracts/src/transcription-recordings.ts`, `packages/contracts/src/index.ts` |
+| Public contracts and limits | `packages/contracts/src/recordings.ts`, `packages/contracts/src/index.ts` |
 | Runtime configuration | `packages/config/src/index.ts`, `.env.example` |
 | Service and segmenter ports | `packages/core/src/transcription.ts` |
-| FORCE-RLS schema, leases, provider pin, cleanup ledger, purge | `packages/db/drizzle/0170_resumable_transcription_recordings.sql`, `packages/db/src/transcription-recordings.ts` |
-| API routes and ffmpeg adapter | `apps/api/src/routes/transcription-recordings.ts`, `apps/api/src/transcription/segmenter.ts` |
+| The ffmpeg segmenter | `packages/core/src/transcription-service/segmenter.ts` |
 | SDK one-shot and resumable methods | `packages/sdk/src/client.ts`, `packages/sdk/src/types.ts` |
-| React capture/recovery/handoff | `packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/voice-recording-owner.ts`, `packages/react/src/voice-recording-store.ts` |
+| Dictation recordings (API, worker) | `apps/api/src/routes/recordings.ts`, `apps/worker/src/activities/recordings.ts` |
+| Web and phone dictation | `packages/react/src/hooks/use-voice-input.ts`, `packages/react-native/src/recordings/dictation.ts` |
 | Global provider-object reaper | `apps/worker/src/activities/file-upload-reaper.ts` |
-| Product controls | `packages/react/src/components/composer-transcription-control.tsx`, `apps/web/src/components/transcription-settings.tsx` |
+| Product controls | `packages/react/src/components/composer-transcription-control.tsx`, `packages/react/src/app/components/transcription-settings.tsx` |
 
 Deprecated host-adapter types remain exported from
 `packages/sdk/src/transcription.ts` for one compatibility release.
+
+## Deployment transcription and credit billing
+
+`OPENGENI_VOICE_INPUT_PROVIDER_ORDER` selects the default before audio is sent.
+For example, `codex-subscription,supergrok-subscription,azure-speech,azure-openai`
+uses a workspace subscription when available, otherwise MAI. Swap the last two
+entries to make GPT Transcribe the deployment default. A recording already
+pinned to a provider keeps that provider. Workspace preferences still apply.
+
+Dictation uses the same providers as meeting recordings (see
+`docs/recordings.md`): after the providers in this order, it can use Azure
+Speech and ElevenLabs Scribe, each with one dictation model. A workspace picks
+one with `voiceInput.preferredProvider`. `OPENGENI_SPEECH_TO_TEXT_PINNED`
+restricts dictation to the pinned model, with no fallback.
+
+- `azure-openai` uses the versioned Azure OpenAI audio transcription API.
+  Configure `OPENGENI_VOICE_INPUT_AZURE_ENDPOINT`, `DEPLOYMENT`, `API_VERSION`,
+  and `API_KEY` (or `AD_TOKEN`), all with the same prefix. `MODEL` identifies
+  the underlying model for pricing when the deployment has a custom name.
+  Without a key or token, the deployment's own Microsoft Entra identity
+  (`AZURE_TENANT_ID` and `AZURE_CLIENT_ID` with a federated token or secret)
+  signs in to the endpoint named here. A gpt-4o-transcribe or
+  gpt-4o-mini-transcribe deployment also streams the live transcript preview
+  over the Realtime API (see `OPENGENI_RECORDING_LIVE_TRANSCRIPTION` in
+  `docs/recordings.md`).
+- `azure-speech` (formerly `azure-mai`, which is still accepted) uses Azure
+  Speech's fast transcription API with MAI-Transcribe-2. It is the same
+  provider meetings use: with `OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT` set
+  it uses that account and its Entra ID or key. Otherwise
+  `OPENGENI_VOICE_INPUT_MAI_ENDPOINT` and `API_KEY` configure it for
+  dictation; `API_VERSION` defaults to `2025-10-15`. Audio the model does not
+  accept is converted with ffmpeg first. This is file dictation, separate
+  from realtime voice.
+- `OPENGENI_VOICE_INPUT_{OPENAI,AZURE,MAI}_PRICING_JSON` accepts
+  `microsPerMinute`, optional paired `inputMicrosPerMillionTokens` /
+  `outputMicrosPerMillionTokens`, optional `audioInputMicrosPerMillionTokens`,
+  and `marginBps`. Rates are integer USD micros; 500 basis points means 5%.
+  MAI requires an explicit price because offers vary; MAI-Transcribe-2 lists at
+  $0.10 per audio hour, so `{"microsPerMinute":1667,"marginBps":500}` (the
+  same 5% margin as models). OpenAI/Azure have built-in prices for recognized
+  transcription models; override contracted rates.
+
+`OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE` replaces the margin on all provider-rate
+transcription prices, including custom entries that specify `marginBps`.
+Leave it unset to preserve current margins; use `0` to bill at the configured
+provider rates without an added margin. Direct fixed credit tariffs are not
+affected.
+
+When Stripe billing or managed usage limits are enabled, deployment-funded
+providers require general credits. Connected subscriptions are never debited.
+Malformed pricing never fails boot (API and workers share this config): the
+affected provider is withheld and the API logs one error per issue at startup
+(`voiceInputPricingIssues`), as it does for a provider with no known price.
+Other configured providers keep serving. Admission checks credits,
+workspace/member allowances and the monthly cost cap before sending audio.
+
+Every deployment-funded call carries a duration the server measured from WAV
+bytes it produced: the resumable segment, or the one-shot upload, which is
+decoded through ffmpeg first with a hard `-t` ceiling one second past
+`OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS` (longer audio is refused as
+`too_large` before any provider call, never truncated). Provider usage bills
+when the deployment can price it (tokens with token rates, or a reported
+duration); otherwise that server duration bills. Client timing and maximum
+recording limits are never billing quantities. Concurrent admitted calls may
+finish after a balance is exhausted; settlement charges their actual usage.
+The one exception is the meeting live transcript, whose audio never passes
+through the server: it bills the recorder's reported streaming time, recorded
+with basis `client_reported_duration` (see "Live transcripts charged in
+credits" in `docs/recordings.md`).
+
+Once the provider has returned text, the user always receives it. Settlement
+runs after the transcript (a resumable segment's text commits first, on its
+own) and never turns into an error response. It commits a `model.cost` usage
+receipt, then the credit debit, both keyed by workspace + unit id. If the
+debit fails, the receipt is the durable record: the next voice admission in
+that workspace applies the same debit (same idempotency key) before reading the
+balance. Any settlement failure is logged with both idempotency keys and
+retried in-process (2 s, 15 s, 60 s); a failure before the receipt commits is
+recoverable only from that log.
+
+Credit/allowance refusals preserve the recording for manual retry, persist the
+exact refusal code on it, and show a specific message. They do not trigger
+automatic retries. A caller whose payer cannot be attributed is refused with
+`policy_blocked`. Client availability honours the workspace's preferred
+provider and fallback setting; `providers` lists every ready provider for the
+settings picker. Both are scoped to the authorized workspace; unscoped
+bootstrap cannot advertise a connected subscription belonging to another
+workspace.
+
+
+## Hosted realtime voice
+
+Dictation configuration is independent of live voice. Configure
+`OPENGENI_AZURE_LIVE_ENDPOINT`, `OPENGENI_AZURE_LIVE_API_KEY`,
+`OPENGENI_AZURE_LIVE_DEPLOYMENT` (default `gpt-live-1`) and
+`OPENGENI_AZURE_LIVE_VOICE` (default `marin`) to offer GPT Live as the hosted
+voice choice. Existing connected subscriptions and workspace Gateway choices
+remain available. Credentials stay in the API; the browser negotiates WebRTC
+using the ordinary session owner proof.
+
+Azure's timed transcript fragments are grouped into application segments,
+explicitly marked as such in ledger metadata; they are not reported as
+provider-finalized turns. Delegation flushes the preceding transcript before
+starting backend work. Stop and connection rotation drain output before sealing
+or retiring the old ledger connection. Progress uses quiet context; final results
+use speakable context on the current provider delegation ID. Results from a
+previous provider connection become general context after rotation.
+
+The transcription debit rules above apply to dictation only. Hosted live voice
+is credit-gated and billed per started minute of server-observed connection time
+with the same refusal codes; see the realtime section of
+[`run-lifecycle.md`](run-lifecycle.md). Backend delegated model work retains
+normal model billing.
+
+Voice is credit-gated on general credits plus verified-signup trial credits.
+Signup credits pay for dictation and live voice exactly like general credits:
+admission counts their remainder, and each voice debit is allocated to them
+first (oldest grant first) before general credit takes the rest. The rule is
+decided at usage time from the grant's source (`verified_signup_trial`), so
+already-issued signup grants are covered. Other model-scoped promotional
+credits do not cover voice; an account holding only those is told so
+("Promotional credits don't cover live voice") instead of "out of credits".
+
+Live voice runs long-lived browser protocol code, so the stock web app checks
+the deployment before every voice begin (`apps/web/src/lib/voice-deployment-guard.ts`).
+A tab whose bundle predates the current deployment or API contract reloads once
+onto the current build and resumes voice from the `?realtime=` launch
+parameter; an unsent draft, upload, or mutation keeps the tab and shows the
+update notice instead. A failed check never blocks voice.

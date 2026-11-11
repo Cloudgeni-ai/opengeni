@@ -6,10 +6,12 @@ import {
   DEFAULT_OPENROUTER_MODEL_ID,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   configuredModels,
+  applyModelCatalogDocument,
+  withCodexCatalogProvider,
   withClaudeConnectionCatalog,
   withClaudeConnectionCredential,
 } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { z } from "zod";
 import {
   buildWorkspaceModelCatalog,
@@ -18,6 +20,12 @@ import {
 } from "../src/model-catalog";
 import { modelPickerBillingClassFor } from "@opengeni/contracts/model-picker-order";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
+
+test("client catalog retains configured model logos", () => {
+  const model = configuredModels(testSettings())[0]!;
+  const logoUrl = "https://cdn.example.test/model.svg";
+  expect(projectClientModel({ ...model, logoUrl }).logoUrl).toBe(logoUrl);
+});
 
 test("public Claude catalog preserves provider and payment identity without leaking credentials", () => {
   let settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
@@ -54,6 +62,10 @@ test("public Claude catalog preserves provider and payment identity without leak
     const client = projectClientModel(model);
     expect(client.provider).toBe(providerId);
     expect(client.providerLabel).toBe(label);
+    expect(client.capabilities?.reasoning).toMatchObject({
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort: "medium",
+    });
     expect(client.source).toBeUndefined();
     expect(modelPickerBillingClassFor(client)).toBe(billingClass);
     expect(JSON.stringify(client)).not.toContain("secret");
@@ -92,6 +104,45 @@ const previousClientModelSchema = z
   .passthrough();
 
 describe("workspace model catalog availability", () => {
+  test("live database catalog projects fast/vision for GPT-6 point releases and Luna", () => {
+    const base = testSettings({ codexSubscriptionEnabled: true });
+    const capabilities = {
+      ...configuredModels(base)[0]!.capabilities,
+      inputModalities: ["text"],
+      latencyModes: [{ id: "standard", upstream: "unknown", runnable: true }],
+    };
+    const settings = applyModelCatalogDocument(base, {
+      schemaVersion: 1,
+      builtInModels: ["gpt-6-luna"],
+      codexModels: ["gpt-6.1-sol", "gpt-6-luna"].map((slug) => ({
+        id: `codex/${slug}`,
+        upstreamModelId: slug,
+        label: slug,
+        capabilities,
+      })),
+    });
+    const catalog = buildWorkspaceModelCatalog({
+      settings,
+      policy: null,
+      codexSubscriptionActive: true,
+    });
+    for (const id of ["codex/gpt-6.1-sol", "codex/gpt-6-luna"]) {
+      const model = catalog.models.find((candidate) => candidate.id === id)!;
+      expect(model.capabilities.inputModalities).toEqual(["text", "image"]);
+      expect(model.capabilities.latencyModes).toContainEqual(
+        expect.objectContaining({ id: "fast", upstream: "supported", runnable: true }),
+      );
+      expect(model.billing).toEqual({
+        upstreamPayer: "connected_subscription",
+        metering: "external",
+      });
+      expect(model.definitionVersion).toBe(
+        configuredModels(withCodexCatalogProvider(settings)).find(
+          (candidate) => candidate.id === id,
+        )!.definitionVersion,
+      );
+    }
+  });
   test("projects anonymous providers as ready external routes", () => {
     const settings = testSettings({
       codexSubscriptionEnabled: false,
@@ -165,7 +216,7 @@ describe("workspace model catalog availability", () => {
     });
   });
 
-  test("projects OpenGeni topology safely and gates the workspace Gateway rail", () => {
+  test("projects Opengeni topology safely and gates the workspace Gateway rail", () => {
     const settings = testSettings({
       codexSubscriptionEnabled: false,
       modelProvidersJson: "[]",
@@ -180,7 +231,7 @@ describe("workspace model catalog availability", () => {
     const managed = disconnected.models.find((model) => model.id === "deepseek-v4-flash-0731")!;
     expect(managed).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
@@ -365,6 +416,39 @@ describe("workspace model catalog availability", () => {
       basis: "configuration",
       checkedAt: null,
     });
+  });
+
+  test("credits turned off reports credits_disabled only when credits are the sole blocker", () => {
+    const settings = testSettings({ codexSubscriptionEnabled: false });
+    const find = (policy: Parameters<typeof buildWorkspaceModelCatalog>[0]["policy"]) =>
+      buildWorkspaceModelCatalog({ settings, policy, codexSubscriptionActive: false }).models;
+    const creditModel = find(null).find((candidate) => candidate.cost === "credits")!;
+    expect(creditModel).toBeDefined();
+
+    const creditsOff = find({
+      allowedProviders: null,
+      allowedModels: null,
+      allowCreditModels: false,
+    });
+    expect(creditsOff.find((candidate) => candidate.id === creditModel.id)!.availability).toEqual({
+      status: "unavailable",
+      selectable: false,
+      reason: "credits_disabled",
+      checkedAt: null,
+    });
+    // Models that do not spend credits stay selectable.
+    for (const model of creditsOff.filter((candidate) => candidate.cost !== "credits")) {
+      expect(model.availability.reason).not.toBe("credits_disabled");
+    }
+
+    // An allowlist that also excludes the model keeps the generic reason, so
+    // turning credits back on is never suggested as the fix.
+    const alsoBlocked = find({
+      allowedProviders: [],
+      allowedModels: null,
+      allowCreditModels: false,
+    }).find((candidate) => candidate.id === creditModel.id)!;
+    expect(alsoBlocked.availability.reason).toBe("policy_blocked");
   });
 
   test("XAI Grok availability requires fresh successful health evidence", () => {
@@ -566,7 +650,7 @@ describe("workspace model catalog availability", () => {
     }).models.find((candidate) => candidate.id === settings.openaiModel)!;
     expect(unresolved).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       credentialReadiness: {
         status: "not_ready",
@@ -903,6 +987,36 @@ describe("workspace model catalog defaults", () => {
 });
 
 describe("workspace model catalog route discipline", () => {
+  test("speeds no serving account offers are shown but not runnable", () => {
+    const settings = testSettings({ codexSubscriptionEnabled: true });
+    const model = configuredModels(withCodexCatalogProvider(settings)).find((candidate) =>
+      candidate.capabilities.latencyModes.some((mode) => mode.id === "ultrafast"),
+    )!;
+    const observations = {
+      [model.definitionVersion]: {
+        status: "available" as const,
+        reason: null,
+        checkedAt: new Date().toISOString(),
+        unavailableLatencyModes: ["ultrafast" as const],
+      },
+    };
+    const project = (withObservations: boolean) =>
+      projectWorkspaceModelCatalog(
+        resolveWorkspaceModelSelection({
+          settings,
+          policy: null,
+          codexSubscriptionActive: true,
+          ...(withObservations ? { observations } : {}),
+        }),
+      ).models.find((candidate) => candidate.id === model.id)!;
+    const runnable = (row: ReturnType<typeof project>) =>
+      Object.fromEntries(
+        (row.capabilities?.latencyModes ?? []).map((mode) => [mode.id, mode.runnable]),
+      );
+    expect(runnable(project(false))).toEqual({ standard: true, fast: true, ultrafast: true });
+    expect(runnable(project(true))).toEqual({ standard: true, fast: true, ultrafast: false });
+  });
+
   const here = dirname(fileURLToPath(import.meta.url));
   const source = readFileSync(resolve(here, "..", "src", "routes", "workspaces.ts"), "utf8");
 
@@ -915,8 +1029,11 @@ describe("workspace model catalog route discipline", () => {
     expect(grant).toBeGreaterThanOrEqual(0);
     expect(handler).toContain('"workspace:read"');
     expect(handler.indexOf("getWorkspaceModelPolicy")).toBeGreaterThan(grant);
-    expect(handler.indexOf("workspaceCodexSubscriptionActive")).toBeGreaterThan(grant);
-    expect(handler.indexOf("workspaceXaiSubscriptionActive")).toBeGreaterThan(grant);
+    // Codex readiness follows the organization's Codex cutover row.
+    expect(handler.indexOf("loadWorkspaceCodexCatalogReadiness")).toBeGreaterThan(grant);
+    // SuperGrok readiness is the shared core's projection only.
+    expect(handler.indexOf("loadCoreRoutedXaiCatalogReadiness")).toBeGreaterThan(grant);
+    expect(handler).not.toContain("workspaceXaiSubscriptionActive");
     expect(handler).toContain("xaiSubscriptionActive,");
     expect(handler).toContain('"private, no-store"');
     // The published default uses the same selection and the caller's own

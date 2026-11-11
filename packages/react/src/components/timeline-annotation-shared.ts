@@ -1,38 +1,34 @@
 import type { TimelineAnnotationSource } from "@opengeni/sdk";
+import { type OpenGeniText } from "../messages/runtime";
+import type { DraftTimelineAnnotation } from "@opengeni/sdk";
+import { renderedSpansForSourceQuote, type TextSpan } from "../timeline/annotation-alignment";
+import { matchingQuoteInSource, occurrenceOffsets } from "../timeline/annotation-model";
+
+export {
+  annotationDisplayOrdinal,
+  annotationHasNote,
+  annotationQuoteText,
+  matchingQuoteInSource,
+  occurrenceOffsets,
+  truncateAnnotationQuote,
+} from "../timeline/annotation-model";
 
 export const ANNOTATION_CHROME_SELECTOR =
   "[data-og-annotation-chrome], [data-og-annotation-badge], [data-og-annotation-popover]";
 
-export function annotationHasNote(note: string): boolean {
-  return note.trim().length > 0;
-}
-
-export function annotationDisplayOrdinal(
-  annotation: { readonly id?: string; readonly ordinal?: number | undefined },
-  index: number,
-): number {
-  return typeof annotation.ordinal === "number" ? annotation.ordinal : index + 1;
-}
-
-export function sourceKindLabel(kind: TimelineAnnotationSource["kind"]): string {
+export function sourceKindLabel(t: OpenGeniText, kind: TimelineAnnotationSource["kind"]): string {
   switch (kind) {
     case "user_message":
-      return "Your message";
+      return t("timelineAnnotationShared.yourMessage");
     case "assistant_message":
-      return "Assistant";
+      return t("timelineAnnotationShared.assistant");
     case "tool_output":
-      return "Tool output";
+      return t("timelineAnnotationShared.toolOutput");
   }
 }
 
-export function annotationSourceLabel(source: TimelineAnnotationSource): string {
-  return source.label?.trim() || sourceKindLabel(source.kind);
-}
-
-export function truncateAnnotationQuote(quote: string, maxChars = 160): string {
-  const normalized = quote.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxChars) return normalized;
-  return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+export function annotationSourceLabel(t: OpenGeniText, source: TimelineAnnotationSource): string {
+  return source.label?.trim() || sourceKindLabel(t, source.kind);
 }
 
 export function cssEscapeAttribute(value: string): string {
@@ -43,46 +39,6 @@ export function cssEscapeAttribute(value: string): string {
 export function isAnnotationChromeNode(node: Node | null): boolean {
   const element = node instanceof Element ? node : node?.parentElement;
   return Boolean(element?.closest(ANNOTATION_CHROME_SELECTOR));
-}
-
-export function occurrenceOffsets(text: string, quote: string): number[] {
-  if (!quote) return [];
-  const offsets: number[] = [];
-  let cursor = 0;
-  while (cursor <= text.length - quote.length) {
-    const offset = text.indexOf(quote, cursor);
-    if (offset < 0) break;
-    offsets.push(offset);
-    cursor = offset + 1;
-  }
-  return offsets;
-}
-
-function uniqueNonEmpty(values: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const value of values) {
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    out.push(value);
-  }
-  return out;
-}
-
-export function matchingQuoteInSource(sourceText: string, quote: string): string | null {
-  for (const candidate of uniqueNonEmpty([quote, quote.trim()])) {
-    if (sourceText.includes(candidate)) return candidate;
-  }
-  const trimmed = quote.trim();
-  for (let length = trimmed.length; length >= 8; length--) {
-    const slice = trimmed.slice(0, length);
-    if (sourceText.includes(slice)) return slice;
-  }
-  for (let start = 1; start <= trimmed.length - 8; start++) {
-    const slice = trimmed.slice(start);
-    if (sourceText.includes(slice)) return slice;
-  }
-  return null;
 }
 
 type AnnotatableSpan = {
@@ -158,15 +114,61 @@ export function buildQuoteRange(
   return rangeFromOffsets(spans, start, start + quote.length);
 }
 
-export function quoteOccurrenceIndex(sourceEl: HTMLElement, range: Range, quote: string): number {
+/** The rendered text of `sourceEl` before and after `range`. */
+export function renderedTextAround(
+  sourceEl: HTMLElement,
+  range: Range,
+): { before: string; after: string } {
   try {
     const prefix = range.cloneRange();
     prefix.selectNodeContents(sourceEl);
     prefix.setEnd(range.startContainer, range.startOffset);
-    return occurrenceOffsets(prefix.toString(), quote).length;
+    const suffix = range.cloneRange();
+    suffix.selectNodeContents(sourceEl);
+    suffix.setStart(range.endContainer, range.endOffset);
+    return { before: prefix.toString(), after: suffix.toString() };
   } catch {
-    return 0;
+    return { before: "", after: "" };
   }
+}
+
+export function quoteOccurrenceIndex(sourceEl: HTMLElement, range: Range, quote: string): number {
+  return occurrenceOffsets(renderedTextAround(sourceEl, range).before, quote).length;
+}
+
+function renderedQuoteSpans(text: string, quote: string): TextSpan[] {
+  const exact = occurrenceOffsets(text, quote);
+  if (exact.length > 0) return exact.map((start) => ({ start, end: start + quote.length }));
+  const aligned = renderedSpansForSourceQuote(text, quote);
+  if (aligned.length > 0) return aligned;
+  const partial = matchingQuoteInSource(text, quote);
+  if (!partial) return [];
+  return occurrenceOffsets(text, partial).map((start) => ({ start, end: start + partial.length }));
+}
+
+/**
+ * Where an annotation's quote shows in its rendered message. The quote is
+ * source markdown, so it is matched across formatting; among repeats, the one
+ * nearest its source offset wins.
+ */
+export function annotationRangeInSource(
+  sourceEl: HTMLElement,
+  annotation: Pick<DraftTimelineAnnotation, "quote" | "source">,
+): Range | null {
+  if (!annotation.quote) return null;
+  const { text, spans } = annotatableText(sourceEl);
+  const candidates = renderedQuoteSpans(text, annotation.quote);
+  if (candidates.length === 0) return null;
+  let best = candidates[0]!;
+  for (const candidate of candidates) {
+    if (
+      Math.abs(candidate.start - annotation.source.startOffset) <
+      Math.abs(best.start - annotation.source.startOffset)
+    ) {
+      best = candidate;
+    }
+  }
+  return rangeFromOffsets(spans, best.start, best.end);
 }
 
 export function clipRangeToSource(range: Range, sourceEl: HTMLElement): Range | null {

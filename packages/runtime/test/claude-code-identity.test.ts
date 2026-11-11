@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import { AnthropicMessagesModel } from "../src/anthropic-messages";
-import { CLAUDE_CODE_HEADERS, claudeCodeFingerprint } from "../src/claude-code-identity";
+import {
+  CLAUDE_CODE_2_1_321,
+  CLAUDE_CODE_HEADERS,
+  claudeCodeFingerprint,
+  claudeCodeHeaders,
+} from "../src/claude-code-identity";
 import type { ResolvedModelProvider } from "@opengeni/config";
 import type { ModelRequest } from "@openai/agents";
 
@@ -26,7 +31,7 @@ const provider: ResolvedModelProvider = {
 };
 const request: ModelRequest = {
   input: "A deterministic request for Claude.",
-  systemInstructions: "OpenGeni instructions",
+  systemInstructions: "Opengeni instructions",
   modelSettings: {
     reasoning: { effort: "high" },
     providerData: { prompt_cache_key: "20000000-0000-4000-8000-000000000002" },
@@ -78,17 +83,57 @@ test("subscription wire identity matches the pinned client while request identif
   );
   expect(a.body.system[0].text).not.toContain("cc_prev_req");
   expect(b.body.system[0].text).toContain("cc_prev_req=req_1;");
-  expect(a.body.system[1].text).toBe("OpenGeni instructions");
+  expect(a.body.system[1].text).toBe("Opengeni instructions");
   expect(a.body.system[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-  expect(a.body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+  // Reasoning summaries stay readable, Opus 5.5 included.
+  // Prefix-bound thinking also opts into the provider's binding reset.
+  expect(a.body.thinking).toEqual({
+    type: "adaptive",
+    display: "summarized",
+    block_binding: { prefix_mismatch_behavior: "drop_block" },
+  });
   expect(a.body.output_config.effort).toBe("high");
   expect(a.body.max_tokens).toBe(32000);
   const betas = a.headers.get("anthropic-beta")!.split(",");
   expect(betas).toContain("claude-code-20250219");
+  expect(betas).toContain("thinking-display-updates-2026-08-18");
+  expect(betas).toContain("context-1m-2025-08-07");
   expect(betas).toContain("extended-cache-ttl-2025-04-11");
   expect(betas).not.toContain("message-threads-2026-08-12");
   expect(betas).not.toContain("advisor-tool-2026-03-01");
   expect(JSON.stringify(request)).toBe(before);
+});
+
+test("Claude Fable 5.2 presents a Claude Code release that supports it; other models keep 2.1.285", async () => {
+  const sent = new Map<string, { headers: Headers; body: any }>();
+  for (const model of ["claude-fable-5-2", "claude-opus-5-5"]) {
+    const claude = new AnthropicMessagesModel(provider, model, (async (_url, init) => {
+      sent.set(model, {
+        headers: new Headers(init?.headers),
+        body: JSON.parse(String(init?.body)),
+      });
+      return Response.json(result);
+    }) as typeof fetch);
+    await claude.getResponse(request);
+  }
+  const fable = sent.get("claude-fable-5-2")!;
+  for (const [name, value] of Object.entries(claudeCodeHeaders(CLAUDE_CODE_2_1_321)))
+    expect(fable.headers.get(name)).toBe(value);
+  expect(fable.headers.get("user-agent")).toBe(
+    "claude-cli/2.1.321 (external, sdk-ts, agent-sdk/0.3.321)",
+  );
+  expect(fable.body.system[0].text).toContain(
+    `cc_version=2.1.321.${claudeCodeFingerprint(request.input, "2.1.321")};`,
+  );
+  // Running sessions on existing models keep the exact billing block they already sent.
+  const opus = sent.get("claude-opus-5-5")!;
+  expect(opus.headers.get("user-agent")).toBe(
+    "claude-cli/2.1.285 (external, sdk-ts, agent-sdk/0.3.276)",
+  );
+  expect(opus.headers.get("x-stainless-package-version")).toBe("0.127.0");
+  expect(opus.body.system[0].text).toContain(
+    `cc_version=2.1.285.${claudeCodeFingerprint(request.input)};`,
+  );
 });
 
 test("API-key calls do not inherit subscription identity or billing attribution", async () => {
@@ -101,8 +146,9 @@ test("API-key calls do not inherit subscription identity or billing attribution"
       const body = JSON.parse(String(init?.body));
       expect(headers.has("x-app")).toBe(false);
       expect(headers.get("x-api-key")).toBe("test-token");
+      expect(headers.get("anthropic-beta")?.split(",")).toContain("context-1m-2025-08-07");
       expect(body.metadata).toBeUndefined();
-      expect(body.system[0].text).toBe("OpenGeni instructions");
+      expect(body.system[0].text).toBe("Opengeni instructions");
       return Response.json(result);
     }) as typeof fetch,
   );
@@ -125,7 +171,7 @@ test("missing subscription account identity fails before any network call", asyn
 
 test("run-scoped native routing preserves prompt lineage but never shares it across runners", async () => {
   const { MultiProviderModelProvider } = await import("../src/model-provider-routing");
-  const { testSettings } = await import("@opengeni/testing");
+  const { testSettings } = await import("@opengeni/testing/settings");
   const settings = testSettings({
     modelProvidersJson: JSON.stringify([
       {

@@ -8,7 +8,7 @@
  */
 
 import { apiKeyStatus as apiKeyStatusAt, type ApiKeyStatus } from "@/lib/api-key-status";
-import { defaultApiKeyPermissions } from "@/lib/permissions";
+import { defaultApiKeyPermissions } from "@opengeni/react/app/lib/permissions";
 
 export type ApiKeyPresetId =
   | "read_only"
@@ -31,10 +31,21 @@ const ORGANIZATION_SCOPES = new Set<string>([
   "workspace:create",
   "billing:read",
   "billing:manage",
+  "usage_allowances:manage",
 ]);
 
 /** Old names still accepted by the API; never offered, but labelled on old keys. */
-const DEPRECATED_ALIASES = new Set<string>(["environments:manage", "environments:use"]);
+/** Legacy names kept readable on existing keys; new keys get the `secrets:*` names. */
+const DEPRECATED_ALIASES = new Set<string>([
+  "environments:manage",
+  "environments:use",
+  "variable-sets:list",
+  "variable-sets:read",
+  "variable-sets:use",
+  "variable-sets:attach",
+  "variable-sets:write",
+  "variable-sets:manage",
+]);
 
 /** Every permission a workspace key may be given, in groups people recognise. */
 export const WORKSPACE_KEY_PERMISSION_GROUPS: ReadonlyArray<{
@@ -69,27 +80,18 @@ export const WORKSPACE_KEY_PERMISSION_GROUPS: ReadonlyArray<{
     ],
   },
   {
-    label: "Schedules",
+    label: "Automations",
     permissions: ["scheduled_tasks:run", "scheduled_tasks:manage"],
   },
   {
-    label: "Variable sets and secrets",
-    permissions: [
-      "variable-sets:list",
-      "variable-sets:read",
-      "variable-sets:use",
-      "variable-sets:attach",
-      "variable-sets:write",
-      "variable-sets:manage",
-      "secrets:list",
-      "secrets:read",
-      "secrets:write",
-    ],
+    label: "Secrets",
+    permissions: ["secrets:list", "secrets:read", "secrets:use", "secrets:write"],
   },
   {
     label: "Connections and code",
     permissions: [
       "connections:read",
+      "connections:personal",
       "connections:write",
       "capabilities:manage",
       "github:use",
@@ -128,21 +130,24 @@ const PERMISSION_LABELS: Record<string, string> = {
   "documents:manage": "Manage knowledge",
   "artifacts:read": "Read artifacts",
   "artifacts:publish": "Publish artifacts",
-  "scheduled_tasks:run": "Run schedules",
-  "scheduled_tasks:manage": "Manage schedules",
-  "variable-sets:list": "List variable sets",
-  "variable-sets:read": "Read variable values",
-  "variable-sets:use": "Use variable sets",
-  "variable-sets:attach": "Attach variable sets",
-  "variable-sets:write": "Change variable sets",
-  "variable-sets:manage": "Manage variable sets",
-  "environments:use": "Use variable sets",
-  "environments:manage": "Manage variable sets",
+  "scheduled_tasks:run": "Run automations",
+  "scheduled_tasks:manage": "Manage automations",
+  // Legacy names on existing keys, shown as what they now grant.
+  "variable-sets:list": "List secrets",
+  "variable-sets:read": "List secrets",
+  "variable-sets:use": "Use secrets",
+  "variable-sets:attach": "Use secrets",
+  "variable-sets:write": "Change secrets",
+  "variable-sets:manage": "Change secrets",
+  "environments:use": "Use secrets",
+  "environments:manage": "Change secrets",
   "secrets:list": "List secrets",
   "secrets:read": "Read secret values",
+  "secrets:use": "Use secrets",
   "secrets:write": "Change secrets",
   "connections:read": "See connections",
   "connections:write": "Manage connections",
+  "connections:personal": "Connect their own accounts",
   "capabilities:manage": "Manage capabilities",
   "github:use": "Use GitHub",
   "github:manage": "Manage GitHub",
@@ -217,7 +222,7 @@ export function apiKeyPresets(): ApiKeyPreset[] {
       id: "full_automation",
       label: "Full workspace automation",
       description:
-        "Everything automation needs, including schedules, variable sets and files. Can't manage people, keys or read secret values.",
+        "Everything automation needs, including automations, secrets and files. Can't manage people, keys or read secret values.",
       permissions: workspaceKeyPermissions().filter(
         (permission) => !FULL_AUTOMATION_EXCLUDED.has(permission),
       ),

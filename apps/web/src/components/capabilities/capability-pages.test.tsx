@@ -5,14 +5,16 @@ import { createRoot } from "react-dom/client";
 
 import {
   capabilityDescription,
+  catalogConnectAccess,
   isCommunityCapability,
   personalOnlyCapability,
 } from "./capability-copy";
 import { CatalogItemPage } from "./catalog-item-page";
+import { nativeCatalogItemNotice } from "@opengeni/react/app/components/capabilities/native-connect-readiness";
 import { IntegrationPage } from "./integration-page";
-import type { IntegrationViewModel } from "./integration-view-model";
+import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import { ProviderPage } from "./provider-page";
-import type { CapabilityCatalogItem } from "@/types";
+import type { CapabilityCatalogItem, SocialConnection } from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -78,7 +80,7 @@ function item(overrides: Partial<CapabilityCatalogItem> = {}): CapabilityCatalog
     kind: "mcp",
     source: "registry",
     name: "Gmail",
-    description: "Search and read Gmail through OpenGeni's reviewed Gmail bridge.",
+    description: "Search and read Gmail through Opengeni's reviewed Gmail bridge.",
     category: "communication",
     tags: ["mcp", "oauth2"],
     homepageUrl: "https://developers.google.com/gmail",
@@ -170,6 +172,52 @@ describe("IntegrationPage", () => {
   });
 });
 
+describe("IntegrationPage sections", () => {
+  test("GitHub's two identities each show what they mean, their state, and one action", async () => {
+    const connect = mock(() => {});
+    const view = await render(
+      <IntegrationPage
+        model={model({
+          id: "github",
+          name: "GitHub",
+          description: "Work on repositories, issues, and pull requests.",
+          footer: { kind: "actions" },
+          sections: [
+            {
+              id: "github-personal",
+              title: "Your GitHub",
+              description:
+                "Work appears under your name. Only in chats you start, on repos you choose.",
+              action: { label: "Connect", onClick: connect, primary: true },
+            },
+            {
+              id: "github-app",
+              title: "Opengeni app",
+              description: "Work appears as the Opengeni bot, shared with the workspace.",
+              status: "Installed on Cloudgeni-ai",
+              note: "A workspace admin manages the Opengeni app.",
+            },
+          ],
+        })}
+        onBack={() => {}}
+      />,
+    );
+    const text = view.container.textContent ?? "";
+    expect(text).toContain("Your GitHub");
+    expect(text).toContain("Work appears under your name.");
+    expect(text).toContain("Opengeni app");
+    expect(text).toContain("Installed on Cloudgeni-ai");
+    expect(text).toContain("A workspace admin manages the Opengeni app.");
+    expect(text.indexOf("Your GitHub")).toBeLessThan(text.indexOf("Opengeni app"));
+    const actions = view.container.querySelectorAll("[data-integration-section-action]");
+    expect(actions).toHaveLength(1);
+    expect(actions[0]!.getAttribute("data-integration-section-action")).toBe("github-personal");
+    await act(async () => (actions[0] as HTMLButtonElement).click());
+    expect(connect).toHaveBeenCalledTimes(1);
+    await view.unmount();
+  });
+});
+
 describe("CatalogItemPage", () => {
   const common = {
     workspaceId: "ws",
@@ -180,8 +228,185 @@ describe("CatalogItemPage", () => {
     socialConnections: [],
     canManageSocial: true,
     canManageSkills: true,
+    canTurnOnOrOff: true,
     onBack: () => {},
   };
+
+  test("MCP detail pages display their authorized connected-account inventory", async () => {
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        item={item()}
+        onAction={() => {}}
+        connectionAccounts={{ connections: [] }}
+      />,
+    );
+    expect(visibleText(view.container)).toContain("Connected accounts");
+    expect(visibleText(view.container)).toContain("No accounts connected to this connector");
+    await view.unmount();
+  });
+
+  test("an unavailable native deep link has no connect action and offers retry after a failed check", async () => {
+    const connect = mock(() => {});
+    const retry = mock(() => {});
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        item={item()}
+        onAction={() => {}}
+        onConnectAccount={connect}
+        setupUnavailable={{
+          tone: "failed",
+          title: "Couldn't check connection availability",
+          action: { label: "Retry", onClick: retry },
+        }}
+      />,
+    );
+    expect(buttons(view.container, "Connect Gmail")).toHaveLength(0);
+    expect(visibleText(view.container)).not.toContain("Not connected");
+    await act(async () => buttons(view.container, "Retry")[0]!.click());
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(connect).toHaveBeenCalledTimes(0);
+    await view.unmount();
+  });
+
+  test("existing social history stays manageable while unavailable provider authorization is withheld", async () => {
+    for (const provider of ["x", "reddit"] as const) {
+      for (const status of ["connected", "needs_reauth", "disabled"] as const) {
+        const account: SocialConnection = {
+          id: "00000000-0000-4000-8000-000000000001",
+          accountId: "00000000-0000-4000-8000-000000000002",
+          workspaceId: "00000000-0000-4000-8000-000000000003",
+          provider,
+          status,
+          ownership: "workspace",
+          accountHandle: "existing-account",
+          accountName: "Existing account",
+          externalAccountId: null,
+          scopes: [],
+          credentialRef: null,
+          tokenMetadata: {},
+          metadata: {},
+          createdAt: "2026-10-03T00:00:00.000Z",
+          updatedAt: "2026-10-03T00:00:00.000Z",
+        };
+        // The API catalog may project enabled=false despite an existing row.
+        const social = item({
+          kind: "api",
+          mcpUrl: null,
+          endpointUrl: null,
+          id: `api:${provider}`,
+          name: provider === "x" ? "X" : "Reddit",
+          enabled: false,
+          surfaceType: "provider_integration",
+          metadata: { providerAdapter: "social", provider },
+        });
+        const onAction = mock(() => {});
+        const view = await render(
+          <CatalogItemPage
+            {...common}
+            item={social}
+            socialConnections={[account]}
+            onAction={onAction}
+            setupUnavailable={nativeCatalogItemNotice(
+              social,
+              { status: "ready", providers: [] },
+              () => {},
+              { connections: [], socialConnections: [account] },
+            )}
+            socialSetupAvailable={false}
+          />,
+        );
+        expect(visibleText(view.container)).toContain("Existing account");
+        expect(buttons(view.container, "Add another account")).toHaveLength(0);
+        expect(buttons(view.container, `Reconnect ${social.name}`)).toHaveLength(0);
+        expect(buttons(view.container, `Connect ${social.name}`)).toHaveLength(0);
+        if (status !== "disabled") {
+          await act(async () => buttons(view.container, "Disconnect")[0]!.click());
+          expect(onAction).toHaveBeenCalledWith({
+            type: "disconnect_social",
+            item: social,
+            connectionId: account.id,
+          });
+        }
+        await view.unmount();
+      }
+    }
+  });
+
+  test("available social authorization still opens the fresh account flow", async () => {
+    const social = item({
+      kind: "api",
+      mcpUrl: null,
+      endpointUrl: null,
+      id: "api:reddit",
+      name: "Reddit",
+      surfaceType: "provider_integration",
+      metadata: { providerAdapter: "social", provider: "reddit" },
+    });
+    const onAction = mock(() => {});
+    const view = await render(
+      <CatalogItemPage {...common} item={social} onAction={onAction} socialSetupAvailable />,
+    );
+    await act(async () => buttons(view.container, "Connect Reddit")[0]!.click());
+    expect(onAction).toHaveBeenCalledWith({
+      type: "social_oauth",
+      item: social,
+      provider: "reddit",
+      ownership: "workspace",
+    });
+    await view.unmount();
+  });
+
+  test("a stock Figma direct link explains approved-client access without opening setup", async () => {
+    const figma = item({
+      source: "registry",
+      name: "Figma",
+      mcpUrl: "https://mcp.figma.com/mcp",
+      endpointUrl: "https://mcp.figma.com/mcp",
+      providerDomain: "figma.com",
+    });
+    const connect = mock(() => {});
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        item={figma}
+        onAction={() => {}}
+        onConnectAccount={connect}
+        setupUnavailable={nativeCatalogItemNotice(
+          figma,
+          { status: "ready", providers: [] },
+          () => {},
+        )}
+      />,
+    );
+    expect(buttons(view.container, "Connect Figma")).toHaveLength(0);
+    expect(visibleText(view.container)).toContain("Figma requires an approved client");
+    expect(visibleText(view.container)).not.toContain("Everyone in this workspace");
+    expect(connect).toHaveBeenCalledTimes(0);
+    await view.unmount();
+  });
+
+  test("available Fiken token setup does not offer unconfigured OAuth", async () => {
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        item={item({
+          kind: "api",
+          id: "api:fiken",
+          name: "Fiken",
+          surfaceType: "first_party_fiken",
+          authKind: "api_key",
+        })}
+        onAction={() => {}}
+        fikenSetup={{ tokenAvailable: true, oauthAvailable: false }}
+      />,
+    );
+    expect(buttons(view.container, "Connect Fiken")).toHaveLength(0);
+    expect(buttons(view.container, "Connect for workspace")).toHaveLength(1);
+    expect(visibleText(view.container)).toContain("API token");
+    await view.unmount();
+  });
 
   test("a personal-only sign-in offers no ownership choice and opens the short connect step", async () => {
     const onConnectAccount = mock(() => {});
@@ -227,6 +452,70 @@ describe("CatalogItemPage", () => {
     await view.unmount();
   });
 
+  test("a member gets the admin setup page for a custom server that is not on yet", async () => {
+    const custom = item({
+      id: "mcp:team-tools",
+      source: "manual",
+      name: "Team tools",
+      providerDomain: null,
+      mcpUrl: "https://tools.example/mcp",
+      endpointUrl: "https://tools.example/mcp",
+      authKind: null,
+      workspaceId: "ws",
+      metadata: {},
+    } as Partial<CapabilityCatalogItem>);
+    const access = catalogConnectAccess(
+      custom,
+      { permissions: ["connections:read", "connections:write"] },
+      "shared",
+    );
+    const onConnectAccount = mock(() => {});
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        item={custom}
+        personalOnly={access.personalOnly}
+        setupUnavailable={access.blocked ? { tone: "muted", ...access.blocked } : undefined}
+        onAction={() => {}}
+        onConnectAccount={onConnectAccount}
+      />,
+    );
+    const text = visibleText(view.container);
+    expect(text).not.toContain("Ask an admin to turn on Team tools");
+    // The same page an admin gets: the member chooses who can use it when connecting.
+    expect(text).toContain("You choose when you connect");
+    await view.unmount();
+  });
+
+  test("in a Personal workspace a connection is only yours: no choice, and it says so", async () => {
+    const acme = item({
+      id: "mcp:acme",
+      name: "Acme",
+      providerDomain: "acme.dev",
+      mcpUrl: "https://mcp.acme.dev",
+      endpointUrl: "https://mcp.acme.dev",
+      authKind: "api_key",
+      metadata: {},
+    });
+    const personal = catalogConnectAccess(acme, { permissions: ["workspace:admin"] }, "personal");
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        workspaceId="personal-workspace"
+        workspaces={[{ id: "personal-workspace", name: "Mia", kind: "personal" }]}
+        personalOnly={personal.personalOnly}
+        item={acme}
+        onAction={() => {}}
+      />,
+    );
+    const text = view.container.textContent ?? "";
+    expect(text).not.toContain("Who can use it?");
+    expect(text).not.toContain("Everyone in this workspace");
+    expect(text).not.toContain("You choose when you connect");
+    expect(text).toContain("Only you");
+    await view.unmount();
+  });
+
   test("an enabled connection disconnects from the ⋯ menu, never an inline button", async () => {
     const view = await render(
       <CatalogItemPage
@@ -242,6 +531,42 @@ describe("CatalogItemPage", () => {
     );
     expect(view.container.textContent).not.toContain("Manage this capability");
     await view.unmount();
+  });
+
+  test("workspace-enabled personal Slack does not request permissions for an unconnected viewer", async () => {
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        health={{ state: "attention", connection: null }}
+        item={item({
+          id: "mcp:slack",
+          name: "Slack",
+          providerDomain: "slack.com",
+          mcpUrl: "https://mcp.slack.com/mcp",
+          endpointUrl: "https://mcp.slack.com/mcp",
+          enabled: true,
+          connectionRef: {
+            providerDomain: "slack.com",
+            kind: "oauth2",
+            subjectScope: "subject",
+          },
+        })}
+        onAction={() => {}}
+      />,
+    );
+    try {
+      // Rendering a permissions reader here would also require an app client,
+      // then report the saved connector as broken even though this user has
+      // never connected an account.
+      expect(view.container.querySelector('[aria-label="Tool permissions"]')).toBeNull();
+      expect(view.container.textContent).not.toContain("Couldn't load tool permissions");
+      expect(buttons(view.container, "Connect Slack")).toHaveLength(1);
+      expect(view.container.textContent).toContain("Each person connects their own account.");
+      expect(view.container.textContent).not.toContain("Your connection stopped working");
+      expect(view.container.textContent).not.toContain("Needs attention");
+    } finally {
+      await view.unmount();
+    }
   });
 });
 

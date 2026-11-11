@@ -1,7 +1,7 @@
 import { expect, mock, test } from "bun:test";
 import type { WorkspaceInstructionPolicyListResponse } from "@opengeni/sdk";
 
-mock.module("@/context", () => ({ useAppContext: () => ({}) }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => ({}) }));
 const { instructionRevisions } = await import("./knowledge-instructions");
 
 const target = { kind: "policy", scope: "global", roleKey: null } as const;
@@ -59,9 +59,30 @@ test("history lists every activated version, newest first, in plain words", () =
   } as unknown as WorkspaceInstructionPolicyListResponse;
   const history = instructionRevisions(response, "user:me");
   expect(history.map((each) => [each.summary, each.author, each.revisionId])).toEqual([
-    ["Restored an earlier version", "A workspace admin", "r1"],
+    ["Restored an earlier version", "A teammate", "r1"],
     ["Approved an agent's change", "Opengeni", "r2"],
     ["Created the instructions", "You", "r1"],
   ]);
   expect(history[1]?.content).toContain("Link the Linear issue.");
+});
+
+test("history names a saved empty version as clearing the instructions", () => {
+  const response = {
+    revisions: [revision("r1", "Keep updates short."), revision("r2", "")],
+    activeHeads: [],
+    inactiveHeads: [],
+    inactiveHeadsTruncated: false,
+    activationEvents: [
+      event("e1", "r1", 1, "activate", "user:me"),
+      event("e2", "r2", 2, "activate", "user:me"),
+      event("e3", "r1", 3, "rollback", "user:me"),
+    ],
+    deactivationEvents: [],
+    nextAfterRevision: null,
+  } as unknown as WorkspaceInstructionPolicyListResponse;
+  expect(instructionRevisions(response, "user:me").map((each) => each.summary)).toEqual([
+    "Restored an earlier version",
+    "Cleared the instructions",
+    "Created the instructions",
+  ]);
 });

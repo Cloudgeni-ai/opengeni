@@ -32,7 +32,7 @@ export type DependencyMode = z.infer<typeof DependencyMode>;
 export const StorageApi = z.enum(["s3-compatible", "aws-s3", "azure-blob", "gcs"]);
 export type StorageApi = z.infer<typeof StorageApi>;
 
-// Mirror of `@opengeni/contracts` SandboxBackend (12 values; every member is
+// Mirror of `@opengeni/contracts` SandboxBackend (13 values; every member is
 // additive at the end). 3-way enum parity is pinned by the SDK contract-parity
 // test.
 export const SandboxBackend = z.enum([
@@ -48,6 +48,7 @@ export const SandboxBackend = z.enum([
   "vercel",
   "selfhosted",
   "opensandbox",
+  "compute",
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
@@ -82,6 +83,7 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
       "OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS",
       "OPENGENI_MODAL_SANDBOX_CPU",
       "OPENGENI_MODAL_SANDBOX_MEMORY_MIB",
+      "OPENGENI_MODAL_REGIONS",
       "OPENGENI_MODAL_WORKSPACE_PERSISTENCE",
       "OPENGENI_SANDBOX_ROTATION_BATCH_SIZE",
       "OPENGENI_SANDBOX_ROTATION_LEAD_MS",
@@ -106,7 +108,12 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
   },
   e2b: {
     required: ["OPENGENI_E2B_API_KEY"],
-    optional: ["OPENGENI_E2B_TEMPLATE"],
+    optional: [
+      "OPENGENI_E2B_DOMAIN",
+      "OPENGENI_E2B_API_URL",
+      "OPENGENI_E2B_SANDBOX_URL",
+      "OPENGENI_E2B_TEMPLATE",
+    ],
   },
   blaxel: {
     required: ["OPENGENI_BLAXEL_API_KEY"],
@@ -140,6 +147,21 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
   // over the agent's enrollment; the enrollment-signing + relay-token secrets are
   // deployment-level (a runtime secret), not per-active-backend required creds.
   selfhosted: { required: [], optional: [] },
+  // compute also relies on the deployment-level Connected Machine plane.
+  compute: {
+    required: ["OPENGENI_COMPUTE_API_URL", "OPENGENI_COMPUTE_API_KEY"],
+    optional: [
+      "OPENGENI_COMPUTE_IMAGE",
+      "OPENGENI_COMPUTE_DESKTOP_IMAGE",
+      "OPENGENI_COMPUTE_VCPUS",
+      "OPENGENI_COMPUTE_MEMORY_MIB",
+      "OPENGENI_COMPUTE_MEMORY_REQUEST_MIB",
+      "OPENGENI_COMPUTE_CPU_REQUEST_MILLIS",
+      "OPENGENI_COMPUTE_DISK_MIB",
+      "OPENGENI_COMPUTE_LINK_URL",
+      "OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS",
+    ],
+  },
 };
 
 // sandbox workspace runtime env (the desktop/Channel-A feature rollout). These are
@@ -169,12 +191,14 @@ export const SANDBOX_SURFACING_PASSTHROUGH_ENV: readonly string[] = [
  * table. */
 export const SANDBOX_LIFECYCLE_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_SANDBOX_IDLE_GRACE_MS",
+  "OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS",
   "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS",
   "OPENGENI_SANDBOX_LEASE_TTL_MS",
   "OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS",
   "OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS",
   "OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS",
   "OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS",
+  "OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS",
   "OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS",
   "OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS",
   "OPENGENI_SANDBOX_WARMING_TIMEOUT_MS",
@@ -197,15 +221,33 @@ export const CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED",
 ];
 
+/** Per-task usage limit producer flag (API + both workers). Default
+ * off in @opengeni/config; a valueEnv passthrough emitted only when set.
+ * Persisted limits are enforced regardless; enable only after every consumer
+ * (API, workers, web, SDK/React, embedded hosts) understands the new stop. */
+export const SESSION_USAGE_LIMITS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_SESSION_USAGE_LIMITS_ENABLED",
+];
+
+/** Event triggers for automations (API + both workers). Default off in
+ * @opengeni/config; a valueEnv passthrough emitted only when set. Enable only
+ * after every API and worker image understands the `event` run trigger.
+ * OPENGENI_WEBHOOK_BASE_URL is the public address webhooks are sent to when it
+ * is not OPENGENI_PUBLIC_BASE_URL.
+ * OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH caps chains of automations waking each
+ * other (default 3). */
+export const EVENT_TRIGGERS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_EVENT_TRIGGERS_ENABLED",
+  "OPENGENI_WEBHOOK_BASE_URL",
+  "OPENGENI_AUTOMATION_MAX_CHAIN_DEPTH",
+];
+
 /** Agent configuration rollout switches (sessions.agent_config, migration
  * 0559). Both default off in @opengeni/config; valueEnv passthroughs emitted
  * only when set. Enable admission only after every worker runs a 0559-aware
  * image; the default-for-new-sessions switch then turns omitted-`agent` new
  * sessions into `{ capabilities: "all" }`. */
-export const AGENT_CONFIG_PASSTHROUGH_ENV: readonly string[] = [
-  "OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED",
-  "OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS",
-];
+export const AGENT_CONFIG_PASSTHROUGH_ENV: readonly string[] = [];
 
 /** Per-channel and per-DM Slack workspace routing. Default ON in
  * @opengeni/config; a valueEnv passthrough emitted only when set, so an unset
@@ -239,15 +281,70 @@ export const EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_KERNEL_BROWSER_STEALTH",
 ];
 
-/** Jev (TypeSafe) settings for the worker-side `code_search` tool. The key is
- * a server runtime secret (the worker calls Jev; the API only checks that it is
- * set); it never reaches a sandbox. Unset keeps the tool off. */
+/** Shared decision settings plus legacy Jev code-search compatibility. Keys are
+ * server runtime secrets, never sandbox environment. Keep the historical export
+ * name for deployment consumers; the same allowlist serves both callers. */
 export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_DECISION_MODEL_PROVIDER",
+  "OPENGENI_DECISION_MODEL_ID",
+  "OPENGENI_DECISION_MODEL_API_KEY",
+  "OPENGENI_DECISION_MODEL_BASE_URL",
+  "OPENGENI_DECISION_MODEL_AUTH",
   "OPENGENI_JEV_API_KEY",
   "OPENGENI_JEV_BASE_URL",
   "OPENGENI_JEV_MODEL",
   "OPENGENI_JEV_REQUEST_TIMEOUT_MS",
   "OPENGENI_CODE_SEARCH_MODE",
+];
+
+/** Provider-agnostic web search (`web_search` / `web_fetch` agent tools).
+ * Keys are server runtime secrets: the worker calls the provider and the keys
+ * never reach a sandbox. Unset keeps the tools off. Mirrors
+ * `webSearchEnvironmentVariables()` in @opengeni/config. */
+export const WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_WEB_SEARCH_PROVIDER",
+  "OPENGENI_WEB_FETCH_PROVIDER",
+  "OPENGENI_WEB_SEARCH_PREFER",
+  "OPENGENI_WEB_SEARCH_PRICING_JSON",
+  "OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS",
+  "OPENGENI_WEB_TINYFISH_API_KEY",
+  "OPENGENI_WEB_TINYFISH_BASE_URL",
+  "OPENGENI_WEB_PARALLEL_API_KEY",
+  "OPENGENI_WEB_PARALLEL_BASE_URL",
+  "OPENGENI_WEB_PERPLEXITY_API_KEY",
+  "OPENGENI_WEB_PERPLEXITY_BASE_URL",
+  "OPENGENI_WEB_EXA_API_KEY",
+  "OPENGENI_WEB_EXA_BASE_URL",
+  "OPENGENI_WEB_TAVILY_API_KEY",
+  "OPENGENI_WEB_TAVILY_BASE_URL",
+  "OPENGENI_WEB_FIRECRAWL_API_KEY",
+  "OPENGENI_WEB_FIRECRAWL_BASE_URL",
+  "OPENGENI_WEB_BRAVE_API_KEY",
+  "OPENGENI_WEB_BRAVE_BASE_URL",
+  "OPENGENI_WEB_JINA_API_KEY",
+  "OPENGENI_WEB_JINA_BASE_URL",
+  "OPENGENI_WEB_SEARXNG_API_KEY",
+  "OPENGENI_WEB_SEARXNG_BASE_URL",
+  "OPENGENI_WEB_SEARCH_API_KEY",
+  "OPENGENI_WEB_SEARCH_BASE_URL",
+  "OPENGENI_WEB_FETCH_API_KEY",
+  "OPENGENI_WEB_FETCH_BASE_URL",
+  "OPENGENI_WEB_SEARCH_PROVIDER_MODE",
+];
+
+/** Optional deployment-wide margin for provider-rate credit charges. */
+export const CREDIT_MARGIN_BPS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE",
+];
+
+/** Optional switch for credit billing of provider-hosted tools (default on). */
+export const PAID_HOSTED_TOOLS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING",
+];
+
+/** Operator opt-in for API-origin use of connected subscriptions (default off). */
+export const API_CONNECTED_SUBSCRIPTIONS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED",
 ];
 
 /** Public workspace MCP OAuth rollout settings. The enable switch is
@@ -888,7 +985,7 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       external: {
         secretRef: { name: "opengeni-temporal", key: "OPENGENI_TEMPORAL_HOST" },
         notes:
-          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the OpenGeni chart.",
+          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the Opengeni chart.",
       },
     },
     nats: {
@@ -896,7 +993,7 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       external: {
         secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" },
         notes:
-          "Customer-provided NATS or the official NATS chart managed outside the OpenGeni chart.",
+          "Customer-provided NATS or the official NATS chart managed outside the Opengeni chart.",
       },
     },
     objectStorage: {
@@ -1004,7 +1101,7 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       external: {
         secretRef: { name: "opengeni-temporal", key: "OPENGENI_TEMPORAL_HOST" },
         notes:
-          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the OpenGeni chart.",
+          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the Opengeni chart.",
       },
     },
     nats: {
@@ -1012,7 +1109,7 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       external: {
         secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" },
         notes:
-          "Customer-provided NATS or the official NATS chart managed outside the OpenGeni chart.",
+          "Customer-provided NATS or the official NATS chart managed outside the Opengeni chart.",
       },
     },
     objectStorage: {
@@ -1117,7 +1214,7 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       external: {
         secretRef: { name: "opengeni-temporal", key: "OPENGENI_TEMPORAL_HOST" },
         notes:
-          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the OpenGeni chart.",
+          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the Opengeni chart.",
       },
     },
     nats: {
@@ -1125,7 +1222,7 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       external: {
         secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" },
         notes:
-          "Customer-provided NATS or the official NATS chart managed outside the OpenGeni chart.",
+          "Customer-provided NATS or the official NATS chart managed outside the Opengeni chart.",
       },
     },
     objectStorage: {
@@ -1330,7 +1427,7 @@ export function preflightChecksFor(contract: DeploymentContract): PreflightCheck
       check(
         "container-registry",
         true,
-        "Verify immutable OpenGeni images can be pulled by the workload plane.",
+        "Verify immutable Opengeni images can be pulled by the workload plane.",
       ),
     );
   }
@@ -1457,7 +1554,7 @@ export function preflightChecksFor(contract: DeploymentContract): PreflightCheck
     check(
       "conformance-session",
       true,
-      "Verify a scripted OpenGeni session can create, stream, replay, run, and complete.",
+      "Verify a scripted Opengeni session can create, stream, replay, run, and complete.",
     ),
   );
   return checks;
@@ -1501,9 +1598,11 @@ export function requiredRuntimeEnvVars(
     "OPENGENI_MODEL_CATALOG_SOURCE",
     "OPENGENI_MODEL_COST_POLICY_JSON",
     "OPENGENI_MODEL_NOTES_JSON",
+    "OPENGENI_MANAGED_MODELS_JSON",
     "OPENGENI_CREDITS_DEFAULT_MODEL",
     "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
     "OPENGENI_OPENROUTER_API_KEY",
+    "OPENGENI_OPPER_API_KEY",
   ] as const) {
     if (env[key]) vars.push(key);
   }
@@ -1550,8 +1649,9 @@ export function requiredRuntimeEnvVars(
       "OPENGENI_BETTER_AUTH_SECRET",
       "OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS",
       "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
-      "OPENGENI_RESEND_API_KEY",
-      "OPENGENI_EMAIL_FROM",
+      ...(env.OPENGENI_MANAGED_EMAIL_DELIVERY === "disabled"
+        ? ["OPENGENI_MANAGED_EMAIL_DELIVERY"]
+        : ["OPENGENI_RESEND_API_KEY", "OPENGENI_EMAIL_FROM"]),
       "OPENGENI_GITHUB_APP_ID",
       "OPENGENI_GITHUB_CLIENT_ID",
       "OPENGENI_GITHUB_CLIENT_SECRET",
@@ -1560,6 +1660,13 @@ export function requiredRuntimeEnvVars(
       "OPENGENI_GITHUB_APP_PRIVATE_KEY",
       "OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET",
     );
+    if (env.OPENGENI_SIGNUP_CHALLENGE_ENABLED === "true") {
+      vars.push(
+        "OPENGENI_SIGNUP_CHALLENGE_SITE_KEY",
+        "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY",
+        "OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES",
+      );
+    }
     if (env.OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED === "true") {
       vars.push(
         "OPENGENI_INTEGRATIONS_ENABLED",
@@ -1568,6 +1675,9 @@ export function requiredRuntimeEnvVars(
         "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
         "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
       );
+      if (env.OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED !== undefined) {
+        vars.push("OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED");
+      }
     }
     for (const key of [
       "OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID",
@@ -1579,19 +1689,6 @@ export function requiredRuntimeEnvVars(
     }
   } else if (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey") {
     vars.push("OPENGENI_DELEGATION_SECRET");
-  }
-  for (const key of [
-    "OPENGENI_PR_REVIEW_GITHUB_APP_ID",
-    "OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID",
-    "OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET",
-    "OPENGENI_PR_REVIEW_GITHUB_APP_SLUG",
-    "OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET",
-    "OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY",
-  ] as const) {
-    if (env[key]) vars.push(key);
-  }
-  if (contract.product.accessMode !== "managed" && env.OPENGENI_PR_REVIEW_GITHUB_APP_ID) {
-    vars.push("OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET", "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
   }
   if (env.OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS) {
     vars.push("OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS");
@@ -1684,7 +1781,7 @@ export function stackPlanFor(
     ),
     verifyCommands: verifyCommands(contract, platformDependencies, productOverlay),
     destroyCommands: destroyCommands(contract, terraformRoot, platformDependencies),
-    notes: planNotes(contract, env),
+    notes: planNotes(contract),
   };
 }
 
@@ -1730,12 +1827,12 @@ export function generateRuntimeArtifacts(
   return {
     profile: contract.profile,
     helmValuesYaml: [
-      "# Generated by OpenGeni deployment runtime artifacts. Do not commit generated copies.",
+      "# Generated by Opengeni deployment runtime artifacts. Do not commit generated copies.",
       renderYaml(helmValues).trimEnd(),
       "",
     ].join("\n"),
     runtimeEnv: [
-      "# Generated by OpenGeni deployment runtime artifacts. Do not commit generated copies.",
+      "# Generated by Opengeni deployment runtime artifacts. Do not commit generated copies.",
       "# Values in this file are intended for a private Kubernetes Secret.",
       ...envLines,
       "",
@@ -1781,8 +1878,8 @@ function helmValuesFileFor(contract: DeploymentContract): string | null {
 
 function createdResourceClasses(contract: DeploymentContract): string[] {
   const out = [
-    "OpenGeni Kubernetes namespace",
-    "OpenGeni Helm release",
+    "Opengeni Kubernetes namespace",
+    "Opengeni Helm release",
     "runtime secret or external secret reference",
   ];
   if (contract.runtime.cloud === "azure" && contract.profile === "azure-managed") {
@@ -1861,106 +1958,6 @@ const HELM_APPLICATION_DRAIN_ARGS = [
   "--set migrations.enabled=false",
 ].join(" ");
 
-export const MODEL_CATALOG_MAINTENANCE_CUTOVER = "0389_model_catalog_and_gateway_custom_models";
-export const SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER = "0394_session_selected_skill_activation";
-export const SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER =
-  "0402_session_input_wait_and_background_command_results";
-export const MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER = "0404_mcp_oauth_authorization_server";
-export const CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER =
-  "0403_codex_unconditional_credential_leasing";
-export const PERSONAL_CODEX_INHERITANCE_MAINTENANCE_CUTOVER =
-  "0422_personal_workspace_organization_codex_inheritance";
-
-const MAINTENANCE_CUTOVERS = {
-  "0435_skill_chat_confirmation": { migrationSummary: "migration 0435" },
-  "0433_unified_skill_lifecycle": { migrationSummary: "migration 0433" },
-  [MODEL_CATALOG_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0389" },
-  [SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0394" },
-  [SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0402" },
-  [CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER]: {
-    migrationSummary: "migration 0403",
-  },
-  [MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER]: {
-    migrationSummary: "migrations 0404 and 0405",
-  },
-  [PERSONAL_CODEX_INHERITANCE_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0422" },
-} as const;
-
-type MaintenanceCutover = keyof typeof MAINTENANCE_CUTOVERS;
-
-const MAINTENANCE_IMAGE_DIGEST_ENV = {
-  api: "OPENGENI_API_IMAGE_DIGEST",
-  worker: "OPENGENI_WORKER_IMAGE_DIGEST",
-  web: "OPENGENI_WEB_IMAGE_DIGEST",
-  migrations: "OPENGENI_MIGRATIONS_IMAGE_DIGEST",
-} as const;
-
-function validatedImageDigests(
-  env: Record<string, string | undefined>,
-  purpose: string,
-): Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string> {
-  const exactSha256Digest = /^sha256:[a-f0-9]{64}$/u;
-  const digests = Object.fromEntries(
-    Object.entries(MAINTENANCE_IMAGE_DIGEST_ENV).map(([component, name]) => {
-      const digest = env[name]?.trim() ?? "";
-      if (!exactSha256Digest.test(digest)) {
-        throw new Error(`${name} must be an exact sha256 digest for ${purpose}`);
-      }
-      return [component, digest];
-    }),
-  ) as Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string>;
-  if (digests.migrations !== digests.api) {
-    throw new Error(
-      "OPENGENI_MIGRATIONS_IMAGE_DIGEST must equal OPENGENI_API_IMAGE_DIGEST because migrations run from the API image",
-    );
-  }
-  return digests;
-}
-
-function maintenanceImageDigestHelmArgs(
-  contract: DeploymentContract,
-  terraformRoot: string | null,
-  env: Record<string, string | undefined>,
-): string {
-  const cutover = requestedMaintenanceCutover(env);
-  if (!cutover) return "";
-  // Managed plans resolve registry digests after publishing the exact images
-  // and inject them through helm-values.generated.yaml.
-  if (terraformRoot) return "";
-  if (contract.runtime.platform !== "kubernetes") {
-    throw new Error(
-      `${cutover} requires a non-local Kubernetes deployment with immutable image artifacts`,
-    );
-  }
-  // Local Kubernetes derives one content identity from the freshly built
-  // Docker image IDs and binds both Helm revisions to that persisted tag.
-  if (contract.runtime.cloud === "local") return "";
-  const digests = validatedImageDigests(env, "a maintenance cutover");
-  return Object.entries(digests)
-    .map(([component, digest]) => ` --set-string ${component}.image.digest=${digest}`)
-    .join("");
-}
-
-function requestedMaintenanceCutover(
-  env: Record<string, string | undefined>,
-): MaintenanceCutover | null {
-  const requested = env.OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER?.trim();
-  if (!requested) return null;
-  if (!Object.hasOwn(MAINTENANCE_CUTOVERS, requested)) {
-    throw new Error(`unsupported OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: ${requested}`);
-  }
-  if (env.OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED !== "true") {
-    throw new Error(
-      "OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true is required for a maintenance cutover",
-    );
-  }
-  return requested as MaintenanceCutover;
-}
-
-function maintenanceFinalUpgradeSafetyArgs(env: Record<string, string | undefined>): string {
-  return requestedMaintenanceCutover(env) ? " --atomic --cleanup-on-fail" : "";
-}
-
 function helmApplicationDrainWaitCommand(namespace: string, release: string): string {
   const selector =
     `app.kubernetes.io/instance=${release},` +
@@ -1976,9 +1973,6 @@ function helmApplicationDrainCommands(input: {
   env: Record<string, string | undefined>;
 }): string[] {
   const wait = helmApplicationDrainWaitCommand(input.namespace, input.release);
-  if (requestedMaintenanceCutover(input.env)) {
-    return [input.drainUpgradeCommand, wait];
-  }
   const needsBootstrapRevision =
     input.contract.database.mode === "inCluster" ||
     input.contract.temporal.mode === "inCluster" ||
@@ -1998,8 +1992,6 @@ function deployCommands(
   productOverlay: ProductOverlayId,
   env: Record<string, string | undefined>,
 ): string[] {
-  const maintenanceImageValuesArg = maintenanceImageDigestHelmArgs(contract, terraformRoot, env);
-  const maintenanceFinalUpgradeArgs = maintenanceFinalUpgradeSafetyArgs(env);
   if (contract.profile === "local-compose") {
     return ["bun run dev"];
   }
@@ -2016,7 +2008,7 @@ function deployCommands(
       : "";
     const drainUpgradeCommand =
       `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values} ` +
-      `${HELM_APPLICATION_DRAIN_ARGS}${maintenanceImageValuesArg} --wait --timeout 10m`;
+      `${HELM_APPLICATION_DRAIN_ARGS} --wait --timeout 10m`;
     return [
       `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
       "bun run deployment:single-node-secrets -- --out-dir .agent/generated/single-node/secrets",
@@ -2032,11 +2024,10 @@ function deployCommands(
         drainUpgradeCommand,
         env,
       }),
-      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs}${maintenanceImageValuesArg}${maintenanceFinalUpgradeArgs} --wait --timeout 15m`,
+      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} --wait --timeout 15m`,
     ];
   }
   if (contract.profile === "local-kubernetes") {
-    const maintenanceCutover = requestedMaintenanceCutover(env) !== null;
     const opensandbox = platformDependencies.find((dependency) => dependency.id === "opensandbox");
     const sandboxSecretArgs = opensandbox
       ? ' --from-literal=OPENGENI_OPENSANDBOX_API_KEY="$OPENGENI_OPENSANDBOX_API_KEY" --from-literal=OPENGENI_OPENSANDBOX_IMAGE="$OPENGENI_OPENSANDBOX_IMAGE"'
@@ -2047,35 +2038,15 @@ function deployCommands(
     const namespace = contract.runtime.namespace ?? "opengeni-local";
     const release = contract.runtime.releaseName;
     const values = helmValuesFile ?? "deploy/helm/opengeni/values.local-kubernetes.example.yaml";
-    const maintenanceImageEnvFile = ".agent/generated/local-kubernetes/maintenance-image-tag.env";
-    const maintenanceImageEnvPrefix = maintenanceCutover
-      ? `set -a && . ${maintenanceImageEnvFile} && set +a && `
-      : "";
-    const localImageTag = maintenanceCutover ? "$OPENGENI_LOCAL_K8S_IMAGE_TAG" : "local-k8s";
-    const maintenanceImageTagHelmArgs = maintenanceCutover
-      ? ["api", "worker", "web", "migrations"]
-          .map(
-            (component) => ` --set-string ${component}.image.tag="$OPENGENI_LOCAL_K8S_IMAGE_TAG"`,
-          )
-          .join("")
-      : "";
     const drainUpgradeCommand =
-      `${maintenanceImageEnvPrefix}helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} ` +
-      `${HELM_APPLICATION_DRAIN_ARGS}${maintenanceImageTagHelmArgs} --wait --timeout 10m`;
-    const localImageCommands = maintenanceCutover
-      ? [
-          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s-maintenance-candidate .",
-          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s-maintenance-candidate .",
-          "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-$(git rev-parse HEAD)} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s-maintenance-candidate .",
-          `mkdir -p .agent/generated/local-kubernetes && OPENGENI_LOCAL_K8S_IMAGE_TAG="maintenance-$(printf '%s\\n' "$(docker image inspect --format '{{.Id}}' opengeni-api:local-k8s-maintenance-candidate)" "$(docker image inspect --format '{{.Id}}' opengeni-worker:local-k8s-maintenance-candidate)" "$(docker image inspect --format '{{.Id}}' opengeni-web:local-k8s-maintenance-candidate)" | git hash-object --stdin)" && printf 'OPENGENI_LOCAL_K8S_IMAGE_TAG=%s\\n' "$OPENGENI_LOCAL_K8S_IMAGE_TAG" > ${maintenanceImageEnvFile} && docker tag opengeni-api:local-k8s-maintenance-candidate "opengeni-api:$OPENGENI_LOCAL_K8S_IMAGE_TAG" && docker tag opengeni-worker:local-k8s-maintenance-candidate "opengeni-worker:$OPENGENI_LOCAL_K8S_IMAGE_TAG" && docker tag opengeni-web:local-k8s-maintenance-candidate "opengeni-web:$OPENGENI_LOCAL_K8S_IMAGE_TAG"`,
-          `${maintenanceImageEnvPrefix}kind load docker-image "opengeni-api:${localImageTag}" "opengeni-worker:${localImageTag}" "opengeni-web:${localImageTag}" --name \${KIND_CLUSTER_NAME:-opengeni-local}`,
-        ]
-      : [
-          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s .",
-          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s .",
-          "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-local-k8s} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s .",
-          "kind load docker-image opengeni-api:local-k8s opengeni-worker:local-k8s opengeni-web:local-k8s --name ${KIND_CLUSTER_NAME:-opengeni-local}",
-        ];
+      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} ` +
+      `${HELM_APPLICATION_DRAIN_ARGS} --wait --timeout 10m`;
+    const localImageCommands = [
+      "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s .",
+      "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s .",
+      "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-local-k8s} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s .",
+      "kind load docker-image opengeni-api:local-k8s opengeni-worker:local-k8s opengeni-web:local-k8s --name ${KIND_CLUSTER_NAME:-opengeni-local}",
+    ];
     return [
       ...localImageCommands,
       `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
@@ -2088,7 +2059,7 @@ function deployCommands(
         drainUpgradeCommand,
         env,
       }),
-      `${maintenanceImageEnvPrefix}helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs}${maintenanceImageTagHelmArgs}${maintenanceFinalUpgradeArgs} --wait --timeout 15m`,
+      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} --wait --timeout 15m`,
     ];
   }
   const commands: string[] = [
@@ -2122,7 +2093,7 @@ function deployCommands(
   const namespace = contract.runtime.namespace ?? "opengeni";
   const drainUpgradeCommand =
     `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace}${valuesArg} ` +
-    `${HELM_APPLICATION_DRAIN_ARGS}${maintenanceImageValuesArg} --wait --timeout 15m`;
+    `${HELM_APPLICATION_DRAIN_ARGS} --wait --timeout 15m`;
   commands.push(
     ...helmApplicationDrainCommands({
       contract,
@@ -2131,7 +2102,7 @@ function deployCommands(
       drainUpgradeCommand,
       env,
     }),
-    `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace}${valuesArg}${maintenanceImageValuesArg}${maintenanceFinalUpgradeArgs} --wait --timeout 15m`,
+    `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace}${valuesArg} --wait --timeout 15m`,
   );
   return commands;
 }
@@ -2292,7 +2263,7 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
         "helm uninstall opengeni-nats --namespace opengeni-platform --ignore-not-found",
       ],
       notes: [
-        "The official NATS chart is lifecycle-managed by the stack wrapper, not by the OpenGeni app chart.",
+        "The official NATS chart is lifecycle-managed by the stack wrapper, not by the Opengeni app chart.",
         "The service is ClusterIP-only; do not expose NATS with LoadBalancer or public ingress for the default stack.",
       ],
     });
@@ -2351,8 +2322,8 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
         "helm uninstall opengeni-temporal --namespace opengeni-platform --ignore-not-found",
       ],
       notes: [
-        "The official Temporal chart is lifecycle-managed by the stack wrapper, not by the OpenGeni app chart.",
-        "The example values require an existing Postgres database/schema pair for Temporal persistence; use managed cloud Postgres or a customer database, not the OpenGeni chart's disposable Postgres fixture.",
+        "The official Temporal chart is lifecycle-managed by the stack wrapper, not by the Opengeni app chart.",
+        "The example values require an existing Postgres database/schema pair for Temporal persistence; use managed cloud Postgres or a customer database, not the Opengeni chart's disposable Postgres fixture.",
       ],
     });
   }
@@ -2412,13 +2383,13 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
         "kubectl delete crd batchsandboxes.sandbox.opensandbox.io pools.sandbox.opensandbox.io sandboxsnapshots.sandbox.opensandbox.io --ignore-not-found",
       ],
       notes: [
-        "OpenSandbox is lifecycle-managed from the exact upstream source commit and checksums in deploy/stacks/opensandbox-source.lock; its templates are not copied into the OpenGeni app chart.",
+        "OpenSandbox is lifecycle-managed from the exact upstream source commit and checksums in deploy/stacks/opensandbox-source.lock; its templates are not copied into the Opengeni app chart.",
         "The lifecycle service is ClusterIP-only and its lifecycle routes are API-key authenticated. Exec and files stay on that private server-proxy. Channel B (browserd, noVNC, ttyd) uses the ClusterIP ingress gateway in URI mode with OSEP-0011 signed endpoints; put a TLS terminator in front of that ClusterIP in production rather than forking the upstream Service to LoadBalancer.",
         "Official server v0.2.2 ignores OPENSANDBOX_SECURE_ACCESS_* env. The image post-renderer adds an initContainer that materializes [ingress.secure_access] into a writable runtime TOML from Secret opensandbox-secure-access so keys never enter git or the server ConfigMap. Helm 4 cannot pass a script to --post-renderer; use helm template | scripts/operator/opensandbox-image-post-renderer.sh | kubectl apply -f -.",
         contract.runtime.cloud === "azure"
           ? "The Azure BatchSandbox template requires the optional Terraform sandbox node pool label and taint contract."
           : "The generic BatchSandbox template has no cloud-specific node selector and works on ordinary Kubernetes or k3s nodes.",
-        "Native OpenSandbox snapshots remain disabled; OpenGeni portable workspace archives in object storage are authoritative in v1.",
+        "Native OpenSandbox snapshots remain disabled; Opengeni portable workspace archives in object storage are authoritative in v1.",
       ],
     });
   }
@@ -2434,10 +2405,7 @@ function usesOfficialPlatformChart(
   );
 }
 
-function planNotes(
-  contract: DeploymentContract,
-  env: Record<string, string | undefined>,
-): string[] {
+function planNotes(contract: DeploymentContract): string[] {
   const notes = [
     "Keep provider resource names, generated credentials, kubeconfigs, Terraform state, and filled tfvars in private operator-controlled storage outside the repository.",
     "Use the generated destroy commands as the baseline cleanup path for environments created from this plan.",
@@ -2449,12 +2417,12 @@ function planNotes(
   }
   if (contract.nats.mode === "external") {
     notes.push(
-      "NATS is intentionally outside the OpenGeni app chart; use an existing endpoint or the official NATS Helm chart.",
+      "NATS is intentionally outside the Opengeni app chart; use an existing endpoint or the official NATS Helm chart.",
     );
   }
   if (contract.temporal.mode === "external") {
     notes.push(
-      "Temporal is intentionally outside the OpenGeni app chart; use Temporal Cloud, an existing endpoint, or the official Temporal Helm chart.",
+      "Temporal is intentionally outside the Opengeni app chart; use Temporal Cloud, an existing endpoint, or the official Temporal Helm chart.",
     );
   }
   if (contract.sandbox.backend === "opensandbox") {
@@ -2467,12 +2435,6 @@ function planNotes(
       "This profile is one persistent machine with no service redundancy; Kubernetes owns restart, volume, and upgrade sequencing only.",
       "Bind NodePorts to loopback and expose only the documented edge ports through the private network boundary.",
       "Create the runtime, migration, Postgres, and Garage Secrets (env keys plus garage.toml) before the two-phase Helm bootstrap.",
-    );
-  }
-  const maintenanceCutover = requestedMaintenanceCutover(env);
-  if (maintenanceCutover) {
-    notes.push(
-      `This plan includes the explicit ${maintenanceCutover} application drain; keep the application stopped until ${MAINTENANCE_CUTOVERS[maintenanceCutover].migrationSummary} and the final exact-digest upgrade succeed. If that final upgrade fails, Helm restores only the preceding exact-image, applications-disabled revision so recovery remains drained and forward-only.`,
     );
   }
   return notes;
@@ -2617,6 +2579,11 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_ANALYTICS_POSTHOG_HOST", env.OPENGENI_ANALYTICS_POSTHOG_HOST),
     valueEnv("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID", env.OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID),
     valueEnv("OPENGENI_DOCUMENTATION_URL", env.OPENGENI_DOCUMENTATION_URL),
+    valueEnv("OPENGENI_LEGAL_PRIVACY_POLICY_URL", env.OPENGENI_LEGAL_PRIVACY_POLICY_URL),
+    valueEnv("OPENGENI_LEGAL_TERMS_OF_SERVICE_URL", env.OPENGENI_LEGAL_TERMS_OF_SERVICE_URL),
+    valueEnv("OPENGENI_SUPPORT_EMAIL", env.OPENGENI_SUPPORT_EMAIL),
+    valueEnv("OPENGENI_DATA_HOSTING_LOCATION", env.OPENGENI_DATA_HOSTING_LOCATION),
+    valueEnv("OPENGENI_LEGAL_SUBPROCESSORS_URL", env.OPENGENI_LEGAL_SUBPROCESSORS_URL),
     valueEnv("OPENGENI_INTEGRATIONS_ENABLED", env.OPENGENI_INTEGRATIONS_ENABLED),
     valueEnv("OPENGENI_INTEGRATIONS_STATE_SECRET", env.OPENGENI_INTEGRATIONS_STATE_SECRET),
     valueEnv("OPENGENI_MCP_OAUTH_ENABLED", env.OPENGENI_MCP_OAUTH_ENABLED),
@@ -2627,33 +2594,30 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_SLACK_SIGNING_SECRET", env.OPENGENI_SLACK_SIGNING_SECRET),
     valueEnv("OPENGENI_SLACK_BOT_DISPLAY_NAME", env.OPENGENI_SLACK_BOT_DISPLAY_NAME),
     valueEnv("OPENGENI_SLACK_COMMAND", env.OPENGENI_SLACK_COMMAND),
-    valueEnv("OPENGENI_PR_REVIEW_GITHUB_APP_ID", env.OPENGENI_PR_REVIEW_GITHUB_APP_ID),
-    valueEnv("OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID", env.OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID),
     valueEnv(
-      "OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET",
-      env.OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET,
-    ),
-    valueEnv("OPENGENI_PR_REVIEW_GITHUB_APP_SLUG", env.OPENGENI_PR_REVIEW_GITHUB_APP_SLUG),
-    valueEnv(
-      "OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET",
-      env.OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET,
+      "OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED",
+      env.OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED ?? "false",
     ),
     valueEnv(
-      "OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY",
-      env.OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY,
+      "OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS",
+      env.OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS,
     ),
-    ...(contract.product.accessMode !== "managed" && env.OPENGENI_PR_REVIEW_GITHUB_APP_ID
-      ? [
-          requiredEnv(
-            "OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET",
-            env.OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET,
-          ),
-          requiredEnv(
-            "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
-            env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY,
-          ),
-        ]
-      : []),
+    valueEnv("OPENGENI_TEAMS_BOT_ENABLED", env.OPENGENI_TEAMS_BOT_ENABLED ?? "false"),
+    valueEnv("OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS", env.OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS),
+    valueEnv("OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS", env.OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS),
+    valueEnv(
+      "OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED",
+      env.OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED ?? "false",
+    ),
+    valueEnv("OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS", env.OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS),
+    valueEnv(
+      "OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS",
+      env.OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS,
+    ),
+    valueEnv("OPENGENI_TEAMS_BOT_CLIENT_ID", env.OPENGENI_TEAMS_BOT_CLIENT_ID),
+    valueEnv("OPENGENI_TEAMS_BOT_CLIENT_SECRET", env.OPENGENI_TEAMS_BOT_CLIENT_SECRET),
+    valueEnv("OPENGENI_TEAMS_BOT_TENANT_ID", env.OPENGENI_TEAMS_BOT_TENANT_ID),
+    valueEnv("OPENGENI_TEAMS_APP_NAME", env.OPENGENI_TEAMS_APP_NAME),
     ...(mcpOauthEnabled
       ? [requiredEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)]
       : publicBaseUrl
@@ -2668,6 +2632,19 @@ function runtimeEnvValues(
     ...(contract.product.accessMode === "managed"
       ? [
           requiredEnv("OPENGENI_BETTER_AUTH_SECRET", env.OPENGENI_BETTER_AUTH_SECRET),
+          valueEnv(
+            "OPENGENI_SIGNUP_CHALLENGE_ENABLED",
+            env.OPENGENI_SIGNUP_CHALLENGE_ENABLED ?? "false",
+          ),
+          ...[
+            "OPENGENI_SIGNUP_CHALLENGE_SITE_KEY",
+            "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY",
+            "OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES",
+          ].map((key) =>
+            env.OPENGENI_SIGNUP_CHALLENGE_ENABLED === "true"
+              ? requiredEnv(key, env[key])
+              : valueEnv(key, env[key]),
+          ),
           valueEnv(
             "OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS",
             env.OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS ?? publicBaseUrl ?? "",
@@ -2694,11 +2671,15 @@ function runtimeEnvValues(
             "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
             env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY,
           ),
-          requiredEnv("OPENGENI_RESEND_API_KEY", env.OPENGENI_RESEND_API_KEY),
-          valueEnv(
-            "OPENGENI_EMAIL_FROM",
-            env.OPENGENI_EMAIL_FROM ?? "OpenGeni <auth@mail.opengeni.ai>",
-          ),
+          ...(env.OPENGENI_MANAGED_EMAIL_DELIVERY === "disabled"
+            ? [valueEnv("OPENGENI_MANAGED_EMAIL_DELIVERY", "disabled")]
+            : [
+                requiredEnv("OPENGENI_RESEND_API_KEY", env.OPENGENI_RESEND_API_KEY),
+                valueEnv(
+                  "OPENGENI_EMAIL_FROM",
+                  env.OPENGENI_EMAIL_FROM ?? "Opengeni <auth@mail.opengeni.ai>",
+                ),
+              ]),
           valueEnv(
             "OPENGENI_GITHUB_APP_MANIFEST_BASE_URL",
             env.OPENGENI_GITHUB_APP_MANIFEST_BASE_URL ?? publicBaseUrl,
@@ -2716,6 +2697,10 @@ function runtimeEnvValues(
           valueEnv(
             "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED",
             env.OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED,
+          ),
+          valueEnv(
+            "OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED",
+            env.OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED,
           ),
           valueEnv(
             "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
@@ -2804,6 +2789,7 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_MODEL_CATALOG_SOURCE", env.OPENGENI_MODEL_CATALOG_SOURCE),
     valueEnv("OPENGENI_MODEL_COST_POLICY_JSON", env.OPENGENI_MODEL_COST_POLICY_JSON),
     valueEnv("OPENGENI_MODEL_NOTES_JSON", env.OPENGENI_MODEL_NOTES_JSON),
+    valueEnv("OPENGENI_MANAGED_MODELS_JSON", env.OPENGENI_MANAGED_MODELS_JSON),
     valueEnv("OPENGENI_CREDITS_DEFAULT_MODEL", env.OPENGENI_CREDITS_DEFAULT_MODEL),
     valueEnv(
       "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
@@ -2834,6 +2820,9 @@ function runtimeEnvValues(
       : []),
     ...(env.OPENGENI_OPENROUTER_API_KEY
       ? [requiredEnv("OPENGENI_OPENROUTER_API_KEY", env.OPENGENI_OPENROUTER_API_KEY)]
+      : []),
+    ...(env.OPENGENI_OPPER_API_KEY
+      ? [requiredEnv("OPENGENI_OPPER_API_KEY", env.OPENGENI_OPPER_API_KEY)]
       : []),
   ];
 
@@ -2977,6 +2966,12 @@ function runtimeEnvValues(
   for (const key of CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
+  for (const key of SESSION_USAGE_LIMITS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of EVENT_TRIGGERS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
   for (const key of AGENT_CONFIG_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
@@ -2990,6 +2985,18 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of JEV_CODE_SEARCH_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of CREDIT_MARGIN_BPS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of PAID_HOSTED_TOOLS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of API_CONNECTED_SUBSCRIPTIONS_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 
@@ -3171,6 +3178,11 @@ function addRuntimeConfigHelmValues(
     "OPENGENI_ANALYTICS_POSTHOG_HOST",
     "OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID",
     "OPENGENI_DOCUMENTATION_URL",
+    "OPENGENI_LEGAL_PRIVACY_POLICY_URL",
+    "OPENGENI_LEGAL_TERMS_OF_SERVICE_URL",
+    "OPENGENI_SUPPORT_EMAIL",
+    "OPENGENI_DATA_HOSTING_LOCATION",
+    "OPENGENI_LEGAL_SUBPROCESSORS_URL",
     "OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_MCP_OAUTH_ENABLED",

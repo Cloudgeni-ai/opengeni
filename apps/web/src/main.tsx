@@ -1,7 +1,10 @@
 import "./lib/crypto-random-uuid";
 // Must evaluate before ./App creates the router from the current URL.
 import "./lib/signup-attribution-boot";
-import { AppearanceProvider } from "./lib/appearance";
+// Backs the shared session UI with this app's router and API helpers.
+import "./app-host";
+import { AppearanceProvider } from "@opengeni/react/app/lib/appearance";
+import { markClassicScrollbars } from "@opengeni/react/scrollbars";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { App, appDestinationRoutePattern, appRoutePattern } from "./App";
@@ -14,8 +17,15 @@ import {
   installVitePreloadErrorReporting,
   setClientErrorReporter,
 } from "./lib/client-error-reporting";
+import {
+  createClientSignalReporter,
+  setClientSignalReporter,
+} from "@opengeni/react/app/lib/client-signals";
+import { reportMissingDesktopBridge } from "@opengeni/react/app/lib/desktop";
 import { retainIdentityLinkContinuation } from "./lib/identity-link-continuation";
-import { setAnalyticsConsentDecisionSender } from "./lib/analytics-consent";
+import { setAnalyticsConsentDecisionSender } from "@opengeni/react/app/lib/analytics-consent";
+import { recordErrorToasts } from "@opengeni/react/app/lib/recent-errors";
+import { installFeedbackTrail } from "@opengeni/react/app/lib/feedback-trail";
 import { ANALYTICS_CONSENT_PATH } from "@opengeni/contracts/analytics-consent-report";
 import {
   availableSessionStorage,
@@ -23,15 +33,40 @@ import {
   installVitePreloadRecovery,
 } from "./lib/vite-preload-recovery";
 import "./styles.css";
+import { toast } from "sonner";
 
 retainIdentityLinkContinuation(window);
-// Content-free operational error counter; see lib/client-error-reporting.ts.
+// Errors the person was shown go with their next feedback report.
+recordErrorToasts(toast);
+// So do the latest requests, uncaught errors, failed loads and steps before it.
+installFeedbackTrail(window);
+// Before the first paint: slim scrollbars where the platform draws classic ones.
+markClassicScrollbars(document);
+// Error counter and diagnostics (scrubbed, bounded error text); see
+// lib/client-error-reporting.ts.
+// An undeliverable report is retried once when the browser is next online.
+const sendBeacon = beaconSender(`${apiBaseUrl}${CLIENT_ERRORS_PATH}`, globalThis.fetch, {
+  retryTarget: window,
+});
 setClientErrorReporter(
-  createClientErrorReporter({
-    send: beaconSender(`${apiBaseUrl}${CLIENT_ERRORS_PATH}`),
-    revision: bundleDeploymentRevision || "dev",
-  }),
+  createClientErrorReporter({ send: sendBeacon, revision: bundleDeploymentRevision || "dev" }),
 );
+// Failed key requests, live-stream health and web vitals share that beacon;
+// see lib/client-signals.ts. Automated browsers (`navigator.webdriver`, such
+// as CI acceptance runs) do not report them, so they never skew the series.
+const reportClientSignals = !navigator.webdriver;
+if (reportClientSignals) {
+  setClientSignalReporter(
+    createClientSignalReporter({
+      send: sendBeacon,
+      revision: bundleDeploymentRevision || "dev",
+      routePattern: appRoutePattern,
+    }),
+  );
+  // The desktop app's own window without the shell's bridge; see lib/desktop.tsx.
+  // The router has not resolved yet, so this names the route it is loading.
+  reportMissingDesktopBridge(appDestinationRoutePattern);
+}
 installGlobalClientErrorReporting({ target: window, routePattern: appRoutePattern });
 // Content-free count of analytics banner answers; see lib/analytics-consent.ts.
 setAnalyticsConsentDecisionSender(beaconSender(`${apiBaseUrl}${ANALYTICS_CONSENT_PATH}`));
@@ -47,10 +82,43 @@ if (preloadRecoveryStorage) {
   });
 }
 
-createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <AppearanceProvider>
-      <App />
-    </AppearanceProvider>
-  </React.StrictMode>,
-);
+// Web vitals load after the page settles, outside the initial bundle graph.
+if (reportClientSignals) {
+  window.addEventListener(
+    "load",
+    () =>
+      setTimeout(() => {
+        void import("./lib/web-vitals-reporting")
+          .then(({ installWebVitalsReporting }) => installWebVitalsReporting())
+          .catch(() => undefined);
+      }, 0),
+    { once: true },
+  );
+}
+
+function renderApp() {
+  createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <AppearanceProvider>
+        <App />
+      </AppearanceProvider>
+    </React.StrictMode>,
+  );
+}
+
+// DEV only: answer the vault routes from fixtures (see dev/secrets-mock).
+if (import.meta.env.DEV && devSecretsMockRequested()) {
+  void import("./dev/secrets-mock")
+    .then(({ installSecretsMock }) => installSecretsMock(window))
+    .finally(renderApp);
+} else {
+  renderApp();
+}
+
+function devSecretsMockRequested(): boolean {
+  try {
+    return window.localStorage.getItem("og-dev-secrets-mock") === "1";
+  } catch {
+    return false;
+  }
+}

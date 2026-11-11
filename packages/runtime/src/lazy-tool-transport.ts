@@ -2,6 +2,7 @@ import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import {
   tool as agentTool,
   toolSearchTool,
+  Usage,
   type Model,
   type ModelProvider,
   type ModelRequest,
@@ -10,13 +11,59 @@ import {
   type StreamEvent,
   type Tool,
 } from "@openai/agents";
-import { isSearchableMcpFunctionTool, searchToolPool } from "./codex-tool-search";
-import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
+import {
+  HARNESS_CONTROL_MCP_SERVER_ID,
+  isHarnessControlMcpFunctionTool,
+  interactionEntryCompanions,
+  INTEGRATION_CARD_TOOL_NAME,
+  INTEGRATION_CATALOG_TOOL_NAME,
+  integrationSetupToolNames,
+  isIntegrationSetupToolName,
+  isInteractionEntryFunctionTool,
+  isInteractionEntryToolName,
+  isSearchableMcpFunctionTool,
+  searchToolPool,
+  rankToolPool,
+  parseSearchArgs,
+  toolsNamedInQuery,
+  shortNameAlternatives,
+  toolsWithExactName,
+  unresolvedToolNames,
+  MAX_SEARCH_LIMIT,
+} from "./codex-tool-search";
+import { hasSearchTerms, isOperationWord, ToolSearchIndex } from "./tool-discovery-ranking";
+import {
+  decisionCandidate,
+  selectFromJudgments,
+  TOOL_SELECTION_POLICY,
+  type ToolSelector,
+} from "./tool-discovery-decision";
+import {
+  fuseRankings,
+  TOOL_MEANING_POLICY,
+  type ToolMeaningRanker,
+} from "./tool-discovery-meaning";
+import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
+import { toolDisclosureItem } from "./provider-history-adapter";
+import { isProviderToolName, providerValidCallName } from "./provider-tool-names";
+import { restoreDeferredToolArgumentTypes } from "./deferred-tool-arguments";
+import { isAliasedMcpToolName, prefixedMcpToolName } from "./mcp-model-tool-name";
 import {
   beforeModelRequest,
   modelResponseSettlement,
   notifyModelRequestCapture,
+  streamPreemptibleModelRequest,
 } from "./model-request-capture";
+import { isRecord } from "@opengeni/contracts/values";
+import {
+  integrationMentionsIn,
+  integrationNameWords,
+  integrationQueryWords,
+  integrationVendorWord,
+  isDistinctiveIntegrationMention,
+  registrableHostDomain,
+  sharedVendorDomains,
+} from "@opengeni/capabilities";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
@@ -24,6 +71,40 @@ export type LazyToolTransport = "codex_native" | "openai_native" | "generic_disp
 const TOOL_SEARCH_NAME = "tool_search";
 const TOOL_LIST_NAME = "tool_list";
 const TOOL_INVOKE_NAME = "tool_invoke";
+/** How deep each keyword ranking reaches when it is fused with a meaning ranking. */
+const FUSION_DEPTH = 300;
+
+/** A search's independent requests: semicolon- or line-separated clauses with search words. */
+function searchClauses(query: string): string[] {
+  const clauses = query.split(/[;\n]+/).filter((part) => hasSearchTerms(part));
+  return clauses.length ? clauses : [query];
+}
+
+/**
+ * What candidates are gathered for: each request's sentences, since an agent
+ * often writes several asks as prose in one request. Loading still follows
+ * the requests themselves.
+ */
+function searchUnits(query: string): { clause: number; text: string }[] {
+  return searchClauses(query).flatMap((clause, index) => {
+    const sentences = clause.split(/(?<=[.!?])\s+/).filter((part) => hasSearchTerms(part));
+    return (sentences.length > 1 ? sentences : [clause]).map((text) => ({ clause: index, text }));
+  });
+}
+
+/** Round-robin over the requests' rankings, so every request is represented near the top. */
+function interleave(rankings: readonly (readonly string[])[]): string[] {
+  const out = new Set<string>();
+  const depth = Math.max(0, ...rankings.map((ranking) => ranking.length));
+  for (let rank = 0; rank < depth; rank++)
+    for (const ranking of rankings) if (ranking[rank] !== undefined) out.add(ranking[rank]!);
+  return [...out];
+}
+/** A tool's name after its server prefix, lowercased: `projects_search` for `mcp_<id>__projects_search`. */
+const shortToolName = (name: string) => {
+  const separator = name.indexOf("__");
+  return (separator >= 0 ? name.slice(separator + 2) : name).toLowerCase();
+};
 /**
  * Base runtime tools that stay in the first request on every transport. These
  * have no MCP connection to prepare, so "eager" here means schema visibility
@@ -42,20 +123,55 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "repository_skill_read",
   "request_human_input",
   "list_models",
+  // Answers privacy and data questions from server facts, never guesses.
+  "privacy_facts",
   // Jev-backed code search. Present only when the deployment and workspace
   // enable it; hiding it behind search would spend a model round trip to find
   // the tool that exists to save round trips.
   "code_search",
+  // Provider web search, offered where the model has no hosted search. Hosted
+  // search is never deferred, so neither is its replacement.
+  "web_search",
+  "web_fetch",
 ]);
+/** True for a base runtime tool that is in the first request on every transport. */
+export function isAlwaysVisibleBaseToolName(name: string): boolean {
+  return ALWAYS_VISIBLE_BASE_TOOL_NAMES.has(name);
+}
 const DISPATCH_MARKER_KEY = "opengeni.lazy_dispatch.v1";
 const SEARCH_MARKER_KEY = "opengeni.lazy_search.v1";
+/** Frozen companion schemas an entry-tool call disclosed, kept on the call itself. */
+const FAMILY_DISCLOSURE_MARKER_KEY = "opengeni.family_disclosure.v1";
 const INTERNAL_REGISTRATION_TOOL_MARKER_KEY = "opengeni.internal_lazy_registration.v1";
+/**
+ * Marks the local response that loads a new session's opening tools (see
+ * LazyToolRuntime.openingToolLoad). No provider produced it, so it carries no
+ * usage, timing or billing.
+ */
+const OPENING_TOOL_LOAD_MARKER_KEY = "opengeni.opening_tool_load.v1";
+/** The one opening load a session can have, so its call ID is constant. */
+const OPENING_TOOL_LOAD_CALL_ID = "call_opening_tools";
+
+/** Whether a model stream event or response is the local opening tool load, not a provider response. */
+export function isOpeningToolLoadResponse(value: unknown): boolean {
+  const response =
+    isRecord(value) && value.type === "response_done" && isRecord(value.response)
+      ? value.response
+      : value;
+  return (
+    isRecord(response) &&
+    isRecord(response.providerData) &&
+    response.providerData[OPENING_TOOL_LOAD_MARKER_KEY] === true
+  );
+}
 const INTERNAL_DISPATCH_REGISTRATION_CALL_PREFIX = "opengeni:lazy-dispatch:register:";
 
 const SEARCH_DESCRIPTION =
-  "Search the currently authorized tools by capability. Describe what you need to do in plain language. Returns matching tool names and input schemas. Search is ranked, not exhaustive: if relevant tools are missing, use tool_list to browse, then pass exact names here with query set to an empty string. Names selects exact tools only; it does not broaden authorization.";
+  "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. Loads the strongest match and returns compact alternatives; ranking is not certainty, so check the match. If a decision model is configured, it can select tools for ambiguous searches. With schemasLoaded:true, only tools have loaded schemas; suggestions are unloaded alternatives. With schemasLoaded:false, load chosen exact names with query:'' before invoking. Known exact names bypass ranking and inference. Call loaded tools by name or through tool_invoke. Search is not exhaustive: tool_list view:'groups' shows available groups. Discovery never grants access.";
+const NATIVE_SEARCH_DESCRIPTION =
+  "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. Loads complete schemas for the strongest matches; ranking is not certainty, so check the match. If a decision model is configured, it can select tools for ambiguous searches. Call loaded functions directly. For compact alternatives or an empty result, use tool_list view:'groups' and browse a group, then load chosen exact names with query:''. Known exact names bypass ranking and inference. Discovery never grants access.";
 const INVOKE_DESCRIPTION =
-  "Invoke a tool returned by tool_search. Pass the exact returned tool name and put that tool's arguments in the nested arguments object.";
+  "Invoke a tool whose complete schema was loaded by tool_search or an entry-tool disclosure. Pass its exact name and put its arguments in the nested arguments object.";
 
 const SEARCH_PARAMETERS = {
   type: "object",
@@ -75,7 +191,7 @@ const SEARCH_PARAMETERS = {
       items: { type: "string", maxLength: 512 },
       maxItems: 20,
       description:
-        "Exact tool names from tool_list. When supplied, replaces keyword ranking; use query: ''.",
+        "Exact tool names to load with complete schemas. Replaces ranking; use query: ''.",
     },
   },
   required: ["query"],
@@ -111,8 +227,339 @@ type GenericDispatchMarker = {
 };
 
 type GenericSearchMarker = {
-  version: 1;
+  version: 1 | 2;
   output: string;
+  /** Version 2 distinguishes compact hits from actually loaded definitions. */
+  tools?: Record<string, unknown>[];
+  /**
+   * Native routes only: what the search output cannot carry, said after the
+   * search result (generic routes put it in output): close candidates it did
+   * not load, integrations it named that the person can connect, and the
+   * person's other connected accounts.
+   */
+  notice?: string;
+};
+
+/**
+ * A catalog integration the person can connect from a card in this chat, and
+ * its vendor domain when the catalog names one.
+ */
+export type ConnectableIntegration = {
+  capabilityId: string;
+  name: string;
+  providerDomain?: string;
+};
+
+/**
+ * Reads catalog integrations matching a search query that the person can
+ * connect from a card (setup status authorization required). Best effort:
+ * a failure only means the search result names none.
+ */
+export type ConnectableIntegrationLookup = (
+  query: string,
+  signal?: AbortSignal,
+) => Promise<readonly ConnectableIntegration[]>;
+
+/**
+ * Whether the query names an integration (see integrationMentionsIn). A
+ * one-word name the ranker reads as an operation ("Send", "Make") names
+ * nothing: the query means the verb. With `distinctive`, only a mention that
+ * cannot be an ordinary word counts (see isDistinctiveIntegrationMention).
+ */
+function integrationNamedIn(
+  query: string,
+  integration: { name: string; providerDomain?: string | undefined },
+  distinctive = false,
+  sharedDomains?: ReadonlySet<string>,
+): boolean {
+  if (isOperationWord(integration.name)) return false;
+  const vendorWord = integrationVendorWord(integration.providerDomain);
+  return integrationMentionsIn(query, integration, sharedDomains ? { sharedDomains } : {}).some(
+    (mention) =>
+      !(mention.kind === "domain" && vendorWord && isOperationWord(vendorWord)) &&
+      (!distinctive || isDistinctiveIntegrationMention(mention, integration.name)),
+  );
+}
+
+/**
+ * Whether a search that strongly matched installed tools could still name an
+ * integration the person has not installed: a word capitalised mid-sentence
+ * ("on Slack"), or a word of four or more letters no installed tool uses
+ * ("whisperflow", "jira"). Searches made only of the installed tools' own
+ * lower-case words skip the catalog read.
+ */
+function mayNameUninstalledIntegration(query: string, index: ToolSearchIndex): boolean {
+  return integrationQueryWords(query).some(
+    ({ word, capitalised }) => capitalised || (word.length >= 4 && !index.knowsWord(word)),
+  );
+}
+
+/** The integration an installed tool belongs to, as far as the tool says. */
+type IntegrationOwner = { serverId?: string; name: string; providerDomain?: string };
+
+/**
+ * Whether a catalog integration is the one an installed tool belongs to: the
+ * same capability as its server, the same name (spacing and case aside), or
+ * the same vendor domain with names that agree ("Atlassian (v1)" and
+ * "Atlassian"; not Microsoft Teams and Microsoft Excel).
+ */
+function ownsIntegration(owner: IntegrationOwner, integration: ConnectableIntegration): boolean {
+  if (owner.serverId === integration.capabilityId) return true;
+  const ownerName = integrationNameWords(owner.name).join("");
+  const name = integrationNameWords(integration.name).join("");
+  if (!ownerName || !name) return false;
+  if (ownerName === name) return true;
+  const domain = (text: string | undefined) => (text ? registrableHostDomain(text) : null);
+  const ownerDomain = domain(owner.providerDomain);
+  return (
+    ownerDomain !== null &&
+    ownerDomain === domain(integration.providerDomain) &&
+    (ownerName.startsWith(name) || name.startsWith(ownerName))
+  );
+}
+
+/**
+ * The catalog matches the query names (see integrationNamedIn), at most
+ * three, in catalog order. With `distinctive`, only distinctive mentions
+ * count: the search already matched installed tools strongly, so an ordinary
+ * word that happens to be a name ("close the ticket") must not add a card. A
+ * vendor word that several differently named matches share ("microsoft" for
+ * Teams, Excel and OneDrive) names none of them.
+ */
+export function connectableIntegrationsNamedIn(
+  query: string,
+  matches: readonly ConnectableIntegration[],
+  distinctive = false,
+): ConnectableIntegration[] {
+  const sharedDomains = sharedVendorDomains(matches);
+  const named: ConnectableIntegration[] = [];
+  for (const match of matches) {
+    if (
+      integrationNamedIn(query, match, distinctive, sharedDomains) &&
+      !named.some((n) => n.capabilityId === match.capabilityId)
+    )
+      named.push(match);
+    if (named.length === 3) break;
+  }
+  return named;
+}
+
+/** The plain sentence a search result carries for connectable integrations. */
+export function connectableIntegrationNotice(
+  integrations: readonly ConnectableIntegration[],
+): string {
+  const listed = integrations
+    .map(
+      (integration) =>
+        `${integration.name} (capabilityId ${JSON.stringify(integration.capabilityId)})`,
+    )
+    .join(", ");
+  return integrations.length === 1
+    ? `Not connected yet: ${listed}. If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.`
+    : `Not connected yet: ${listed}. If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card.`;
+}
+
+/**
+ * The connected account a tool reaches: its source (one per account route),
+ * how the account is named ("Gmail" or "Gmail (alice@example.com)"), its
+ * connector, and the kind of need it serves (the connector's catalog
+ * category, such as "communication") when one is known.
+ */
+export type ConnectedToolAccount = {
+  source: string;
+  label: string;
+  connector: string;
+  kind?: string;
+  /** The connector's vendor domain, when known. */
+  providerDomain?: string;
+};
+
+/** At most this many other accounts are named; the rest are counted. */
+const CONNECTED_ACCOUNTS_NAMED = 10;
+
+/**
+ * The plain text after a native search result about what it did not load:
+ * requested names no authorized tool has, and close candidates (compact
+ * name and description preview, as tool_list shows them).
+ */
+export function searchCandidatesNotice(
+  loaded: boolean,
+  unavailable: readonly string[],
+  candidates: readonly { name: string; description: string }[],
+): string | undefined {
+  if (!unavailable.length && !candidates.length) return undefined;
+  const lines: string[] = [];
+  if (unavailable.length)
+    lines.push(
+      `No authorized tool is named ${unavailable.map((name) => JSON.stringify(name)).join(", ")}.`,
+    );
+  if (candidates.length) {
+    lines.push(
+      loaded ? "Close candidates this search did not load:" : "No tool loaded. Close candidates:",
+    );
+    for (const candidate of candidates)
+      lines.push(
+        candidate.description
+          ? `- ${candidate.name}: ${candidate.description}`
+          : `- ${candidate.name}`,
+      );
+    lines.push('Load one that fits with tool_search names:["<exact name>"] and query:"".');
+  }
+  return lines.join("\n");
+}
+
+/** The plain sentence a search result carries about the person's other connected accounts. */
+export function connectedAccountsNotice(
+  reached: readonly string[],
+  others: readonly string[],
+): string {
+  const named = others.slice(0, CONNECTED_ACCOUNTS_NAMED).join(", ");
+  const more = others.length - CONNECTED_ACCOUNTS_NAMED;
+  return `These tools reach ${reached.join(", ")}. Also connected: ${named}${more > 0 ? `, and ${more} more` : ""}. If the request could mean those accounts too (the person's email, calendar or files), check each that fits, or say which account you checked and offer the others.`;
+}
+
+/**
+ * Tools a search matched that every request already carries. Search only
+ * loads deferred tools, so without this a search for one of them reads as
+ * "this tool does not exist".
+ */
+export function alreadyAvailableNotice(names: readonly string[]): string {
+  return names.length === 1
+    ? `${names[0]} is already in your tool list; call it directly.`
+    : `${names.join(", ")} are already in your tool list; call them directly.`;
+}
+
+/**
+ * The capability_catalog_search matches whose next step is a Connect card the
+ * person completes themselves (connect or add credentials), not one a
+ * workspace admin must enable. Spelling-approximate matches are kept: whether
+ * the query names one is decided by connectableIntegrationsNamedIn. Accepts
+ * the MCP content array or a full result.
+ */
+export function connectableIntegrationsFromCatalogResult(
+  result: unknown,
+): ConnectableIntegration[] {
+  const content = Array.isArray(result)
+    ? result
+    : isRecord(result) && Array.isArray(result.content)
+      ? result.content
+      : [];
+  if (isRecord(result) && result.isError === true) return [];
+  const found: ConnectableIntegration[] = [];
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(block.text);
+    } catch {
+      continue;
+    }
+    if (!isRecord(parsed) || !Array.isArray(parsed.matches)) continue;
+    for (const match of parsed.matches) {
+      if (!isRecord(match)) continue;
+      const setup = isRecord(match.setup) ? match.setup : null;
+      const next = setup && isRecord(setup.nextAction) ? setup.nextAction : null;
+      if (next?.toolName !== "capability_authorization_request") continue;
+      // A setup the catalog reports unavailable (this deployment cannot
+      // connect it) has no card the person could finish.
+      if (setup!.action === "enable" || setup!.status === "unavailable") continue;
+      if (typeof match.capabilityId !== "string" || typeof match.name !== "string") continue;
+      found.push({
+        capabilityId: match.capabilityId,
+        name: match.name,
+        ...(typeof match.providerDomain === "string" && match.providerDomain
+          ? { providerDomain: match.providerDomain }
+          : {}),
+      });
+    }
+  }
+  return found;
+}
+
+/** Bounded so a slow catalog read never holds a search result back for long. */
+const CONNECTABLE_LOOKUP_TIMEOUT_MS = 2_000;
+/**
+ * How long a search that strongly matched installed tools waits for the
+ * catalog: above a typical read (about half a second on staging, rarely over
+ * a second), below the general bound. Such a search reads the catalog only
+ * when the query has a word that could name something the person has not
+ * installed (see mayNameUninstalledIntegration).
+ */
+const BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS = 1_500;
+
+/** The promise's result, or a rejection once the signal aborts, whichever comes first. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  promise.catch(() => undefined);
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+/**
+ * Only the catalog's best matches may be named. The catalog ranks entries a
+ * query names above entries that only share its words, so the few it names
+ * come first; a little room past three keeps ordinary-word names ("Box") from
+ * displacing one the query names distinctively.
+ */
+const CONNECTABLE_LOOKUP_LIMIT = 5;
+
+/**
+ * Looks a search query up with the harness control server's catalog search,
+ * through the same authorized call path as a model call of that tool.
+ */
+export function catalogConnectableIntegrationLookup(server: {
+  callTool(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<unknown>;
+  callToolResult?(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<unknown>;
+}): ConnectableIntegrationLookup {
+  return async (query, signal) => {
+    const timeout = AbortSignal.timeout(CONNECTABLE_LOOKUP_TIMEOUT_MS);
+    const options = { signal: signal ? AbortSignal.any([signal, timeout]) : timeout };
+    const args = {
+      query: Array.from(query).slice(0, 500).join(""),
+      limit: CONNECTABLE_LOOKUP_LIMIT,
+    };
+    const result = server.callToolResult
+      ? await server.callToolResult(INTEGRATION_CATALOG_TOOL_NAME, args, null, options)
+      : await server.callTool(INTEGRATION_CATALOG_TOOL_NAME, args, null, options);
+    return connectableIntegrationsFromCatalogResult(result);
+  };
+}
+
+/**
+ * Written once when the model calls an interaction entry tool (browser_open,
+ * computer_open). The schemas are frozen at that moment so the disclosure the
+ * provider sees after the step's results never changes on later requests,
+ * even after a deploy changes the live catalog.
+ */
+type FamilyDisclosureMarker = {
+  version: 1;
+  tools: Record<string, unknown>[];
+  /**
+   * Native routes retain native loading; generic routes use tool_invoke.
+   * Preserve the originating route on replay, never rewrite an old receipt.
+   */
+  viaToolInvoke: boolean;
 };
 
 type FunctionCallItem = {
@@ -123,10 +570,6 @@ type FunctionCallItem = {
   providerData?: Record<string, unknown>;
   [key: string]: unknown;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function isFunctionTool(tool: Tool): tool is Tool & {
   type: "function";
@@ -188,6 +631,21 @@ export class LazyToolRuntime {
   private activeRunContext: unknown;
   readonly controlTools: Tool[];
   private routerWasExposed: boolean;
+  private searchIndex: ToolSearchIndex | undefined;
+  /** Ranks the tools every request already carries, for alreadyAvailableNotice. */
+  private visibleIndex: ToolSearchIndex | undefined;
+  /** Whether a search this turn already named the person's connected accounts. */
+  private connectedAccountsNamed = false;
+  /**
+   * This turn's search memory: tools earlier searches loaded, and tools they
+   * showed as alternatives. A repeated search tells the selector what it
+   * already loaded and shows alternatives the agent has not seen yet.
+   */
+  private readonly loadedThisTurn = new Set<string>();
+  private readonly shownThisTurn = new Set<string>();
+  /** Tools a new session's opening context is for (see openingToolLoad). */
+  private openingToolNames: readonly string[] = [];
+  private openingToolLoadConsidered = false;
 
   constructor(
     readonly transport: LazyToolTransport,
@@ -198,12 +656,45 @@ export class LazyToolRuntime {
     private readonly modelMcpServerIds: () => ReadonlyMap<string, string> = () => new Map(),
     private readonly conditionalRouter = false,
     routerInHistory = false,
+    private readonly startToolPreparation?: () => void,
+    private readonly pendingMcpServerIds: ReadonlySet<string> = deferredMcpServerIds,
+    /**
+     * Exact model names a prepared deferred server keeps on the first request
+     * (its harness control tools and the session's ToolRef.eager list).
+     */
+    private readonly firstRequestMcpToolNames: () => ReadonlySet<string> = () => new Set(),
+    private readonly decisionModel?: ToolSelector,
+    /** Best-effort MCP servers whose tools are missing this attempt, and why. */
+    private readonly unavailableMcpServers: () => ReadonlyMap<string, string> = () => new Map(),
+    /** Catalog integrations a search names that the person could connect. */
+    private readonly connectableLookup?: ConnectableIntegrationLookup,
+    /** The connected account each tool reaches, by model tool name. */
+    private readonly connectedAccounts?: () => ReadonlyMap<string, ConnectedToolAccount>,
+    /** Ranks tools by meaning alongside keywords; absent means keywords alone. */
+    private readonly meaningRanker?: ToolMeaningRanker,
+    /**
+     * Each MCP tool's name as its server publishes it, by model tool name.
+     * A shortened model name (`mcp_<digest>__…`) can hide which of several
+     * siblings a tool is; the decision model reads the full name instead.
+     */
+    private readonly mcpToolNames: () => ReadonlyMap<string, string> = () => new Map(),
+    /**
+     * False when the host proved nothing this attempt attaches is deferred: a
+     * pending preparation then exposes no router on its own. Tools that turn
+     * out searchable once prepared still expose it.
+     */
+    private readonly pendingPreparationDefers = true,
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
       transport !== "generic_dispatch"
         ? [this.buildNativeSearchTool(), this.buildListTool()]
-        : [this.buildGenericSearchTool(), this.buildGenericInvokeTool(), this.buildListTool()];
+        : [
+            this.buildGenericSearchTool(),
+            this.buildGenericInvokeTool(),
+            this.buildListTool(),
+            this.buildNativeSearchTool(true),
+          ];
     if (toolPreparationReady) {
       void toolPreparationReady.then(
         () => {
@@ -223,7 +714,11 @@ export class LazyToolRuntime {
   }
 
   async prepareConditionalRouter(): Promise<void> {
-    if (this.conditionalRouter) await this.ensurePrepared();
+    // Router visibility already accounts for authorized pending server IDs.
+    // Joining their catalog here would put background MCP setup back on the
+    // first-request path for configured agents. Tool demand still joins the
+    // exact preparation fence; settled empty catalogs keep the router hidden.
+    if (this.conditionalRouter && !this.hasPendingPreparation()) await this.ensurePrepared();
   }
 
   visibleControlTools(): Tool[] {
@@ -231,11 +726,18 @@ export class LazyToolRuntime {
     this.routerWasExposed ||=
       !this.conditionalRouter ||
       this.searchableToolNames.size > 0 ||
-      (this.hasPendingPreparation() && this.deferredMcpServerIds.size > 0);
+      (this.pendingPreparationDefers &&
+        this.hasPendingPreparation() &&
+        this.pendingMcpServerIds.size > 0);
     return this.routerWasExposed ? this.controlTools : [];
   }
 
+  startPreparation(): void {
+    this.startToolPreparation?.();
+  }
+
   async ensurePrepared(): Promise<void> {
+    this.startPreparation();
     await this.toolPreparationReady;
     this.preparationSettled = true;
     if (!this.preparedToolsLoaded && this.activeAgent) {
@@ -314,14 +816,33 @@ export class LazyToolRuntime {
       }
     }
     this.currentTools = tools;
+    this.searchIndex = undefined;
+    this.visibleIndex = undefined;
     this.functionTools.clear();
     this.searchableToolNames.clear();
     const modelServerIds = this.modelMcpServerIds();
+    const firstRequestMcpToolNames = this.firstRequestMcpToolNames();
     for (const tool of tools) {
       if (!isFunctionTool(tool)) continue;
       this.functionTools.set(tool.name, tool);
       if (ALWAYS_VISIBLE_BASE_TOOL_NAMES.has(tool.name)) continue;
       if (this.preparationIndependentToolNames.has(tool.name)) continue;
+      // Exact first-party harness control tools (goal lifecycle, command
+      // polling, wait_for_input) stay visible on every transport when the
+      // authorized opengeni server listed them; its other tools stay deferred.
+      if (isHarnessControlMcpFunctionTool(tool, this.mcpServerIds, modelServerIds)) continue;
+      // The session's exact eager tool list (ToolRef.eager as names): those
+      // tools of an authorized prepared server stay in the first request; the
+      // server's other tools stay searchable.
+      if (
+        firstRequestMcpToolNames.has(tool.name) &&
+        isSearchableMcpFunctionTool(tool, this.mcpServerIds, modelServerIds)
+      )
+        continue;
+      // Each interaction family's entry tool (browser_open, computer_open)
+      // stays visible so a browser or computer task starts without a search
+      // round trip; calling it discloses the rest of the family.
+      if (isInteractionEntryFunctionTool(tool, this.mcpServerIds, modelServerIds)) continue;
       // Origin, not transport: deferred MCP plus every non-MCP function tool
       // outside the base set. ToolRef.eager still decides the MCP arm.
       const lazy =
@@ -331,9 +852,10 @@ export class LazyToolRuntime {
         // After the preparation fence, deferred tools stay off the Agent
         // list. Search teaches names; a remembered raw name binds later
         // through resolveMissingFunctionTool. Do not use the SDK's
-        // deferLoading gate — installLazyToolRuntime clears it. Browser,
-        // Computer, and image/video schemas hide behind search on every
-        // transport; the base set stays in the first request.
+        // deferLoading gate — installLazyToolRuntime clears it. Browser and
+        // Computer tools other than their entry tools, and image/video
+        // schemas, hide behind search on every transport; the base set stays
+        // in the first request.
         tool.deferLoading = false;
         this.searchableToolNames.add(tool.name);
       }
@@ -343,7 +865,6 @@ export class LazyToolRuntime {
   shouldHideSerializedTool(tool: SerializedTool): boolean {
     if (tool.type === "function") return this.searchableToolNames.has(tool.name);
     return (
-      this.transport === "generic_dispatch" &&
       tool.type === "hosted_tool" &&
       tool.providerData?.type === "tool_search" &&
       tool.providerData[INTERNAL_REGISTRATION_TOOL_MARKER_KEY] === true
@@ -363,6 +884,16 @@ export class LazyToolRuntime {
 
   resolveFunctionTool(name: string): Tool | undefined {
     return this.functionTools.get(name);
+  }
+
+  /** Model names of every authorized function tool, deferred ones included. */
+  knownFunctionToolNames(): string[] {
+    return [...this.functionTools.keys()];
+  }
+
+  /** True for a tool disclosed through search rather than sent on every request. */
+  isDeferredFunctionTool(name: string): boolean {
+    return this.searchableToolNames.has(name);
   }
 
   inspectSearchableTools(): ReadonlyArray<{
@@ -406,6 +937,83 @@ export class LazyToolRuntime {
     );
   }
 
+  /**
+   * Tools the turn's opening context is for, such as the tool that reaches the
+   * open document a new chat is bound to. They load as if the model's first
+   * step had searched for them by name (see openingToolLoad).
+   */
+  loadAtOpening(names: readonly string[]): void {
+    this.openingToolNames = [...new Set(names)];
+  }
+
+  /**
+   * The first model step of a turn that names opening tools is a tool_search
+   * by those names, answered here without a provider call. The ordinary search
+   * path then loads them, so the first provider request carries the search and
+   * its result after the person's message, and the model can call the tools
+   * directly. Instructions and the tool block stay byte-identical to every
+   * other chat. Considered once, only when the request starts the turn (no
+   * generated items after the last user message) and offers tool_search.
+   * Names that are unknown, unauthorized or already in the request are
+   * ignored; with none left this is null and the step goes to the provider.
+   */
+  hasOpeningToolLoad(): boolean {
+    return !this.openingToolLoadConsidered && this.openingToolNames.length > 0;
+  }
+
+  async openingToolLoad(request: ModelRequest): Promise<ModelResponse | null> {
+    if (!this.hasOpeningToolLoad()) return null;
+    this.openingToolLoadConsidered = true;
+    // A later attempt of the same turn (say, resumed with a newly delivered
+    // update after the person's message) replays the stored load; loading
+    // again would rewrite history that was already sent.
+    if (!startsTurn(request.input) || holdsOpeningToolLoad(request.input)) return null;
+    const offersSearch = request.tools.some((tool) =>
+      this.transport === "generic_dispatch"
+        ? tool.type === "function" && tool.name === TOOL_SEARCH_NAME
+        : tool.type === "hosted_tool" && tool.providerData?.type === "tool_search",
+    );
+    if (!offersSearch) return null;
+    request.signal?.throwIfAborted();
+    await this.ensurePrepared();
+    const pool = this.searchableTools(this.currentTools).filter(
+      (tool): tool is Tool & { name: string } => isFunctionTool(tool),
+    );
+    const offered = new Set(
+      request.tools.flatMap((tool) => (tool.type === "function" ? [tool.name] : [])),
+    );
+    const names = [
+      ...new Set(
+        this.openingToolNames.flatMap((name) =>
+          toolsWithExactName(pool, name).map((tool) => tool.name),
+        ),
+      ),
+    ].filter((name) => !offered.has(name));
+    if (names.length === 0) return null;
+    const args = { query: "", names };
+    const call =
+      this.transport === "generic_dispatch"
+        ? {
+            type: "function_call",
+            callId: OPENING_TOOL_LOAD_CALL_ID,
+            name: TOOL_SEARCH_NAME,
+            arguments: JSON.stringify(args),
+            status: "completed",
+          }
+        : {
+            type: "tool_search_call",
+            call_id: OPENING_TOOL_LOAD_CALL_ID,
+            execution: "client",
+            status: "completed",
+            arguments: args,
+          };
+    return {
+      usage: new Usage(),
+      output: [call] as ModelResponse["output"],
+      providerData: { [OPENING_TOOL_LOAD_MARKER_KEY]: true },
+    };
+  }
+
   wrapModel(model: Model): Model {
     const existing = this.wrappedModels.get(model);
     if (existing) return existing;
@@ -419,37 +1027,823 @@ export class LazyToolRuntime {
     return tools.filter((tool) => isFunctionTool(tool) && this.searchableToolNames.has(tool.name));
   }
 
+  /**
+   * Integrations selected for this turn whose tools could not be loaded, so a
+   * search that finds nothing is not read as "this integration has no such
+   * tool". Absent when every server loaded; read live, never recomputed for
+   * an earlier result.
+   */
+  private unavailableSources(): { unavailableSources?: { server: string; reason: string }[] } {
+    const unavailable = [...this.unavailableMcpServers()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .slice(0, 20)
+      .map(([server, reason]) => ({ server, reason }));
+    return unavailable.length ? { unavailableSources: unavailable } : {};
+  }
+
+  /** Function tools every request carries: search never loads them. */
+  private visibleTools(): Tool[] {
+    return this.currentTools.filter(
+      (tool) =>
+        isFunctionTool(tool) &&
+        !this.searchableToolNames.has(tool.name) &&
+        !this.controlTools.includes(tool),
+    );
+  }
+
+  /**
+   * Already-visible tools a search asked for: those named exactly, or for a
+   * query, those it names or clearly matches among the visible tools.
+   */
+  private alreadyAvailable(query: string, names: readonly string[] | undefined): string[] {
+    const visible = this.visibleTools().filter(isFunctionTool);
+    if (!visible.length) return [];
+    if (names !== undefined)
+      return visible.filter((tool) => names.includes(tool.name)).map((tool) => tool.name);
+    if (!query.trim()) return [];
+    this.visibleIndex ??= new ToolSearchIndex(visible);
+    return [
+      ...new Set([
+        ...toolsNamedInQuery(visible, query).map((tool) => tool.name),
+        ...this.visibleIndex
+          .strongMatches(query)
+          .filter(isFunctionTool)
+          .map((tool) => tool.name),
+      ]),
+    ];
+  }
+
+  private withAlreadyAvailable(
+    result: GenericSearchMarker,
+    query: string,
+    names: readonly string[] | undefined,
+  ): GenericSearchMarker {
+    const available = this.alreadyAvailable(query, names);
+    return available.length
+      ? this.withNotice(result, "alreadyAvailable", alreadyAvailableNotice(available))
+      : result;
+  }
+
   search(rawArguments: unknown): Tool[] {
     return searchToolPool(this.searchableTools(this.currentTools), rawArguments);
   }
 
+  /** Compact discovery has no schema byte exclusions and discloses no companions. */
+  matches(rawArguments: unknown): Tool[] {
+    const tools = this.searchableTools(this.currentTools);
+    this.searchIndex ??= new ToolSearchIndex(tools);
+    return rankToolPool(tools, rawArguments, this.searchIndex);
+  }
+
+  searchDisclosure(rawArguments: unknown): Record<string, unknown>[] {
+    if (parseSearchArgs(rawArguments).names === undefined) return [];
+    return this.search(rawArguments)
+      .map(modelVisibleToolDefinition)
+      .filter((definition): definition is Record<string, unknown> => definition !== null);
+  }
+
+  /** Model-visible schemas an entry-tool call discloses, or [] for any other tool. */
+  familyDisclosure(toolName: string): Record<string, unknown>[] {
+    if (!isInteractionEntryToolName(toolName)) return [];
+    return interactionEntryCompanions(toolName, this.searchableTools(this.currentTools))
+      .map((tool) => modelVisibleToolDefinition(tool))
+      .filter((definition): definition is Record<string, unknown> => definition !== null);
+  }
+
   genericSearchOutput(rawArguments: unknown): string {
-    const definitions: Record<string, unknown>[] = [];
-    for (const tool of this.search(rawArguments)) {
-      const definition = modelVisibleToolDefinition(tool);
-      if (!definition) continue;
-      const candidate = JSON.stringify({ tools: [...definitions, definition] });
-      if (Buffer.byteLength(candidate) > MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES) continue;
-      definitions.push(definition);
+    const { names, limit } = parseSearchArgs(rawArguments);
+    const tools = (
+      names === undefined ? this.matches(rawArguments) : this.search(rawArguments)
+    ).filter(isFunctionTool);
+    // A name every request already carries is not unavailable: the notice
+    // tells the model to call it directly.
+    const visible = names ? new Set(this.alreadyAvailable("", names)) : new Set<string>();
+    const unavailable = names
+      ? unresolvedToolNames(tools, names).filter((name) => !visible.has(name))
+      : [];
+    // A short name several servers share loads one of them; the others stay
+    // reachable as unloaded alternatives under their full names.
+    const pool = names ? this.searchableTools(this.currentTools).filter(isFunctionTool) : [];
+    const suggestions = [
+      ...new Set([
+        ...(names ?? [])
+          .flatMap((name) => shortNameAlternatives(pool, name))
+          .filter((tool) => !tools.includes(tool)),
+        ...(unavailable.length
+          ? this.matches({ query: unavailable.join(" "), limit }).filter(isFunctionTool)
+          : []),
+      ]),
+    ];
+    return JSON.stringify({
+      tools: tools.map(toolDescriptor),
+      schemasLoaded: names !== undefined && tools.length > 0,
+      ...(names === undefined ? {} : { unavailable }),
+      ...this.unavailableSources(),
+      ...(suggestions.length ? { suggestions: suggestions.map(toolDescriptor) } : {}),
+    });
+  }
+
+  /** One decision and one detached receipt per call; never recompute historical output. */
+  async prepareSearch(rawArguments: unknown, signal?: AbortSignal): Promise<GenericSearchMarker> {
+    signal?.throwIfAborted();
+    // The decision is replayed verbatim when the call executes, so it must
+    // read the prepared catalog. Preparation can settle while the model is
+    // still answering the first request; the tools that request carried then
+    // lack every deferred server, and a search decided from them would report
+    // tools that exist as unavailable.
+    await this.ensurePrepared();
+    const parsed = parseSearchArgs(rawArguments);
+    const { query, limit } = parsed;
+    if (parsed.names !== undefined) {
+      const resolve = this.exactMcpNameResolver();
+      const exact = { ...parsed, names: parsed.names.map((name) => resolve(name) ?? name) };
+      const loaded = this.withCandidatesNotice({
+        version: 2,
+        output: this.genericSearchOutput(exact),
+        tools: structuredClone(this.searchDisclosure(exact)),
+      });
+      // Loading one account's tools by exact name (after browsing a group,
+      // say) names the person's other accounts once per turn, as a ranked
+      // search reaching that account does.
+      const accounts = this.connectedAccountsNotice(loaded);
+      return this.remembered(
+        this.withAlreadyAvailable(
+          accounts ? this.withNotice(loaded, "connectedAccounts", accounts) : loaded,
+          query,
+          parsed.names,
+        ),
+      );
     }
-    return JSON.stringify({ tools: definitions });
+    const pool = this.searchableTools(this.currentTools);
+    this.searchIndex ??= new ToolSearchIndex(pool);
+    const { named, near, onlyNames } = this.namesInQuery(pool.filter(isFunctionTool), query);
+    const strong = this.searchIndex
+      .strongMatches(query)
+      .filter(isFunctionTool)
+      .map((t) => t.name);
+    const strongest = this.searchIndex
+      .bestMatches(query)
+      .filter(isFunctionTool)
+      .map((t) => t.name);
+    // Either integration setup tool brings the other. A search that names an
+    // integration the person can connect also loads the Connect card tool and
+    // names that integration plainly, so the card is the next call. Tools that
+    // strongly match without belonging to the named integration (a Slack bot
+    // tool for "posts on Slack", meetings_search for "Linear issues") do not
+    // stop the lookup; a strong match that is the named integration's own
+    // tool does. Beside strong matches only a distinctive mention names an
+    // integration, and the search waits for the catalog only briefly. The
+    // catalog read runs alongside ranking and any decision model; only the
+    // companions wait for it.
+    const setup = integrationSetupToolNames(pool);
+    const owners = this.integrationOwners(strong);
+    const lookup: Promise<ConnectableIntegration[]> =
+      named.length ||
+      setup.length < 2 ||
+      owners.some((owner) => integrationNamedIn(query, owner)) ||
+      (strong.length > 0 && !mayNameUninstalledIntegration(query, this.searchIndex))
+        ? Promise.resolve([])
+        : this.connectableIntegrations(query, owners, strong.length > 0, signal);
+    // Rejects only on cancellation, which the search itself observes.
+    lookup.catch(() => undefined);
+    const setupFor = async (chosen: readonly string[]) =>
+      (chosen.some(isIntegrationSetupToolName)
+        ? setup
+        : (await lookup).length
+          ? [INTEGRATION_CARD_TOOL_NAME]
+          : []
+      ).filter((name) => !chosen.includes(name));
+    // A search that only names tools needs no ranking.
+    const meaning = onlyNames
+      ? undefined
+      : await this.meaningRankings(pool.filter(isFunctionTool), query, signal);
+    const ranked = await this.rankedSearch(
+      rawArguments,
+      { query, limit, named, near, onlyNames, strongest, meaning },
+      setupFor,
+      signal,
+    );
+    // A search that only names tools, or (without a selector or meaning
+    // ranking) clearly matches one by keywords, needs no alternatives.
+    // Otherwise the alternatives a result lists must reach the model on every
+    // route.
+    const result =
+      onlyNames || (!this.decisionModel && !meaning && strong.length)
+        ? ranked
+        : this.withCandidatesNotice(ranked);
+    const connectable = await lookup;
+    const withConnectable = connectable.length
+      ? this.withNotice(result, "notConnected", connectableIntegrationNotice(connectable))
+      : result;
+    const accounts = this.connectedAccountsNotice(withConnectable);
+    return this.remembered(
+      this.withAlreadyAvailable(
+        accounts
+          ? this.withNotice(withConnectable, "connectedAccounts", accounts)
+          : withConnectable,
+        query,
+        undefined,
+      ),
+    );
+  }
+
+  /** Records what a decided search loaded and showed, for later searches this turn. */
+  private remembered(result: GenericSearchMarker): GenericSearchMarker {
+    for (const tool of result.tools ?? []) this.loadedThisTurn.add(String(tool.name));
+    const output = JSON.parse(result.output) as {
+      schemasLoaded?: boolean;
+      tools?: { name?: unknown }[];
+      suggestions?: { name?: unknown }[];
+    };
+    for (const tool of [
+      ...(output.schemasLoaded ? [] : (output.tools ?? [])),
+      ...(output.suggestions ?? []),
+    ])
+      if (typeof tool.name === "string") this.shownThisTurn.add(tool.name);
+    return result;
+  }
+
+  /**
+   * Tools a free-text query names, in any supported form, and whether the
+   * query is nothing but names: every name-like token resolved and no other
+   * search words remain.
+   */
+  private namesInQuery(
+    pool: (Tool & { name: string })[],
+    query: string,
+  ): { named: string[]; near: string[]; onlyNames: boolean } {
+    const resolve = this.exactMcpNameResolver();
+    const lookup = (token: string) => {
+      const exact = resolve(token);
+      if (exact) return [exact];
+      const matches = toolsNamedInQuery(pool, token).map((tool) => tool.name);
+      // Shortened tool names (`…__request_drafts_convert_to` for convert_to_ticket
+      // and convert_to_order alike) can each begin the longer name a query
+      // writes. When several do and none is the name itself, the name is
+      // ambiguous: they become candidates for the selector, not loaded tools.
+      const plain = token.toLowerCase().replace(/[^a-z0-9_]/g, "_");
+      if (matches.length > 1 && !matches.some((name) => shortToolName(name) === plain)) {
+        for (const name of matches) if (!near.includes(name)) near.push(name);
+        return [];
+      }
+      return matches;
+    };
+    const named: string[] = [];
+    const near: string[] = [];
+    let unresolved = false;
+    const remainder: string[] = [];
+    const tokens = query
+      .split(/[^A-Za-z0-9_.\-/:]+/)
+      .map((raw) => raw.replace(/^[_.\-/:]+|[_.\-/:]+$/g, ""));
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index]!;
+      if (!/[_.\-/:]/.test(token)) {
+        remainder.push(token);
+        continue;
+      }
+      let tools = lookup(token);
+      if (!tools.length) {
+        // A tool family followed by operations names one tool per operation:
+        // "support_tickets create get" is support_tickets_create and _get.
+        while (index + 1 < tokens.length && /^[a-z0-9]+$/i.test(tokens[index + 1]!)) {
+          const operation = lookup(`${token}_${tokens[index + 1]!.toLowerCase()}`);
+          if (!operation.length) break;
+          tools = [...tools, ...operation];
+          index++;
+        }
+      }
+      if (!tools.length) {
+        // A family that only begins several tool names leaves the choice to
+        // the selector: those tools become candidates, not loaded tools.
+        const prefix = `${token.toLowerCase().replaceAll(".", "_")}_`;
+        const family = pool.filter((tool) => shortToolName(tool.name).startsWith(prefix));
+        if (family.length <= TOOL_SELECTION_POLICY.maxAlternatives)
+          for (const tool of family) if (!near.includes(tool.name)) near.push(tool.name);
+      }
+      if (!tools.length) unresolved = true;
+      for (const name of tools) if (!named.includes(name)) named.push(name);
+    }
+    return {
+      named,
+      near: near.filter((name) => !named.includes(name)),
+      onlyNames: named.length > 0 && !unresolved && !hasSearchTerms(remainder.join(" ")),
+    };
+  }
+
+  /**
+   * Tools the candidates' own descriptions point to ("use reports.get_sections
+   * for…", "call get_configuration first"), in candidate order, that are not
+   * candidates yet. Curated integrations route between their tools this way.
+   */
+  private toolsNamedByCandidates(
+    pool: (Tool & { name: string })[],
+    candidates: readonly Tool[],
+    max: number,
+  ): Tool[] {
+    const resolve = this.exactMcpNameResolver();
+    const present = new Set(candidates.map((tool) => (tool as { name: string }).name));
+    const byName = new Map(pool.map((tool) => [tool.name, tool]));
+    const added: Tool[] = [];
+    for (const candidate of candidates) {
+      if (added.length >= max) break;
+      const description = candidate.type === "function" ? (candidate.description ?? "") : "";
+      for (const raw of description.split(/[^A-Za-z0-9_.\-/:]+/)) {
+        const token = raw.replace(/^[_.\-/:]+|[_.\-/:]+$/g, "");
+        if (!/[_.]/.test(token) || !/[a-z]/i.test(token)) continue;
+        const exact = resolve(token);
+        const names = exact ? [exact] : toolsWithExactName(pool, token).map((tool) => tool.name);
+        for (const name of names) {
+          const tool = byName.get(name);
+          if (!tool || present.has(name) || added.length >= max) continue;
+          present.add(name);
+          added.push(tool);
+        }
+      }
+    }
+    return added;
+  }
+
+  /**
+   * The first search this turn whose result shows the model a tool reaching a
+   * connected account (loaded, or as a compact candidate where the output
+   * carries those) names the person's other accounts that serve the same
+   * need: other accounts of that connector, and accounts whose connector has
+   * the same kind. A request for "my email" can mean Gmail and Outlook Mail,
+   * which ranking cannot tell are alike. An account whose tools failed to
+   * load is reported as an unavailable source instead.
+   */
+  private connectedAccountsNotice(result: GenericSearchMarker): string | undefined {
+    if (this.connectedAccountsNamed || !this.connectedAccounts) return undefined;
+    const accounts = this.connectedAccounts();
+    if (!accounts.size) return undefined;
+    // The tools the result gives the model: those it loaded, or, when it
+    // loaded none, the candidates it lists (in the generic output, or in the
+    // notice that follows a native result). Accounts reached only through a
+    // lower suggestion are still named as others worth checking.
+    const listed =
+      (this.transport === "generic_dispatch" || !result.tools?.length
+        ? (JSON.parse(result.output) as { tools?: { name?: unknown }[] }).tools
+        : result.tools) ?? [];
+    const shown = new Map<string, ConnectedToolAccount>();
+    for (const tool of listed) {
+      const account = typeof tool.name === "string" ? accounts.get(tool.name) : undefined;
+      if (account) shown.set(account.source, account);
+    }
+    if (!shown.size) return undefined;
+    const connectors = new Set([...shown.values()].map((account) => account.connector));
+    const kinds = new Set([...shown.values()].flatMap((account) => account.kind ?? []));
+    const reached: string[] = [];
+    const others: string[] = [];
+    const seen = new Set<string>();
+    for (const account of accounts.values()) {
+      if (seen.has(account.source)) continue;
+      seen.add(account.source);
+      if (shown.has(account.source)) reached.push(account.label);
+      else if (
+        connectors.has(account.connector) ||
+        (account.kind !== undefined && kinds.has(account.kind))
+      )
+        others.push(account.label);
+    }
+    if (!others.length) return undefined;
+    this.connectedAccountsNamed = true;
+    return connectedAccountsNotice(reached, others);
+  }
+
+  private async connectableIntegrations(
+    query: string,
+    owners: readonly IntegrationOwner[],
+    besideStrongMatches: boolean,
+    signal?: AbortSignal,
+  ): Promise<ConnectableIntegration[]> {
+    if (!this.connectableLookup) return [];
+    // A search that strongly matched installed tools is otherwise ready at
+    // once, so it waits for the catalog only briefly, whether or not the
+    // lookup observes its signal.
+    const bounded = besideStrongMatches
+      ? signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS)])
+        : AbortSignal.timeout(BESIDE_STRONG_MATCHES_LOOKUP_TIMEOUT_MS)
+      : signal;
+    try {
+      const lookup = this.connectableLookup(query, bounded);
+      const matches =
+        bounded && bounded !== signal ? await untilAborted(lookup, bounded) : await lookup;
+      // Named among every match, so an installed sibling still shows that
+      // its vendor domain is shared, then without the strong matches' own.
+      return connectableIntegrationsNamedIn(query, matches, besideStrongMatches).filter(
+        (integration) => !owners.some((owner) => ownsIntegration(owner, integration)),
+      );
+    } catch {
+      // Cancellation belongs to the owning turn; any other failure only means
+      // this result names no connectable integration.
+      signal?.throwIfAborted();
+      return [];
+    }
+  }
+
+  /**
+   * The integrations the given tools belong to: each MCP tool's server, and
+   * for a connected account route its connector's name and vendor domain.
+   * First-party tools (a Slack bot, meeting search) belong to none.
+   */
+  private integrationOwners(toolNames: readonly string[]): IntegrationOwner[] {
+    if (!toolNames.length) return [];
+    const servers = this.modelMcpServerIds();
+    const accounts = this.connectedAccounts?.() ?? new Map<string, ConnectedToolAccount>();
+    const owners: IntegrationOwner[] = [];
+    for (const name of toolNames) {
+      const account = accounts.get(name);
+      const serverId = servers.get(name);
+      if (!account && (!serverId || serverId === HARNESS_CONTROL_MCP_SERVER_ID)) continue;
+      owners.push({
+        ...(serverId ? { serverId } : {}),
+        // Without a connected account route, the server's own id ("github")
+        // is the only name it carries.
+        name: account?.connector ?? serverId!,
+        ...(account?.providerDomain ? { providerDomain: account.providerDomain } : {}),
+      });
+    }
+    return owners;
+  }
+
+  /**
+   * Plain text about a search result: a field of the JSON output, and on
+   * native routes (whose search output cannot carry text) the marker notice.
+   */
+  private withNotice(
+    result: GenericSearchMarker,
+    field: string,
+    notice: string,
+  ): GenericSearchMarker {
+    return {
+      ...result,
+      output: JSON.stringify({ ...JSON.parse(result.output), [field]: notice }),
+      ...(this.transport === "generic_dispatch"
+        ? {}
+        : { notice: result.notice === undefined ? notice : `${result.notice}\n${notice}` }),
+    };
+  }
+
+  /**
+   * Native search outputs carry only loaded definitions. The close candidates
+   * a search found but did not load, and the names it could not resolve,
+   * follow the result as its notice there; generic outputs already list them.
+   */
+  private withCandidatesNotice(result: GenericSearchMarker): GenericSearchMarker {
+    if (this.transport === "generic_dispatch") return result;
+    const output = JSON.parse(result.output) as {
+      tools?: { name: string; description: string }[];
+      schemasLoaded?: boolean;
+      unavailable?: string[];
+      suggestions?: { name: string; description: string }[];
+    };
+    const loaded = new Set((result.tools ?? []).map((tool) => String(tool.name)));
+    const candidates: { name: string; description: string }[] = [];
+    for (const candidate of [
+      ...(output.schemasLoaded ? [] : (output.tools ?? [])),
+      ...(output.suggestions ?? []),
+    ]) {
+      if (!loaded.has(candidate.name) && !candidates.some((c) => c.name === candidate.name))
+        candidates.push(candidate);
+    }
+    const notice = searchCandidatesNotice(loaded.size > 0, output.unavailable ?? [], candidates);
+    if (notice === undefined) return result;
+    return {
+      ...result,
+      notice: result.notice === undefined ? notice : `${notice}\n${result.notice}`,
+    };
+  }
+
+  /**
+   * Resolves a name to the model name of the tool an MCP server publishes
+   * under exactly that name (`projects.search`), when its model name is a
+   * digest alias that a lookup by plain name cannot otherwise tell apart from
+   * a similar, shortened one. Undefined for any other name.
+   */
+  private exactMcpNameResolver(): (name: string) => string | undefined {
+    const pool = new Set(this.searchableTools(this.currentTools).map((tool) => tool.name));
+    const registries = [...new Set(this.modelMcpServerIds().values())];
+    return (name) => {
+      if (!name || name.includes("__") || pool.has(name)) return undefined;
+      // A shortened alias encodes the server's own spelling, and agents write
+      // `projects.search`, `projects_search` and `projects-search` alike: the
+      // name as written, all underscores, and each single underscore as the
+      // server's dot are tried.
+      const plain = name.replace(/[.-]/g, "_");
+      const spellings = new Set([name, plain]);
+      for (let at = plain.indexOf("_"); at > 0; at = plain.indexOf("_", at + 1))
+        spellings.add(`${plain.slice(0, at)}.${plain.slice(at + 1)}`);
+      for (const spelling of spellings)
+        for (const registryId of registries) {
+          const model = prefixedMcpToolName(registryId, spelling);
+          if (isAliasedMcpToolName(model) && pool.has(model)) return model;
+        }
+      return undefined;
+    };
+  }
+
+  /**
+   * Each of the search's units ({@link searchUnits}) ranked by meaning over
+   * the authorized pool, or undefined (keywords alone) when there is no
+   * meaning ranker or it does not answer in time. The turn's own cancellation
+   * still wins.
+   */
+  private async meaningRankings(
+    pool: readonly Tool[],
+    query: string,
+    signal?: AbortSignal,
+  ): Promise<string[][] | undefined> {
+    if (!this.meaningRanker || !pool.length) return undefined;
+    const units = searchUnits(query);
+    const deadline = AbortSignal.timeout(TOOL_MEANING_POLICY.deadlineMs);
+    const rankings = await this.meaningRanker({
+      queries: units.map((unit) => unit.text),
+      tools: pool,
+      signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+    }).catch(() => undefined);
+    signal?.throwIfAborted();
+    if (!Array.isArray(rankings) || rankings.length !== units.length) return undefined;
+    // Only this pool's tools can be ranked, whatever the ranker returned.
+    const names = new Set(pool.map((tool) => (tool as { name: string }).name));
+    return rankings.map((ranking) =>
+      Array.isArray(ranking) ? ranking.filter((name) => names.has(name)) : [],
+    );
+  }
+
+  private async rankedSearch(
+    rawArguments: unknown,
+    search: {
+      query: string;
+      limit: number;
+      named: readonly string[];
+      /** Tools a family in the query begins, judged before keyword candidates. */
+      near: readonly string[];
+      onlyNames: boolean;
+      strongest: readonly string[];
+      /** Each unit's meaning ranking, when one answered in time. */
+      meaning: readonly (readonly string[])[] | undefined;
+    },
+    setupFor: (chosen: readonly string[]) => Promise<string[]>,
+    signal?: AbortSignal,
+  ): Promise<GenericSearchMarker> {
+    const { query, limit, named, near, onlyNames, strongest, meaning } = search;
+    const clauses = searchClauses(query);
+    const units = searchUnits(query);
+    const keywordRanking = (clause: string, depth: number) =>
+      this.searchIndex!.rank(clause, depth)
+        .filter(isFunctionTool)
+        .map((t) => t.name);
+    // Each request's keyword ranking fused with its sentences' meaning
+    // rankings, when meaning answered: what is loaded without a selector.
+    const fused = meaning
+      ? clauses.map((clause, i) =>
+          fuseRankings([
+            keywordRanking(clause, FUSION_DEPTH),
+            ...units.flatMap((unit, u) => (unit.clause === i ? [meaning[u]!] : [])),
+          ]),
+        )
+      : undefined;
+    // Each sentence's own ranking: where candidates and alternatives come from.
+    const recall = (depth: number) =>
+      interleave(
+        units.map((unit, u) =>
+          meaning
+            ? fuseRankings([keywordRanking(unit.text, FUSION_DEPTH), meaning[u]!])
+            : keywordRanking(unit.text, depth),
+        ),
+      );
+    // Without a selector, the best match for each request is loaded: the top
+    // of its fused ranking, else the best keyword match. When keyword ranking
+    // cannot tell (a tie, or a clause without resource words) the top-ranked
+    // candidate still is, since an empty result hides candidates that fit.
+    const lexical = () =>
+      named.length
+        ? named
+        : fused
+          ? [...new Set(fused.flatMap((ranking) => ranking.slice(0, 1)))]
+          : strongest.length
+            ? strongest
+            : keywordRanking(query, 1);
+    // What a result without a selection shows beside its loaded tools: the
+    // fused rankings' next candidates, else the keyword matches.
+    const unselected = (chosen: readonly string[]): true | string[] =>
+      fused
+        ? recall(FUSION_DEPTH)
+            .filter((name) => !chosen.includes(name))
+            .slice(0, limit)
+        : true;
+    if (onlyNames || !this.decisionModel) {
+      const chosen = lexical();
+      const companions = await setupFor(chosen);
+      return chosen.length || companions.length
+        ? this.selectedSearch(chosen, rawArguments, onlyNames || unselected(chosen), companions)
+        : {
+            version: 2,
+            output: this.genericSearchOutput(rawArguments),
+            tools: [],
+          };
+    }
+    // Wider recall than the model-facing result page, not an execution quota:
+    // tools the query names, the top candidates for each of its requests, and
+    // tools those candidates' own descriptions point to.
+    const pool = this.searchableTools(this.currentTools).filter(isFunctionTool);
+    const byName = new Map(pool.map((tool) => [tool.name, tool]));
+    const depth = Math.max(TOOL_SELECTION_POLICY.candidates, limit);
+    const ranked = recall(depth)
+      .slice(0, depth)
+      .flatMap((name) => byName.get(name) ?? []);
+    const candidates: Tool[] = [
+      ...new Set([...[...named, ...near].flatMap((name) => byName.get(name) ?? []), ...ranked]),
+    ];
+    candidates.push(
+      ...this.toolsNamedByCandidates(pool, candidates, TOOL_SELECTION_POLICY.pointedCandidates),
+    );
+    if (!candidates.length) {
+      const companions = await setupFor([]);
+      return companions.length
+        ? this.selectedSearch([], rawArguments, false, companions)
+        : {
+            version: 2,
+            output: JSON.stringify({
+              tools: [],
+              schemasLoaded: false,
+              ...this.unavailableSources(),
+            }),
+            tools: [],
+          };
+    }
+    signal?.throwIfAborted();
+    let chosen: string[];
+    let alternatives: string[];
+    try {
+      // A selection that has not answered by the deadline falls back to keywords
+      // like any other selector failure; the turn's own cancellation still wins.
+      const deadline = AbortSignal.timeout(TOOL_SELECTION_POLICY.deadlineMs);
+      const published = this.mcpToolNames();
+      const judgments = await this.decisionModel({
+        query,
+        ...(units.length > 1 ? { requests: units.map((unit) => unit.text.trim()) } : {}),
+        candidates: candidates.map((tool) =>
+          decisionCandidate(
+            tool,
+            isAliasedMcpToolName(String(tool.name)) ? published.get(String(tool.name)) : undefined,
+          ),
+        ),
+        ...(this.loadedThisTurn.size ? { loadedEarlier: [...this.loadedThisTurn] } : {}),
+        signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+      });
+      const available = new Set(candidates.filter(isFunctionTool).map((t) => t.name));
+      if (
+        !Array.isArray(judgments) ||
+        judgments.length !== available.size ||
+        judgments.some(
+          (judgment) =>
+            typeof judgment?.name !== "string" ||
+            !available.has(judgment.name) ||
+            typeof judgment.probability !== "number" ||
+            !(judgment.probability >= 0 && judgment.probability <= 1),
+        ) ||
+        new Set(judgments.map((judgment) => judgment.name)).size !== judgments.length
+      )
+        throw new Error("Invalid decision model selection");
+      const selection = selectFromJudgments(judgments);
+      // Named tools are loaded whatever the judgments say; the selector
+      // covers the query's other needs.
+      chosen = [...new Set([...named, ...selection.load])];
+      alternatives = selection.clear
+        ? []
+        : selection.rest
+            .filter((name) => !chosen.includes(name) && !this.shownThisTurn.has(name))
+            .slice(0, TOOL_SELECTION_POLICY.maxAlternatives);
+    } catch {
+      // Cancellation belongs to the owning turn, not the recovery path.
+      signal?.throwIfAborted();
+      const fallbackChosen = lexical();
+      const companions = await setupFor(fallbackChosen);
+      const fallback =
+        fallbackChosen.length || companions.length
+          ? this.selectedSearch(
+              fallbackChosen,
+              rawArguments,
+              unselected(fallbackChosen),
+              companions,
+            )
+          : {
+              version: 2 as const,
+              output: this.genericSearchOutput(rawArguments),
+              tools: [],
+            };
+      return {
+        ...fallback,
+        output: JSON.stringify({
+          ...JSON.parse(fallback.output),
+          fallback: "decision_model_unavailable",
+        }),
+      };
+    }
+    signal?.throwIfAborted();
+    // Everything the selector judged needed loads: `limit` bounds keyword
+    // results and suggestions, not the tools a search asked for.
+    return this.selectedSearch(
+      chosen,
+      rawArguments,
+      alternatives,
+      await setupFor(chosen),
+      MAX_SEARCH_LIMIT,
+    );
+  }
+
+  private selectedSearch(
+    chosen: readonly string[],
+    rawArguments: unknown,
+    /** true: the keyword matches; a list: exactly these; false: none. */
+    alternatives: boolean | readonly string[],
+    companions: readonly string[] = [],
+    /** The most chosen tools that load; the search's own limit unless a selector chose them. */
+    loadLimit?: number,
+  ): GenericSearchMarker {
+    const { limit } = parseSearchArgs(rawArguments);
+    // Resolve again after inference: revoked identities cannot be disclosed.
+    // The existing disclosure byte budgets still apply, but automatic family
+    // helpers are not a decision-model selection and do not enter its result.
+    // Integration setup companions are explicit: they follow the selection and
+    // do not count against its limit.
+    const resolved = this.search({ query: "", names: [...chosen, ...companions], limit }).filter(
+      isFunctionTool,
+    );
+    const selected = [
+      ...resolved.filter((t) => chosen.includes(t.name)).slice(0, loadLimit ?? limit),
+      ...resolved.filter((t) => companions.includes(t.name) && !chosen.includes(t.name)),
+    ];
+    const isSelected = (tool: Tool) =>
+      selected.some((s) => s.name === (tool as { name: string }).name);
+    const suggestions =
+      alternatives === true
+        ? // Loaded tools do not use up the alternatives: up to `limit` others are shown.
+          this.matches({
+            query: parseSearchArgs(rawArguments).query,
+            limit: limit + selected.length,
+          })
+            .filter(isFunctionTool)
+            .filter((t) => !isSelected(t))
+            .slice(0, limit)
+        : alternatives === false
+          ? []
+          : this.search({
+              query: "",
+              names: [...alternatives],
+              limit: alternatives.length,
+            })
+              .filter(isFunctionTool)
+              .filter((t) => alternatives.includes(t.name) && !isSelected(t))
+              .sort((a, b) => alternatives.indexOf(a.name) - alternatives.indexOf(b.name));
+    return {
+      version: 2,
+      output: JSON.stringify({
+        tools: selected.map(toolDescriptor),
+        schemasLoaded: selected.length > 0,
+        unavailable: chosen.filter((name) => !selected.some((t) => t.name === name)),
+        ...this.unavailableSources(),
+        ...(alternatives !== false && (alternatives === true || suggestions.length)
+          ? { suggestions: suggestions.map(toolDescriptor) }
+          : {}),
+      }),
+      tools: structuredClone(
+        selected
+          .map(modelVisibleToolDefinition)
+          .filter((t): t is Record<string, unknown> => t !== null),
+      ),
+    };
   }
 
   private buildListTool(): Tool {
     return agentTool({
       name: TOOL_LIST_NAME,
       description:
-        "Browse currently authorized deferred tools without keyword ranking. Returns compact names/descriptions, not schemas. Follow nextCursor until null; optionally filter by a literal namePrefix. Use tool_search with exact names to load schemas. Missing evidence is not permission to invent facts; exhaust relevant discovery or report the gap.",
+        "Browse currently authorized deferred tools without ranking. Use view:'groups' for a compact directory with counts and examples, then group with an exact returned key to browse its tools. Default view:'tools' returns names and description previews, not schemas. Follow nextCursor until null with the same view and filters. namePrefix is an optional literal tool-name filter. Use tool_search with chosen exact names to load schemas. An empty page grants no new access and is not proof of capability absence.",
       // The SDK's non-strict schema type requires additionalProperties: true,
       // although a closed object with optional fields is valid non-strict JSON Schema.
       // Keep the wire contract closed, as with search/invoke below.
       parameters: {
         type: "object",
         properties: {
+          view: {
+            type: "string",
+            enum: ["tools", "groups"],
+            description:
+              "Default tools; groups lists the available tool groups without loading schemas.",
+          },
+          group: {
+            type: "string",
+            description:
+              "Exact group key returned by view:'groups'; filters only this authorized catalog.",
+          },
           cursor: {
             type: "string",
             maxLength: 512,
-            description: "Exact nextCursor from the previous page with the same namePrefix.",
+            description:
+              "Exact nextCursor from the previous page with the same view, group and namePrefix.",
           },
           namePrefix: {
             type: "string",
@@ -472,15 +1866,76 @@ export class LazyToolRuntime {
         await this.ensurePrepared();
         const args = isRecord(input) ? input : {};
         const prefix = typeof args.namePrefix === "string" ? args.namePrefix : "";
+        const group = typeof args.group === "string" ? args.group : undefined;
+        const serverIds = this.modelMcpServerIds();
         const cursor = typeof args.cursor === "string" ? args.cursor : undefined;
         const limit =
           typeof args.limit === "number" && Number.isFinite(args.limit)
             ? Math.max(1, Math.min(40, Math.floor(args.limit)))
             : 20;
-        const tools = [...new Set(this.searchableTools(this.currentTools))]
+        // Digest aliases sort by their readable name part, so one connection's
+        // tools page alphabetically rather than in digest order.
+        const sortKey = (name: string) =>
+          isAliasedMcpToolName(name)
+            ? `mcp__${name.slice(name.indexOf("__") + 2)}\u0000${name}`
+            : name;
+        const authorizedTools = [...new Set(this.searchableTools(this.currentTools))]
           .filter(isFunctionTool)
-          .filter((tool) => tool.name.startsWith(prefix))
-          .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+          .map((tool) => ({ tool, key: sortKey(tool.name) }))
+          .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+          .map(({ tool }) => tool);
+        // A prefix also matches the name after the server separator, in the
+        // form a server publishes it (`projects.` or `projects_`).
+        const shortPrefix = prefix.includes("__") ? null : prefix.replace(/[^A-Za-z0-9_]/g, "_");
+        const hasPrefix = (name: string) =>
+          name.startsWith(prefix) ||
+          (shortPrefix !== null &&
+            name.includes("__") &&
+            name.slice(name.lastIndexOf("__") + 2).startsWith(shortPrefix));
+        const tools = authorizedTools.filter(
+          (tool) =>
+            hasPrefix(tool.name) &&
+            (group === undefined || toolGroup(tool.name, serverIds) === group),
+        );
+        if (args.view === "groups") {
+          const groups = toolGroups(tools, serverIds);
+          const cursorIndex =
+            cursor === undefined ? -1 : groups.findIndex((entry) => entry.group === cursor);
+          if (cursor !== undefined && cursorIndex === -1)
+            return JSON.stringify({
+              error: "invalid_cursor",
+              message: "Restart listing without a cursor in the current authorized catalog.",
+            });
+          const page: typeof groups = [];
+          let index = cursorIndex + 1;
+          for (; index < groups.length && page.length < limit; index++) {
+            const entry = groups[index]!;
+            if (
+              Buffer.byteLength(
+                JSON.stringify({
+                  groups: [...page, entry],
+                  total: groups.length,
+                  nextCursor: entry.group,
+                }),
+              ) >
+              16 * 1024
+            ) {
+              if (!page.length)
+                return JSON.stringify({
+                  error: "descriptor_too_large",
+                  message: "A tool group exceeds the listing budget.",
+                });
+              break;
+            }
+            page.push(entry);
+          }
+          return JSON.stringify({
+            groups: page,
+            total: groups.length,
+            nextCursor: index < groups.length ? page.at(-1)!.group : null,
+            ...(cursor === undefined ? this.unavailableSources() : {}),
+          });
+        }
         const cursorIndex =
           cursor === undefined ? -1 : tools.findIndex((tool) => tool.name === cursor);
         if (cursor !== undefined && cursorIndex === -1) {
@@ -493,10 +1948,7 @@ export class LazyToolRuntime {
         let index = cursorIndex + 1;
         for (; index < tools.length && descriptors.length < limit; index++) {
           const tool = tools[index]!;
-          const descriptor = {
-            name: tool.name,
-            description: Array.from(tool.description).slice(0, 160).join(""),
-          };
+          const descriptor = toolDescriptor(tool);
           const candidate = {
             tools: [...descriptors, descriptor],
             total: tools.length,
@@ -513,41 +1965,35 @@ export class LazyToolRuntime {
           }
           descriptors.push(descriptor);
         }
-        return JSON.stringify({
+        const result = {
           tools: descriptors,
           total: tools.length,
           nextCursor: index < tools.length ? descriptors.at(-1)!.name : null,
-          ...(prefix && tools.length === 0
-            ? {
-                message:
-                  "No tool names match this literal prefix. Retry tool_list without namePrefix to browse the authorized catalog; tool names can include a server namespace.",
-              }
-            : {}),
-        });
-      },
-    }) as unknown as Tool;
-  }
+          ...(cursor === undefined ? this.unavailableSources() : {}),
+        };
+        if (!prefix || tools.length > 0 || group !== undefined) return JSON.stringify(result);
 
-  private buildNativeSearchTool(): Tool {
-    return toolSearchTool({
-      execution: "client",
-      description: SEARCH_DESCRIPTION,
-      parameters: SEARCH_PARAMETERS as never,
-      execute: (async (args: {
-        agent?: object;
-        availableTools?: Tool[];
-        runContext?: unknown;
-        toolCall?: { arguments?: unknown };
-      }) => {
-        const tools = args.agent
-          ? await this.preparedToolsForAgent(args.agent, args.runContext, args.availableTools ?? [])
-          : (args.availableTools ?? []);
-        // Eager MCP and the always-visible base set are already direct
-        // configured tools on this request. Search may disclose only the
-        // lazy set; returning an eager tool again would create a second
-        // routed identity for one tool.
-        return searchToolPool(this.searchableTools(tools), args.toolCall?.arguments);
-      }) as never,
+        // Preserve literal-prefix pagination. Recovery hints are descriptors
+        // from the same authorized deferred pool, never schemas or new grants.
+        const recovery = {
+          ...result,
+          message:
+            "No tool names match this literal prefix. This does not establish capability absence. Load any suggested exact names with tool_search, or retry tool_list without namePrefix to browse the authorized catalog.",
+          suggestions: [] as { name: string; description: string }[],
+        };
+        for (const candidate of authorizedTools) {
+          if (!candidate.name.includes(prefix)) continue;
+          const suggestion = {
+            name: candidate.name,
+            description: Array.from(candidate.description).slice(0, 160).join(""),
+          };
+          const next = { ...recovery, suggestions: [...recovery.suggestions, suggestion] };
+          if (Buffer.byteLength(JSON.stringify(next)) > 16 * 1024) continue;
+          recovery.suggestions.push(suggestion);
+          if (recovery.suggestions.length >= Math.min(limit, 8)) break;
+        }
+        return JSON.stringify(recovery);
+      },
     }) as unknown as Tool;
   }
 
@@ -557,11 +2003,56 @@ export class LazyToolRuntime {
       description: SEARCH_DESCRIPTION,
       parameters: SEARCH_PARAMETERS as never,
       strict: false,
-      execute: async (input: unknown) => {
+      execute: async (input: unknown, _context: unknown, details) => {
         await this.ensurePrepared();
-        return this.genericSearchOutput(input);
+        const marker = details?.toolCall?.providerData?.[SEARCH_MARKER_KEY] as
+          | GenericSearchMarker
+          | undefined;
+        return marker?.output ?? (await this.prepareSearch(input, details?.signal)).output;
       },
     }) as unknown as Tool;
+  }
+
+  /** Preserve hosted client search and native function loading on native routes. */
+  private buildNativeSearchTool(executionOnly = false): Tool {
+    const search = toolSearchTool({
+      execution: "client",
+      description: NATIVE_SEARCH_DESCRIPTION,
+      parameters: SEARCH_PARAMETERS as never,
+      execute: (async (args: {
+        agent?: object;
+        availableTools?: Tool[];
+        runContext?: unknown;
+        toolCall?: { arguments?: unknown; providerData?: Record<string, unknown> };
+      }) => {
+        const tools = args.agent
+          ? await this.preparedToolsForAgent(args.agent, args.runContext, args.availableTools ?? [])
+          : (args.availableTools ?? []);
+        const pool = this.searchableTools(tools);
+        const marker = args.toolCall?.providerData?.[SEARCH_MARKER_KEY] as
+          | GenericSearchMarker
+          | undefined;
+        if (marker?.version === 2 && marker.tools) {
+          // Selection ran once at the model-response boundary with the owning
+          // request's cancellation signal. Revalidate identities here and let
+          // the SDK serialize the native output from original executable tools.
+          const selected = new Set(marker.tools.map((entry) => entry.name));
+          return marker.tools.flatMap((entry) => {
+            const found = pool.find((tool) => isFunctionTool(tool) && tool.name === entry.name);
+            return found && selected.delete(entry.name) ? [found] : [];
+          });
+        }
+        // An interrupted pre-upgrade native call has no frozen selection. Finish
+        // it through the original executor contract, never rerun completed history.
+        return searchToolPool(pool, args.toolCall?.arguments);
+      }) as never,
+    }) as Tool;
+    if (executionOnly && search.type === "hosted_tool")
+      search.providerData = {
+        ...search.providerData,
+        [INTERNAL_REGISTRATION_TOOL_MARKER_KEY]: true,
+      };
+    return search;
   }
 
   private buildGenericInvokeTool(): Tool {
@@ -601,12 +2092,15 @@ export function lazyToolRuntimeForAgent(agent: object): LazyToolRuntime | undefi
 }
 
 /**
- * Install native OpenAI/Azure or generic progressive disclosure on an agent.
+ * Install provider-contained progressive disclosure on an agent.
  * Deferred schemas stay off the first-request tool block. A remembered raw
  * name binds through resolveMissingFunctionTool after the catalog is ready.
- * Classification is origin, not transport: the always-visible base set and
- * eager MCP tools stay in the first request; everything else is searchable.
- * Generic dispatch adds stable ordinary tool_search/tool_invoke schemas.
+ * Classification is origin, not transport: the always-visible base set, eager
+ * MCP tools, and the first-party harness control tools (goal lifecycle,
+ * command polling, wait_for_input) stay in the first request when listed;
+ * everything else is searchable.
+ * Native routes retain hosted client search; other routes use stable ordinary
+ * search/list/invoke controls. Neither path grows the top-level tool block.
  */
 export function installLazyToolRuntime(
   agent: CloneCapableAgent,
@@ -618,6 +2112,16 @@ export function installLazyToolRuntime(
   modelMcpServerIds?: () => ReadonlyMap<string, string>,
   conditionalRouter = false,
   routerInHistory = false,
+  startToolPreparation?: () => void,
+  pendingMcpServerIds: ReadonlySet<string> = deferredMcpServerIds,
+  firstRequestMcpToolNames?: () => ReadonlySet<string>,
+  decisionModel?: ToolSelector,
+  unavailableMcpServers?: () => ReadonlyMap<string, string>,
+  connectableLookup?: ConnectableIntegrationLookup,
+  connectedAccounts?: () => ReadonlyMap<string, ConnectedToolAccount>,
+  meaningRanker?: ToolMeaningRanker,
+  mcpToolNames?: () => ReadonlyMap<string, string>,
+  pendingPreparationDefers = true,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -628,6 +2132,16 @@ export function installLazyToolRuntime(
     modelMcpServerIds,
     conditionalRouter,
     routerInHistory,
+    startToolPreparation,
+    pendingMcpServerIds,
+    firstRequestMcpToolNames,
+    decisionModel,
+    unavailableMcpServers,
+    connectableLookup,
+    connectedAccounts,
+    meaningRanker,
+    mcpToolNames,
+    pendingPreparationDefers,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
@@ -680,6 +2194,7 @@ function restoredProviderData(providerData: unknown): Record<string, unknown> | 
   const restored = { ...providerData };
   delete restored[DISPATCH_MARKER_KEY];
   delete restored[SEARCH_MARKER_KEY];
+  delete restored[FAMILY_DISCLOSURE_MARKER_KEY];
   return Object.keys(restored).length > 0 ? restored : undefined;
 }
 
@@ -702,15 +2217,23 @@ export function restoreGenericDispatchHistory(input: ModelRequest["input"]): Mod
 
 /** Per-item form used by the run-local memoized wire projector. */
 export function restoreGenericDispatchHistoryItem<T>(candidate: T): T {
-  if (!isRecord(candidate) || candidate.type !== "function_call") return candidate;
+  if (
+    !isRecord(candidate) ||
+    (candidate.type !== "function_call" && candidate.type !== "tool_search_call")
+  )
+    return candidate;
   const providerData = isRecord(candidate.providerData) ? candidate.providerData : undefined;
   const marker = providerData?.[DISPATCH_MARKER_KEY];
   const hasDispatchMarker =
     isRecord(marker) && marker.version === 1 && typeof marker.arguments === "string";
   const searchMarker = providerData?.[SEARCH_MARKER_KEY];
   const hasSearchMarker =
-    isRecord(searchMarker) && searchMarker.version === 1 && typeof searchMarker.output === "string";
-  if (!hasDispatchMarker && !hasSearchMarker) {
+    isRecord(searchMarker) &&
+    (searchMarker.version === 1 || searchMarker.version === 2) &&
+    typeof searchMarker.output === "string";
+  const hasFamilyMarker =
+    providerData !== undefined && FAMILY_DISCLOSURE_MARKER_KEY in providerData;
+  if (!hasDispatchMarker && !hasSearchMarker && !hasFamilyMarker) {
     return candidate;
   }
   const restored = { ...candidate } as Record<string, unknown>;
@@ -747,7 +2270,12 @@ function restoreGenericSearchResults(input: ModelRequest["input"]): ModelRequest
     const marker = isRecord(candidate.providerData)
       ? candidate.providerData[SEARCH_MARKER_KEY]
       : undefined;
-    if (id && isRecord(marker) && marker.version === 1 && typeof marker.output === "string") {
+    if (
+      id &&
+      isRecord(marker) &&
+      (marker.version === 1 || marker.version === 2) &&
+      typeof marker.output === "string"
+    ) {
       disclosures.set(id, marker.output);
     }
   }
@@ -775,28 +2303,35 @@ export function restoreGenericDispatchHistoryItems(
   >;
 }
 
-function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRuntime): unknown[] {
+function transformGenericDispatchCall(
+  candidate: unknown,
+  runtime: LazyToolRuntime,
+  preparedSearch?: GenericSearchMarker,
+): unknown[] {
   if (!isRecord(candidate) || candidate.type !== "function_call") return [candidate];
   if (candidate.name === TOOL_SEARCH_NAME && typeof candidate.arguments === "string") {
     const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
     if (SEARCH_MARKER_KEY in providerData) {
-      throw new Error("Provider function call collided with OpenGeni lazy-search metadata");
+      throw new Error("Provider function call collided with lazy-search metadata");
     }
     return [
       {
         ...candidate,
         providerData: {
           ...providerData,
-          [SEARCH_MARKER_KEY]: {
-            version: 1,
-            output: runtime.genericSearchOutput(candidate.arguments),
-          } satisfies GenericSearchMarker,
+          [SEARCH_MARKER_KEY]:
+            preparedSearch ??
+            ({
+              version: 2,
+              output: runtime.genericSearchOutput(candidate.arguments),
+              tools: structuredClone(runtime.searchDisclosure(candidate.arguments)),
+            } satisfies GenericSearchMarker),
         },
       },
     ];
   }
   if (candidate.name !== TOOL_INVOKE_NAME || typeof candidate.arguments !== "string") {
-    return [candidate];
+    return [restoreDirectDeferredCallArgumentTypes(candidate, runtime)];
   }
   const dispatch = parseJsonObject(candidate.arguments);
   const name = dispatch && typeof dispatch.name === "string" ? dispatch.name : null;
@@ -807,7 +2342,7 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
   }
   const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
   if (DISPATCH_MARKER_KEY in providerData) {
-    throw new Error("Provider function call collided with OpenGeni lazy-dispatch metadata");
+    throw new Error("Provider function call collided with lazy-dispatch metadata");
   }
   return [
     {
@@ -825,6 +2360,25 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
   ];
 }
 
+/**
+ * A direct call by exact name to a search-disclosed tool reaches the provider
+ * without that tool's schema, so its scalar, array and object values can
+ * arrive as strings. Restore the declared types before Runner dispatches it.
+ */
+export function restoreDirectDeferredCallArgumentTypes(
+  candidate: Record<string, unknown>,
+  runtime: LazyToolRuntime,
+): Record<string, unknown> {
+  if (typeof candidate.name !== "string" || typeof candidate.arguments !== "string") {
+    return candidate;
+  }
+  if (!runtime.isDeferredFunctionTool(candidate.name)) return candidate;
+  const tool = runtime.resolveFunctionTool(candidate.name);
+  if (!tool || !isFunctionTool(tool)) return candidate;
+  const restored = restoreDeferredToolArgumentTypes(candidate.arguments, tool.parameters);
+  return restored === null ? candidate : { ...candidate, arguments: restored };
+}
+
 export function transformGenericDispatchResponse(
   response: ModelResponse,
   runtime: LazyToolRuntime,
@@ -837,15 +2391,320 @@ export function transformGenericDispatchResponse(
   };
 }
 
+/** Apply the transport's response rewrites to one model output item. */
+async function transformResponseItem(
+  received: unknown,
+  runtime: LazyToolRuntime,
+  signal?: AbortSignal,
+): Promise<unknown[]> {
+  const item = await withProviderValidCallName(received, runtime);
+  if (isRecord(item) && item.type === "tool_search_call") {
+    const providerData = isRecord(item.providerData) ? item.providerData : {};
+    if ((item.execution ?? providerData.execution) === "client") {
+      if (SEARCH_MARKER_KEY in providerData)
+        throw new Error("Provider tool-search call collided with lazy-search metadata");
+      await runtime.ensurePrepared();
+      return [
+        {
+          ...item,
+          providerData: {
+            ...providerData,
+            [SEARCH_MARKER_KEY]: await runtime.prepareSearch(item.arguments, signal),
+          },
+        },
+      ];
+    }
+  }
+  if (runtime.transport !== "generic_dispatch") {
+    return [
+      withFamilyDisclosure(
+        isRecord(item) && item.type === "function_call"
+          ? restoreDirectDeferredCallArgumentTypes(item, runtime)
+          : item,
+        runtime,
+      ),
+    ];
+  }
+  const search =
+    isRecord(item) &&
+    item.type === "function_call" &&
+    item.name === TOOL_SEARCH_NAME &&
+    typeof item.arguments === "string";
+  const items = transformGenericDispatchCall(
+    item,
+    runtime,
+    search ? await runtime.prepareSearch(item.arguments, signal) : undefined,
+  );
+  return items.map((candidate) => withFamilyDisclosure(candidate, runtime));
+}
+
+/**
+ * A model-written call whose name a provider would reject (a published
+ * `server.tool` form) named, once and before it is stored, as the authorized
+ * tool it denotes or by its stable alias, so the history replays valid on
+ * every later request (see provider-tool-names.ts). Deferred tools are only
+ * in the catalog once preparation ran; after a preparation failure the
+ * catalog is partial, so the call keeps an alias rather than a guess.
+ */
+async function withProviderValidCallName(
+  item: unknown,
+  runtime: LazyToolRuntime,
+): Promise<unknown> {
+  if (!isRecord(item) || item.type !== "function_call" || typeof item.name !== "string")
+    return item;
+  if (isProviderToolName(item.name)) return item;
+  let known: string[] = [];
+  try {
+    await runtime.ensurePrepared();
+    known = runtime.knownFunctionToolNames();
+  } catch {
+    known = [];
+  }
+  const name = providerValidCallName(item.name, known);
+  return name === item.name ? item : { ...item, name };
+}
+
+async function transformResponseOutput(
+  output: ModelResponse["output"],
+  runtime: LazyToolRuntime,
+  signal?: AbortSignal,
+): Promise<ModelResponse["output"]> {
+  const transformed = (
+    await Promise.all(output.map((item) => transformResponseItem(item, runtime, signal)))
+  ).flat();
+  const unchanged =
+    transformed.length === output.length &&
+    transformed.every((item, index) => item === output[index]);
+  return unchanged ? output : (transformed as ModelResponse["output"]);
+}
+
+/**
+ * Freeze the family an entry-tool call discloses onto the call. The provider
+ * sees the disclosure after that step's results (see
+ * expandInteractionFamilyDisclosures), so the model's next step can observe
+ * and act without first searching for the tools.
+ */
+function withFamilyDisclosure(candidate: unknown, runtime: LazyToolRuntime): unknown {
+  if (!isRecord(candidate) || candidate.type !== "function_call") return candidate;
+  if (typeof candidate.name !== "string" || !isInteractionEntryToolName(candidate.name)) {
+    return candidate;
+  }
+  const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
+  if (FAMILY_DISCLOSURE_MARKER_KEY in providerData) return candidate;
+  const tools = runtime.familyDisclosure(candidate.name);
+  if (tools.length === 0) return candidate;
+  return {
+    ...candidate,
+    providerData: {
+      ...providerData,
+      [FAMILY_DISCLOSURE_MARKER_KEY]: {
+        version: 1,
+        tools,
+        viaToolInvoke: runtime.transport === "generic_dispatch",
+      } satisfies FamilyDisclosureMarker,
+    },
+  };
+}
+
+function familyDisclosure(
+  candidate: Record<string, unknown>,
+): { tools: Record<string, unknown>[]; viaToolInvoke: boolean } | null {
+  const providerData = isRecord(candidate.providerData) ? candidate.providerData : null;
+  const marker = providerData?.[FAMILY_DISCLOSURE_MARKER_KEY];
+  if (!isRecord(marker) || marker.version !== 1 || !Array.isArray(marker.tools)) return null;
+  const tools = marker.tools.filter(
+    (tool): tool is Record<string, unknown> => isRecord(tool) && typeof tool.name === "string",
+  );
+  return tools.length > 0 ? { tools, viaToolInvoke: marker.viaToolInvoke === true } : null;
+}
+
+function disclosedToolNames(tools: unknown): string[] {
+  if (!Array.isArray(tools)) return [];
+  return tools.flatMap((tool) =>
+    isRecord(tool) && typeof tool.name === "string" ? [tool.name] : [],
+  );
+}
+
+function genericSearchOutputNames(output: string): string[] {
+  const parsed = parseJsonObject(output);
+  // Legacy search results carried definitions. Compact candidate descriptors
+  // are not disclosures and must never suppress a later actual schema load.
+  return parsed && parsed.schemasLoaded === undefined ? disclosedToolNames(parsed.tools) : [];
+}
+
+/** Items that answer a call of the model's previous step. */
+const STEP_RESULT_ITEM_TYPES = new Set([
+  "function_call_result",
+  "computer_call_result",
+  "shell_call_output",
+  "apply_patch_call_output",
+  "tool_search_output",
+]);
+
+/**
+ * Declare the tools an entry call (browser_open, computer_open) made available
+ * as one tool-disclosure item placed after that step's results, where a
+ * developer message would go. Each provider projection renders it in its own
+ * standard form (see projectHistoryForProvider). Tools the history already
+ * disclosed are not repeated. The item depends only on earlier items, so every
+ * later request reproduces the identical prefix.
+ */
+export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
+  const pending = new Map<string, { tools: Record<string, unknown>[]; viaToolInvoke: boolean }>();
+  const disclosed = new Set<string>();
+  // Native search results cannot carry text, so a native search's notice (see
+  // GenericSearchMarker.notice) follows that step's results as a developer message.
+  const pendingNotices = new Map<string, string>();
+  let ready: Record<string, unknown>[] = [];
+  let readyNotices: string[] = [];
+  let readyViaToolInvoke = false;
+  let readyAfter: object | null = null;
+  let noticeAfter: object | null = null;
+  let expanded = null as T[] | null;
+  const flush = (index: number) => {
+    if (readyAfter && ready.length > 0) {
+      expanded ??= input.slice(0, index);
+      expanded.push(cachedToolDisclosureItem(readyAfter, ready, readyViaToolInvoke) as T);
+    }
+    if (noticeAfter && readyNotices.length > 0) {
+      expanded ??= input.slice(0, index);
+      expanded.push(cachedNoticeItem(noticeAfter, readyNotices.join("\n")) as T);
+    }
+    ready = [];
+    readyNotices = [];
+    readyViaToolInvoke = false;
+    readyAfter = null;
+    noticeAfter = null;
+  };
+  for (let index = 0; index < input.length; index += 1) {
+    const original = input[index]!;
+    const candidate: unknown = original;
+    const result = isRecord(candidate) && STEP_RESULT_ITEM_TYPES.has(String(candidate.type));
+    if (!result) flush(index);
+    expanded?.push(original);
+    if (!isRecord(candidate)) continue;
+    if (candidate.type === "tool_search_call") {
+      const providerData = isRecord(candidate.providerData) ? candidate.providerData : null;
+      const searchMarker = providerData?.[SEARCH_MARKER_KEY];
+      const id = callId(candidate);
+      if (id && isRecord(searchMarker) && typeof searchMarker.notice === "string")
+        pendingNotices.set(id, searchMarker.notice);
+      continue;
+    }
+    if (candidate.type === "tool_search_output") {
+      for (const name of disclosedToolNames(candidate.tools)) disclosed.add(name);
+      const id = callId(candidate);
+      const notice = id ? pendingNotices.get(id) : undefined;
+      if (id && notice !== undefined) {
+        pendingNotices.delete(id);
+        readyNotices.push(notice);
+        noticeAfter = candidate;
+      }
+      continue;
+    }
+    if (candidate.type === "function_call") {
+      const providerData = isRecord(candidate.providerData) ? candidate.providerData : null;
+      const searchMarker = providerData?.[SEARCH_MARKER_KEY];
+      if (isRecord(searchMarker) && typeof searchMarker.output === "string") {
+        if (searchMarker.version === 1) {
+          for (const name of genericSearchOutputNames(searchMarker.output)) disclosed.add(name);
+        } else if (searchMarker.version === 2 && Array.isArray(searchMarker.tools)) {
+          const id = callId(candidate);
+          if (id)
+            pending.set(id, { tools: searchMarker.tools.filter(isRecord), viaToolInvoke: true });
+        }
+      }
+      const id = callId(candidate);
+      const disclosure = familyDisclosure(candidate);
+      if (id && disclosure) pending.set(id, disclosure);
+      continue;
+    }
+    if (candidate.type !== "function_call_result") continue;
+    if (candidate.name === TOOL_SEARCH_NAME && typeof candidate.output === "string") {
+      for (const name of genericSearchOutputNames(candidate.output)) disclosed.add(name);
+    }
+    const id = callId(candidate);
+    const disclosure = id ? pending.get(id) : undefined;
+    if (!id || !disclosure) continue;
+    pending.delete(id);
+    for (const tool of disclosure.tools) {
+      const name = String(tool.name);
+      if (disclosed.has(name)) continue;
+      disclosed.add(name);
+      ready.push(tool);
+      readyViaToolInvoke ||= disclosure.viaToolInvoke;
+    }
+    readyAfter = candidate;
+  }
+  flush(input.length);
+  return expanded ?? input;
+}
+
+/**
+ * The SDK reuses item identities between requests. Returning the same item for
+ * the same step keeps later identity-memoized projections and their
+ * append-only prefix reuse effective.
+ */
+const toolDisclosureItemCache = new WeakMap<
+  object,
+  { key: string; item: Record<string, unknown> }
+>();
+
+function cachedToolDisclosureItem(
+  after: object,
+  tools: Record<string, unknown>[],
+  viaToolInvoke: boolean,
+): Record<string, unknown> {
+  const key = `${viaToolInvoke}\u0000${tools.map((tool) => String(tool.name)).join("\u0000")}`;
+  const cached = toolDisclosureItemCache.get(after);
+  if (cached?.key === key) return cached.item;
+  const item = toolDisclosureItem(tools, { viaToolInvoke });
+  toolDisclosureItemCache.set(after, { key, item });
+  return item;
+}
+
+const noticeItemCache = new WeakMap<object, { key: string; item: Record<string, unknown> }>();
+
+/** A plain developer message after a native search result, identical on every replay. */
+function cachedNoticeItem(after: object, content: string): Record<string, unknown> {
+  const cached = noticeItemCache.get(after);
+  if (cached?.key === content) return cached.item;
+  const item = { type: "message", role: "developer", content };
+  noticeItemCache.set(after, { key: content, item });
+  return item;
+}
+
 function prepareLazyToolRequest(request: ModelRequest, runtime: LazyToolRuntime): ModelRequest {
   const input = restoreGenericSearchResults(request.input);
   return {
     ...request,
-    // Historical generic-dispatch calls must be restored even after switching
-    // the current turn to native OpenAI search.
+    // Restore the exact recorded dispatcher transcript on every provider route.
     input: restoreGenericDispatchHistory(input),
     tools: request.tools.filter((tool) => !runtime.shouldHideSerializedTool(tool)),
   };
+}
+
+/** Whether a request starts its turn: nothing but instructions after the last user message. */
+function startsTurn(input: ModelRequest["input"]): boolean {
+  if (typeof input === "string") return true;
+  const items: unknown[] = input;
+  let lastUser = -1;
+  items.forEach((item, index) => {
+    if (isRecord(item) && item.role === "user") lastUser = index;
+  });
+  return (
+    lastUser >= 0 &&
+    items
+      .slice(lastUser + 1)
+      .every((item) => isRecord(item) && (item.role === "developer" || item.role === "system"))
+  );
+}
+
+/** Whether the history already holds this session's opening tool load. */
+function holdsOpeningToolLoad(input: ModelRequest["input"]): boolean {
+  if (typeof input === "string") return false;
+  const items: unknown[] = input;
+  return items.some((item) => isRecord(item) && callId(item) === OPENING_TOOL_LOAD_CALL_ID);
 }
 
 class LazyToolModel implements Model {
@@ -855,39 +2714,67 @@ class LazyToolModel implements Model {
   ) {}
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    await beforeModelRequest();
+    const opening = await this.openingToolLoad(request);
+    if (opening) return opening;
+    await beforeModelRequest("model_entry");
     const prepared = prepareLazyToolRequest(request, this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     const response = await this.inner.getResponse(prepared);
+    this.runtime.startPreparation();
     if (responseRequiresToolPreparation(response, this.runtime)) {
       await this.runtime.ensurePrepared();
     }
-    return this.runtime.transport === "generic_dispatch"
-      ? transformGenericDispatchResponse(response, this.runtime)
-      : response;
+    return {
+      ...response,
+      output: await transformResponseOutput(response.output, this.runtime, request.signal),
+    };
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
-    await beforeModelRequest();
+    const opening = await this.openingToolLoad(request);
+    if (opening) {
+      yield {
+        type: "response_done",
+        response: {
+          id: "opening_tools",
+          usage: { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          output: opening.output,
+          providerData: opening.providerData,
+        },
+      } as StreamEvent;
+      return;
+    }
+    await beforeModelRequest("model_entry");
     const prepared = prepareLazyToolRequest(request, this.runtime);
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
-    for await (const event of this.inner.getStreamedResponse(prepared)) {
+    let responseStartedPreparation = false;
+    for await (const event of streamPreemptibleModelRequest(prepared, (preemptible) =>
+      this.inner.getStreamedResponse(preemptible),
+    )) {
+      // Some transports synthesize response_started before network I/O. A
+      // substantive response is the provider-neutral fallback, not that marker.
+      if (!responseStartedPreparation && event.type !== "response_started") {
+        responseStartedPreparation = true;
+        this.runtime.startPreparation();
+      }
       if (event.type === "response_done") {
         if (responseRequiresToolPreparation(event.response, this.runtime)) {
           await this.runtime.ensurePrepared();
         }
       }
       const delivered =
-        this.runtime.transport === "generic_dispatch" && event.type === "response_done"
+        event.type === "response_done"
           ? ({
               ...event,
               response: {
                 ...event.response,
-                output: event.response.output.flatMap((item) =>
-                  transformGenericDispatchCall(item, this.runtime),
-                ) as typeof event.response.output,
+                output: (await transformResponseOutput(
+                  event.response.output as ModelResponse["output"],
+                  this.runtime,
+                  request.signal,
+                )) as typeof event.response.output,
               },
             } as StreamEvent)
           : event;
@@ -902,6 +2789,19 @@ class LazyToolModel implements Model {
       ...args,
       request: prepareLazyToolRequest(args.request, this.runtime),
     });
+  }
+
+  /** The local opening tool load, already through the ordinary search transform. */
+  private async openingToolLoad(request: ModelRequest): Promise<ModelResponse | null> {
+    if (!this.runtime.hasOpeningToolLoad()) return null;
+    const opening = await this.runtime.openingToolLoad(
+      prepareLazyToolRequest(request, this.runtime),
+    );
+    if (!opening) return null;
+    return {
+      ...opening,
+      output: await transformResponseOutput(opening.output, this.runtime, request.signal),
+    };
   }
 }
 

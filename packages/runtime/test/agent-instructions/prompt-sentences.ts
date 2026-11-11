@@ -31,7 +31,9 @@ export const ALL_RESOURCES: AgentPromptResources = {
   connectedMachine: true,
   repositories: true,
   gitCredentials: true,
-  attachments: true,
+  secretReferences: true,
+  personalGitHub: true,
+  commandCompletionDelivery: true,
   workspaceEnvironment: {
     name: "prod",
     description: "Use DEPLOY_KEY for deploys.",

@@ -1,0 +1,358 @@
+import { describe, expect, test } from "bun:test";
+import { InteractionError } from "@opengeni/contracts";
+import {
+  createObservability,
+  ERROR_CAUSE_MESSAGE_MAX_BYTES,
+  errorCauseAttributes,
+  errorCauseMessage,
+  PUBLIC_INTERACTION_ERROR_CODES,
+} from "../src";
+
+const settings = {
+  serviceName: "opengeni",
+  environment: "test",
+  deploymentRevision: "revision-test",
+  observabilityStructuredLogs: true,
+  observabilityMetricsEnabled: true,
+  observabilityOtlpHeaders: "",
+};
+
+class BrowserControlRequestError extends Error {
+  readonly name = "BrowserControlRequestError";
+  constructor(
+    readonly status: number,
+    readonly error: { code: string; message: string; retryable: boolean },
+    readonly diagnostic: unknown = null,
+  ) {
+    super(error.message);
+  }
+}
+
+class SelfhostedControlError extends Error {
+  readonly name = "SelfhostedControlError";
+  constructor(readonly code: number) {
+    super("agent refused /private/path/secret");
+  }
+}
+
+class HTTPException extends Error {
+  constructor(
+    readonly status: number,
+    options: { message: string; cause: unknown },
+  ) {
+    super(options.message, { cause: options.cause });
+  }
+}
+
+function capture(run: (obs: ReturnType<typeof createObservability>) => void): string[] {
+  const observed: string[] = [];
+  const warn = console.warn;
+  const error = console.error;
+  console.warn = (message?: unknown) => observed.push(String(message));
+  console.error = (message?: unknown) => observed.push(String(message));
+  try {
+    run(createObservability(settings, { component: "api", now: () => 1 }));
+  } finally {
+    console.warn = warn;
+    console.error = error;
+  }
+  return observed;
+}
+
+describe("error cause classification", () => {
+  test("names the controller refusal underneath a route's 500 wrapper", () => {
+    const refusal = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "working copy /home/user/profile is unavailable",
+      retryable: false,
+    });
+    const wrapped = new HTTPException(500, {
+      message: "BrowserSession request failed",
+      cause: refusal,
+    });
+    expect(errorCauseAttributes(wrapped)).toEqual({
+      causeName: "BrowserControlRequestError",
+      causeCode: "resource_unavailable",
+      causeStatus: 503,
+    });
+  });
+
+  test("keeps only the agent's enum number for a connected-machine failure", () => {
+    expect(errorCauseAttributes(new SelfhostedControlError(2))).toEqual({
+      causeName: "SelfhostedControlError",
+      causeAgentCode: 2,
+    });
+  });
+
+  test("keeps a SQLSTATE but never the database message", () => {
+    const error = Object.assign(new Error("relation secret_table denied"), {
+      name: "PostgresError",
+      code: "42501",
+    });
+    expect(errorCauseAttributes(error)).toEqual({
+      causeName: "PostgresError",
+      causeSqlState: "42501",
+    });
+  });
+
+  test("an unreviewed class or code contributes nothing", () => {
+    const sentinel = "SECRET_SENTINEL_9d1";
+    const Secret = class SECRET_SENTINEL_9d1 extends Error {};
+    expect(errorCauseAttributes(Object.assign(new Secret(sentinel), { code: sentinel }))).toEqual(
+      {},
+    );
+    const odd = new BrowserControlRequestError(700, {
+      code: sentinel,
+      message: sentinel,
+      retryable: false,
+    });
+    expect(errorCauseAttributes(odd)).toEqual({ causeName: "BrowserControlRequestError" });
+    expect(errorCauseAttributes("plain string")).toEqual({});
+  });
+
+  test("the reviewed controller codes are exactly the contract's closed codes", () => {
+    expect([...PUBLIC_INTERACTION_ERROR_CODES].sort()).toEqual(
+      [...InteractionError.shape.code.options].sort(),
+    );
+  });
+
+  test("Channel-A and HTTP failure logs carry the reviewed cause and the browser operation", () => {
+    const sentinel = "DIAGNOSTIC_VALUE_SENTINEL_77aa";
+    const lines = capture((obs) => {
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        errorCode: "sandbox_channel_a_operation_failed",
+        origin: "api",
+        op: "browser.resume",
+        reason: "unexpected",
+        outcome: "failed",
+        causeName: "BrowserControlRequestError",
+        causeCode: "resource_unavailable",
+        causeStatus: 503,
+      });
+      obs.error("HTTP request failed", {
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        origin: "api",
+        method: "POST",
+        route: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume",
+        causeName: "SelfhostedControlError",
+        causeAgentCode: 2,
+      });
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        causeName: sentinel,
+        causeCode: sentinel,
+        causeAgentCode: 4096,
+        causeStatus: Number.NaN,
+        causeSqlState: sentinel,
+      });
+    });
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      op: "browser.resume",
+      reason: "unexpected",
+      causeName: "BrowserControlRequestError",
+      causeCode: "resource_unavailable",
+      causeStatus: 503,
+    });
+    expect(JSON.parse(lines[1]!)).toMatchObject({
+      causeName: "SelfhostedControlError",
+      causeAgentCode: 2,
+    });
+    expect(lines[2]).not.toContain(sentinel);
+    for (const key of ["causeName", "causeCode", "causeAgentCode", "causeStatus", "causeSqlState"])
+      expect(JSON.parse(lines[2]!)).not.toHaveProperty(key);
+  });
+
+  test("a driver failure says which driver class, function and message template failed", () => {
+    const title = "Quarterly salary review — Inbox";
+    const failure = new BrowserControlRequestError(
+      500,
+      {
+        code: "driver_failed",
+        message: `CUA get_window_state did not establish completion: window "${title}" is hidden`,
+        retryable: false,
+      },
+      { errorClass: "ComputerBackendError", frame: "CuaComputerBackend.observe" },
+    );
+    const attributes = errorCauseAttributes(
+      new HTTPException(500, { message: "x", cause: failure }),
+    );
+    expect(attributes).toEqual({
+      causeName: "BrowserControlRequestError",
+      causeCode: "driver_failed",
+      causeStatus: 500,
+      causeDriverClass: "ComputerBackendError",
+      causeDriverFrame: "CuaComputerBackend.observe",
+      causeDriverMessage: "CUA get_window_state did not establish completion: [redacted]",
+    });
+    const lines = capture((obs) => {
+      obs.error("HTTP request failed", {
+        errorClass: "HttpOperationError",
+        origin: "api",
+        ...attributes,
+      });
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        causeName: "BrowserControlRequestError",
+        causeCode: "driver_failed",
+        causeDriverClass: "has spaces",
+        causeDriverFrame: "/Users/user/secret",
+        causeDriverMessage: `window "${title}" vanished`,
+      });
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        causeName: "BrowserControlRequestError",
+        causeCode: "timeout",
+        causeDriverClass: "ComputerBackendError",
+        causeDriverMessage: "anything",
+      });
+    });
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      causeDriverClass: "ComputerBackendError",
+      causeDriverFrame: "CuaComputerBackend.observe",
+      causeDriverMessage: "CUA get_window_state did not establish completion: [redacted]",
+    });
+    expect(lines.join("\n")).not.toContain("salary");
+    const forged = JSON.parse(lines[1]!);
+    expect(forged).not.toHaveProperty("causeDriverClass");
+    expect(forged).not.toHaveProperty("causeDriverFrame");
+    expect(forged.causeDriverMessage).toBe("window [redacted] vanished");
+    for (const key of ["causeDriverClass", "causeDriverMessage"])
+      expect(JSON.parse(lines[2]!)).not.toHaveProperty(key);
+  });
+
+  test("an older controller's driver failure still logs its redacted message", () => {
+    const failure = new BrowserControlRequestError(500, {
+      code: "driver_failed",
+      message: "interaction controller request failed",
+      retryable: false,
+    });
+    expect(errorCauseAttributes(failure)).toEqual({
+      causeName: "BrowserControlRequestError",
+      causeCode: "driver_failed",
+      causeStatus: 500,
+      causeDriverMessage: "interaction controller request failed",
+    });
+  });
+
+  test("a read the controller gave up retrying keeps the driver's class and frame", () => {
+    const failure = new BrowserControlRequestError(
+      503,
+      { code: "resource_unavailable", message: "browser observation unavailable", retryable: true },
+      { errorClass: "Error", frame: "AgentBrowserDriver.refreshAccessibility" },
+    );
+    expect(errorCauseAttributes(new HTTPException(503, { message: "x", cause: failure }))).toEqual({
+      causeName: "BrowserControlRequestError",
+      causeCode: "resource_unavailable",
+      causeStatus: 503,
+      causeDriverClass: "Error",
+      causeDriverFrame: "AgentBrowserDriver.refreshAccessibility",
+      causeDriverMessage: "browser observation unavailable",
+    });
+    // Without a diagnostic, nothing about a driver is claimed.
+    const plain = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "browser observation unavailable",
+      retryable: true,
+    });
+    expect(errorCauseAttributes(plain)).toEqual({
+      causeName: "BrowserControlRequestError",
+      causeCode: "resource_unavailable",
+      causeStatus: 503,
+    });
+    const lines = capture((obs) => {
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        causeName: "BrowserControlRequestError",
+        causeCode: "resource_unavailable",
+        causeDriverClass: "Error",
+        causeDriverFrame: "AgentBrowserDriver.refreshAccessibility",
+        causeDriverMessage: "browser observation unavailable",
+      });
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        causeName: "BrowserControlRequestError",
+        causeCode: "resource_unavailable",
+        causeDriverMessage: "anything",
+      });
+    });
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      causeDriverClass: "Error",
+      causeDriverFrame: "AgentBrowserDriver.refreshAccessibility",
+      causeDriverMessage: "browser observation unavailable",
+    });
+    expect(JSON.parse(lines[1]!)).not.toHaveProperty("causeDriverMessage");
+  });
+});
+
+class DrizzleQueryError extends Error {
+  readonly name = "DrizzleQueryError";
+  constructor(query: string, params: unknown[], cause: Error) {
+    super(`Failed query: ${query}\nparams: ${params.join(",")}`, { cause });
+  }
+}
+
+describe("unclassified internal error messages", () => {
+  test("are the first real cause's message, scrubbed and bounded", () => {
+    const cause = new Error("Insights quantity exceeds the exact non-negative wire range");
+    expect(errorCauseMessage(new HTTPException(500, { message: "wrapped", cause }))).toBe(
+      "Insights quantity exceeds the exact non-negative wire range",
+    );
+    expect(errorCauseMessage(new Error("refused token=SECRET_CANARY_VALUE at /v1/x?key=1"))).toBe(
+      "refused token=[redacted] at /v1/x?key=1",
+    );
+    expect(errorCauseMessage(new Error("  \n "))).toBeUndefined();
+    expect(errorCauseMessage({ message: 42 })).toBeUndefined();
+    expect(errorCauseMessage("not an error")).toBeUndefined();
+    const long = errorCauseMessage(new Error("é".repeat(5_000)))!;
+    expect(new TextEncoder().encode(long).byteLength).toBeLessThanOrEqual(
+      ERROR_CAUSE_MESSAGE_MAX_BYTES,
+    );
+  });
+
+  test("use a query error's database cause, never its SQL or parameters", () => {
+    const database = Object.assign(new Error('relation "missing" does not exist'), {
+      name: "PostgresError",
+    });
+    const error = new DrizzleQueryError("select $1", ["SECRET_PARAMETER"], database);
+    expect(errorCauseMessage(error)).toBe('relation "missing" does not exist');
+    expect(errorCauseMessage(new DrizzleQueryError("select 1", [], null as never))).toBeUndefined();
+  });
+
+  test("reach only an internal_error HTTP log line, as an exact projection", () => {
+    const base = {
+      errorClass: "HttpOperationError",
+      origin: "api",
+      method: "GET",
+      route: "/v1/workspaces/:workspaceId/insights/usage",
+    };
+    const lines = capture((obs) => {
+      obs.error("HTTP request failed", {
+        ...base,
+        errorCode: "internal_error",
+        causeMessage: "Insights quantity exceeds the exact non-negative wire range",
+      });
+      obs.error("HTTP request failed", {
+        ...base,
+        errorCode: "internal_error",
+        causeMessage: "password=SECRET_CANARY_VALUE",
+      });
+      obs.error("HTTP request failed", {
+        ...base,
+        errorCode: "service_unavailable",
+        causeMessage: "database is down",
+      });
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        errorCode: "internal_error",
+        causeMessage: "anything",
+      });
+    });
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      causeMessage: "Insights quantity exceeds the exact non-negative wire range",
+    });
+    expect(lines[1]).not.toContain("SECRET_CANARY_VALUE");
+    for (const line of lines.slice(1)) expect(JSON.parse(line)).not.toHaveProperty("causeMessage");
+  });
+});

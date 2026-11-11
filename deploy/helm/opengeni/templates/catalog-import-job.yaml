@@ -1,4 +1,5 @@
 {{- if and .Values.catalogImport.enabled .Values.api.enabled }}
+{{- $settingsScope := dict "root" . "component" "catalog-import" }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -39,11 +40,11 @@ spec:
               {{- if .Values.catalogImport.skipLogos }} --skip-logos{{- end }}
           envFrom:
             - configMapRef:
-                name: {{ include "opengeni.fullname" . }}-config
+                name: {{ include "opengeni.jobConfigName" $settingsScope }}
             # Later envFrom sources win duplicate keys. Keep the runtime Secret
             # authoritative for protected provider/model overrides.
             - secretRef:
-                name: {{ include "opengeni.secretName" . }}
+                name: {{ include "opengeni.jobRuntimeSecretName" $settingsScope }}
           env:
             # Global catalog/import-batch tables are intentionally unavailable
             # to the restricted runtime role. Keep this owner credential scoped
@@ -51,7 +52,7 @@ spec:
             - name: OPENGENI_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "opengeni.migrationSecretName" . }}
+                  name: {{ include "opengeni.jobMigrationSecretName" $settingsScope }}
                   key: OPENGENI_MIGRATIONS_DATABASE_URL
             {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
             {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStoragePublicEndpoint" .) "includeDatabaseUrl" false) | nindent 12 }}

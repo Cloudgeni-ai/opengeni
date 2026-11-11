@@ -1,4 +1,14 @@
 export type ConnectOwnership = "personal" | "workspace";
+/** Non-secret endpoint and header mapping; values enter only credential submission. */
+export type PreparedMcpSetup = {
+  name: string;
+  endpointUrl: string;
+  headers: Array<
+    | { name: string; value: string }
+    | { name: string; secret: string; prefix?: string | undefined; suffix?: string | undefined }
+  >;
+  secretFields: Array<{ id: string; label: string }>;
+};
 export type ConnectProvider = {
   id: string;
   label: string;
@@ -26,7 +36,12 @@ export type ConnectInstallationTarget = {
   expectedInstanceVersion?: number;
 };
 export type ConnectNextAction =
-  | { type: "authorize"; url: string }
+  | {
+      type: "authorize";
+      url: string;
+      /** Where the person's organization approves the app once for everyone (Microsoft work accounts). */
+      organizationApprovalUrl?: string;
+    }
   | {
       type: "credentials";
       fields: Array<{
@@ -70,6 +85,10 @@ export type ConnectAttempt = {
   expiresAt: string;
   account?: ConnectAccount;
   installationTarget?: ConnectInstallationTarget;
+  mcpSetup?: PreparedMcpSetup;
+  mcpCapabilityId?: string;
+  /** Additional provider access this reconnect asks for. */
+  requestedScopes?: string[];
   source?:
     | { kind: "definition"; definitionId: string }
     | { kind: "openapi" | "auto"; url: string; baseUrl?: string }
@@ -90,15 +109,25 @@ export interface ConnectTransport {
   catalog(workspaceId: string, options?: ConnectCallOptions): Promise<ConnectProvider[]>;
   accounts(workspaceId: string, options?: ConnectCallOptions): Promise<ConnectAccount[]>;
   pending(workspaceId: string, options?: ConnectCallOptions): Promise<ConnectAttempt[]>;
+  /**
+   * Finish the caller's built-in integration setups that saved an account but
+   * never added its tools (the app closed before the last step). Returns the
+   * setups it completed. Optional for hosts without this route.
+   */
+  finishUnfinished?(workspaceId: string, options?: ConnectCallOptions): Promise<ConnectAttempt[]>;
   begin(
     workspaceId: string,
     input: {
       providerId: string;
       ownership: ConnectOwnership;
       returnUrl: string;
+      finishInPopup?: true;
       idempotencyKey: string;
       reconnectAccountId?: string;
+      /** Additional provider access to ask for; only with `reconnectAccountId`. */
+      requestedScopes?: string[];
       installationTarget?: ConnectInstallationTarget;
+      mcpSetup?: PreparedMcpSetup;
     },
     options?: ConnectCallOptions,
   ): Promise<ConnectAttempt>;

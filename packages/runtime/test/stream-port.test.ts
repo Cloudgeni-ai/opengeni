@@ -165,7 +165,7 @@ describe("exposeStreamPort — coherent {url,token,expiresAt} + the token verifi
     const session = fakeSession({ host: "box-7.modal.host", port: 443, tls: true, query: "" });
     const result = await exposeStreamPort(session, { ...baseInput, nowSeconds, ttlSeconds: 120 });
 
-    // The provider-direct URL — the OpenGeni token is NOT appended.
+    // The provider-direct URL — the Opengeni token is NOT appended.
     expect(result.url).toBe("wss://box-7.modal.host/");
     expect(result.url).not.toContain("token=");
     expect(result.transport).toBe("vnc-ws");
@@ -203,6 +203,14 @@ describe("exposeStreamPort — coherent {url,token,expiresAt} + the token verifi
     const cb = await verifyStreamToken(SECRET, b.token);
     expect(ca?.leaseEpoch).toBe(1);
     expect(cb?.leaseEpoch).toBe(2);
+  });
+
+  test("the token claims the input mode the caller granted, watch-only by default", async () => {
+    const session = fakeSession({ host: "h", port: 443, tls: true });
+    const control = await exposeStreamPort(session, { ...baseInput, mode: "control" });
+    const view = await exposeStreamPort(session, baseInput);
+    expect((await verifyStreamToken(SECRET, control.token))?.mode).toBe("control");
+    expect((await verifyStreamToken(SECRET, view.token))?.mode).toBe("view");
   });
 
   test("a session with no resolveExposedPort throws StreamPortUnavailableError (caller degrades to transport:null)", async () => {

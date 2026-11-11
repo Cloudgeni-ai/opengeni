@@ -1,5 +1,6 @@
 // Deterministic mock data for the SessionChrome DEV harness
 // (`/dev/composer-chrome`). No live session, queue, or goal APIs.
+import { t } from "@opengeni/react/app/lib/console-text";
 import type {
   ComposerState,
   UseFileAttachmentsResult,
@@ -9,8 +10,8 @@ import type {
 import { projectPickerRows, type PickerModelRow } from "@opengeni/react";
 import type {
   EffectiveSessionControl,
-  LineageNode,
-  Session,
+  ChatLineageNode as LineageNode,
+  ChatSession as Session,
   SessionBackgroundCommand,
   SessionGoal,
   SessionPendingInputPreview,
@@ -19,8 +20,11 @@ import type {
 } from "@opengeni/sdk";
 import { FIRST_PARTY_MCP_TOOL_NAMES, type FirstPartyMcpToolName } from "@opengeni/contracts";
 
-import type { SessionToolSelection } from "@/components/pickers";
-import { firstPartySessionToolOptions, type McpServerOption } from "@/lib/session-tools";
+import type { SessionToolSelection } from "@opengeni/react/app/components/pickers";
+import {
+  firstPartySessionToolOptionsFor,
+  type McpServerOption,
+} from "@opengeni/react/app/lib/session-tools";
 
 export const GALLERY_WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 export const GALLERY_SESSION_ID = "22222222-2222-4222-8222-222222222222";
@@ -74,8 +78,6 @@ export function gallerySession(overrides: Partial<Session> = {}): Session {
     activeSandboxId: null,
     activeEpoch: 0,
     workingDir: null,
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     rigVersionId: null,
     channelId: null,
@@ -195,7 +197,7 @@ function galleryGoalRecord(overrides: Partial<SessionGoal> = {}): SessionGoal {
     workspaceId: GALLERY_WORKSPACE_ID,
     sessionId: GALLERY_SESSION_ID,
     status: "active",
-    text: "Make Linear activation on the live OpenGeni deployment operational end-to-end",
+    text: "Make Linear activation on the live Opengeni deployment operational end-to-end",
     successCriteria: "Linear issues sync and activate from the live deployment",
     evidence: null,
     rationale: null,
@@ -243,7 +245,7 @@ export function galleryGoal(overrides: Partial<SessionGoal> | null): UseGoalResu
   };
 }
 
-export function galleryAgentNode(index: number, overrides: Partial<Session> = {}): LineageNode {
+function galleryAgentNode(index: number, overrides: Partial<Session> = {}): LineageNode {
   const id = `${String(index + 1).padStart(8, "0")}-7777-4777-8777-${String(index + 1).padStart(12, "0")}`;
   return {
     session: gallerySession({
@@ -289,6 +291,9 @@ export function idleComposer(overrides: Partial<ComposerState> = {}): ComposerSt
     send: async () => true,
     steer: async () => true,
     sending: false,
+    // Nothing runs or waits: Send just sends. `working: true` shows the
+    // working controls (Pause, and Queue/Steer wording).
+    working: false,
     canSend: false,
     pause: async () => {},
     pausing: false,
@@ -362,7 +367,7 @@ function catalogModel(
   };
 }
 
-export const galleryModelRows: PickerModelRow[] = projectPickerRows([
+export const galleryModelRows: PickerModelRow[] = projectPickerRows(t, [
   catalogModel({
     id: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",
@@ -417,6 +422,15 @@ export const galleryModelRows: PickerModelRow[] = projectPickerRows([
     cost: "free",
     billing: { upstreamPayer: "deployment", metering: "external" },
   }),
+  catalogModel({
+    id: "opper/aws/claude-opus-5-5",
+    label: "Claude Opus 5.5",
+    shortLabel: "Opus 5.5",
+    provider: "opper",
+    providerLabel: "Opper",
+    cost: "credits",
+    billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+  }),
 ]);
 
 /** 52 first-party + 1 MCP = 53; leave two off → Tools · 51/53. */
@@ -429,7 +443,7 @@ export const galleryToolSelection: SessionToolSelection = {
   ),
 };
 
-export const galleryFirstPartyTools = firstPartySessionToolOptions;
+export const galleryFirstPartyTools = firstPartySessionToolOptionsFor(undefined);
 
 export const screenshotIncomingInputs: SessionPendingInputPreview[] = [
   galleryPendingInput(0, {

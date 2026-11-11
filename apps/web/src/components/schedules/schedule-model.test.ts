@@ -1,19 +1,30 @@
 import { describe, expect, test } from "bun:test";
 
-import type { ScheduledTask } from "@/types";
+import type { ScheduledTask } from "@opengeni/react/app/types";
+import { formStateFromScheduledTask } from "@/lib/scheduled-tasks";
+import {
+  selectedConnectionAccounts,
+  type ConnectedAccountGroup,
+} from "@opengeni/react/app/components/capabilities/session-connection-accounts";
 
 import {
   SCHEDULE_FREQUENCIES,
   cadenceOfSchedule,
   createRequestFromDraft,
   deriveScheduleName,
+  draftFromTemplate,
+  mergeSchedulePinnedAccounts,
   newScheduleDraft,
   nextRunOf,
   scheduleAgentOpeningMessage,
   scheduleErrorText,
+  scheduleInheritsChatSettings,
+  scheduleConnectionAccountIntent,
+  scheduleTemplates,
   scheduleWords,
   sortSchedulesForList,
   specFromCadence,
+  templateById,
   updateRequestFromDraft,
   type ScheduleDraft,
 } from "./schedule-model";
@@ -34,15 +45,18 @@ function task(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     runMode: "new_session_per_run",
     overlapPolicy: "allow_concurrent",
     action: { kind: "agent_turn" },
-    agentConfig: { prompt: "Compare spend.", resources: [], tools: [], metadata: {} },
+    agentConfig: {
+      prompt: "Compare spend.",
+      resources: [],
+      tools: [],
+      metadata: {},
+    },
     createdBy: { kind: "subject", subjectId: "dev" },
     createdByContext: {},
     authorityRevision: 1,
     executionDigest: "0".repeat(64),
     reusableSessionId: null,
     targetSessionId: null,
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     metadata: {},
     createdAt: "2026-09-26T10:00:00.000Z",
@@ -119,19 +133,80 @@ describe("schedule names", () => {
   });
 });
 
+describe("schedule templates", () => {
+  test("event templates are offered only where event triggers run", () => {
+    expect(scheduleTemplates(false).some((template) => template.triggers.length > 0)).toBe(false);
+    expect(templateById("pr-review", false)).toBeUndefined();
+    expect(templateById("pr-review", true)?.triggers[0]?.source).toEqual({ kind: "github" });
+    expect(templateById("meeting-notes", true)?.triggers[0]?.source).toEqual({
+      kind: "workspace",
+    });
+  });
+
+  test("the pull request review runs on events only and skips drafts until they are ready", () => {
+    const template = templateById("pr-review")!;
+    const draft = draftFromTemplate(
+      template,
+      { includeOpenGeniTool: false },
+      { timeZone: "Europe/Oslo" },
+    );
+    expect(draft.cadence).toBeNull();
+    expect(draft.prompt).toBe(template.instructions);
+    const sourceId = "00000000-0000-4000-8000-000000000001";
+    const request = createRequestFromDraft(
+      {
+        ...draft,
+        events: {
+          ...draft.events,
+          triggers: draft.events.triggers.map((trigger) => ({ ...trigger, sourceId })),
+        },
+      },
+      { now: NOW, learningScope: "personal" },
+    );
+    expect(request.schedule).toEqual({ type: "manual" });
+    expect("events" in request ? request.events?.triggers : undefined).toEqual([
+      expect.objectContaining({
+        sourceId,
+        eventTypes: ["pull_request.opened", "pull_request.ready_for_review"],
+        conditions: [{ field: "data.pull_request.draft", op: "equals", value: false }],
+      }),
+    ]);
+  });
+
+  test("a scheduled template runs at its time in the viewer's time zone", () => {
+    const draft = draftFromTemplate(
+      templateById("morning-brief")!,
+      { includeOpenGeniTool: false },
+      { timeZone: "Europe/Oslo" },
+    );
+    expect(draft.cadence?.timeZone).toBe("Europe/Oslo");
+    expect(draft.events.triggers).toEqual([]);
+    const request = createRequestFromDraft(draft, { now: NOW, learningScope: "personal" });
+    expect(request.schedule).toEqual(
+      expect.objectContaining({
+        type: "calendar",
+        hour: 8,
+        minute: 0,
+        timeZone: "Europe/Oslo",
+        daysOfWeek: ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+      }),
+    );
+  });
+});
+
 describe("schedule requests", () => {
   const base = (): ScheduleDraft => ({
     ...newScheduleDraft({ includeOpenGeniTool: false }, "Europe/Oslo"),
     prompt: "Summarize open incidents.",
   });
 
-  test("a new-chat schedule is created with the default overlap and its attachments", () => {
+  test("a new-chat schedule is created with the default overlap, steer, and its attachments", () => {
     const request = createRequestFromDraft(
-      { ...base(), overlapPolicy: "skip", variableSetId: "vs-1", rigId: "rig-1" },
+      { ...base(), overlapPolicy: "skip", rigId: "rig-1" },
       { now: NOW, learningScope: "workspace" },
     );
-    expect(request.overlapPolicy).toBe("allow_concurrent");
-    expect(request.variableSetId).toBe("vs-1");
+    expect(request.overlapPolicy).toBe("steer");
+    if (!("agentConfig" in request)) throw new Error("Expected a separate agent");
     expect(request.rigId).toBe("rig-1");
     expect(request.name).toBe("Summarize open incidents");
     expect(request.metadata).toEqual({});
@@ -145,8 +220,160 @@ describe("schedule requests", () => {
     expect(request.overlapPolicy).toBe("skip");
   });
 
+  test("a new automation starts on steer; an edit sends only a changed choice", () => {
+    expect(base().overlapPolicy).toBe("steer");
+    const initial: ScheduleDraft = {
+      ...base(),
+      runMode: "existing_session",
+      targetSessionId: "chat",
+    };
+    const stored = task({
+      runMode: "existing_session",
+      targetSessionId: "chat",
+      overlapPolicy: "steer",
+    });
+    expect(
+      updateRequestFromDraft(stored, initial, { ...initial, overlapPolicy: "skip" }, { now: NOW })
+        .overlapPolicy,
+    ).toBe("skip");
+    expect(
+      updateRequestFromDraft(stored, { ...initial, overlapPolicy: "skip" }, initial, { now: NOW })
+        .overlapPolicy,
+    ).toBe("steer");
+    const moved = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...initial, runMode: "new_session_per_run", targetSessionId: "" },
+      { now: NOW },
+    );
+    expect(moved.runMode).toBe("new_session_per_run");
+    expect(moved.overlapPolicy).toBeUndefined();
+  });
+
+  test("Secrets narrowing is sent only when vaults are picked, and cleared back to all", () => {
+    const vaultIds = ["00000000-0000-4000-8000-0000000000a1"];
+    const all = createRequestFromDraft(base(), { now: NOW, learningScope: "workspace" });
+    expect("vaultPolicy" in all).toBe(false);
+    const narrowed = createRequestFromDraft(
+      { ...base(), vaultPolicy: { mode: "selected", vaultIds } },
+      { now: NOW, learningScope: "workspace" },
+    );
+    expect("vaultPolicy" in narrowed && narrowed.vaultPolicy).toEqual({
+      mode: "selected",
+      vaultIds,
+    });
+
+    const initial: ScheduleDraft = { ...base(), vaultPolicy: { mode: "selected", vaultIds } };
+    expect("vaultPolicy" in updateRequestFromDraft(task(), initial, initial, { now: NOW })).toBe(
+      false,
+    );
+    const { vaultPolicy: _dropped, ...widened } = initial;
+    expect(updateRequestFromDraft(task(), initial, widened, { now: NOW }).vaultPolicy).toEqual({
+      mode: "all",
+    });
+    expect(updateRequestFromDraft(task(), base(), initial, { now: NOW }).vaultPolicy).toEqual({
+      mode: "selected",
+      vaultIds,
+    });
+  });
+
+  test("a new schedule is shared by default and sends Only me only when chosen", () => {
+    const shared = createRequestFromDraft(base(), {
+      now: NOW,
+      learningScope: "workspace",
+    });
+    expect("visibility" in shared).toBe(false);
+
+    const privateNew = createRequestFromDraft(
+      { ...base(), visibility: "private" },
+      { now: NOW, learningScope: "workspace" },
+    );
+    expect("visibility" in privateNew && privateNew.visibility).toBe("private");
+
+    const privateMessage = createRequestFromDraft(
+      {
+        ...base(),
+        runMode: "existing_session",
+        targetSessionId: "chat",
+        visibility: "private",
+      },
+      { now: NOW, learningScope: "workspace" },
+    );
+    expect("visibility" in privateMessage && privateMessage.visibility).toBe("private");
+  });
+
+  test("an edit sends who can see the schedule only when it changed", () => {
+    const initial = base();
+    const unchanged = updateRequestFromDraft(
+      task(),
+      initial,
+      { ...initial, name: "Renamed" },
+      {
+        now: NOW,
+      },
+    );
+    expect("visibility" in unchanged).toBe(false);
+
+    const madePrivate = updateRequestFromDraft(
+      task(),
+      initial,
+      { ...initial, visibility: "private" },
+      { now: NOW },
+    );
+    expect(madePrivate.visibility).toBe("private");
+
+    const shared = updateRequestFromDraft(
+      task({ visibility: "private" }),
+      { ...initial, visibility: "private" },
+      initial,
+      { now: NOW },
+    );
+    expect(shared.visibility).toBe("workspace");
+  });
+
+  test("an existing-chat message carries no copied execution settings", () => {
+    const request = createRequestFromDraft(
+      {
+        ...base(),
+        runMode: "existing_session",
+        targetSessionId: "00000000-0000-4000-8000-000000000099",
+        rigId: "stale-environment",
+      },
+      { now: NOW, learningScope: "workspace" },
+    );
+    expect(request).toMatchObject({
+      targetSessionId: "00000000-0000-4000-8000-000000000099",
+      prompt: "Summarize open incidents.",
+    });
+    expect("agentConfig" in request).toBe(false);
+    expect("rigId" in request).toBe(false);
+  });
+
+  test("moving a schedule sends only its new destination and changed message", () => {
+    const initial = base();
+    const stored = task();
+    const request = updateRequestFromDraft(
+      stored,
+      initial,
+      {
+        ...initial,
+        runMode: "existing_session",
+        targetSessionId: "destination",
+        prompt: "Review urgent incidents.",
+      },
+      { now: NOW },
+    );
+    expect(request).toEqual({
+      expectedExecutionDigest: stored.executionDigest,
+      runMode: "existing_session",
+      targetSessionId: "destination",
+      prompt: "Review urgent incidents.",
+      name: "Review urgent incidents",
+    });
+  });
+
   test("an edit sends the schedule and attachments only when they changed", () => {
-    const initial: ScheduleDraft = { ...base(), variableSetId: "vs-1", rigId: null };
+    const initial: ScheduleDraft = { ...base(), rigId: null };
     const untouched = updateRequestFromDraft(
       task(),
       initial,
@@ -157,7 +384,6 @@ describe("schedule requests", () => {
     );
     expect(untouched.name).toBe("Renamed");
     expect("schedule" in untouched).toBe(false);
-    expect("variableSetId" in untouched).toBe(false);
     expect("rigId" in untouched).toBe(false);
 
     const changed = updateRequestFromDraft(
@@ -165,22 +391,575 @@ describe("schedule requests", () => {
       initial,
       {
         ...initial,
-        variableSetId: null,
         rigId: "rig-2",
         cadence: { timeZone: "Europe/Oslo", rule: { frequency: "hourly" } },
       },
       { now: NOW },
     );
     expect(changed.schedule).toEqual({ type: "interval", everySeconds: 3_600 });
-    expect(changed.variableSetId).toBeNull();
     expect(changed.rigId).toBe("rig-2");
   });
 
   test("an edit keeps a stored description it no longer shows", () => {
-    const stored = task({ metadata: { scheduleDescription: "Old summary", other: 1 } });
+    const stored = task({
+      metadata: { scheduleDescription: "Old summary", other: 1 },
+    });
     const initial: ScheduleDraft = { ...base(), description: "Old summary" };
-    const request = updateRequestFromDraft(stored, initial, initial, { now: NOW });
-    expect(request.metadata).toEqual({ scheduleDescription: "Old summary", other: 1 });
+    const request = updateRequestFromDraft(stored, initial, initial, {
+      now: NOW,
+    });
+    expect(request.metadata).toBeUndefined();
+    expect(request).toEqual({
+      expectedExecutionDigest: stored.executionDigest,
+    });
+  });
+
+  test("separate-agent message edits preserve hidden settings through a narrow patch", () => {
+    const stored = task();
+    stored.agentConfig.approvalTimeoutSeconds = 300;
+    stored.agentConfig.maxNestedAgentDepth = 0;
+    stored.agentConfig.bundledSkillIds = [];
+    const initial = { ...base(), name: stored.name };
+    const request = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...initial, prompt: "New message" },
+      { now: NOW },
+    );
+    expect(request).toEqual({
+      expectedExecutionDigest: stored.executionDigest,
+      prompt: "New message",
+    });
+    const changedTools = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...initial, includeOpenGeniTool: true },
+      { now: NOW },
+    );
+    expect(changedTools.agentConfig).toMatchObject({
+      approvalTimeoutSeconds: 300,
+      maxNestedAgentDepth: 0,
+      bundledSkillIds: [],
+    });
+    expect(changedTools.agentConfig).not.toHaveProperty("pinnedAccounts");
+  });
+
+  test("a model edit retains the existing tools' startup and failure policy", () => {
+    const stored = task();
+    stored.agentConfig.tools = [
+      { kind: "mcp", id: "example", eager: true, optional: true },
+      { kind: "mcp", id: "opengeni", eager: true },
+    ];
+    const initial = {
+      ...base(),
+      ...formStateFromScheduledTask(stored),
+      modelFollowsDefault: false,
+    };
+    const patch = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...initial, model: "example-model" },
+      { now: NOW },
+    );
+    expect(patch.agentConfig?.tools).toEqual(stored.agentConfig.tools);
+  });
+
+  test("unrelated edits retain individually omitted model and reasoning settings", () => {
+    for (const policy of [{ reasoningEffort: "high" as const }, { model: "example-model" }]) {
+      const stored = task();
+      Object.assign(stored.agentConfig, policy);
+      const initial = {
+        ...base(),
+        ...formStateFromScheduledTask(stored, {
+          model: "default-model",
+          reasoningEffort: "medium",
+          modelFollowsDefault: true,
+        }),
+      };
+      const patch = updateRequestFromDraft(
+        stored,
+        initial,
+        { ...initial, includeOpenGeniTool: true },
+        { now: NOW },
+      );
+      expect(patch.agentConfig?.model).toEqual(stored.agentConfig.model);
+      expect(patch.agentConfig?.reasoningEffort).toEqual(stored.agentConfig.reasoningEffort);
+    }
+  });
+
+  test("edits preserve exact message bytes in narrow, full and destination patches", () => {
+    const stored = task();
+    const initial = { ...base(), ...formStateFromScheduledTask(stored) };
+    const prompt = "\n  Keep this indentation.  \n";
+    for (const change of [
+      {},
+      { includeOpenGeniTool: true },
+      { runMode: "existing_session" as const, targetSessionId: "destination" },
+    ]) {
+      const patch = updateRequestFromDraft(
+        stored,
+        initial,
+        { ...initial, ...change, prompt },
+        { now: NOW },
+      );
+      expect(patch.prompt ?? patch.agentConfig?.prompt).toBe(prompt);
+    }
+  });
+
+  test("a materialized reusable chat ignores hidden settings while keeping message edits", () => {
+    const stored = task({
+      runMode: "reusable_session",
+      reusableSessionId: "existing-chat",
+    });
+    const initial = { ...base(), ...formStateFromScheduledTask(stored) };
+    const draft = {
+      ...initial,
+      model: "default-resolved-later",
+      includeOpenGeniTool: !initial.includeOpenGeniTool,
+      machineSandboxId: "default-machine-loaded-later",
+      rigId: "unused-environment",
+      prompt: "Updated message",
+    };
+    const agentLearning = {
+      scope: "workspace" as const,
+      operationId: "operation",
+      expectedVersion: 1,
+      settings: {},
+    };
+    expect(scheduleInheritsChatSettings(stored)).toBe(true);
+    expect(
+      updateRequestFromDraft(stored, initial, draft, {
+        now: NOW,
+        agentLearning,
+      }),
+    ).toEqual({
+      expectedExecutionDigest: stored.executionDigest,
+      prompt: "Updated message",
+      agentLearning,
+    });
+    const separate = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...draft, runMode: "new_session_per_run" },
+      { now: NOW, agentLearning },
+    );
+    expect(separate.agentConfig?.model).toBe("default-resolved-later");
+    expect(separate.rigId).toBe("unused-environment");
+    expect(separate.agentLearning).toEqual(agentLearning);
+    expect(scheduleInheritsChatSettings({ ...stored, reusableSessionId: null })).toBe(false);
+  });
+
+  test("materialized reusable schedules still edit message resources and Slack channel", () => {
+    const stored = task({
+      runMode: "reusable_session",
+      reusableSessionId: "existing-chat",
+    });
+    stored.agentConfig.model = "stored-default";
+    stored.agentConfig.slackBotConnectionId = "bot";
+    stored.agentConfig.slackBotChannelId = "old-channel";
+    stored.agentConfig.tools = [{ kind: "mcp", id: "example", optional: true }];
+    const initial = { ...base(), ...formStateFromScheduledTask(stored) };
+    const resources = [
+      {
+        kind: "repository" as const,
+        uri: "https://example.com/example/repo.git",
+        ref: "main",
+      },
+    ];
+    const patch = updateRequestFromDraft(
+      stored,
+      initial,
+      {
+        ...initial,
+        resources,
+        slackBotChannelId: "new-channel",
+        model: "hidden-unapplied-change",
+        mcpServerIds: [],
+      },
+      { now: NOW },
+    );
+    expect(patch.agentConfig).toEqual({
+      ...stored.agentConfig,
+      resources,
+      slackBotChannelId: "new-channel",
+    });
+  });
+
+  test("editing one account group retains hidden and active first-party choices", () => {
+    const saved = [
+      { serverId: "example", connectionId: "old-choice" },
+      { serverId: "unavailable", connectionId: "retained-choice" },
+      { serverId: "github:personal", connectionId: "repository-choice" },
+      {
+        serverId: "google-drive-publishing",
+        connectionId: "publication-choice",
+      },
+      { serverId: "removed", connectionId: "removed-choice" },
+    ];
+    const selection = { serverId: "example", connectionId: "new-choice" };
+    expect(
+      mergeSchedulePinnedAccounts(saved, [selection], ["example"], {
+        selectedServerIds: ["example", "unavailable"],
+        resources: [
+          {
+            kind: "repository",
+            uri: "https://example.com/example/repo.git",
+            ref: "main",
+            connectionType: "github_personal",
+          },
+        ],
+      }),
+    ).toEqual([saved[1]!, saved[2]!, selection]);
+  });
+
+  test("a materialized chat keeps only pins its current tools can use; an existing-chat schedule has none", () => {
+    const stored = task({
+      runMode: "reusable_session",
+      reusableSessionId: "current-chat",
+    });
+    stored.agentConfig.tools = [{ kind: "mcp", id: "old-tool" }];
+    const saved = [
+      { serverId: "old-tool", connectionId: "old-account" },
+      { serverId: "retained-tool", connectionId: "hidden-retained-account" },
+    ];
+    stored.agentConfig.pinnedAccounts = saved;
+    const initial = { ...base(), ...formStateFromScheduledTask(stored) };
+    expect(initial.pinnedAccounts).toEqual(saved);
+    const selection = {
+      serverId: "current-tool",
+      connectionId: "chosen-account",
+    };
+    const merged = mergeSchedulePinnedAccounts(saved, [selection], ["current-tool"], {
+      selectedServerIds: ["current-tool", "retained-tool"],
+      resources: [],
+      chat: {
+        resources: [],
+        firstPartyMcpTools: [],
+        firstPartyMcpPermissions: [],
+      },
+    });
+    const patch = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...initial, pinnedAccounts: merged },
+      { now: NOW },
+    );
+    expect(patch.pinnedAccounts).toEqual([saved[1]!, selection]);
+
+    const chatTask = task({
+      runMode: "existing_session",
+      targetSessionId: "source-chat",
+    });
+    chatTask.agentConfig.tools = [];
+    const chatInitial = { ...base(), ...formStateFromScheduledTask(chatTask) };
+    expect(chatInitial.pinnedAccounts).toEqual([]);
+    const chatPatch = updateRequestFromDraft(
+      chatTask,
+      chatInitial,
+      {
+        ...chatInitial,
+        targetSessionId: "destination-chat",
+        pinnedAccounts: merged,
+      },
+      { now: NOW },
+    );
+    expect(chatPatch).not.toHaveProperty("pinnedAccounts");
+    expect(
+      createRequestFromDraft(
+        { ...chatInitial, pinnedAccounts: merged },
+        {
+          now: NOW,
+          learningScope: "workspace",
+        },
+      ),
+    ).not.toHaveProperty("pinnedAccounts");
+  });
+
+  test("retargeting retains only eligible first-party account choices", () => {
+    const saved = [
+      { serverId: "github:personal", connectionId: "repository-choice" },
+      {
+        serverId: "google-drive-publishing",
+        connectionId: "publication-choice",
+      },
+    ];
+    const destination = {
+      selectedServerIds: [],
+      resources: [
+        {
+          kind: "repository" as const,
+          uri: "https://example.com/example/repo.git",
+          ref: "main",
+          connectionType: "github_personal" as const,
+        },
+      ],
+      chat: {
+        resources: [],
+        firstPartyMcpTools: [
+          "editable_artifact_export",
+          "editable_artifact_export_status",
+        ] as const,
+        firstPartyMcpPermissions: ["artifacts:read", "artifacts:publish"],
+      },
+    };
+    expect(
+      mergeSchedulePinnedAccounts(saved, [], [], {
+        ...destination,
+        chat: {
+          ...destination.chat,
+          firstPartyMcpTools: [...destination.chat.firstPartyMcpTools],
+        },
+      }),
+    ).toEqual([saved[0]!]);
+    expect(
+      mergeSchedulePinnedAccounts(saved, [], [], {
+        ...destination,
+        selectedServerIds: ["github:personal", "google-drive-publishing"],
+        resources: [],
+        chat: {
+          resources: [],
+          firstPartyMcpTools: [],
+          firstPartyMcpPermissions: [],
+        },
+      }),
+    ).toEqual([]);
+    expect(
+      mergeSchedulePinnedAccounts(saved, [], [], {
+        ...destination,
+        chat: {
+          resources: [],
+          firstPartyMcpTools: [...destination.chat.firstPartyMcpTools],
+          firstPartyMcpPermissions: ["artifacts:read"],
+        },
+      }),
+    ).toEqual([saved[0]!]);
+    expect(
+      mergeSchedulePinnedAccounts(saved, [], [], {
+        ...destination,
+        chat: {
+          ...destination.chat,
+          firstPartyMcpTools: [...destination.chat.firstPartyMcpTools],
+          firstPartyMcpPermissions: [],
+        },
+      }),
+    ).toEqual([saved[0]!]);
+    expect(
+      mergeSchedulePinnedAccounts(saved, [], [], {
+        ...destination,
+        chat: {
+          ...destination.chat,
+          firstPartyMcpTools: [...destination.chat.firstPartyMcpTools],
+          firstPartyMcpPermissions: null,
+        },
+      }),
+    ).toEqual([saved[0]!]);
+  });
+
+  test("removing the last reusable message repository removes its account during a picker edit", () => {
+    const stored = task({
+      runMode: "reusable_session",
+      reusableSessionId: "current-chat",
+    });
+    stored.agentConfig.resources = [
+      {
+        kind: "repository",
+        uri: "https://example.com/example/repo.git",
+        ref: "main",
+        connectionType: "github_personal",
+      },
+    ];
+    stored.agentConfig.pinnedAccounts = [
+      { serverId: "github:personal", connectionId: "repository-choice" },
+    ];
+    const initial = { ...base(), ...formStateFromScheduledTask(stored) };
+    const selection = {
+      serverId: "current-tool",
+      connectionId: "chosen-account",
+    };
+    const draft = { ...initial, resources: [] };
+    draft.pinnedAccounts = mergeSchedulePinnedAccounts(
+      initial.pinnedAccounts ?? [],
+      [selection],
+      ["current-tool"],
+      {
+        selectedServerIds: ["current-tool"],
+        resources: draft.resources,
+        chat: {
+          resources: [],
+          firstPartyMcpTools: [],
+          firstPartyMcpPermissions: [],
+        },
+      },
+    );
+    const patch = updateRequestFromDraft(stored, initial, draft, { now: NOW });
+    expect(patch.pinnedAccounts).toEqual([selection]);
+    expect(patch.agentConfig?.resources).toEqual([]);
+  });
+
+  test("bound-chat and preserved message repositories both retain their pin during picker edits", () => {
+    const repository = {
+      kind: "repository" as const,
+      uri: "https://example.com/example/repo.git",
+      ref: "main",
+      connectionType: "github_personal" as const,
+    };
+    const repositoryAccount = {
+      serverId: "github:personal",
+      connectionId: "repository-choice",
+    };
+    const selection = { serverId: "example", connectionId: "new-choice" };
+    for (const repositorySource of ["chat", "message"] as const) {
+      const stored = task({
+        runMode: "reusable_session",
+        reusableSessionId: "bound-chat",
+      });
+      stored.agentConfig.pinnedAccounts = [repositoryAccount];
+      stored.agentConfig.resources = repositorySource === "message" ? [repository] : [];
+      const initial = { ...base(), ...formStateFromScheduledTask(stored) };
+      const pinnedAccounts = mergeSchedulePinnedAccounts(
+        initial.pinnedAccounts ?? [],
+        [selection],
+        ["example"],
+        {
+          selectedServerIds: ["example"],
+          resources: initial.resources,
+          chat: {
+            resources: repositorySource === "chat" ? [repository] : [],
+            firstPartyMcpTools: [],
+            firstPartyMcpPermissions: [],
+          },
+        },
+      );
+      const patch = updateRequestFromDraft(
+        stored,
+        initial,
+        {
+          ...initial,
+          pinnedAccounts,
+        },
+        { now: NOW },
+      );
+      expect(patch.pinnedAccounts).toEqual([repositoryAccount, selection]);
+      expect(patch.agentConfig).toBeUndefined();
+    }
+  });
+});
+
+describe("schedule account edit intent", () => {
+  const saved = [{ serverId: "retained", connectionId: "chosen-account" }];
+  const groups = [
+    {
+      serverId: "retained",
+      name: "Retained",
+      accounts: [{ id: "chosen-account" }, { id: "later-account" }],
+    },
+    {
+      serverId: "unpinned",
+      name: "Unpinned",
+      accounts: [{ id: "current-account" }],
+    },
+    { serverId: "added", name: "Added", accounts: [{ id: "new-account" }] },
+  ] as ConnectedAccountGroup[];
+  const selectedServerIds = ["retained", "unpinned", "added"];
+  const input = {
+    saved,
+    editedServerIds: [] as string[],
+    destinationChanged: false,
+    toolsChanged: false,
+  };
+
+  function submission(
+    intent: ReturnType<typeof scheduleConnectionAccountIntent>,
+    choices = intent.choices,
+    pins = saved,
+  ) {
+    const selection = selectedConnectionAccounts(
+      groups.filter((group) => intent.changedServerIds.includes(group.serverId)),
+      choices,
+    );
+    expect(selection.unresolved).toEqual([]);
+    return mergeSchedulePinnedAccounts(pins, selection.selections, intent.changedServerIds, {
+      selectedServerIds,
+      resources: [],
+    });
+  }
+
+  test("enabling a connector leaves it on current accounts and keeps the person's pins", () => {
+    const intent = scheduleConnectionAccountIntent({
+      ...input,
+      toolsChanged: true,
+    });
+    expect(intent.choices).toEqual({ retained: ["chosen-account"] });
+    expect(intent.changed).toBe(true);
+    expect(intent.changedServerIds).toEqual([]);
+    const pins = submission(intent);
+    expect(pins).toEqual(saved);
+    const stored = task();
+    stored.agentConfig.tools = [
+      { kind: "mcp", id: "retained" },
+      { kind: "mcp", id: "unpinned" },
+    ];
+    stored.agentConfig.pinnedAccounts = saved;
+    const initial = {
+      ...newScheduleDraft({ includeOpenGeniTool: false }),
+      ...formStateFromScheduledTask(stored),
+    };
+    const patch = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...initial, mcpServerIds: selectedServerIds, pinnedAccounts: pins },
+      { now: NOW },
+    );
+    expect(patch).not.toHaveProperty("pinnedAccounts");
+  });
+
+  test("a destination change re-checks pins but pins nothing new", () => {
+    const intent = scheduleConnectionAccountIntent({
+      ...input,
+      destinationChanged: true,
+    });
+    expect(intent.changed).toBe(true);
+    expect(intent.changedServerIds).toEqual([]);
+    expect(submission(intent)).toEqual(saved);
+  });
+
+  test("loading a chat with new tools never pins its accounts during a message edit", () => {
+    const intent = scheduleConnectionAccountIntent(input);
+    expect(intent.changed).toBe(false);
+    expect(intent.choices).toEqual({ retained: ["chosen-account"] });
+    expect(submission(intent)).toEqual(saved);
+  });
+
+  test("changing one connector pins only that connector", () => {
+    const intent = scheduleConnectionAccountIntent({
+      ...input,
+      editedServerIds: ["unpinned"],
+    });
+    expect(submission(intent, { ...intent.choices, unpinned: ["current-account"] })).toEqual([
+      ...saved,
+      { serverId: "unpinned", connectionId: "current-account" },
+    ]);
+    const repinned = scheduleConnectionAccountIntent({
+      ...input,
+      editedServerIds: ["retained"],
+    });
+    expect(
+      submission(repinned, {
+        ...repinned.choices,
+        retained: ["later-account"],
+      }),
+    ).toEqual([{ serverId: "retained", connectionId: "later-account" }]);
+  });
+
+  test("using current accounts clears every pin", () => {
+    const intent = scheduleConnectionAccountIntent({
+      ...input,
+      saved: [],
+      pinsCleared: true,
+    });
+    expect(intent.changed).toBe(true);
+    expect(intent.choices).toEqual({});
+    expect(submission(intent, intent.choices, [])).toEqual([]);
   });
 });
 
@@ -189,7 +968,7 @@ describe("schedule errors", () => {
     expect(
       scheduleErrorText(
         new Error(
-          "OpenGeni API 422: self-hosted scheduled tasks require a Connected Machine; select a machine before saving Reference: 58f70db6-fcc9-4e4a-8b58-064908f49d53.",
+          "Opengeni API 422: self-hosted scheduled tasks require a Connected Machine; select a machine before saving Reference: 58f70db6-fcc9-4e4a-8b58-064908f49d53.",
         ),
       ),
     ).toBe(
@@ -199,25 +978,13 @@ describe("schedule errors", () => {
 });
 
 describe("scheduleAgentOpeningMessage", () => {
-  test("carries the request and directs the agent to research, then create with its tools", () => {
+  test("carries only the scheduling request and the person's time zone", () => {
     const message = scheduleAgentOpeningMessage(
       "  Every weekday morning, summarize new Sentry errors and post them to #eng \n",
       "Europe/Oslo",
     );
-    expect(message).toContain(
-      "What should happen, and how often:\nEvery weekday morning, summarize new Sentry errors and post them to #eng\n",
+    expect(message).toBe(
+      "Help me create an automation in this workspace.\n\nEvery weekday morning, summarize new Sentry errors and post them to #eng\n\nMy time zone is Europe/Oslo.",
     );
-    for (const tool of [
-      "scheduled_tasks_list",
-      "github_repositories_list",
-      "variable_set_list",
-      "capability_catalog_search",
-      "scheduled_tasks_create",
-    ]) {
-      expect(message).toContain(tool);
-    }
-    expect(message).toContain("my time zone (Europe/Oslo)");
-    expect(message).toContain("Ask me only for what you can't find or decide yourself.");
-    expect(message).not.toContain("\u2014");
   });
 });

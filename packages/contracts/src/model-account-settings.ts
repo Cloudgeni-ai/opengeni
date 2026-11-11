@@ -1,0 +1,218 @@
+import * as primitives from "./primitives";
+import { defineSchema } from "./define-schema";
+import { z } from "zod";
+
+/**
+ * Organization model-account settings with lockable workspace overrides and
+ * the organization overview (contract SUB-SET-01..05). The organization sets
+ * every value; a shared workspace may override a value unless the
+ * organization locked it. Each effective value reports where it comes from.
+ */
+export const MODEL_ACCOUNT_SETTING_KEYS = [
+  "rotation",
+  "providers",
+  "crossProviderFailover",
+  "fallbackOrder",
+  "personalConnectionsAllowed",
+  "personalFallbackAllowed",
+] as const;
+export const ModelAccountSettingKey = /* @__PURE__ */ defineSchema(() =>
+  z.enum(MODEL_ACCOUNT_SETTING_KEYS),
+);
+export type ModelAccountSettingKey = z.infer<typeof ModelAccountSettingKey>;
+
+/** organization: the organization value; workspace: this workspace's override; locked: the organization value, which workspaces cannot override. */
+export const ModelAccountSettingSource = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["organization", "workspace", "locked"]),
+);
+export type ModelAccountSettingSource = z.infer<typeof ModelAccountSettingSource>;
+
+const SAFE_KEY = (key: string) => !["__proto__", "constructor", "prototype"].includes(key);
+const ModelId = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(200).refine(SAFE_KEY));
+const ProviderId = /* @__PURE__ */ defineSchema(() =>
+  primitives.string.regex(/^[a-z][a-z0-9_]{1,31}$/).refine(SAFE_KEY),
+);
+
+export const ModelAccountRotationMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["spread", "primary_first"]),
+);
+export type ModelAccountRotationMode = z.infer<typeof ModelAccountRotationMode>;
+
+/** Ordered fallback models for a preferred model (at most 64 models, 8 fallbacks each). */
+export const ModelAccountFallbackOrder = /* @__PURE__ */ defineSchema(() =>
+  z
+    .record(ModelId, z.array(ModelId).max(8))
+    .refine((value) => Object.keys(value).length <= 64, "At most 64 models"),
+);
+
+export const ModelAccountSettingValues = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    rotation: z.record(
+      primitives.string,
+      z.object({
+        mode: ModelAccountRotationMode,
+        primaryConnectionId: z.string().nullable().optional(),
+      }),
+    ),
+    providers: z.record(
+      primitives.string,
+      z.object({
+        /** Deprecated and never set: every account that reaches a workspace serves it. */
+        inferenceSource: z.enum(["automatic", "workspace", "organization"]).optional(),
+        /** Deprecated: always true. Every account that reaches a workspace serves it. */
+        useOrganizationAccounts: primitives.boolean.default(true),
+        enabled: primitives.boolean,
+      }),
+    ),
+    crossProviderFailover: primitives.boolean,
+    fallbackOrder: z.record(primitives.string, z.array(primitives.string)),
+    personalConnectionsAllowed: primitives.boolean,
+    personalFallbackAllowed: primitives.boolean,
+  }),
+);
+export type ModelAccountSettingValues = z.infer<typeof ModelAccountSettingValues>;
+
+const ModelAccountSettingSources = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    rotation: ModelAccountSettingSource,
+    providers: ModelAccountSettingSource,
+    crossProviderFailover: ModelAccountSettingSource,
+    fallbackOrder: ModelAccountSettingSource,
+    personalConnectionsAllowed: ModelAccountSettingSource,
+    personalFallbackAllowed: ModelAccountSettingSource,
+  }),
+);
+
+const EntrySource = /* @__PURE__ */ defineSchema(() =>
+  z.record(primitives.string, z.enum(["organization", "workspace"])),
+);
+
+/** Effective values with one source per setting and, for map-valued settings, per entry. */
+const ModelAccountSettingsView = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    values: ModelAccountSettingValues,
+    sources: ModelAccountSettingSources,
+    entrySources: z.object({
+      rotation: EntrySource,
+      providers: EntrySource,
+      fallbackOrder: EntrySource,
+    }),
+  }),
+);
+
+export const OrganizationModelAccountSettings = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    organizationId: primitives.string,
+    values: ModelAccountSettingValues,
+    locked: z.array(ModelAccountSettingKey),
+    /** Pass back as `expectedVersion` to refuse a write over a concurrent change. */
+    version: primitives.nonnegativeInteger,
+    updatedAt: primitives.nullableString,
+    /**
+     * False when this deployment doesn't switch models when subscriptions run
+     * out, so `crossProviderFailover` has no effect here. Absent from older
+     * servers.
+     */
+    crossProviderFailoverAvailable: primitives.optionalBoolean,
+  }),
+);
+export type OrganizationModelAccountSettings = z.infer<typeof OrganizationModelAccountSettings>;
+
+/**
+ * PATCH body for the organization: omitted fields are kept; `fallbackOrder`
+ * and `locked` replace the stored value; `rotation` sets the mode of each
+ * named provider whose accounts run on the shared core. Locking a setting
+ * clears every workspace override of it.
+ */
+export const UpdateOrganizationModelAccountSettingsRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      crossProviderFailover: primitives.optionalBoolean,
+      fallbackOrder: ModelAccountFallbackOrder.optional(),
+      personalConnectionsAllowed: primitives.optionalBoolean,
+      personalFallbackAllowed: primitives.optionalBoolean,
+      rotation: z
+        .record(ProviderId, z.object({ mode: ModelAccountRotationMode }).strict())
+        .optional(),
+      locked: z.array(ModelAccountSettingKey).max(MODEL_ACCOUNT_SETTING_KEYS.length).optional(),
+      expectedVersion: z.number().int().nonnegative().optional(),
+    })
+    .strict(),
+);
+export type UpdateOrganizationModelAccountSettingsRequest = z.infer<
+  typeof UpdateOrganizationModelAccountSettingsRequest
+>;
+
+/** A workspace's stored overrides: null follows the organization. */
+export const ModelAccountSettingOverrides = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    rotation: z.record(primitives.string, z.unknown()).nullable(),
+    providers: z.record(primitives.string, z.unknown()).nullable(),
+    crossProviderFailover: z.boolean().nullable(),
+    fallbackOrder: z.record(primitives.string, z.array(primitives.string)).nullable(),
+    personalConnectionsAllowed: z.boolean().nullable(),
+    personalFallbackAllowed: z.boolean().nullable(),
+  }),
+);
+
+export const WorkspaceModelAccountSettings = /* @__PURE__ */ defineSchema(() =>
+  ModelAccountSettingsView.extend({
+    workspaceId: primitives.string,
+    locked: z.array(ModelAccountSettingKey),
+    overrides: ModelAccountSettingOverrides,
+    version: primitives.nonnegativeInteger,
+    updatedAt: primitives.nullableString,
+    /** Whether the caller may change this workspace's overrides. */
+    canEdit: primitives.boolean,
+    /** As on the organization's settings: false when switching models is off here. */
+    crossProviderFailoverAvailable: primitives.optionalBoolean,
+  }),
+);
+export type WorkspaceModelAccountSettings = z.infer<typeof WorkspaceModelAccountSettings>;
+
+/**
+ * PATCH body for a workspace: omitted fields are kept and `null` follows the
+ * organization again. `fallbackOrder` and `rotation` change entry by entry;
+ * a `null` entry follows the organization for that entry. A setting the
+ * organization locked cannot be set.
+ */
+export const UpdateWorkspaceModelAccountSettingsRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      crossProviderFailover: z.boolean().nullable().optional(),
+      personalConnectionsAllowed: z.boolean().nullable().optional(),
+      personalFallbackAllowed: z.boolean().nullable().optional(),
+      fallbackOrder: z
+        .record(ModelId, z.array(ModelId).max(8).nullable())
+        .refine((value) => Object.keys(value).length <= 64, "At most 64 models")
+        .nullable()
+        .optional(),
+      rotation: z
+        .record(ProviderId, z.object({ mode: ModelAccountRotationMode }).strict().nullable())
+        .nullable()
+        .optional(),
+      expectedVersion: z.number().int().nonnegative().optional(),
+    })
+    .strict(),
+);
+export type UpdateWorkspaceModelAccountSettingsRequest = z.infer<
+  typeof UpdateWorkspaceModelAccountSettingsRequest
+>;
+
+export const ModelAccountSettingsOverviewWorkspace = /* @__PURE__ */ defineSchema(() =>
+  ModelAccountSettingsView.extend({
+    workspaceId: primitives.string,
+    name: primitives.string,
+  }),
+);
+
+/** Every shared workspace's effective settings and sources, in pages ordered by workspace id. */
+export const ModelAccountSettingsOverview = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    organization: OrganizationModelAccountSettings,
+    workspaces: z.array(ModelAccountSettingsOverviewWorkspace),
+    /** Pass as `after` for the next page; null after the last workspace. */
+    nextCursor: primitives.nullableString,
+  }),
+);
+export type ModelAccountSettingsOverview = z.infer<typeof ModelAccountSettingsOverview>;

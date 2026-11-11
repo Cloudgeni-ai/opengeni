@@ -90,7 +90,9 @@ for (const scenario of [
         wakeSessionWorkflow,
       },
       17,
-      { claimPendingSessionWorkflowWakes },
+      {
+        claimPendingSessionWorkflowWakes,
+      },
     );
 
     expect(result).toEqual({

@@ -1,9 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
@@ -271,7 +268,7 @@ async function claimedParentBatch(grant: Grant, parent: Started, childSessionId:
     .find(
       (content): content is string =>
         typeof content === "string" &&
-        content.startsWith("[OpenGeni internal updates]") &&
+        content.startsWith("[Opengeni internal updates]") &&
         content.includes(childSessionId),
     );
   if (!batch) throw new Error("claimed child result missing from parent history");

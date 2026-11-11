@@ -4,11 +4,13 @@ description: "Require a human to approve tool calls, and let the agent ask struc
 icon: "hand"
 ---
 
-A session can pause mid-turn and wait for a person in two ways. `SessionConversation` renders both inline, and the same turn continues once someone answers. See [Approvals and human input](/concepts/approvals-and-human-input) for the full model.
+A session can pause mid-turn and wait for a person: to approve a tool call, or to answer a question. `SessionConversation` renders both inline, and the turn continues once someone answers. See [Approvals and human input](/concepts/approvals-and-human-input) for the full model.
 
-## Require approval for tools
+## Set tool approval defaults
 
-Set `requireApproval` on a per-session MCP server: `true` for every tool, or a list of tool names:
+Set the initial recommendation with `requireApproval` on a per-session MCP server: `true` for every tool, or a list of tool names. Explicit account choices take precedence:
+
+{/* doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" */}
 
 ```ts
 mcpServers: [
@@ -22,11 +24,17 @@ mcpServers: [
 tools: [{ kind: "mcp", id: "acme" }],
 ```
 
-When the agent proposes a gated call, the session enters `requires_action` and the conversation shows the call with Approve and Reject. A rejection goes back to the agent as the tool's result so it can adapt. Approvals are human-only: an agent can never approve a tool call.
+Use the names from the server's `tools/list` (`update_ticket`, not `acme__update_ticket`). Use `getConnectorToolPermissions` and `updateConnectorToolPermissions` for account-specific Allow, Ask first, Block and reset choices. Pass the returned revision as `expectedRevision` to detect concurrent changes. API Integration `autoApprovedTools` remains a compatibility input: omission preserves existing choices, while an explicit value updates them. See [Your data](/integrate/your-data).
+
+If you own the MCP server, it can recommend Ask itself: set `_meta: { "opengeni/recommendedPermission": "ask" }` on a tool in its `tools/list` (the key is exported as `MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY`). Opengeni reads the list on every run, so new tools get their recommendation in existing sessions without reattaching the server. A tool asks first when either the server or `requireApproval` says so.
+
+For an MCP server your product attaches to sessions, let workspace admins save the same choices with `getSessionMcpToolPermissions` and `updateSessionMcpToolPermissions`. Pass the server's `id` and its exact `url`. `target: "default"` covers every tool without its own choice, so it can be "Allow all", while `target: "tools"` sets named tools. Saved choices replace the `requireApproval` recommendation from the next run on. Writes need `capabilities:manage`, so an agent cannot change its own permissions.
+
+When the agent proposes a gated call, the session enters `requires_action` and the conversation shows Approve and Reject. A rejection goes back to the agent as the tool's result so it can adapt. Only people can approve tool calls.
 
 ## Let the agent ask questions
 
-Agents have a built-in tool for questions that need an answer before the turn can continue: free text, single select, or multi select, up to 20 per request. Answers are delivered to the agent as the tool's output. To turn it off, set the workspace setting `agentHumanInputEnabled: false`.
+The agent can ask free-text, single-select, or multi-select questions and gets the answers as the tool's output. Turn this off with the `humanInput` capability in [Configure the agent](/integrate/configure-the-agent).
 
 ## Answering without the React UI
 
@@ -37,8 +45,16 @@ Agents have a built-in tool for questions that need an answer before the turn ca
 
 Custom React UIs can use `projectPendingApprovals` and `useHumanInputRequests` from `@opengeni/react/session`.
 
-If a user sends an ordinary message while a session waits, the pending approval or question is cancelled and the message is delivered as a Steer. "Actually, do this instead" is one action.
+Pass the approval's `id` from the `session.requiresAction` event to `sendApprovalDecision`. Fetch its portable facts with `getToolActionReview`, and paginated saved arguments with `getToolReviewDetails`. The shared `ToolActionReviewCard` and `ToolActionReviewDetails` components use the same data as the web console. Present the exact account, action and consequences before enabling approval; keep full details accessible without dumping large JSON into the primary view.
 
-To notify people who are not watching, subscribe a [workspace webhook](/integrate/host-managed-integrations#webhooks) to `session.requiresAction` and `session.humanInput.requested`.
+To show your own words for an approval, such as a tool whose arguments are only identifiers, pass `loadReview` to the web `ApprovalSurface` or to the React Native `NativeSessionScreen` / `ApprovalStrip`. It returns a `ToolActionReview`: the server's from `getToolActionReview`, or one you write with a plain title and consequence. Return `null` to keep the standard card. The review changes only what the card says, never which approval is decided.
+
+When two or more approvals wait, the web `ApprovalSurface` also offers Approve all and Decline all. It calls your `onApprove` or `onReject` once per approval, one after another, so each decision is its own `sendApprovalDecision` with the server's usual checks. Approve all includes only approvals whose card offers Approve without more input (not a server's question, or one this person may only decline); one that fails stays waiting and is named with its error.
+
+The current Codemode client returns a durable pending handle for an action that needs review. After a decision, a current authorized attempt reads or resumes that handle. Preserve the operation ID; do not rebuild or resubmit its arguments. Older clients receive a safe approval-required error. External MCP clients without a supported human approval round trip cannot execute tools whose effective setting asks for review.
+
+If a user sends a normal message while a session waits, the pending approval or question is cancelled and the message runs as a Steer.
+
+To notify people who are not watching, subscribe a [webhook](/guides/webhooks-and-credentials#webhooks) to `session.requiresAction` and `session.humanInput.requested`.
 
 <Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

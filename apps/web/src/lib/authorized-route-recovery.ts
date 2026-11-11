@@ -1,6 +1,6 @@
-import type { AccessContext, Workspace } from "@/types";
+import type { AccessContext, Workspace } from "@opengeni/react/app/types";
 
-import { workspaceSessionsPath } from "./routes";
+import { workspaceSessionsPath } from "@opengeni/react/app/lib/routes";
 
 export type RouteRecoveryLocation = Pick<Location, "pathname" | "search" | "hash">;
 
@@ -18,9 +18,7 @@ const PORTABLE_WORKSPACE_DESTINATIONS: Readonly<
   sessions: { anyWorkspacePermissions: ["sessions:read"] },
   agents: { anyWorkspacePermissions: ["sessions:read"] },
   priority: { anyWorkspacePermissions: ["sessions:read"] },
-  "variable-sets": {
-    allWorkspacePermissions: ["variable-sets:list", "secrets:list"],
-  },
+  secrets: { anyWorkspacePermissions: ["secrets:list"] },
   rigs: { anyWorkspacePermissions: ["rigs:use"] },
   machines: { anyWorkspacePermissions: ["enrollments:read"] },
   capabilities: { anyWorkspacePermissions: ["connections:read"] },

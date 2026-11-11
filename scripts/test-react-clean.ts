@@ -64,6 +64,7 @@ async function main(): Promise<number> {
   const groups = [
     { tasks: plan.parallel, processes: budget.concurrency, inner: 1 },
     { tasks: plan.explicitConcurrency, processes: 1, inner: budget.concurrency },
+    { tasks: plan.cpuSaturating, processes: 1, inner: 1 },
     { tasks: plan.wallClockSensitive, processes: 1, inner: 1 },
     { tasks: plan.sharedPostgresExclusive, processes: 1, inner: 1 },
     { tasks: plan.clusterRoleSensitive, processes: 1, inner: 1 },

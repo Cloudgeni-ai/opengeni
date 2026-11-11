@@ -2,7 +2,10 @@ import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import type { ScheduledTaskAccessAttention, ScheduledTaskPolicyDrift } from "@/types";
+import type {
+  ScheduledTaskAccessAttention,
+  ScheduledTaskPolicyDrift,
+} from "@opengeni/react/app/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -20,7 +23,6 @@ const drift: ScheduledTaskPolicyDrift = {
   unavailableConnectors: [],
   missingOpenGeniTools: ["browser_read"],
   unavailableAccounts: [],
-  attachableAccounts: [{ id: "slack", name: "Slack" }],
   canRefresh: true,
 };
 
@@ -73,10 +75,12 @@ describe("scheduled task access notices", () => {
       const text = view.container.textContent ?? "";
       expect(text).toContain("The last run could not use a connector");
       expect(text).toContain(
-        "Couldn't use Slack: your personal account is not available to this schedule.",
+        "Couldn't use Slack: your personal account is not available to this automation.",
       );
       expect(text).toContain("Refreshing access below may fix it.");
-      expect(text).toContain("New schedules in this workspace also get Gmail; this one does not.");
+      expect(text).toContain(
+        "New automations in this workspace also get Gmail; this one does not.",
+      );
       expect(text).toContain("1 newer Opengeni tool is not available to it: browser read.");
       const button = [...view.container.querySelectorAll("button")].find(
         (candidate) => candidate.textContent === "Refresh access",
@@ -102,7 +106,7 @@ describe("scheduled task access notices", () => {
     try {
       expect(view.container.querySelector("button")).toBeNull();
       expect(view.container.textContent).toContain(
-        "Refreshing needs a signed-in person who can manage schedules.",
+        "Refreshing needs a signed-in person who can manage automations.",
       );
     } finally {
       await view.cleanup();
@@ -121,7 +125,7 @@ describe("scheduled task access notices", () => {
     );
     try {
       expect(view.container.textContent).toContain(
-        "Check the connection in Capabilities, then run the schedule again.",
+        "Check the connection in Capabilities, then run the automation again.",
       );
       expect(view.container.querySelector("button")).toBeNull();
     } finally {
@@ -129,8 +133,15 @@ describe("scheduled task access notices", () => {
     }
   });
 
-  test("a schedule that cannot start says so once and offers the refresh right there", async () => {
+  test("a stale pin says so once and points at the schedule, never at a refresh", async () => {
     const onRefreshAccess = mock(() => undefined);
+    const stalePin = {
+      ...attention,
+      runId: null,
+      firedAt: null,
+      failures: [],
+      unavailableAccounts: [{ id: "linear", name: "Linear" }],
+    };
     const view = await render(
       <ScheduledTaskAccessNotices
         policyDrift={{
@@ -138,16 +149,9 @@ describe("scheduled task access notices", () => {
           unavailableConnectors: [],
           missingOpenGeniTools: [],
           unavailableAccounts: [{ id: "linear", name: "Linear" }],
-          attachableAccounts: [],
           canRefresh: true,
         }}
-        attention={{
-          ...attention,
-          runId: null,
-          firedAt: null,
-          failures: [],
-          unavailableAccounts: [{ id: "linear", name: "Linear" }],
-        }}
+        attention={stalePin}
         ownsTask
         busy={false}
         onRefreshAccess={onRefreshAccess}
@@ -155,19 +159,41 @@ describe("scheduled task access notices", () => {
     );
     try {
       const text = view.container.textContent ?? "";
-      expect(text).toContain("New runs of this schedule cannot start");
+      expect(text).toContain("A pinned account can no longer be used");
       const sentence =
-        "The account chosen for Linear can no longer be used, so new runs cannot start.";
+        "The account pinned for Linear can no longer be used, so runs go ahead without Linear.";
       expect(text.split(sentence)).toHaveLength(2);
-      expect(text).toContain("Refreshing access uses the accounts you can use now.");
-      expect(text).not.toContain("This schedule's access is out of date");
-      const button = [...view.container.querySelectorAll("button")].find(
-        (candidate) => candidate.textContent === "Refresh access",
+      expect(text).toContain(
+        "edit the automation to pin another one or use your current accounts.",
       );
-      await act(async () => button!.click());
-      expect(onRefreshAccess).toHaveBeenCalledTimes(1);
+      expect(text).not.toContain("This automation's access is out of date");
+      // A refresh never changes pins, so it is not offered for one.
+      expect(
+        [...view.container.querySelectorAll("button")].some(
+          (candidate) => candidate.textContent === "Refresh access",
+        ),
+      ).toBe(false);
     } finally {
       await view.cleanup();
+    }
+    const required = await render(
+      <ScheduledTaskAccessNotices
+        policyDrift={null}
+        attention={stalePin}
+        pinnedAccountsRequired
+        ownsTask
+        busy={false}
+        onRefreshAccess={onRefreshAccess}
+      />,
+    );
+    try {
+      const text = required.container.textContent ?? "";
+      expect(text).toContain("Runs of this automation are being skipped");
+      expect(text).toContain(
+        "The account pinned for Linear can no longer be used, so runs are skipped.",
+      );
+    } finally {
+      await required.cleanup();
     }
   });
 
@@ -189,7 +215,7 @@ describe("scheduled task access notices", () => {
     );
     try {
       expect(view.container.textContent).toContain(
-        "Reconnect the account in Capabilities, or edit the schedule to choose another one.",
+        "Reconnect the account in Capabilities, or edit the automation to pin another one or use your current accounts.",
       );
       expect(view.container.querySelector("button")).toBeNull();
     } finally {

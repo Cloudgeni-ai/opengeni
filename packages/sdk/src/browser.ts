@@ -25,6 +25,7 @@ export type {
   FetchResponse,
   GetSessionOptions,
   OpenGeniClientOptions,
+  ChatClient,
   OpenGeniRequestOptions,
   SendMessageInput,
   SteerMessageResult,
@@ -36,18 +37,37 @@ export {
   OpenGeniApiError,
   OpenGeniSetupError,
   OpenGeniAllowanceExhaustedError,
+  OpenGeniSessionUsageLimitReachedError,
+  OpenGeniSessionUsageLimitUnsupportedError,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
+  formatErrorMessage,
+  isMaintenanceError,
+  isApprovalRequiresAccountOwnerError,
+  APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE,
   isRetryableStreamError,
+  OPENGENI_MAINTENANCE_ERROR_CODE,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
+export { isTransientRequestError } from "./read-retry";
+export type { OpenGeniReadRetryOptions } from "./read-retry";
 export { resolveWorkspaceVoiceInputEnabled } from "./transcription";
-export { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
+export {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_BROWSER_REQUEST_HEADERS,
+  OPENGENI_BROWSER_RESPONSE_HEADERS,
+  OPENGENI_CORRELATION_HEADER,
+  OPENGENI_SDK_VERSION_HEADER,
+  OPENGENI_SESSION_CHAT_ACCEPT,
+} from "./types";
 
 export type {
   ConnectorToolPermission,
   ConnectorToolPermissionEntry,
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
+  SessionMcpToolPermissionsResponse,
+  UpdateSessionMcpToolPermissionsRequest,
 } from "./types";

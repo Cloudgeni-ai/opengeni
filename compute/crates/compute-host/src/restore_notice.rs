@@ -1,0 +1,867 @@
+//! Telling a guest that it was restored from a memory image.
+//!
+//! A restored guest carries on exactly where its image was taken, and two
+//! things inside it are then wrong without it noticing:
+//!
+//! - Its wall clock still shows the moment the image was saved. The clock
+//!   only advances while the VM runs, so after an hour asleep it is an hour
+//!   behind. (A paused VM whose process stayed alive keeps correct time.)
+//! - Every connection it opened to the host still looks open to it, although
+//!   the VM process that carried them is gone. Nothing resets them, so a
+//!   client only finds out the next time it writes, which for an idle
+//!   control link can be a minute of the guest's own running time.
+//!
+//! A third thing matters for sandboxes started from a template: every one
+//! of them wakes with the template's memory, so none knows which sandbox it
+//! is, and all draw the same random numbers until their kernels reseed.
+//! (The VMM changes the VM generation id on every restore and the kernel
+//! reseeds when it learns of that, but asynchronously: under a burst of
+//! restores, seconds later.)
+//!
+//! So right after a restore, before anything else may use the sandbox, the
+//! host connects to the guest's notice port and sends one line:
+//!
+//! ```text
+//! restored <unix time in nanoseconds> sandbox=<sandbox id> seed=<hex> order=<generation>.<revision> owner=<owner epoch> disk=<bytes>
+//! ```
+//!
+//! The guest sets its clock, drops connections it opened before the
+//! restore, takes the sandbox id as its own, mixes the seed (32 random
+//! bytes from the host, the same on every attempt of one notice) into its
+//! random number generator and reseeds it, and answers `ok seeded`, or
+//! `ok` if it could not apply the seed. A clone of a template or a ready
+//! sandbox is used only after `ok seeded`: until it reseeds, it draws the
+//! numbers every other clone of the same snapshot draws. Later
+//! `key=value` fields may follow; a guest ignores those it does not know.
+//!
+//! `disk` is how long the sandbox's disk is, as the host made it: a claim
+//! or a create from a template may have made it longer than the memory the
+//! guest wakes with knows, and the guest's kernel learns of that only once
+//! it handles its disk's change after the resume. Before it answers, the
+//! guest waits for its kernel to see the disk that long and grows its root
+//! file system to fill it, so a sandbox is never used with less room than
+//! it asked for. A guest of a release before this grows it a moment after
+//! it answers.
+//!
+//! The host retries until the guest answers or a deadline passes, so set a
+//! notice port only for guest images that listen on it; a guest that never
+//! answers costs every restore the whole deadline (and still runs).
+//!
+//! A guest booted from its disk instead finds the same id on its kernel
+//! command line, as `opengeni.sandbox=<sandbox id>`. One booted from a
+//! clone's disk (a clone that never acknowledged its notice) is told the
+//! same notice and must answer `ok seeded` before it is used: its disk
+//! carries the template's machine identity, which the guest replaces.
+//!
+//! A guest applies notices one at a time and ignores one ordered below the
+//! latest it applied, answering `stale`, so an attempt the host gave up on
+//! that arrives late never takes back a newer identity. The order is the
+//! sandbox's owner epoch (`owner`), then its record fence when the notice
+//! is sent (`order`: its generation, then its revision), compared as
+//! numbers in that order. Every restore, claim and boot raises the fence
+//! with a durable write before it tells the guest, and the fence never goes
+//! back across agent restarts; but it is this host's record's, and a
+//! sandbox that moves starts afresh on its new host. Its new owner's epoch
+//! is higher, and the epoch is what a moved guest's memory is ordered by.
+//! The attempts of one notice share the order, so a retry is applied
+//! again; the time sets only the clock, and a host clock that steps back
+//! orders nothing. A retry moves the guest's clock only forward: the guest
+//! may get to it after the attempt before it, with the time it was sent
+//! at. A template's guest is told no notice before its
+//! snapshot, so a clone's first notice is the first its memory knows of.
+//!
+//! The same port answers one more question, asked before a running sandbox
+//! sleeps only for being idle: the line `activity`,
+//! answered `commands <n>`, the number of commands started through the
+//! guest's helper that are still running and keep the sandbox awake (a
+//! caller can start one that does not). A sandbox running such a command
+//! stays awake however quiet the command is. A guest that does not know
+//! the question gives no count, and only processor use and traffic count.
+//!
+//! And one request, made before the host pauses a guest to save it or to
+//! checkpoint it: the line `sync`, answered `synced` once the guest has
+//! written everything it holds for its disks to them. A saved disk is then
+//! whole without the memory saved beside it, which matters when that
+//! memory cannot be used: the sandbox's host was lost, and the next one
+//! boots the disk (see [`crate::protocol::Request::Adopt`]). A guest that
+//! does not know the request does not answer; the host waits a short
+//! while and saves anyway, so the disk is then as after a power cut.
+//! Before it answers, the guest also trims its root file system: the
+//! drive takes discards, so the host's file gives back what the guest's
+//! files freed, and the saved disk, its archive and its copies hold only
+//! what they use. A guest that does not trim keeps its disk's file as
+//! large as its guest ever filled it.
+//!
+//! When the host is short of memory and a sandbox holds more than it
+//! requested, the host may ask its guest to give memory back (ADR 24):
+//!
+//! ```text
+//! shrink free=<bytes> keep=<bytes>
+//! ```
+//!
+//! The guest drops its file cache, then ends the processes its kernel's
+//! out-of-memory killer would end first, never those its init supervises,
+//! until `free` more bytes are free or no more than `keep` are in use, and
+//! answers `shrunk freed=<bytes> spent=<0|1> ended=<count> names=<a,b>`:
+//! what it freed, whether nothing is left that it may end, and what it
+//! ended. A guest of a release before this does not answer.
+//!
+//! Last, while a sandbox runs the host connects to the port every so often
+//! without sending a line, and closes the connection again: a guest reads
+//! its end and ignores it. The guest's kernel takes a connection to a
+//! listening port by itself, before the guest reads anything, so a guest
+//! that is busy, or still writing its disks out for a `sync`, takes it as
+//! well; one that takes none for minutes has stopped while its VM runs on
+//! (see [`crate::agent`]). Only a connection the VMM was asked for and the
+//! guest did not take counts: one the host could not even ask for, its
+//! VMM's socket out of reach, says nothing about the guest (see
+//! [`Reach`]). So a host that sets a notice port expects every guest it
+//! runs to listen on it, and ends one that does not.
+
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{fmt, io};
+
+use compute_engine::vsock;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
+
+/// Where a notice stands among those sent to one sandbox's guest: the
+/// sandbox's owner epoch, then its record's generation and revision, when
+/// it was sent.
+pub type Order = (u64, u64, u64);
+
+/// The line a guest sends back once it has acted on the notice, without
+/// a newline.
+const ACK: &[u8] = b"ok";
+/// The same, from a guest that also applied the seed.
+const SEEDED: &[u8] = b"ok seeded";
+/// The line from a guest that applied a later notice, and so ignored this
+/// one.
+const STALE: &[u8] = b"stale";
+
+/// How a guest answered a notice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Told {
+    /// Connections it took, the answered one included.
+    pub attempts: u32,
+    /// Whether it applied the seed (`ok seeded`).
+    pub seeded: bool,
+}
+
+/// Nanoseconds since the Unix epoch at `at`.
+fn unix_nanos(at: SystemTime) -> io::Result<u128> {
+    Ok(at
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos())
+}
+
+/// Formats the notice to sandbox `sandbox` with `seed` at `order` for the
+/// time `now`, with its disk's length, if known.
+fn notice(
+    now: SystemTime,
+    sandbox: impl fmt::Display,
+    seed: &str,
+    (owner, generation, revision): Order,
+    disk: Option<u64>,
+) -> io::Result<String> {
+    use std::fmt::Write as _;
+    let nanos = unix_nanos(now)?;
+    let mut line = format!(
+        "restored {nanos} sandbox={sandbox} seed={seed} order={generation}.{revision} owner={owner}"
+    );
+    if let Some(disk) = disk {
+        let _ = write!(line, " disk={disk}");
+    }
+    line.push('\n');
+    Ok(line)
+}
+
+/// 32 bytes from the host's random number generator, in hex.
+fn seed() -> io::Result<String> {
+    use std::fmt::Write as _;
+    use std::io::Read as _;
+    let mut bytes = [0_u8; 32];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    }))
+}
+
+/// Longest a single attempt waits for the guest's answer at first; each
+/// attempt after a timeout waits twice as long. A guest just restored can
+/// take a few hundred milliseconds to answer (more in a burst of restores),
+/// and giving up on an attempt it is already handling only gives it more
+/// work.
+const FIRST_ATTEMPT: Duration = Duration::from_secs(1);
+
+/// Pause before trying again after the guest dropped the connection.
+const RETRY_PAUSE: Duration = Duration::from_millis(5);
+
+/// Tells the guest of sandbox `sandbox`, whose record is at `order` and
+/// whose disk is `disk` bytes long (if known), through the VM's vsock
+/// socket and waits for its answer, trying again until `deadline` has
+/// passed.
+///
+/// Retrying matters right after a restore: the guest kernel first handles
+/// the VMM's vsock transport reset, and a connection that arrives in that
+/// instant is dropped or never answered, although the listener is there.
+/// The notice is idempotent and every attempt carries the same order, so a
+/// guest that acted on an attempt whose answer came too late only sets the
+/// clock and the same id again.
+///
+/// # Errors
+///
+/// The guest answered something else (also that it applied a later
+/// notice), or did not answer before `deadline` (the last attempt's error).
+pub async fn tell_restored(
+    vsock_socket: &Path,
+    port: u32,
+    sandbox: impl fmt::Display,
+    order: Order,
+    disk: Option<u64>,
+    deadline: Duration,
+) -> io::Result<Told> {
+    let sandbox = sandbox.to_string();
+    let seed = seed()?;
+    let give_up = Instant::now() + deadline;
+    let mut wait = FIRST_ATTEMPT;
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let left = give_up.saturating_duration_since(Instant::now());
+        let error = match tokio::time::timeout(
+            wait.min(left),
+            exchange(vsock_socket, port, &sandbox, &seed, order, disk),
+        )
+        .await
+        {
+            Ok(Ok(seeded)) => return Ok(Told { attempts, seeded }),
+            Ok(Err(error)) if error.kind() == io::ErrorKind::InvalidData => return Err(error),
+            Ok(Err(error)) => error,
+            Err(_) => {
+                wait = wait.saturating_mul(2);
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the guest did not answer the restore notice",
+                )
+            }
+        };
+        tracing::debug!(attempts, %error, "restore notice attempt failed");
+        if Instant::now() + RETRY_PAUSE >= give_up {
+            return Err(error);
+        }
+        tokio::time::sleep(RETRY_PAUSE).await;
+    }
+}
+
+/// One connection: the notice out, the guest's answer back. Returns
+/// whether the guest applied the seed.
+async fn exchange(
+    vsock_socket: &Path,
+    port: u32,
+    sandbox: &str,
+    seed: &str,
+    order: Order,
+    disk: Option<u64>,
+) -> io::Result<bool> {
+    let mut stream = vsock::connect(vsock_socket, port).await?;
+    stream
+        .write_all(notice(SystemTime::now(), sandbox, seed, order, disk)?.as_bytes())
+        .await?;
+    let mut answer = Vec::with_capacity(SEEDED.len() + 1);
+    let mut byte = [0_u8; 1];
+    while answer.len() <= SEEDED.len() {
+        stream.read_exact(&mut byte).await?;
+        if byte[0] == b'\n' {
+            if answer == ACK {
+                return Ok(false);
+            }
+            if answer == SEEDED {
+                return Ok(true);
+            }
+            if answer == STALE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the guest applied a later restore notice than this one",
+                ));
+            }
+            break;
+        }
+        answer.push(byte[0]);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "unexpected answer to the restore notice",
+    ))
+}
+
+/// Longest answer to `activity` or `sync` a guest may give.
+const MAX_ACTIVITY: usize = 32;
+
+/// Longest the host waits for a running guest to take a connection on its
+/// notice port, for a check and an activity ask alike, so both tell a
+/// guest that takes none the same way. Firecracker itself gives up on a
+/// connection its guest leaves unanswered after two seconds.
+pub const REACH_LIMIT: Duration = Duration::from_secs(5);
+
+/// Whether a running guest took a connection on its notice port.
+#[derive(Debug)]
+pub enum Reach {
+    /// It took one.
+    Reached,
+    /// Its VMM had the request, and the guest refused it or left it
+    /// unanswered within the limit: it may have stopped (see the module
+    /// documentation).
+    Unreached(io::Error),
+    /// The host could not ask: it could not reach or write to the VMM's
+    /// socket in time, as when it is out of descriptors. That says nothing
+    /// about the guest.
+    Untried(io::Error),
+}
+
+/// Connects to `port` in the guest behind `vsock_socket` within `limit`,
+/// or says why not: never [`Reach::Reached`].
+async fn dial(vsock_socket: &Path, port: u32, limit: Duration) -> Result<UnixStream, Reach> {
+    let until = tokio::time::Instant::now() + limit;
+    let asked = match tokio::time::timeout_at(until, vsock::request(vsock_socket, port)).await {
+        Ok(Ok(asked)) => asked,
+        Ok(Err(error)) => return Err(Reach::Untried(error)),
+        Err(_) => {
+            return Err(Reach::Untried(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the VMM's socket took no request",
+            )));
+        }
+    };
+    match tokio::time::timeout_at(until, vsock::answered(asked)).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) => Err(Reach::Unreached(error)),
+        Err(_) => Err(Reach::Unreached(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the guest took no connection",
+        ))),
+    }
+}
+
+/// How a running guest answered `activity`.
+#[derive(Debug)]
+pub enum Commands {
+    /// That many commands started through its helper still run.
+    Running(u32),
+    /// It took the connection but gave no count in time: a guest that does
+    /// not know the question, or one slow to answer it. Or the host could
+    /// not ask it ([`Reach::Untried`]).
+    Unknown(io::Error),
+    /// It took no connection in time ([`Reach::Unreached`]): it may have
+    /// stopped (see the module documentation).
+    Unreached(io::Error),
+}
+
+/// Asks a running guest how many commands started through its helper are
+/// still running and keep it awake (see the module documentation), and
+/// says whether it took the connection at all: it has `reach` to take it,
+/// as [`reachable`] gives it, then `limit` to answer.
+pub async fn ask_commands(
+    vsock_socket: &Path,
+    port: u32,
+    reach: Duration,
+    limit: Duration,
+) -> Commands {
+    let mut stream = match dial(vsock_socket, port, reach).await {
+        Ok(stream) => stream,
+        Err(Reach::Unreached(error)) => return Commands::Unreached(error),
+        Err(Reach::Untried(error)) => return Commands::Unknown(error),
+        Err(Reach::Reached) => unreachable!("a failed dial reached nothing"),
+    };
+    let asked = async {
+        stream.write_all(b"activity\n").await?;
+        let mut answer = Vec::with_capacity(MAX_ACTIVITY);
+        let mut byte = [0_u8; 1];
+        while answer.len() <= MAX_ACTIVITY {
+            stream.read_exact(&mut byte).await?;
+            if byte[0] == b'\n' {
+                return std::str::from_utf8(&answer)
+                    .ok()
+                    .and_then(|line| line.strip_prefix("commands "))
+                    .and_then(|count| count.parse().ok())
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "unexpected answer to activity")
+                    });
+            }
+            answer.push(byte[0]);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "answer to activity too long",
+        ))
+    };
+    match tokio::time::timeout(limit, asked).await {
+        Ok(Ok(count)) => Commands::Running(count),
+        Ok(Err(error)) => Commands::Unknown(error),
+        Err(_) => Commands::Unknown(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the guest did not answer activity",
+        )),
+    }
+}
+
+/// Whether a running guest takes a connection on its notice port within
+/// `limit` (see the module documentation). The connection is closed at
+/// once, without a line.
+pub async fn reachable(vsock_socket: &Path, port: u32, limit: Duration) -> Reach {
+    match dial(vsock_socket, port, limit).await {
+        Ok(_) => Reach::Reached,
+        Err(reach) => reach,
+    }
+}
+
+/// Asks a running guest to write everything it holds for its disks to
+/// them (see the module documentation), giving up after `limit`.
+///
+/// # Errors
+///
+/// The guest did not answer in time, or answered something else.
+pub async fn ask_sync(vsock_socket: &Path, port: u32, limit: Duration) -> io::Result<()> {
+    let asked = async {
+        let mut stream = vsock::connect(vsock_socket, port).await?;
+        stream.write_all(b"sync\n").await?;
+        let mut answer = Vec::with_capacity(MAX_ACTIVITY);
+        let mut byte = [0_u8; 1];
+        while answer.len() <= MAX_ACTIVITY {
+            stream.read_exact(&mut byte).await?;
+            if byte[0] == b'\n' {
+                break;
+            }
+            answer.push(byte[0]);
+        }
+        if answer == b"synced" {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected answer to sync",
+            ))
+        }
+    };
+    tokio::time::timeout(limit, asked)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the guest did not answer sync"))?
+}
+
+/// How a guest answered `shrink`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shrunk {
+    /// Bytes more free in the guest than before.
+    pub freed: u64,
+    /// Whether nothing is left that it may end.
+    pub spent: bool,
+    /// How many processes it ended.
+    pub ended: u32,
+    /// The names of some of them.
+    pub names: Vec<String>,
+}
+
+/// The longest answer to `shrink` the host reads.
+const MAX_SHRUNK: usize = 512;
+
+/// Parses the guest's answer to `shrink`, without its newline.
+fn parse_shrunk(line: &str) -> Option<Shrunk> {
+    let mut words = line.split_whitespace();
+    if words.next()? != "shrunk" {
+        return None;
+    }
+    let (mut freed, mut spent, mut ended, mut names) = (None, None, 0, Vec::new());
+    for field in words {
+        let (key, value) = field.split_once('=').unwrap_or((field, ""));
+        match key {
+            "freed" => freed = value.parse().ok(),
+            "spent" => spent = Some(value == "1"),
+            "ended" => ended = value.parse().unwrap_or(0),
+            "names" => {
+                names = value
+                    .split(',')
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+    Some(Shrunk {
+        freed: freed?,
+        spent: spent?,
+        ended,
+        names,
+    })
+}
+
+/// Asks a running guest to free `free` bytes of memory for the host,
+/// keeping at least `keep` in use (see the module documentation), and
+/// waits at most `limit` for its answer.
+///
+/// # Errors
+///
+/// The guest could not be reached, did not answer in time (also a guest
+/// that does not know the request), or answered something else.
+pub async fn ask_shrink(
+    vsock_socket: &Path,
+    port: u32,
+    free: u64,
+    keep: u64,
+    limit: Duration,
+) -> io::Result<Shrunk> {
+    let asked = async {
+        let mut stream = vsock::connect(vsock_socket, port).await?;
+        stream
+            .write_all(format!("shrink free={free} keep={keep}\n").as_bytes())
+            .await?;
+        let mut answer = Vec::with_capacity(64);
+        let mut byte = [0_u8; 1];
+        while answer.len() <= MAX_SHRUNK {
+            stream.read_exact(&mut byte).await?;
+            if byte[0] == b'\n' {
+                return std::str::from_utf8(&answer)
+                    .ok()
+                    .and_then(parse_shrunk)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "unexpected answer to shrink")
+                    });
+            }
+            answer.push(byte[0]);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "answer to shrink too long",
+        ))
+    };
+    tokio::time::timeout(limit, asked)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the guest did not answer shrink"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::UnixListener;
+
+    const ORDER: Order = (2, 4, 9);
+
+    #[test]
+    fn reads_what_a_guest_freed_and_ended() {
+        assert_eq!(
+            parse_shrunk("shrunk freed=5242880 spent=0 ended=3 names=cc1plus,node later=x"),
+            Some(Shrunk {
+                freed: 5 << 20,
+                spent: false,
+                ended: 3,
+                names: vec!["cc1plus".into(), "node".into()],
+            })
+        );
+        assert_eq!(
+            parse_shrunk("shrunk freed=0 spent=1 ended=0 names="),
+            Some(Shrunk {
+                freed: 0,
+                spent: true,
+                ended: 0,
+                names: Vec::new(),
+            })
+        );
+        for line in [
+            "",
+            "ok",
+            "shrunk spent=1",
+            "shrunk freed=x spent=0",
+            "synced",
+        ] {
+            assert_eq!(parse_shrunk(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn the_notice_carries_unix_nanoseconds_the_record_fence_and_the_disk() {
+        let at = UNIX_EPOCH + Duration::new(1_700_000_000, 5);
+        assert_eq!(
+            notice(at, "00ab", "5eed", ORDER, None).unwrap(),
+            "restored 1700000000000000005 sandbox=00ab seed=5eed order=4.9 owner=2\n"
+        );
+        assert_eq!(
+            notice(at, "00ab", "5eed", ORDER, Some(21_474_836_480)).unwrap(),
+            "restored 1700000000000000005 sandbox=00ab seed=5eed order=4.9 owner=2 disk=21474836480\n"
+        );
+    }
+
+    /// A stand-in for a VMM's vsock socket with one guest behind it, which
+    /// answers its successive connections with `answers`; `None` drops the
+    /// connection unanswered, as a guest does during its transport reset.
+    /// Its directory goes with the guest when the test's runtime ends.
+    fn guest(name: &str, answers: &'static [Option<&'static [u8]>]) -> std::path::PathBuf {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("notice-{name}-"))
+            .tempdir()
+            .unwrap();
+        let socket = dir.path().join("vsock.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let _dir = dir;
+            let mut held = Vec::new();
+            let mut seeds = Vec::new();
+            for answer in answers {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                assert_eq!(lines.next_line().await.unwrap().unwrap(), "CONNECT 53");
+                write.write_all(b"OK 1073741824\n").await.unwrap();
+                let line = lines.next_line().await.unwrap().unwrap();
+                assert!(line.starts_with("restored "), "{line}");
+                assert!(line.contains(" sandbox=7 seed="), "{line}");
+                // Every attempt carries the record's fence.
+                assert!(line.ends_with(" order=4.9 owner=2"), "{line}");
+                let seed = line
+                    .split_whitespace()
+                    .find_map(|field| field.strip_prefix("seed="))
+                    .unwrap()
+                    .to_owned();
+                assert_eq!(seed.len(), 64, "{line}");
+                seeds.push(seed);
+                // Every attempt carries the same seed.
+                assert!(seeds.iter().all(|seed| *seed == seeds[0]), "{seeds:?}");
+                if let Some(answer) = answer {
+                    write.write_all(answer).await.unwrap();
+                    // Hold the connection open so a missing answer times out.
+                    held.push((lines, write));
+                }
+            }
+            std::future::pending::<()>().await;
+        });
+        socket
+    }
+
+    #[tokio::test]
+    async fn a_guest_says_whether_it_applied_the_seed() {
+        for (name, answer, seeded) in [
+            ("ok", b"ok\n" as &[u8], false),
+            ("seeded", b"ok seeded\n", true),
+        ] {
+            let socket = guest(name, Box::leak(Box::new([Some(answer)])));
+            let told = tell_restored(&socket, 53, 7, ORDER, None, Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert_eq!(
+                told,
+                Told {
+                    attempts: 1,
+                    seeded
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_guest_resetting_its_transport_is_told_on_a_later_attempt() {
+        let socket = guest("reset", &[None, Some(b""), Some(b"ok seeded\n")]);
+        let told = tell_restored(&socket, 53, 7, ORDER, None, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(told.attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn a_wrong_answer_is_not_retried() {
+        for (name, answer) in [
+            ("wrong", b"no\n" as &[u8]),
+            ("seedy", b"ok seedy\n"),
+            ("long", b"ok seeded and more\n"),
+            ("stale", b"stale\n"),
+        ] {
+            let socket = guest(name, Box::leak(Box::new([Some(answer), Some(b"ok\n")])));
+            let error = tell_restored(&socket, 53, 7, ORDER, None, Duration::from_secs(5))
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
+        }
+    }
+
+    /// A guest that answers each `question` with one of `answers`. Its
+    /// directory goes with the guest when the test's runtime ends.
+    fn asked_guest(
+        name: &str,
+        question: &'static str,
+        answers: &'static [&'static [u8]],
+    ) -> std::path::PathBuf {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("{question}-{name}-"))
+            .tempdir()
+            .unwrap();
+        let socket = dir.path().join("vsock.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let _dir = dir;
+            let mut held = Vec::new();
+            for answer in answers {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                assert_eq!(lines.next_line().await.unwrap().unwrap(), "CONNECT 53");
+                write.write_all(b"OK 1073741824\n").await.unwrap();
+                assert_eq!(lines.next_line().await.unwrap().unwrap(), question);
+                write.write_all(answer).await.unwrap();
+                held.push((lines, write));
+            }
+            std::future::pending::<()>().await;
+        });
+        socket
+    }
+
+    #[tokio::test]
+    async fn a_guest_counts_the_commands_that_keep_it_awake() {
+        let socket = asked_guest(
+            "counts",
+            "activity",
+            &[
+                b"commands 2\n",
+                b"commands 0\n",
+                b"what?\n",
+                b"commands two\n",
+                b"",
+            ],
+        );
+        let limit = Duration::from_millis(200);
+        assert!(matches!(
+            ask_commands(&socket, 53, limit, limit).await,
+            Commands::Running(2)
+        ));
+        assert!(matches!(
+            ask_commands(&socket, 53, limit, limit).await,
+            Commands::Running(0)
+        ));
+        for _ in 0..2 {
+            let Commands::Unknown(error) = ask_commands(&socket, 53, limit, limit).await else {
+                panic!("a wrong answer is no count");
+            };
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        let Commands::Unknown(error) = ask_commands(&socket, 53, limit, limit).await else {
+            panic!("a guest that took the connection was reached");
+        };
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::TimedOut,
+            "a guest that never answers"
+        );
+    }
+
+    /// What a stand-in VMM does with each connection to its guest.
+    #[derive(Clone, Copy, Debug)]
+    enum Handshake {
+        /// Drops it, as Firecracker does once its guest refused it or left
+        /// it unanswered for too long.
+        Drop,
+        /// Holds it unanswered, as while it still waits for the guest.
+        Hold,
+        /// Says the guest took it, and the guest never answers.
+        Take,
+    }
+
+    /// A stand-in for a VMM whose guest's connections all go as
+    /// `handshake` says.
+    fn handshaking_guest(name: &str, handshake: Handshake) -> std::path::PathBuf {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("handshake-{name}-"))
+            .tempdir()
+            .unwrap();
+        let socket = dir.path().join("vsock.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let _dir = dir;
+            let mut held = Vec::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                assert_eq!(lines.next_line().await.unwrap().unwrap(), "CONNECT 53");
+                match handshake {
+                    Handshake::Drop => continue,
+                    Handshake::Hold => {}
+                    Handshake::Take => write.write_all(b"OK 1073741824\n").await.unwrap(),
+                }
+                held.push((lines, write));
+            }
+        });
+        socket
+    }
+
+    /// A guest whose kernel takes no connection on its notice port is told
+    /// apart from one that takes it and gives no count, whether its VMM
+    /// drops the connection or still waits on it when time is up. A VMM
+    /// socket the host cannot reach says nothing about the guest.
+    #[tokio::test]
+    async fn a_guest_that_takes_no_connection_is_unreached() {
+        let limit = Duration::from_millis(200);
+        for socket in [
+            handshaking_guest("dropped", Handshake::Drop),
+            handshaking_guest("held", Handshake::Hold),
+        ] {
+            assert!(
+                matches!(
+                    ask_commands(&socket, 53, limit, limit).await,
+                    Commands::Unreached(_)
+                ),
+                "{}",
+                socket.display()
+            );
+            assert!(
+                matches!(reachable(&socket, 53, limit).await, Reach::Unreached(_)),
+                "{}",
+                socket.display()
+            );
+        }
+        let gone = tempfile::tempdir().unwrap();
+        let socket = gone.path().join("vsock.sock");
+        assert!(matches!(
+            reachable(&socket, 53, limit).await,
+            Reach::Untried(_)
+        ));
+        let Commands::Unknown(error) = ask_commands(&socket, 53, limit, limit).await else {
+            panic!("a guest the host could not ask was not found unreached");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        // One that takes it is reached, whatever it then says.
+        let socket = handshaking_guest("taken", Handshake::Take);
+        assert!(matches!(
+            reachable(&socket, 53, limit).await,
+            Reach::Reached
+        ));
+        let Commands::Unknown(error) = ask_commands(&socket, 53, limit, limit).await else {
+            panic!("a guest that took the connection was reached");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn a_guest_says_when_its_disks_hold_what_it_wrote() {
+        let socket = asked_guest("synced", "sync", &[b"synced\n", b"what?\n", b""]);
+        let limit = Duration::from_millis(200);
+        ask_sync(&socket, 53, limit).await.unwrap();
+        let error = ask_sync(&socket, 53, limit).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let error = ask_sync(&socket, 53, limit).await.unwrap_err();
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::TimedOut,
+            "a guest that never answers"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_silent_guest_times_out() {
+        let socket = guest("silent", &[Some(b""), Some(b""), Some(b"")]);
+        let error = tell_restored(&socket, 53, 7, ORDER, None, Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+}

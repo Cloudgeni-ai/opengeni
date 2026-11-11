@@ -12,14 +12,17 @@ import {
   RejectPreferenceRegistryProposalRequest,
   SupersedePreferenceRegistryRequest,
   type AccessGrant,
+  type Permission,
   type PreferenceRegistryScope,
 } from "@opengeni/contracts";
 import {
+  authorizationHoldsOrganizationAdministration,
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import {
   changePreferenceRegistryScope,
@@ -42,14 +45,16 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 
 const Id = z.string().uuid();
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
-  const parsed = schema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success)
-    throw new HTTPException(422, { message: "Invalid preference registry request" });
-  return parsed.data;
+  const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
+    status: 422,
+    message: "Invalid preference registry request",
+  });
+  return parsed;
 }
 
 function exactAttemptClaims(grant: AccessGrant) {
@@ -97,6 +102,7 @@ function requiredAttemptClaims(grant: AccessGrant): PreferenceRegistryAttemptCla
 
 function requireHumanMutation(access: AccessGrantAuthorization): void {
   const { grant } = access;
+  if (isDeploymentKeyOperator(access)) return;
   if (
     !access.contextIntegrity ||
     access.authenticatedSubjectId !== grant.subjectId ||
@@ -112,24 +118,46 @@ function requireHumanMutation(access: AccessGrantAuthorization): void {
   }
 }
 
+/**
+ * A key-only (configured) deployment has no Opengeni sign-in: whoever holds the
+ * deployment key is its operator, so a request made with the key itself counts
+ * as the person. Agents never hold the key and stay refused.
+ */
+function isDeploymentKeyOperator(access: AccessGrantAuthorization): boolean {
+  const { grant } = access;
+  return (
+    access.contextIntegrity &&
+    access.authenticatedSubjectId === grant.subjectId &&
+    grant.principalKind === "configured_key" &&
+    exactAttemptClaims(grant) === null &&
+    !grant.serviceInitiator &&
+    !grant.serviceInitiatorContext
+  );
+}
+
 export function authorizePreferenceRegistryScopeMutation(
   access: AccessGrantAuthorization,
   scope: PreferenceRegistryScope,
 ): void {
+  // The registry is the Skills authority. Workspace Skills are shared team
+  // procedures that ordinary Members (documents:manage) author, review, move
+  // and retire, just as their agents already can under Agent learning.
+  const workspacePermission: Permission = "documents:manage";
   const { grant } = access;
   requireHumanMutation(access);
   if (scope === "organization") {
     // Deliberately do not use hasPermission: workspace:admin must not expand to
-    // account:admin for an organization-wide preference. Account authority is
-    // carried separately from the authenticated context and must match this
+    // organization authority for an organization-wide preference. The
+    // organization's owner or admins qualify, through the account grant and
+    // role carried separately from the authenticated context, matching this
     // exact workspace grant's account and subject.
-    if (!access.accountGrant?.permissions.includes("account:admin")) {
-      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    if (!authorizationHoldsOrganizationAdministration(access)) {
+      throw new MissingPermissionRefusal("account:admin");
     }
     return;
   }
-  if (scope === "workspace" && !hasPermission(grant.permissions, "workspace:admin")) {
-    throw new HTTPException(403, { message: "missing permission: workspace:admin" });
+  if (scope === "workspace" && !hasPermission(grant.permissions, workspacePermission)) {
+    throw new MissingPermissionRefusal(workspacePermission);
   }
   // User scope is always self-only: the route derives the target from the
   // authenticated actor and never accepts a subject selector.
@@ -180,13 +208,15 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
   app.get(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
-    const query = PreferenceRegistryListQuery.safeParse({
-      scope: context.req.query("scope"),
-      status: context.req.query("status"),
-      limit: context.req.query("limit"),
-    });
-    if (!query.success)
-      throw new HTTPException(422, { message: "Invalid preference registry query" });
+    const query = parseRequestQuery(
+      PreferenceRegistryListQuery,
+      {
+        scope: context.req.query("scope"),
+        status: context.req.query("status"),
+        limit: context.req.query("limit"),
+      },
+      { status: 422, message: "Invalid preference registry query" },
+    );
     try {
       const claims = exactAttemptClaims(grant);
       const result = claims
@@ -194,12 +224,12 @@ export function registerPreferenceRegistryRoutes(app: Hono, deps: ApiRouteDeps):
             accountId: grant.accountId,
             workspaceId,
             ...claims,
-            ...query.data,
+            ...query,
           })
         : await listPreferenceRegistry(deps.db, {
             workspaceId,
             subjectId: grant.subjectId,
-            ...query.data,
+            ...query,
           });
       return context.json(PreferenceRegistryListResponse.parse(result));
     } catch (error) {

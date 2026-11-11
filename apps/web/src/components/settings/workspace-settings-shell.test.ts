@@ -41,7 +41,7 @@ function grant(accountId: string, name: string, role: "owner" | "admin" | "membe
   };
 }
 
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     resetSessionView,
     workspaces,
@@ -79,16 +79,24 @@ mock.module("@tanstack/react-router", () => ({
     to,
     params,
     search: _search,
+    state,
     ...props
   }: {
     children?: ReactNode;
     to: string;
-    params?: { workspaceId?: string };
+    params?: { workspaceId?: string; sessionId?: string };
     search?: unknown;
+    state?: { restoredSessionId?: string };
   }) =>
     createElement(
       "a",
-      { ...props, href: to.replace("$workspaceId", params?.workspaceId ?? "") },
+      {
+        ...props,
+        href: to
+          .replace("$workspaceId", params?.workspaceId ?? "")
+          .replace("$sessionId", params?.sessionId ?? ""),
+        "data-restored-session": state?.restoredSessionId,
+      },
       children,
     ),
   useNavigate: () => navigate,
@@ -109,6 +117,8 @@ const {
   workspaceManagementLocation,
   workspaceSettingsSectionFromSearch,
 } = await import("./workspace-settings-shell");
+const { forgetLastSessionId, lastSessionMemoryId } =
+  await import("@opengeni/react/app/lib/last-session-memory");
 
 const base = `/workspaces/${workspaceId}`;
 
@@ -123,6 +133,7 @@ beforeEach(() => {
   workspacePermissions = [];
   acmeRole = "owner";
   document.body.replaceChildren();
+  window.sessionStorage.clear();
 });
 
 async function renderShell(
@@ -195,11 +206,13 @@ describe("settings rail", () => {
       expect(linkLabels(workspaceSection)).toEqual([
         "General",
         "Access",
+        "Available here",
+        "Agent learning",
         "Usage",
         "API keys",
         "Developer",
         "Insights",
-        "Variable sets",
+        "Secrets",
         "Sandbox environments",
         "Machines",
       ]);
@@ -211,7 +224,7 @@ describe("settings rail", () => {
       expect(workspaceSection?.getAttribute("aria-label")).toBe("Workspace");
       expect(
         Array.from(workspaceSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([6, 3]);
+      ).toEqual([8, 3]);
 
       const organizationSection = view.section("organization");
       expect(organizationSection?.firstElementChild?.textContent).toBe("Organization");
@@ -220,16 +233,20 @@ describe("settings rail", () => {
         "People",
         "Workspaces",
         "Organization identity",
+        // Everything the organization shares, and where each works.
+        "Shared",
         // Every model setting, each workspace's included, lives on Organization > Models.
         "Models",
         "Integrations",
-        "Billing & usage",
+        "Connected apps",
+        "Insights",
+        "Billing",
         "Developer",
         "Security & data",
       ]);
       expect(
         Array.from(organizationSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([4, 5]);
+      ).toEqual([4, 8]);
       for (const link of Array.from(organizationSection!.querySelectorAll("a"))) {
         expect(link.getAttribute("href")).toBe(`${base}/organization`);
         expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");
@@ -252,10 +269,12 @@ describe("settings rail", () => {
         iconOf(view.section("account"), "Security"),
       );
 
-      expect(linkLabels(view.section("account"))).toEqual(["Security"]);
-      expect(view.section("account")?.querySelector("a")?.getAttribute("href")).toBe(
-        "/settings/security",
-      );
+      // My things opens through this workspace; Security opens outside it.
+      expect(linkLabels(view.section("account"))).toEqual(["My things", "Security"]);
+      const accountLinks = Array.from(view.section("account")?.querySelectorAll("a") ?? []);
+      // The mocked Link drops search params; the route is this workspace's settings.
+      expect(accountLinks[0]?.getAttribute("href")).toBe(`${base}/settings`);
+      expect(accountLinks[1]?.getAttribute("href")).toBe("/settings/security");
       // No separate jump out to an organization shell any more.
       expect(view.rail().textContent).not.toContain("Organization settings for");
       for (const label of ["Members", "Memory", "Danger zone", "Capabilities"]) {
@@ -273,12 +292,16 @@ describe("settings rail", () => {
     try {
       // Models shows a member their own Personal workspace's model settings.
       expect(linkLabels(view.section("organization"))).toEqual([
+        // People lists everyone by name only.
+        "People",
         "Organization identity",
         "Models",
+        // Every member connects their own coding agents.
+        "Connected apps",
         "Security & data",
       ]);
-      // A short list stays one group, not lone rows.
-      expect(view.section("organization")!.querySelectorAll("ul")).toHaveLength(1);
+      // The organization and its people, then what it provides and protects.
+      expect(view.section("organization")!.querySelectorAll("ul")).toHaveLength(2);
       // Insights needs workspace admin.
       expect(linkLabels(view.section("workspace"))).toContain("General");
       expect(linkLabels(view.section("workspace"))).not.toContain("Insights");
@@ -308,13 +331,88 @@ describe("settings rail", () => {
     }
   });
 
+  test("Back to sessions reopens the session last open in this workspace", async () => {
+    const sessionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    window.sessionStorage.setItem(lastSessionMemoryId("user:alex", workspaceId), sessionId);
+    // Another person's or workspace's memory never leaks into this rail.
+    window.sessionStorage.setItem(lastSessionMemoryId("user:sam", workspaceId), "other-person");
+    window.sessionStorage.setItem(
+      lastSessionMemoryId("user:alex", northwindWorkspaceId),
+      "other-workspace",
+    );
+    const backLinks = (view: Awaited<ReturnType<typeof renderShell>>) =>
+      Array.from(view.container.querySelectorAll("a")).filter(
+        (link) =>
+          link.textContent === "Back to sessions" ||
+          link.getAttribute("aria-label") === "Back to sessions",
+      );
+    const remembered = await renderShell({ kind: "settings", section: "general" });
+    try {
+      const back = backLinks(remembered);
+      expect(back.length).toBeGreaterThan(0);
+      for (const link of back) {
+        expect(link.getAttribute("href")).toBe(`${base}/sessions/${sessionId}`);
+        // Marks the restore, so a session that is gone returns to sessions.
+        expect(link.getAttribute("data-restored-session")).toBe(sessionId);
+      }
+      // "Opengeni home" stays an explicit new session.
+      const home = remembered.container.querySelector('a[aria-label="Opengeni home"]');
+      expect(home?.getAttribute("href")).toBe(`${base}/sessions`);
+    } finally {
+      await remembered.unmount();
+    }
+
+    // After the new-session page forgets it, Back opens a new session again.
+    forgetLastSessionId(lastSessionMemoryId("user:alex", workspaceId));
+    const forgotten = await renderShell({ kind: "settings", section: "general" });
+    try {
+      for (const link of backLinks(forgotten)) {
+        expect(link.getAttribute("href")).toBe(`${base}/sessions`);
+        expect(link.hasAttribute("data-restored-session")).toBe(false);
+      }
+    } finally {
+      await forgotten.unmount();
+    }
+  });
+
+  test("Agent learning is a workspace settings page: current in the rail, with its own header", async () => {
+    const view = await renderShell({ kind: "settings", section: "learning" });
+    try {
+      const current = view.rail().querySelector('a[aria-current="page"]');
+      expect(current?.textContent).toBe("Agent learning");
+      expect(view.section("workspace")?.contains(current)).toBe(true);
+      expect(view.container.querySelector("h1")?.textContent).toBe("Agent learning");
+      expect(view.container.textContent).toContain(
+        "What agents can change on their own, and what waits for your OK.",
+      );
+      expect(view.container.textContent).toContain("Settings content");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a Personal workspace keeps Agent learning in its rail, for your private-chat modes", async () => {
+    const view = await renderShell(
+      { kind: "settings", section: "learning" },
+      { workspaceId: personalWorkspaceId },
+    );
+    try {
+      const labels = linkLabels(view.section("workspace"));
+      expect(labels).toContain("Agent learning");
+      expect(labels).not.toContain("API keys");
+      expect(view.rail().querySelector('a[aria-current="page"]')?.textContent).toBe(
+        "Agent learning",
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a page this person can't use falls back to the first organization page they can", async () => {
     acmeRole = "member";
-    const view = await renderShell({ kind: "organization", section: "people" });
+    const view = await renderShell({ kind: "organization", section: "workspaces" });
     try {
-      expect(view.rail().querySelector('a[aria-current="page"]')?.textContent).toBe(
-        "Organization identity",
-      );
+      expect(view.rail().querySelector('a[aria-current="page"]')?.textContent).toBe("People");
     } finally {
       await view.unmount();
     }
@@ -333,11 +431,23 @@ describe("settings rail", () => {
       await openMenu(picker);
       const labels = menuItems().map((item) => item.textContent ?? "");
       expect(labels.some((label) => label.includes("Design preview"))).toBe(true);
-      expect(labels.some((label) => label.includes("Launch room"))).toBe(false);
+      // Every workspace open to the person, grouped by organization (#5508).
+      expect(
+        Array.from(
+          document.body.querySelectorAll('[role="group"][aria-label^="Workspaces in"]'),
+        ).map((group) => group.getAttribute("aria-label")),
+      ).toEqual([
+        "Workspaces in Acme Robotics",
+        "Workspaces in Beta Partners",
+        "Workspaces in Northwind Labs",
+      ]);
+      expect(labels.some((label) => label.includes("Launch room"))).toBe(true);
       // Admins get the one quiet "New workspace" row; everyone else does not (see the picker tests).
       expect(labels.filter((label) => label.startsWith("New workspace"))).toHaveLength(1);
       expect(labels).not.toContain("Organization settings");
-      expect(labels.slice(-2)).toEqual(["Beta Partners", "Northwind Labs"]);
+      // Organizations are headings now, not rows that pick a workspace for you.
+      expect(labels).not.toContain("Beta Partners");
+      expect(labels).not.toContain("Northwind Labs");
       // Switching workspace keeps the settings page.
       await act(async () =>
         menuItems()
@@ -355,13 +465,17 @@ describe("settings rail", () => {
     }
   });
 
-  test("switching organization from the picker keeps the organization page", async () => {
+  test("picking a workspace in another organization keeps the organization page", async () => {
     const view = await renderShell({ kind: "organization", section: "people" });
     try {
       await openMenu(view.rail().querySelector<HTMLElement>('button[aria-haspopup="menu"]')!);
       await act(async () =>
-        menuItems()
-          .find((item) => item.textContent === "Northwind Labs")!
+        Array.from(
+          document.body
+            .querySelector('[role="group"][aria-label="Workspaces in Northwind Labs"]')!
+            .querySelectorAll<HTMLElement>('[role="menuitem"]'),
+        )
+          .find((item) => item.textContent?.includes("General"))!
           .click(),
       );
       expect(navigate).toHaveBeenCalledWith({
@@ -374,17 +488,23 @@ describe("settings rail", () => {
     }
   });
 
-  test("switching organization returns to the workspace last used there", async () => {
+  test("another organization's personal workspace opens directly, whatever was last used there", async () => {
+    // The picker lists the workspace itself now (#5508), so a remembered workspace
+    // in that organization no longer decides where the pick lands.
     localStorage.setItem(
       "og.workspace.navigation.organizations:v1:user%3Aalex",
-      JSON.stringify({ [northwind]: northwindPersonalId }),
+      JSON.stringify({ [northwind]: northwindWorkspaceId }),
     );
     const view = await renderShell({ kind: "organization", section: "people" });
     try {
       await openMenu(view.rail().querySelector<HTMLElement>('button[aria-haspopup="menu"]')!);
       await act(async () =>
-        menuItems()
-          .find((item) => item.textContent === "Northwind Labs")!
+        Array.from(
+          document.body
+            .querySelector('[role="group"][aria-label="Workspaces in Northwind Labs"]')!
+            .querySelectorAll<HTMLElement>('[role="menuitem"]'),
+        )
+          .find((item) => item.textContent?.includes("Personal workspace"))!
           .click(),
       );
       expect(navigate).toHaveBeenCalledWith({
@@ -420,7 +540,7 @@ describe("settings rail", () => {
       kind: "organization",
       section: null,
     });
-    for (const route of ["insights", "variable-sets", "rigs", "machines"]) {
+    for (const route of ["insights", "secrets", "rigs", "machines"]) {
       expect(workspaceManagementLocation(`${base}/${route}`, workspaceId)).not.toBeNull();
     }
     expect(workspaceManagementLocation(`${base}/rigs/rig-123`, workspaceId)).toEqual({
@@ -448,6 +568,7 @@ describe("settings rail", () => {
     expect(workspaceSettingsSectionFromSearch("models")).toBe("models");
     expect(workspaceSettingsSectionFromSearch("members")).toBe("access");
     expect(workspaceSettingsSectionFromSearch("danger")).toBe("general");
+    expect(workspaceSettingsSectionFromSearch("learning")).toBe("learning");
   });
 
   test("an organization admin without workspace access sees General and Access only", async () => {
@@ -478,7 +599,7 @@ describe("settings rail", () => {
         `${base}/organization`,
       );
       expect(rendered.rail().textContent).not.toContain("API keys");
-      expect(rendered.rail().textContent).not.toContain("Variable sets");
+      expect(rendered.rail().textContent).not.toContain("Secrets");
     } finally {
       await rendered.unmount();
     }

@@ -67,7 +67,9 @@ describe("local stack ownership", () => {
       script,
       `
       import { acquireDevelopmentStackLock } from ${JSON.stringify(new URL("./dev-stack-lock.ts", import.meta.url).href)};
-      acquireDevelopmentStackLock("one", ${JSON.stringify(owner)}, { directory: ${JSON.stringify(directory)} });
+      // Keep the release handle reachable, as the real launcher does; otherwise
+      // garbage collection can finalize the SQLite handle and drop the lock.
+      (globalThis as { release?: () => void }).release = acquireDevelopmentStackLock("one", ${JSON.stringify(owner)}, { directory: ${JSON.stringify(directory)} });
       await Bun.write(${JSON.stringify(marker)}, "ready");
       setInterval(() => {}, 1000);
     `,

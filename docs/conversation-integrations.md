@@ -1,6 +1,6 @@
 # Conversation integration kernel
 
-OpenGeni's provider-neutral conversation integration boundary lives in
+Opengeni's provider-neutral conversation integration boundary lives in
 `packages/core/src/domain/conversation-integrations.ts`. It defines the
 normalized facts and delivery semantics that future Slack, Teams, Discord, or
 similar adapters can share without treating any provider's wire format as the
@@ -99,7 +99,7 @@ A provider adapter built on this kernel remains responsible for:
    the normalized envelope;
 5. choosing durable logical operation keys, recording the provider-call start
    boundary outside this pure contract, and reconciling `unknown` outcomes;
-6. translating normalized intent into OpenGeni's existing authoritative
+6. translating normalized intent into Opengeni's existing authoritative
    session/turn lifecycle rather than creating a parallel one.
 
 The exported normalizers and assertions reject non-plain objects, unknown

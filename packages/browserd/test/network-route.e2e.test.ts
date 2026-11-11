@@ -26,7 +26,7 @@ e2e(
         language: request.headers["accept-language"] ?? null,
       });
       if (authorization !== expectedAuthorization) {
-        response.writeHead(407, { "proxy-authenticate": 'Basic realm="OpenGeni test"' });
+        response.writeHead(407, { "proxy-authenticate": 'Basic realm="Opengeni test"' });
         response.end("proxy authentication required");
         return;
       }
@@ -58,7 +58,6 @@ e2e(
     if (!address || typeof address === "string") throw new Error("proxy did not bind TCP");
     const supervisor = await BrowserSupervisor.open({
       rootDirectory: join(root, "state"),
-      socketRootDirectory: join(root, "s"),
     });
     const reference = {
       browserSessionId: randomUUID(),

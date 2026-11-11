@@ -1,7 +1,7 @@
 //! TEST-ONLY protobuf pipe bridge for cross-language editor integration tests.
 //! Not an agent command, network listener, enrollment, or authorization surface.
 //! Build explicitly with `cargo build -p opengeni-agent --example transactional-fs-fixture`.
-//! Run with an existing synthetic root and nonzero epoch; stdin/stdout frames are
+//! Run with an existing synthetic root and exact epoch; stdin/stdout frames are
 //! a four-byte big-endian byte length followed by generated protobuf bytes.
 
 // This pipe fixture exercises upload semantics without a self-update supervisor.
@@ -75,11 +75,11 @@ async fn serve(
     request: v1::ControlRequest,
     epoch: u32,
 ) -> v1::ControlResponse {
-    if request.epoch != epoch || request.epoch == 0 {
+    if request.epoch != epoch {
         return error(
             request.request_id,
             v1::ErrorCode::Fenced,
-            "fixture requires its exact nonzero epoch",
+            "fixture requires its exact epoch",
         );
     }
     if uploads::handles(&request) {
@@ -133,12 +133,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let epoch: u32 = args
         .next()
-        .ok_or("expected nonzero epoch")?
+        .ok_or("expected epoch")?
         .to_str()
         .ok_or("invalid epoch")?
         .parse()?;
-    if epoch == 0 || args.next().is_some() {
-        return Err("usage: transactional-fs-fixture <synthetic-root> <nonzero-epoch>".into());
+    if args.next().is_some() {
+        return Err("usage: transactional-fs-fixture <synthetic-root> <epoch>".into());
     }
     let platform = NativePlatform::with_root(root);
     let registry = Mutex::new(uploads::Uploads::default());

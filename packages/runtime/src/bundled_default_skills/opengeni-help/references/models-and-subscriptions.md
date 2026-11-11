@@ -1,0 +1,121 @@
+# Models and subscription settings
+
+Use this reference to explain model and subscription settings in the words the
+person sees, and to change them for the person when your session has the
+authority to do so. Recheck labels against the deployed interface when exact
+wording matters.
+
+## Where the settings live
+
+- Organization settings, Models: subscription accounts the organization
+  connects (Codex, Claude, SuperGrok), API-key model providers, and the
+  organization's default for Context & compaction.
+- Workspace settings, Models: which models this workspace offers, which
+  subscription accounts it uses, its Codex options, and its own Context &
+  compaction override.
+- A personal workspace can also hold accounts that only its owner uses.
+
+What pays for a model: an API-key provider bills that provider account per
+request. A subscription account (Codex, Claude, SuperGrok) uses the plan of the
+person who signed in, within that plan's usage limits. Opengeni credits are a
+separate charge; zero Opengeni charge does not mean zero provider cost.
+
+On the hosted service, connected subscriptions are included on Pro
+($20/month), Max and Enterprise, with no inference or platform fee. Free is
+a trial with $10 monthly app credit for eligible accounts; Free, no plan and
+past-due plans cannot use connected subscriptions. They are for Opengeni app
+work, not API keys, SDK integrations or embedded products. API work uses
+credits, never monthly plan credit; choose a credit-billed model or an own
+provider API key. An own-key fee follows deployment configuration and is
+currently paused at 0% in production and staging. Do not promise a fixed
+percentage. At zero there is no fee debit or paid-credit requirement for it.
+The billing page shows historical charges only when the monthly amount is
+positive. Recheck the deployed configuration when answering a rate question.
+
+## Organization subscription account settings
+
+Each organization subscription account has its own page.
+
+- Which workspaces can use it: All workspaces, All workspaces + Personal, Only
+  selected workspaces, Personal workspaces only, or No workspaces. An account
+  set to No workspaces is connected but serves nothing; point this out when
+  someone asks why an account is unused.
+- Models it can serve: "All models, including new ones" also covers models the
+  provider adds later. "Only the models I choose" keeps new models off until
+  someone adds them.
+- Enable account: when off, the account shows as Disabled and is not picked for
+  new chats or schedules. Turning it off won't interrupt running work. Use this
+  to retire an account gently. It doesn't pause or cancel the provider plan.
+- Use extra credits: allows paid extra credits after the plan's included usage
+  runs out. Spread work uses other accounts' included usage first. Usage updates
+  can lag, so a request may still use credits shortly after this is turned off.
+- Usage: the page shows remaining usage and when it resets. When every eligible
+  account is exhausted, new work waits for capacity and continues by itself when
+  usage returns; it is not failed.
+- Usage limit resets: a plan may offer resets that give the account a fresh
+  5-hour and weekly limit. The account's row shows how many are waiting, and
+  its page lists them under Usage limit resets with their expiry. Redeeming is
+  irreversible and done by a person in their own browser: an organization
+  account by an organization owner or admin, from Organization settings >
+  Models > the account's page, even when no workspace uses it; a workspace's
+  own account by the person who connected it, from that workspace's Models
+  page. An agent can read how many are available and when they expire, and
+  explain what one does, but cannot redeem it; send the person to that page.
+- Disconnect: workspaces stop using the account for new work, work already
+  running finishes first, and reconnecting needs a new sign-in. Confirm with the
+  person before disconnecting.
+
+## Workspace Codex options
+
+- Which accounts: a workspace uses either its own Codex accounts or the
+  organization's, never both for new work. Codex can also be turned off for the
+  workspace; accounts stay connected.
+- Sharing work between this workspace's accounts: Spread work shares new chats
+  evenly across accounts that can serve them. Primary first starts new chats on
+  the primary account and uses another account when it can't serve them.
+- Switching models in a Codex chat: any chat can switch to another model at
+  any time, with no setting to turn on. A Codex chat keeps ChatGPT's own memory
+  of long conversations while it stays on Codex. On the first switch to another
+  provider's model, Opengeni rebuilds a plain summary of the earlier messages
+  from the chat's stored history (the transcript notes "Earlier messages
+  summarized for the new model"), and the chat uses that portable form from
+  then on. When a ChatGPT/Codex plan runs out of usage, the chat says when it
+  resets and, by default, continues on its own then. Turn off "Continue at
+  reset" to pause it instead, or pick another model to carry on right away.
+- Codex Apps: lets agents use the ChatGPT apps connected to one account. It must
+  be an account owned by the workspace.
+
+## Context & compaction
+
+Controls when long chats are summarized to fit the model's context. The
+organization sets a default and a workspace can override it. A change applies to
+later turns; it does not interrupt a reply that is already running.
+
+## Acting as an agent
+
+Change these settings for the person with the app-action tools; don't send them
+to the settings page. To switch only this chat's model, use `session_set_model`.
+
+1. Find the action with `admin_actions_search`, then read it with
+   `admin_action_describe`. Each action has a plain description.
+2. Read the current settings before writing. Send the version or revision that
+   read returned, so a concurrent change is not overwritten.
+3. Call it with `admin_action_call`. A change shows the person a confirmation
+   in the chat and runs once they allow it (at once if they gave the session
+   full access). Then read the setting back to confirm.
+
+Connecting accounts:
+
+- Codex and SuperGrok use device sign-in. Start it with the account's connect
+  start action, give the person the code and the link, and poll the matching
+  action until it reports connected or expired. The person signs in with their
+  own provider account. Never ask for their model-provider password or keys;
+  they enter provider API keys and setup tokens in the settings page
+  themselves. For credentials to other services, follow the `secrets`
+  Skill when it is available.
+- Claude sign-in is tied to the person's browser. Send them to the Claude
+  account page, or use a setup token they create and paste in themselves.
+
+Describe changes in the interface's words, for example "Which workspaces can use
+it is now All workspaces", not internal field names. If an action is refused,
+report the reason and what the person can do rather than retrying the same call.

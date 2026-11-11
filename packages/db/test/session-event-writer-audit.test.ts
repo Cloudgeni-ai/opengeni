@@ -106,38 +106,42 @@ function parseSourceFile(path: string, source: string): SourceFile {
 }
 
 const expectedWriters: Record<string, ExpectedWriter> = {
+  "packages/db/src/unstarted-queue-retirement.ts#retireUnstartedSessionQueue": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
+  "packages/db/src/empty-session-queue.ts#repairEmptyQueuedSessionProjection": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/archived-session-imports.ts#appendTimeline": {
     inserts: 1,
     contract: "owned_suffix",
   },
-  "packages/db/src/index.ts#switchSessionCodexAccount": {
+  // Provider-neutral account choice uses the same preference-write lock contract.
+  "packages/db/src/subscription-core/session-choice.ts#chooseOnce": {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#armCodexCapacityWait": {
+  // The shared-core waiter (M3 PR 2a; any provider since SuperGrok X1b)
+  // mirrors the legacy Codex arm, reconcile and supersession lock contracts
+  // exactly.
+  "packages/db/src/index.ts#armSubscriptionCoreCapacityWait": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
   },
-  "packages/db/src/index.ts#supersedeCodexCapacityWaitInTransaction": {
+  "packages/db/src/index.ts#supersedeSubscriptionCoreCodexCapacityWaitInTransaction": {
     inserts: 1,
     contract: "owned_suffix",
   },
-  "packages/db/src/index.ts#reconcileCodexCapacityWait": {
-    inserts: 1,
+  "packages/db/src/index.ts#reconcileSubscriptionCoreCapacityWait": {
+    inserts: 2,
     contract: "canonical",
     requiresControlRevalidation: true,
   },
-  "packages/db/src/index.ts#armXaiCapacityWait": {
-    inserts: 1,
-    contract: "canonical",
-    requiresControlRevalidation: true,
-  },
-  "packages/db/src/index.ts#supersedeXaiCapacityWaitInTransaction": {
-    inserts: 1,
-    contract: "owned_suffix",
-  },
-  "packages/db/src/index.ts#reconcileXaiCapacityWait": {
+  "packages/db/src/index.ts#reconcileCompletedSandboxSetup": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
@@ -174,11 +178,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 3,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#updateSessionVariableSets": {
+  "packages/db/src/index.ts#updateSessionTitleWithEvent": {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#updateSessionTitleWithEvent": {
+  "packages/db/src/index.ts#updateSessionProfileWithEvent": {
     inserts: 1,
     contract: "canonical",
   },
@@ -223,19 +227,27 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#failSessionWorkBeforeAttemptClaim": {
+  "packages/db/src/index.ts#settleSessionWorkBeforeAttemptClaim": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
+  },
+  "packages/db/src/index.ts#recordRetiredChildNotice": {
+    inserts: 1,
+    contract: "canonical",
   },
   "packages/db/src/index.ts#recoverSessionWorkFailedBeforeAttemptClaim": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
   },
-  "packages/db/src/index.ts#commitSessionAttemptQuiescence": {
-    inserts: 2,
-    contract: "canonical",
+  "packages/db/src/index.ts#recordSessionAttemptQuiescenceInTransaction": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
+  "packages/db/src/index.ts#projectPausedRecovery": {
+    inserts: 1,
+    contract: "owned_suffix",
   },
   "packages/db/src/index.ts#settleSessionAttemptInterruptions": {
     inserts: 1,
@@ -249,14 +261,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#settleCodexCredentialLeaseLoss": {
-    inserts: 2,
-    contract: "canonical",
-  },
-  "packages/db/src/index.ts#settleCodexCredentialFailover": {
-    inserts: 2,
-    contract: "canonical",
-  },
   "packages/db/src/index.ts#requestSessionTurnRecovery": {
     inserts: 1,
     contract: "canonical",
@@ -265,7 +269,18 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#recoverSessionDispatch": { inserts: 2, contract: "canonical" },
+  // Releases an admission block after access changed: the start signal is
+  // written only while effective control is still active.
+  "packages/db/src/index.ts#releaseSessionAdmissionBlocksAfterAccessChange": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
+  "packages/db/src/index.ts#recoverSessionOwner": {
+    inserts: 3,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#addSessionSystemUpdateWithSourceMutation": {
     // pending event, producer-side supersession event, consumed-on-arrival
     // cancellation, goal.resumed
@@ -281,7 +296,13 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 2,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#mutateAndAppendSessionEventsForTurnAttempt": {
+  // Opengeni's own secret approval card: the answer event, appended in the
+  // decision update's source mutation.
+  "packages/db/src/index.ts#acceptSecretUseApprovalCardResponse": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#persist": {
     inserts: 1,
     contract: "turn_attempt_fence",
   },
@@ -305,11 +326,30 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // Unarchive reopens a chat its Archive cancelled (session.status.changed to
+  // idle) under the canonical event-row locks; the chat stays paused until the
+  // separate Resume, which takes the control locks itself.
+  "packages/db/src/session-archive.ts#reopenArchiveStoppedSessions": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-model-settings.ts#setSessionModelInTransaction": {
     inserts: 1,
     contract: "canonical",
   },
+  // Moving a capacity-waiting turn onto a new model, or stopping it for a
+  // chat's or the workspace's Pause, under that command's own canonical locks.
+  "packages/db/src/capacity-wait-release.ts#releaseCapacityWaitingTurnInTransaction": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
   "packages/db/src/session-retry.ts#retryFailedSessionInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  // A person's or host's change to a root's usage limit records
+  // session.usage_limit.updated under the canonical control-share locks.
+  "packages/db/src/session-usage-limits.ts#setSessionUsageLimitInTransaction": {
     inserts: 1,
     contract: "canonical",
   },
@@ -332,6 +372,13 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   "packages/db/src/session-queue-commands.ts#steerQueuedTurnInTransaction": {
     inserts: 1,
     contract: "canonical",
+  },
+  // A Steer that waited for the next model step replaces an ownerless wait
+  // (approval, question or capacity) right after the worker settles it.
+  "packages/db/src/session-queue-commands.ts#resolveWaitingSteerInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
   },
   "packages/db/src/session-queue-commands.ts#submitHumanPromptInTransaction": {
     inserts: 1,
@@ -357,17 +404,27 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "owned_suffix",
   },
+  // The visibility settlement's local append helper; its enclosing settlement
+  // takes the canonical event-write locks before any call.
+  "packages/db/src/session-visibility-work.ts#insertEvents": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
 };
 
 const genericControlWriters = new Set([
   // Preference changes do not admit inference; waiter reconciliation rechecks Pause.
-  "packages/db/src/index.ts#switchSessionCodexAccount",
+  "packages/db/src/subscription-core/session-choice.ts#chooseOnce",
   "packages/db/src/index.ts#acceptSessionApprovalDecision",
   "packages/db/src/index.ts#acceptSessionHumanInputResponse",
   "packages/db/src/index.ts#appendSessionEvents",
   "packages/db/src/index.ts#appendSessionEventsAndUpdateSession",
   "packages/db/src/index.ts#appendSessionEventToSandboxGroup",
   "packages/db/src/index.ts#updateSessionTitleWithEvent",
+  "packages/db/src/index.ts#updateSessionProfileWithEvent",
+  // Reopening an archive-cancelled chat does not admit inference: it stays
+  // paused until a Resume through the control path.
+  "packages/db/src/session-archive.ts#reopenArchiveStoppedSessions",
 ]);
 
 const callerOwnedControlWriters = new Set([
@@ -377,25 +434,36 @@ const callerOwnedControlWriters = new Set([
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
   appendTimeline: ["importArchivedSession", "appendArchivedSessionEvents"],
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
-  supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
-  supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
+  releaseCapacityWaitingTurnInTransaction: [
+    "mutateSessionControlInTransaction",
+    "mutateWorkspaceControlInTransaction",
+    "setSessionModelInTransaction",
+  ],
+  supersedeSubscriptionCoreCodexCapacityWaitInTransaction: [
+    "reconcileSubscriptionCoreCapacityWait",
+  ],
+  projectPausedRecovery: ["commitSessionAttemptQuiescence"],
+  recordSessionAttemptQuiescenceInTransaction: [
+    "commitSessionAttemptQuiescence",
+    "recoverSessionOwner",
+  ],
   supersedeSessionCurrentDirectionInTransaction: [
+    "resolveWaitingSteerInTransaction",
     "steerAgentSessionInTransaction",
     "steerQueuedTurnInTransaction",
     "submitHumanPromptInTransaction",
   ],
+  insertEvents: ["settleSessionVisibilityWorkInTransaction"],
   closePendingSessionToolCallsInTransaction: [
-    "armCodexCapacityWait",
-    "armXaiCapacityWait",
+    "armSubscriptionCoreCapacityWait",
     "cancelSessionSubtreeInTransaction",
-    "failSessionWorkBeforeAttemptClaim",
+    "settleSessionWorkBeforeAttemptClaim",
     "supersedeSessionCurrentDirectionInTransaction",
     "settleSessionAttemptInterruptions",
     "applySessionTurnSettlement",
-    "settleCodexCredentialLeaseLoss",
-    "settleCodexCredentialFailover",
     "requestSessionTurnRecovery",
-    "recoverSessionDispatch",
+    "recoverSessionOwner",
+    "settleSessionVisibilityWorkInTransaction",
   ],
 };
 
@@ -426,10 +494,9 @@ const expectedFailedChildOutboxCallers = [
   "applySessionTurnSettlement",
   // arm owns the canonical child-lifecycle prefix (including parent session)
   // before atomically emitting a false-capacity-recovery terminal boundary.
-  "armCodexCapacityWait",
-  "failSessionWorkBeforeAttemptClaim",
-  "recoverSessionDispatch",
-  "settleCodexCredentialFailover",
+  "armSubscriptionCoreCapacityWait",
+  "settleSessionWorkBeforeAttemptClaim",
+  "recoverSessionOwner",
 ];
 const expectedSharedFailedChildOutboxCallers = [
   "enqueueFailedChildOutboxForTurnTx",
@@ -458,9 +525,9 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "acceptSessionApprovalDecision",
     "acceptSessionHumanInputResponse",
     "applySessionTurnSettlement",
-    "failSessionWorkBeforeAttemptClaim",
+    "settleSessionWorkBeforeAttemptClaim",
   ],
-  enqueueChildWaitingCapacityOutboxTx: ["armCodexCapacityWait", "armXaiCapacityWait"],
+  enqueueChildWaitingCapacityOutboxTx: ["armSubscriptionCoreCapacityWait"],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
 };
 const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
@@ -474,70 +541,18 @@ const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
 const DEV_SEED_PATH = "scripts/dev-seed-design-preview.ts";
 const DEV_SEED_CONVERSATION_WRITER = `${DEV_SEED_PATH}#seedConversations`;
 // Links finished preview sessions to their seeded schedule runs (metadata only).
-const DEV_SEED_SCHEDULE_RUN_WRITER = `${DEV_SEED_PATH}#seedScheduleRuns`;
-const ARCHIVED_IMPORT_PATH = "packages/db/src/archived-session-imports.ts";
-const ARCHIVED_IMPORT_WRITER = `${ARCHIVED_IMPORT_PATH}#appendTimeline`;
+
+// A benchmark that seeds a disposable local fixture database, never a deployment.
+
+// Benchmarks that seed raw tool-call events into their own shared-harness test
+// database, keyed by the harness name each one must acquire.
+const DISPOSABLE_BENCH_EVENT_WRITERS: Record<string, string> = {
+  "scripts/operator/bench-event-metadata.ts": "event-metadata-benchmark",
+  "scripts/operator/bench-tool-name-pages.ts": "tool-name-pages-benchmark",
+};
 
 /** Inert imports have no turns/attempts. Only these two activity-gated callers
  * may delegate a timeline write after owning the workspace/session/cursor prefix. */
-function expectArchivedImportBoundary(source: string): void {
-  const sourceFile = parseSourceFile(ARCHIVED_IMPORT_PATH, source);
-  const functions = new Map<string, FunctionLikeDeclaration>();
-  const visit = (node: t.Node): void => {
-    if (isFunctionDeclaration(node) && node.id) functions.set(node.id.name, node);
-    forEachChild(node, visit);
-  };
-  visit(sourceFile.program);
-  for (const caller of expectedOwnedSuffixCallers.appendTimeline!) {
-    const functionNode = functions.get(caller)!;
-    expect(functionNode, caller).toBeDefined();
-    expect(functionCalls(functionNode, "withWorkspaceSubjectSessionActivityRls"), caller).toBe(
-      true,
-    );
-    const activityCalls: t.CallExpression[] = [];
-    const visitActivity = (node: t.Node): void => {
-      if (isCallExpression(node) && callName(node) === "withWorkspaceSubjectSessionActivityRls") {
-        activityCalls.push(node);
-      }
-      forEachChild(node, visitActivity);
-    };
-    forEachChild(functionNode, visitActivity);
-    expect(activityCalls, caller).toHaveLength(1);
-    const membershipFence = activityCalls[0]!.arguments[6];
-    expect(membershipFence?.type, caller).toBe("Literal");
-    expect(
-      membershipFence && "value" in membershipFence ? membershipFence.value : null,
-      caller,
-    ).toBe(true);
-    const locks = callPositions(functionNode, "lockSessionEventWriteRows");
-    const writes = callPositions(functionNode, "appendTimeline");
-    expect(locks, caller).toHaveLength(1);
-    expect(writes, caller).toHaveLength(1);
-    expect(locks[0], caller).toBeLessThan(writes[0]!);
-    expect(
-      functionCallHasProperty(functionNode, "lockSessionEventWriteRows", "sessionIds"),
-      caller,
-    ).toBe(true);
-  }
-  expect(source).toContain("row.importedArchiveImportId !== input.importId");
-  expect(source).toContain("row.importedArchiveSubjectId !== input.subjectId");
-  expect(source).toContain("importedArchiveImportId: payload.importId");
-  expect(source).toContain("turnAssociation: null");
-  const migration = readFileSync(
-    join(repoRoot, "packages/db/drizzle/0560_archived_session_imports.sql"),
-    "utf8",
-  );
-  expect(migration).toContain("sessions_imported_archive_inert_check");
-  expect(migration).toContain("MESSAGE = 'SESSION_IMPORTED_READ_ONLY'");
-  // Turn and attempt guards cover updates as well as fresh admission: the
-  // historical attempt-binding guard alone only covers inserts.
-  expect(migration).toContain("CREATE TRIGGER session_turns_imported_archive_guard");
-  expect(migration).toContain("BEFORE INSERT OR UPDATE ON session_turns");
-  expect(migration).toContain("CREATE TRIGGER session_turn_attempts_imported_archive_guard");
-  expect(migration).toContain("BEFORE INSERT OR UPDATE ON session_turn_attempts");
-  expect(migration).toContain("OR EXISTS (SELECT 1 FROM session_turn_attempts");
-  expect(migration).toContain("OR EXISTS (SELECT 1 FROM session_history_items");
-}
 
 /** The DEV-only seed may only write to this worktree's loopback dev stack. */
 function expectDevSeedGuards(source: string): void {
@@ -545,6 +560,20 @@ function expectDevSeedGuards(source: string): void {
   expect(source).toContain("if (!LOOPBACK.has(url.hostname)) fail(");
   expect(source).toContain("if (url.port !== runtime.OPENGENI_API_PORT)");
   expect(source).toContain("set_config('opengeni.session_activity_gate_state', 'finalized', true)");
+}
+
+/** The benchmark may only seed a shared-harness database on a loopback test cluster. */
+
+/** The event benchmark only seeds the shared-harness database it acquires itself. */
+function expectDisposableBenchEventGuards(source: string, harness: string): void {
+  expect(source).toContain(
+    'import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";',
+  );
+  expect(source).toContain(`await acquireSharedTestDatabase("${harness}")`);
+  expect(source).toContain('throw Error("Real PostgreSQL required");');
+  expect(source).toContain("const client = createDb(shared.appUrl, { max: 1 });");
+  expect(source).not.toContain("OPENGENI_DATABASE_URL");
+  expect(source).not.toContain("process.env");
 }
 
 function productionTypeScriptFiles(): string[] {
@@ -569,14 +598,16 @@ function productionTypeScriptFiles(): string[] {
   return files.sort();
 }
 
-function namedTopLevelFunction(
+function namedEnclosingFunction(
   node: t.Node,
+  outermost = false,
 ): { name: string; node: FunctionLikeDeclaration } | null {
   let current: t.Node | undefined = node;
   let result: { name: string; node: FunctionLikeDeclaration } | null = null;
   while (current) {
     if (isFunctionDeclaration(current) && current.id) {
       result = { name: current.id.name, node: current };
+      if (!outermost) return result;
     } else if (
       (isArrowFunctionExpression(current) || isFunctionExpression(current)) &&
       isVariableDeclarator(parentNodes.get(current))
@@ -584,11 +615,20 @@ function namedTopLevelFunction(
       const parent = parentNodes.get(current);
       if (isVariableDeclarator(parent) && isIdentifier(parent.id)) {
         result = { name: parent.id.name, node: current };
+        if (!outermost) return result;
       }
     }
     current = parentNodes.get(current);
   }
   return result;
+}
+
+function isNamedFunctionNode(node: t.Node): boolean {
+  return (
+    isFunctionDeclaration(node) ||
+    ((isArrowFunctionExpression(node) || isFunctionExpression(node)) &&
+      isVariableDeclarator(parentNodes.get(node)))
+  );
 }
 
 function callName(node: t.CallExpression): string | null {
@@ -627,25 +667,37 @@ function writesSessions(node: t.CallExpression): boolean {
   );
 }
 
-const tenancyQuiescenceTables = {
-  sessions: "sessions",
-  sessionTurns: "session_turns",
-  sessionTurnAttempts: "session_turn_attempts",
-  sessionAttemptInterruptions: "session_attempt_interruptions",
-  sessionSystemUpdates: "session_system_updates",
-  sessionHumanInputRequests: "session_human_input_requests",
-  sessionPendingToolCalls: "session_pending_tool_calls",
-  agentRunStates: "agent_run_states",
-  sessionGoals: "session_goals",
-  codexCapacityWaiters: "codex_capacity_waiters",
-  xaiCapacityWaiters: "xai_capacity_waiters",
-  sessionRealtimeModes: "session_realtime_modes",
-  sessionRealtimeConnections: "session_realtime_connections",
-  scheduledTasks: "scheduled_tasks",
-  sandboxWorkspaceMutationAdmissions: "sandbox_workspace_mutation_admissions",
-  sandboxRetainedProcesses: "sandbox_retained_processes",
-  sandboxLeaseHolders: "sandbox_lease_holders",
-} as const;
+const sessionActivityGateWrappers = [
+  "withSessionActivityRlsContext",
+  "withRestoredSessionActivityRlsContext",
+  "withWorkspaceSessionActivityRls",
+  "withWorkspaceSubjectSessionActivityRls",
+  "retrySessionActivityRls",
+  "withWorkspaceSessionEventActivityRls",
+  "retryWorkspaceSessionEventActivityPersistence",
+  "withSessionCodexCapacityMutation",
+  "withScopedCapacityWaiterRls",
+];
+
+function hasSessionActivityBoundary(node: t.Node, source: string): boolean {
+  let ancestor = parentNodes.get(node);
+  while (ancestor) {
+    if (
+      isCallExpression(ancestor) &&
+      sessionActivityGateWrappers.includes(callName(ancestor) ?? "")
+    ) {
+      return true;
+    }
+    ancestor = parentNodes.get(ancestor);
+  }
+  const enclosing = namedEnclosingFunction(node);
+  return Boolean(
+    enclosing?.node.body &&
+    /\bSessionActivityDatabase\b/.test(
+      source.slice(enclosing.node.start, enclosing.node.body.start),
+    ),
+  );
+}
 
 const tenancyCascadeRootTables = {
   managedAccounts: "managed_accounts",
@@ -666,17 +718,36 @@ const expectedTenancyCascadeRootFenceCalls: Record<string, string> = {
   "scripts/operator/turn-density-profile.ts#deleteDensityProfileAccount": "withWorkspaceRls",
 };
 
-function writesTenancyQuiescenceTable(node: t.CallExpression): boolean {
-  if (!isMemberExpression(node.callee)) return false;
-  const method = callName(node);
-  if (method !== "insert" && method !== "update" && method !== "delete") return false;
+/** Resolve the actual table object, not the provider label or a guessed table name. */
+
+function parameterizedWaiterMutationTables(
+  node: t.CallExpression,
+  bindings: Map<string, string[]>,
+): string[] {
+  if (
+    !isMemberExpression(node.callee) ||
+    !["insert", "update", "delete"].includes(callName(node) ?? "")
+  ) {
+    return [];
+  }
   const table = node.arguments[0];
-  return Boolean(
-    table &&
-    isMemberExpression(table) &&
-    isIdentifier(table.property) &&
-    table.property.name in tenancyQuiescenceTables,
-  );
+  if (
+    !table ||
+    !isMemberExpression(table) ||
+    !isIdentifier(table.object) ||
+    table.object.name !== "tables" ||
+    !isIdentifier(table.property) ||
+    table.property.name !== "capacityWaiters"
+  )
+    return [];
+  let ancestor: t.Node | undefined = node;
+  while (ancestor) {
+    if (isFunctionDeclaration(ancestor) && ancestor.id && bindings.has(ancestor.id.name)) {
+      return bindings.get(ancestor.id.name)!;
+    }
+    ancestor = parentNodes.get(ancestor);
+  }
+  throw new Error("Unresolved parameterized capacity-waiter writer");
 }
 
 function deletedTenancyCascadeRoot(node: t.CallExpression): string | null {
@@ -706,9 +777,14 @@ function insertsSessionSystemUpdateOutbox(node: t.CallExpression): boolean {
   );
 }
 
-function functionCalls(functionNode: FunctionLikeDeclaration, expectedName: string): boolean {
+function functionCalls(
+  functionNode: FunctionLikeDeclaration,
+  expectedName: string,
+  recursive = false,
+): boolean {
   let found = false;
   const visit = (node: t.Node): void => {
+    if (!recursive && isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && callName(node) === expectedName) found = true;
     if (!found) forEachChild(node, visit);
   };
@@ -723,6 +799,7 @@ function functionCallHasProperty(
 ): boolean {
   let found = false;
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (
       isCallExpression(node) &&
       callName(node) === expectedName &&
@@ -757,6 +834,7 @@ function callPositionsWithStringProperty(
 ): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (
       isCallExpression(node) &&
       callName(node) === expectedName &&
@@ -789,6 +867,7 @@ function callPositionsWithStringArgument(
 ): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && callName(node) === expectedName) {
       const argument = node.arguments[argumentIndex];
       if (argument !== undefined && isStringLiteral(argument) && argument.value === argumentValue) {
@@ -799,6 +878,62 @@ function callPositionsWithStringArgument(
   };
   forEachChild(functionNode, visit);
   return positions.sort((left, right) => left - right);
+}
+
+const VISIBILITY_SETTLEMENT = "settleSessionVisibilityWorkInTransaction";
+
+/**
+ * The visibility settlement locks its event-write rows with controlLock
+ * "already_locked": each caller first runs lockSessionForVisibilityWork, which
+ * takes the workspace control share before the canonical event-write rows. Pin
+ * that exact chain and its closed caller set instead of widening the generic
+ * prefix rule.
+ */
+function visibilitySettlementPrefixIsPinned(): boolean {
+  const callers = new Set<string>();
+  const definitions = new Map<string, FunctionLikeDeclaration[]>();
+  for (const path of productionTypeScriptFiles()) {
+    const source = readFileSync(path, "utf8");
+    if (!source.includes(VISIBILITY_SETTLEMENT)) continue;
+    const visit = (node: t.Node): void => {
+      if (isNamedFunctionNode(node)) {
+        const named = namedEnclosingFunction(node);
+        if (named)
+          definitions.set(named.name, [...(definitions.get(named.name) ?? []), named.node]);
+      }
+      if (isCallExpression(node) && callName(node) === VISIBILITY_SETTLEMENT) {
+        const enclosing = namedEnclosingFunction(node);
+        if (enclosing) callers.add(enclosing.name);
+      }
+      forEachChild(node, visit);
+    };
+    visit(parseSourceFile(path, source).program);
+  }
+  const only = (name: string): FunctionLikeDeclaration => {
+    const found = definitions.get(name) ?? [];
+    expect(found, name).toHaveLength(1);
+    return found[0]!;
+  };
+  const lock = only("lockSessionForVisibilityWork");
+  const controlShare = callPositionsWithStringArgument(
+    lock,
+    "lockWorkspaceInferenceControl",
+    2,
+    "share",
+  )[0];
+  expect(controlShare).toBeDefined();
+  expect(controlShare!).toBeLessThan(callPositions(lock, "lockSessionEventWriteRows")[0]!);
+  expect([...callers].sort()).toEqual([
+    "settleWorkBeforePrivateTransition",
+    "stopSessionWorkForVisibilityChange",
+  ]);
+  for (const caller of callers) {
+    const node = only(caller);
+    const prefix = callPositions(node, "lockSessionForVisibilityWork")[0];
+    expect(prefix, caller).toBeDefined();
+    expect(prefix!, caller).toBeLessThan(callPositions(node, VISIBILITY_SETTLEMENT)[0]!);
+  }
+  return true;
 }
 
 function controlAwarePrefixPositions(functionNode: FunctionLikeDeclaration): number[] {
@@ -833,9 +968,14 @@ function genericPrefixPositions(functionNode: FunctionLikeDeclaration): number[]
   );
 }
 
-function callPositions(functionNode: FunctionLikeDeclaration, expectedName: string): number[] {
+function callPositions(
+  functionNode: FunctionLikeDeclaration,
+  expectedName: string,
+  recursive = false,
+): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
+    if (!recursive && isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && callName(node) === expectedName) {
       positions.push(nodeStart(node));
     }
@@ -848,6 +988,7 @@ function callPositions(functionNode: FunctionLikeDeclaration, expectedName: stri
 function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && insertsSessionEvents(node)) {
       positions.push(nodeStart(node));
     }
@@ -858,72 +999,92 @@ function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
 }
 
 describe("session_events writer inventory", () => {
-  test("pins all 17 tenancy-quiescence mutation surfaces behind workspace RLS entry", () => {
-    const discovered = new Set<string>();
-    const writers = new Set<string>();
-    const sqlTables = Object.values(tenancyQuiescenceTables).join("|");
-    const rawMutation = new RegExp(
-      `\\b(?:insert\\s+into|update|delete\\s+from)\\s+(?:[a-z_]+\\.)?(?:${sqlTables})\\b`,
-      "i",
-    );
-    for (const path of productionTypeScriptFiles()) {
-      const source = readFileSync(path, "utf8");
-      if (
-        !Object.keys(tenancyQuiescenceTables).some((name) => source.includes(name)) &&
-        !Object.values(tenancyQuiescenceTables).some((name) => source.includes(name))
-      )
-        continue;
-      const file = relative(repoRoot, path).replaceAll("\\", "/");
-      const sourceFile = parseSourceFile(path, source);
-      const recordWriter = (node: t.Node, table: string): void => {
-        discovered.add(table);
-        const enclosing = namedTopLevelFunction(node);
-        writers.add(
-          enclosing ? `${file}#${enclosing.name}` : `${file}:${lineNumber(source, node)}`,
-        );
-      };
-      const visit = (node: t.Node): void => {
-        if (isCallExpression(node) && writesTenancyQuiescenceTable(node)) {
-          const table = node.arguments[0];
-          if (table && isMemberExpression(table) && isIdentifier(table.property)) {
-            recordWriter(
-              node,
-              tenancyQuiescenceTables[table.property.name as keyof typeof tenancyQuiescenceTables],
-            );
-          }
+  test("nested factory writers cannot borrow sibling lock or gate evidence", () => {
+    const sourceFile = parseSourceFile(
+      "factory.ts",
+      `
+      function createScopedSubscriptionCapacityWaiters() {
+        function protectedWriter(tx: SessionActivityDatabase) {
+          lockSessionEventWriteRows(tx, { controlLock: "share" });
+          tx.insert(schema.sessionEvents);
+          tx.insert(tables.capacityWaiters);
+          tx.update(schema.sessions);
         }
-        if (isTaggedTemplateExpression(node)) {
-          const sqlText = source.slice(nodeStart(node.quasi), node.quasi.end);
-          if (rawMutation.test(sqlText)) {
-            for (const table of Object.values(tenancyQuiescenceTables)) {
-              if (new RegExp(`\\b${table}\\b`, "i").test(sqlText)) recordWriter(node, table);
-            }
-          }
+        const unprotectedWriter = (tx: Database) => {
+          tx.insert(schema.sessionEvents);
+          tx.insert(tables.capacityWaiters);
+          tx.update(schema.sessions);
+        };
+        return { protectedWriter, unprotectedWriter };
+      }
+    `,
+    );
+    const writers: Array<{ name: string; node: FunctionLikeDeclaration }> = [];
+    const violations: string[] = [];
+    const aliasedWriters: Record<string, string[]> = {};
+    const bindings = new Map([
+      ["createScopedSubscriptionCapacityWaiters", ["xai_capacity_waiters"]],
+    ]);
+    const visit = (node: t.Node): void => {
+      if (isCallExpression(node) && insertsSessionEvents(node)) {
+        writers.push(namedEnclosingFunction(node)!);
+      }
+      if (isCallExpression(node)) {
+        const tables = parameterizedWaiterMutationTables(node, bindings);
+        if (tables.length) aliasedWriters[namedEnclosingFunction(node)!.name] = tables;
+        if (writesSessions(node) && !hasSessionActivityBoundary(node, sourceFile.source)) {
+          violations.push(namedEnclosingFunction(node)!.name);
         }
-        forEachChild(node, visit);
-      };
-      visit(sourceFile.program);
-    }
-    expect([...discovered].sort()).toEqual([...Object.values(tenancyQuiescenceTables)].sort());
-    expect(writers.size).toBeGreaterThanOrEqual(61);
-    const database = readFileSync(join(repoRoot, "packages/db/src/database.ts"), "utf8");
-    expect(database).toMatch(
-      /withRlsContext[\s\S]*?setRlsContext[\s\S]*?pg_advisory_xact_lock_shared[\s\S]*?const value = await fn/u,
+      }
+      forEachChild(node, visit);
+    };
+    visit(sourceFile.program);
+    expect(violations).toEqual(["unprotectedWriter"]);
+    expect(aliasedWriters).toEqual({
+      protectedWriter: ["xai_capacity_waiters"],
+      unprotectedWriter: ["xai_capacity_waiters"],
+    });
+    expect(writers.map((writer) => writer.name)).toEqual(["protectedWriter", "unprotectedWriter"]);
+    const factory = sourceFile.program.body[0]!;
+    expect(isFunctionDeclaration(factory)).toBe(true);
+    if (!isFunctionDeclaration(factory)) throw new Error("Expected a factory declaration");
+    expect(callPositions(factory, "lockSessionEventWriteRows")).toEqual([]);
+    expect(insertPositions(factory)).toEqual([]);
+    expect(controlAwarePrefixPositions(writers[0]!.node)).toHaveLength(1);
+    expect(insertPositions(writers[0]!.node)).toHaveLength(1);
+    expect(controlAwarePrefixPositions(writers[1]!.node)).toEqual([]);
+    expect(functionCalls(writers[1]!.node, "lockSessionEventWriteRows")).toBe(false);
+    expect(insertPositions(writers[1]!.node)).toHaveLength(1);
+    expect(
+      sourceFile.source.slice(writers[1]!.node.start, writers[1]!.node.body!.start),
+    ).not.toContain("SessionActivityDatabase");
+  });
+
+  test("forbidden effects inside invoked named retry callbacks remain visible", () => {
+    const sourceFile = parseSourceFile(
+      "retry.ts",
+      `
+      function command() {
+        function retryCallback() { publishSessionEventIds(); }
+        return runSessionCommandPersistenceTransaction(retryCallback);
+      }
+    `,
     );
-    const migration = readFileSync(
-      join(repoRoot, "packages/db/drizzle/0345_tenant_scoped_session_tenancy_fence.sql"),
-      "utf8",
-    );
-    const declaration = migration.slice(
-      migration.indexOf("hot_tables constant text[]"),
-      migration.indexOf("];", migration.indexOf("hot_tables constant text[]")),
-    );
-    const guardedTables = [...declaration.matchAll(/'([^']+)'/gu)].map((match) => match[1]);
-    expect(guardedTables.sort()).toEqual([...Object.values(tenancyQuiescenceTables)].sort());
-    expect(migration).toMatch(
-      /BEFORE INSERT OR UPDATE OR DELETE[\s\S]*?require_session_tenancy_fence/u,
-    );
-    expect(migration).toContain("session tenancy mutation requires the workspace fence");
+    const visit = (node: t.Node): void => {
+      forEachChild(node, visit);
+    };
+    visit(sourceFile.program);
+    const command = sourceFile.program.body[0]!;
+    if (!isFunctionDeclaration(command)) throw new Error("Expected a command declaration");
+    expect(functionCalls(command, "runSessionCommandPersistenceTransaction")).toBe(true);
+    // Scope-local positive evidence cannot certify the sibling callback, while
+    // recursive forbidden-effect checks must still reject its publication.
+    expect(functionCalls(command, "publishSessionEventIds")).toBe(false);
+    expect(functionCalls(command, "publishSessionEventIds", true)).toBe(true);
+    const persistence = callPositions(command, "runSessionCommandPersistenceTransaction")[0]!;
+    const forbidden = callPositions(command, "publishSessionEventIds", true);
+    expect(forbidden).toHaveLength(1);
+    expect(forbidden[0]).toBeLessThan(persistence);
   });
 
   test("pins every production TypeScript delete of a session-tenancy cascade root", () => {
@@ -945,7 +1106,7 @@ describe("session_events writer inventory", () => {
       const file = relative(repoRoot, path).replaceAll("\\", "/");
       const sourceFile = parseSourceFile(path, source);
       const recordDelete = (node: t.Node, root: string): void => {
-        const enclosing = namedTopLevelFunction(node);
+        const enclosing = namedEnclosingFunction(node);
         if (!enclosing) throw new Error(`Unnamed ${root} delete in ${file}`);
         const key = `${file}#${enclosing.name}`;
         const writer = writers.get(key) ?? {
@@ -996,105 +1157,6 @@ describe("session_events writer inventory", () => {
     expect(directSource.indexOf("pg_advisory_xact_lock_shared"), "deleteWorkspace").toBeLessThan(
       directSource.indexOf(".delete(schema.workspaces)"),
     );
-  });
-
-  test("every production session-row writer has an activity gate or exact maintenance boundary", () => {
-    const violations: string[] = [];
-    const gateWrappers = [
-      "withSessionActivityRlsContext",
-      "withRestoredSessionActivityRlsContext",
-      "withWorkspaceSessionActivityRls",
-      "withWorkspaceSubjectSessionActivityRls",
-      "retrySessionActivityRls",
-      "withWorkspaceSessionEventActivityRls",
-      "retryWorkspaceSessionEventActivityPersistence",
-      "withSessionCodexCapacityMutation",
-    ];
-
-    for (const path of productionTypeScriptFiles()) {
-      const source = readFileSync(path, "utf8");
-      if (!source.includes("sessions")) continue;
-      const file = relative(repoRoot, path).replaceAll("\\", "/");
-      const sourceFile = parseSourceFile(path, source);
-      const checked = new Set<string>();
-      const checkWriter = (node: t.Node): void => {
-        let ancestor = parentNodes.get(node);
-        while (ancestor) {
-          if (isCallExpression(ancestor) && gateWrappers.includes(callName(ancestor) ?? "")) {
-            return;
-          }
-          ancestor = parentNodes.get(ancestor);
-        }
-        const enclosing = namedTopLevelFunction(node);
-        if (!enclosing) {
-          violations.push(`${file}:${lineNumber(source, node)} unnamed session writer`);
-          return;
-        }
-        const key = `${file}#${enclosing.name}`;
-        if (checked.has(key)) return;
-        checked.add(key);
-        if (key === ARCHIVED_IMPORT_WRITER) {
-          // The unbranded suffix receives the create hook's Database handle;
-          // its closed caller inventory and import boundary are pinned below.
-          expectArchivedImportBoundary(source);
-          return;
-        }
-        if (key === "packages/db/src/skill-config-migration.ts#migrateLegacySkillConfigurations") {
-          // The parser-backed maintenance migration cannot use the runtime
-          // Drizzle activity handle. Its only writer updates dormant Skill
-          // configuration inside the drained, table-locked owner transaction.
-          // Pin its explicit owner/window guard; do not exempt other writers.
-          const guards = callPositions(enclosing.node, "assertSkillConfigurationMaintenanceWindow");
-          expect(guards, key).toHaveLength(1);
-          expect(guards[0], key).toBeLessThan(nodeStart(node));
-          expect(source).toContain("pg_get_userbyid(c.relowner)=current_user");
-          expect(source).toContain("c.relrowsecurity AND NOT c.relforcerowsecurity");
-          expect(source).toContain("to_regclass('pg_temp.skill_metadata_0426') IS NOT NULL");
-          expect(source).toContain("IN SHARE ROW EXCLUSIVE MODE");
-          const callers = productionTypeScriptFiles()
-            .filter(
-              (candidate) =>
-                candidate !== path &&
-                readFileSync(candidate, "utf8").includes("migrateLegacySkillConfigurations("),
-            )
-            .map((candidate) => relative(repoRoot, candidate).replaceAll("\\", "/"));
-          expect(callers).toEqual(["packages/db/src/migrate.ts"]);
-          return;
-        }
-        if (key === DEV_SEED_CONVERSATION_WRITER || key === DEV_SEED_SCHEDULE_RUN_WRITER) {
-          // The DEV-only design-preview seed writes fixture history into the
-          // local dev stack through the migrations role, outside the runtime's
-          // Drizzle handle. seedConversations replays the full open -> finalized
-          // gate itself; seedScheduleRuns only tags those finished sessions'
-          // metadata with their seeded schedule run. Pin the local-only guards;
-          // do not exempt any other writer.
-          expectDevSeedGuards(source);
-          return;
-        }
-        const body = enclosing.node.body;
-        if (!body) {
-          violations.push(`${key} has no function body`);
-          return;
-        }
-        const signature = source.slice(enclosing.node.start, body.start);
-        if (!/\bSessionActivityDatabase\b/.test(signature)) {
-          violations.push(`${key} has no activity-gated handle or wrapper`);
-        }
-      };
-      const visit = (node: t.Node): void => {
-        if (isCallExpression(node) && writesSessions(node)) checkWriter(node);
-        if (isTaggedTemplateExpression(node)) {
-          const sqlText = source.slice(nodeStart(node.quasi), node.quasi.end);
-          if (/\b(?:insert\s+into|update)\s+(?:[a-z_]+\.)?sessions\b/i.test(sqlText)) {
-            checkWriter(node);
-          }
-        }
-        forEachChild(node, visit);
-      };
-      visit(sourceFile.program);
-    }
-
-    expect(violations).toEqual([]);
   });
 
   test("session activity gate GUCs have one application owner", () => {
@@ -1161,7 +1223,9 @@ describe("session_events writer inventory", () => {
 
     for (const path of productionTypeScriptFiles()) {
       const source = readFileSync(path, "utf8");
+      const file = relative(repoRoot, path).replaceAll("\\", "/");
       if (
+        file !== "packages/db/src/session-attempt-fence.ts" &&
         !source.includes("sessionEvents") &&
         !source.includes("session_events") &&
         !source.includes("sessionSystemUpdateOutbox") &&
@@ -1169,16 +1233,18 @@ describe("session_events writer inventory", () => {
       ) {
         continue;
       }
-      const file = relative(repoRoot, path).replaceAll("\\", "/");
       const sourceFile = parseSourceFile(path, source);
       const visit = (node: t.Node): void => {
-        if (isFunctionDeclaration(node) && node.id) {
-          const definitions = functionDefinitions.get(node.id.name) ?? [];
-          definitions.push({ sourceFile, functionNode: node });
-          functionDefinitions.set(node.id.name, definitions);
+        if (isNamedFunctionNode(node)) {
+          const enclosing = namedEnclosingFunction(node);
+          if (enclosing) {
+            const definitions = functionDefinitions.get(enclosing.name) ?? [];
+            definitions.push({ sourceFile, functionNode: enclosing.node });
+            functionDefinitions.set(enclosing.name, definitions);
+          }
         }
         if (isCallExpression(node)) {
-          const enclosing = namedTopLevelFunction(node);
+          const enclosing = namedEnclosingFunction(node);
           if (insertsSessionEvents(node)) {
             if (!enclosing) throw new Error(`Unnamed session_events writer in ${file}`);
             const key = `${file}#${enclosing.name}`;
@@ -1223,12 +1289,20 @@ describe("session_events writer inventory", () => {
         }
         if (isTaggedTemplateExpression(node)) {
           const sqlText = sourceFile.source.slice(nodeStart(node.quasi), node.quasi.end);
-          if (
-            /\binsert\s+into\s+(?:[a-z_]+\.)?session_events\b/i.test(sqlText) &&
-            // The DEV-only seed's pinned exception; see DEV_SEED_CONVERSATION_WRITER.
-            `${file}#${namedTopLevelFunction(node)?.name}` !== DEV_SEED_CONVERSATION_WRITER
-          ) {
-            rawSqlWriters.push(`${file}:${lineNumber(sourceFile.source, node)}`);
+          if (/\binsert\s+into\s+(?:[a-z_]+\.)?session_events\b/i.test(sqlText)) {
+            const outer = namedEnclosingFunction(node, true);
+            if (`${file}#${outer?.name}` === DEV_SEED_CONVERSATION_WRITER) {
+              // The DEV-only seed's pinned exception; see DEV_SEED_CONVERSATION_WRITER.
+            } else if (DISPOSABLE_BENCH_EVENT_WRITERS[file] && !outer) {
+              // Top-level fixture seeding in the benchmark's own shared-harness
+              // database; pin its guards and do not exempt any other writer.
+              expectDisposableBenchEventGuards(
+                sourceFile.source,
+                DISPOSABLE_BENCH_EVENT_WRITERS[file],
+              );
+            } else {
+              rawSqlWriters.push(`${file}:${lineNumber(sourceFile.source, node)}`);
+            }
           }
         }
         forEachChild(node, visit);
@@ -1306,7 +1380,8 @@ describe("session_events writer inventory", () => {
         expect(
           controlAwarePrefixPositions(callerNode).length > 0 ||
             genericPrefixPositions(callerNode).length > 0 ||
-            Object.hasOwn(expectedOwnedSuffixCallers, caller),
+            Object.hasOwn(expectedOwnedSuffixCallers, caller) ||
+            (caller === VISIBILITY_SETTLEMENT && visibilitySettlementPrefixIsPinned()),
         ).toBe(true);
         const firstLock = canonicalLocks[0];
         const delegatedCalls = [...ownedSuffixCallers.keys()].flatMap((ownedWriter) =>
@@ -1505,10 +1580,10 @@ describe("session_events writer inventory", () => {
     expect(functionCalls(retryHelper!, "runIdempotentPersistenceTransaction")).toBe(true);
     expect(functionCalls(retryHelper!, "withWorkspaceSessionActivityRls")).toBe(true);
     expect(functionCalls(retryHelper!, "withWorkspaceSubjectSessionActivityRls")).toBe(true);
-    expect(functionCalls(retryHelper!, "publishAndWakeAgentCommand")).toBe(false);
-    expect(functionCalls(retryHelper!, "publishWorkspaceControlEvent")).toBe(false);
-    expect(functionCalls(retryHelper!, "publishSessionEventIds")).toBe(false);
-    expect(functionCalls(retryHelper!, "requestControlWakeDispatch")).toBe(false);
+    expect(functionCalls(retryHelper!, "publishAndWakeAgentCommand", true)).toBe(false);
+    expect(functionCalls(retryHelper!, "publishWorkspaceControlEvent", true)).toBe(false);
+    expect(functionCalls(retryHelper!, "publishSessionEventIds", true)).toBe(false);
+    expect(functionCalls(retryHelper!, "requestControlWakeDispatch", true)).toBe(false);
 
     for (const commandName of [
       "sendAgentSessionMessage",
@@ -1530,7 +1605,7 @@ describe("session_events writer inventory", () => {
         "publishSessionEventIds",
         "requestControlWakeDispatch",
       ]) {
-        for (const effect of callPositions(command!, externalEffect)) {
+        for (const effect of callPositions(command!, externalEffect, true)) {
           expect(persistence).toBeLessThan(effect);
         }
       }

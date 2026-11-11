@@ -117,7 +117,7 @@ async function renderDemoComputer(target: ComputerTarget): Promise<Uint8Array> {
   context.fill();
   context.fillStyle = "#f1f5fb";
   context.font = "600 17px Inter, system-ui, sans-serif";
-  context.fillText(target.title || "OpenGeni computer", 164, 108, 760);
+  context.fillText(target.title || "Opengeni computer", 164, 108, 760);
   for (const [index, color] of ["#ff6b6b", "#ffd166", "#51cf66"].entries()) {
     context.fillStyle = color;
     context.beginPath();

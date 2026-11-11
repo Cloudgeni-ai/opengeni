@@ -30,6 +30,47 @@ export type WorkspaceArtifactVersion = {
   createdAt: string;
 };
 
+/** Pin or archive a Site row in this person's own sidebar; set at least one. */
+export type UpdateSiteSidebarStateRequest = {
+  pinned?: boolean;
+  /** Hides the row (and the conversations under it) for this person only. */
+  archived?: boolean;
+};
+
+/** This person's sidebar state for one Site row. */
+export type SiteSidebarStateResponse = {
+  siteId: string;
+  pinned: boolean;
+  pinnedAt: string | null;
+  archived: boolean;
+  archivedAt: string | null;
+};
+
+/** Move a Site's sidebar row from one project to another; null is Default. */
+export type UpdateSiteProjectRequest = {
+  fromChannelId: string | null;
+  channelId: string | null;
+};
+
+/** The result of moving a Site's sidebar row. */
+export type SiteProjectResponse = {
+  siteId: string;
+  channelId: string | null;
+  /** The Site itself moved: the row was its own project's. */
+  siteMoved: boolean;
+  /** The row's conversations that moved with it. */
+  movedSessionIds: string[];
+};
+
+/** This person's latest recorded open of a Site, which orders its sidebar row. */
+export type SiteOpenedResponse = {
+  /** When the open was recorded (ISO 8601). */
+  openedAt: string;
+};
+
+/** Who can see a Site: everyone in the workspace, or only its owner ("Only me"). */
+export type WorkspaceArtifactVisibility = "private" | "workspace";
+
 export type WorkspaceArtifact = {
   id: string;
   accountId: string;
@@ -38,6 +79,10 @@ export type WorkspaceArtifact = {
   title: string;
   description: string | null;
   status: "active" | "archived";
+  /** Absent from older servers, where every Site is visible to the workspace. */
+  visibility?: WorkspaceArtifactVisibility;
+  /** The person the Site belongs to; only they can change its audience. */
+  ownerSubjectId?: string | null;
   currentVersion: WorkspaceArtifactVersion | null;
   createdBySubjectId: string;
   createdAt: string;
@@ -79,6 +124,13 @@ export type WorkspaceArtifactDetailResponse = {
   versionsTruncated: boolean;
   eventsTruncated: boolean;
 };
+/**
+ * A Site and its current version without its history or who made it: what an
+ * open Site view checks to see whether a new version is live.
+ */
+export type WorkspaceArtifactCurrentResponse = {
+  artifact: WorkspaceArtifact;
+};
 export type WorkspaceArtifactContentResponse = {
   artifactId: string;
   versionId: string;
@@ -102,6 +154,8 @@ export type CreateWorkspaceArtifactRequest = {
   uploadId?: string;
   source?: WorkspaceArtifactSourceBundle;
   requestedTools?: ToolGatewayIdentity[];
+  /** Who can see the new Site. Omitted: the whole workspace. */
+  visibility?: WorkspaceArtifactVisibility;
   idempotencyKey: string;
 };
 export type PublishWorkspaceArtifactVersionRequest = {
@@ -120,9 +174,21 @@ export type RollbackWorkspaceArtifactRequest = {
   reason: string;
   idempotencyKey: string;
 };
+/** A new Site from another Site's current version. Its publication and data stay behind. */
+export type DuplicateWorkspaceArtifactRequest = {
+  /** Omitted: the original's title followed by "(copy)". */
+  title?: string;
+  idempotencyKey: string;
+};
 export type SetWorkspaceArtifactStatusRequest = {
   status: "active" | "archived";
   expectedCurrentVersionId: string;
   reason: string;
   idempotencyKey: string;
+};
+export type UpdateWorkspaceArtifactVisibilityRequest = {
+  visibility: WorkspaceArtifactVisibility;
+};
+export type UpdateWorkspaceArtifactVisibilityResponse = {
+  artifact: WorkspaceArtifact;
 };

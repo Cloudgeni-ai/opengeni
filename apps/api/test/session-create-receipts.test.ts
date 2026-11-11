@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createObservability } from "@opengeni/observability";
 import type { Settings } from "@opengeni/config";
 import type { AccessGrant, McpMutationReceiptType } from "@opengeni/contracts";
 import {
@@ -8,17 +9,21 @@ import {
   createChannel,
   getSession,
   createSession,
+  ensureManagedAccessForUser,
+  requireWorkspace,
   type DbClient,
 } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
-import { resolveTurnSurface, withSiteSessionOrigin } from "@opengeni/core";
+import {
+  resolveSessionAgentConfigForCreate,
+  createSessionForRequestWithOutcome,
+  resolveTurnSurface,
+  withSiteSessionOrigin,
+} from "@opengeni/core";
 import {
   resolveSiteSessionOrigin,
   withOptionalSiteCommandOrigin,
@@ -58,29 +63,30 @@ function buildServer(
     sandboxBackend: "none",
   }),
 ): unknown {
+  return buildOpenGeniMcpServer(buildDeps(workflow, settings), grant);
+}
+
+function buildDeps(workflow: FakeWorkflowClient, settings: Settings): ApiRouteDeps {
   const noop = async () => undefined;
-  return buildOpenGeniMcpServer(
-    {
-      settings,
-      db: client.db,
-      bus: new MemoryEventBus(),
-      workflowClient: {
-        signalUserMessage: noop,
-        wakeSessionWorkflow: workflow.wakeSessionWorkflow.bind(workflow),
-        requestSessionWorkflowWakeDispatch: noop,
-        signalApprovalDecision: noop,
-        signalSessionControl: noop,
-        syncScheduledTask: noop,
-        deleteScheduledTaskSchedule: noop,
-        triggerScheduledTask: noop,
-      } as unknown as SessionWorkflowClient,
-      objectStorage: null,
-      githubStateSecret: "test",
-      documentIndexer: { indexDocument: noop },
-      getDocumentServices: () => ({}) as never,
-    } as unknown as ApiRouteDeps,
-    grant,
-  );
+  return {
+    settings,
+    db: client.db,
+    bus: new MemoryEventBus(),
+    workflowClient: {
+      signalUserMessage: noop,
+      wakeSessionWorkflow: workflow.wakeSessionWorkflow.bind(workflow),
+      requestSessionWorkflowWakeDispatch: noop,
+      signalApprovalDecision: noop,
+      signalSessionControl: noop,
+      syncScheduledTask: noop,
+      deleteScheduledTaskSchedule: noop,
+      triggerScheduledTask: noop,
+    } as unknown as SessionWorkflowClient,
+    objectStorage: null,
+    githubStateSecret: "test",
+    documentIndexer: { indexDocument: noop },
+    getDocumentServices: () => ({}) as never,
+  } as unknown as ApiRouteDeps;
 }
 
 async function callMcpTool<T>(
@@ -174,46 +180,204 @@ afterAll(async () => {
 }, 60_000);
 
 describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
-  test("records validated Site origin and preserves keyed replay after archive and rename", async () => {
-    if (!available) return;
+  test("create reads committed state while fanout and workflow wake are still held", async () => {
+    if (!available) throw new Error("Session-create overlap proof requires PostgreSQL");
     const grant = await freshGrant();
+    const settings = testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" });
+    const workflow = new FakeWorkflowClient();
+    const deps = buildDeps(workflow, settings);
+    const observability = createObservability(settings, { component: "api" });
+    deps.observability = observability;
+    let releaseFanout!: () => void;
+    let releaseWake!: () => void;
+    const fanoutHeld = new Promise<void>((resolve) => {
+      releaseFanout = resolve;
+    });
+    const wakeHeld = new Promise<void>((resolve) => {
+      releaseWake = resolve;
+    });
+    let fanoutSessionId: string | undefined;
+    deps.bus.publish = async (_workspaceId, sessionId) => {
+      fanoutSessionId = sessionId;
+      await fanoutHeld;
+    };
+    deps.workflowClient.wakeSessionWorkflow = async (input) => {
+      workflow.wakeups.push(input);
+      await wakeHeld;
+    };
+    let completedReload!: () => void;
+    const reloaded = new Promise<void>((resolve) => {
+      completedReload = resolve;
+    });
+    const startSpan = observability.startSpan.bind(observability);
+    observability.startSpan = (name, attributes, options) => {
+      const span = startSpan(name, attributes, options);
+      return {
+        ...span,
+        end: (input) => {
+          span.end(input);
+          if (name === "core.session_start.session_reload") completedReload();
+        },
+      };
+    };
+    const server = buildOpenGeniMcpServer(deps, grant);
+    let settled = false;
+    const creating = callMcpTool<McpMutationReceiptType>(server, "session_create", {
+      initialMessage: "Synthetic create, never invoke a model",
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    void creating.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        reloaded,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("Response read waited for transport")), 5000);
+        }),
+      ]);
+      expect(settled).toBe(false);
+      expect(workflow.wakeups).toHaveLength(1);
+      expect(fanoutSessionId).toBeDefined();
+      expect(await durableCounts(grant.workspaceId, fanoutSessionId!)).toMatchObject({
+        workspaceSessions: 1,
+        events: 4,
+        turns: 1,
+        wakeRows: 1,
+        wakeRevision: 1,
+      });
+      releaseFanout();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      releaseWake();
+      const receipt = await creating;
+      expect(receipt).toMatchObject({
+        committed: true,
+        resource: { id: fanoutSessionId, state: "queued" },
+      });
+      const session = await getSession(client.db, grant.workspaceId, receipt.resource.id);
+      expect(session).toMatchObject({ status: "queued", lastSequence: 4 });
+    } finally {
+      clearTimeout(timeout);
+      releaseFanout();
+      releaseWake();
+      await creating.catch(() => undefined);
+    }
+  }, 30_000);
+
+  test("records validated Site origin on private native children and preserves keyed replay after archive and rename", async () => {
+    if (!available) return;
+    const userId = crypto.randomUUID();
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Site receipt owner",
+    });
+    const grant = {
+      ...access.workspaceGrants.find(
+        (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+      )!,
+      principalKind: "human_session" as const,
+    };
     const [site] = await shared!.admin<{ id: string }[]>`
       insert into workspace_artifacts (account_id, workspace_id, slug, title, created_by_subject_id)
       values (${grant.accountId}, ${grant.workspaceId}, 'origin-test', 'Analytics', ${grant.subjectId}) returning id`;
     const [version] = await shared!.admin<{ id: string }[]>`
       insert into workspace_artifact_versions (account_id, workspace_id, artifact_id, revision, content_key, size_bytes, operation_key, created_by_subject_id)
       values (${grant.accountId}, ${grant.workspaceId}, ${site!.id}, 1, 'synthetic.html', 1, ${crypto.randomUUID()}, ${grant.subjectId}) returning id`;
-    const origin = await resolveSiteSessionOrigin(
-      client.db,
-      grant.workspaceId,
-      site!.id,
-      version!.id,
-    );
-    expect(origin).toEqual({ siteId: site!.id, title: "Analytics" });
+    const origin = await resolveSiteSessionOrigin(client.db, grant, site!.id, version!.id);
+    expect(origin).toEqual({ siteId: site!.id, title: "Analytics", versionId: version!.id });
     const other = await freshGrant();
     await expect(
-      resolveSiteSessionOrigin(client.db, other.workspaceId, site!.id, version!.id),
+      resolveSiteSessionOrigin(client.db, other, site!.id, version!.id),
     ).rejects.toMatchObject({ status: 404 });
     await expect(
-      resolveSiteSessionOrigin(client.db, grant.workspaceId, site!.id, crypto.randomUUID()),
+      resolveSiteSessionOrigin(client.db, grant, site!.id, crypto.randomUUID()),
     ).rejects.toMatchObject({ status: 404 });
-    const server = buildServer(grant, new FakeWorkflowClient());
+    const workflow = new FakeWorkflowClient();
+    const settings = testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" });
     const args = {
       initialMessage: "A single Site conversation",
       model: "scripted-model",
       sandboxBackend: "none",
       idempotencyKey: crypto.randomUUID(),
     };
+    // Provenance alone is not owning-user authority. A sessionless MCP caller
+    // cannot manufacture a private Site root, even with the owner's subject.
+    const refused = await withSiteSessionOrigin(origin!, () =>
+      callMcpTool<{ error: { diagnostic: { sqlState: string } } }>(
+        buildServer(grant, workflow, settings),
+        "session_create",
+        args,
+      ),
+    );
+    expect(refused).toMatchObject({ error: { diagnostic: { sqlState: "42501" } } });
+    const parent = await withSiteSessionOrigin(origin!, () =>
+      createSessionForRequestWithOutcome(
+        buildDeps(workflow, settings),
+        grant,
+        grant.workspaceId,
+        { ...args, visibility: "private", idempotencyKey: crypto.randomUUID() },
+        {
+          grant,
+          accountGrant: access.accountGrants[0] ?? null,
+          authenticatedSubjectId: grant.subjectId,
+          contextIntegrity: true,
+          canonicalManagedHumanSession: true,
+        },
+      ),
+    );
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    if (claim.action !== "claimed") throw new Error("Site parent was not claimed");
+    const agentGrant: AccessGrant = {
+      ...grant,
+      principalKind: "agent_attempt",
+      metadata: {
+        sessionId: parent.session.id,
+        turnId: claim.turn.id,
+        attemptId,
+        executionGeneration: claim.turn.executionGeneration,
+        firstPartyMcpTools: ["session_create"],
+      },
+    };
+    const server = buildServer(agentGrant, workflow, settings);
     const created = await withSiteSessionOrigin(origin!, () =>
       callMcpTool<McpMutationReceiptType>(server, "session_create", args),
     );
+    expect(created).toMatchObject({ committed: true });
     const sessionId = created.resource.id;
     const [row] = await shared!.admin<
-      { metadata: Record<string, unknown>; parent_session_id: string | null }[]
+      {
+        metadata: Record<string, unknown>;
+        parent_session_id: string | null;
+        visibility: string;
+        owner_subject_id: string;
+        site_access_root_id: string;
+      }[]
     >`
-      select metadata, parent_session_id from sessions where id = ${sessionId}`;
+      select metadata, parent_session_id, visibility, owner_subject_id, site_access_root_id from sessions where id = ${sessionId}`;
     expect(row!.metadata._opengeniSiteOrigin).toEqual(origin);
-    expect(row!.parent_session_id).toBeNull();
+    expect(row!.parent_session_id).toBe(parent.session.id);
+    expect(row!.visibility).toBe("user_private");
+    expect(row!.owner_subject_id).toBe(grant.subjectId);
+    expect(row!.site_access_root_id).toBe(parent.session.id);
+    expect(parent.session.parentSessionId).toBeNull();
     // Analytics: the Site-created conversation's first turn records `site`.
     const siteTurns = await shared!.admin<{ surface: string | null }[]>`
       select surface from session_turns where session_id = ${sessionId}`;
@@ -221,7 +385,7 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
     // Follow-up Send/Steer from the Site bridge runs in the validated Site
     // scope; a missing or unverifiable origin leaves the command unscoped.
     const surfaceFor = (siteId: string | undefined, versionId: string | undefined) =>
-      withOptionalSiteCommandOrigin(client.db, grant.workspaceId, siteId, versionId, async () =>
+      withOptionalSiteCommandOrigin(client.db, grant, siteId, versionId, async () =>
         resolveTurnSurface({ grant: { ...grant, principalKind: "human_session" } }),
       );
     expect(await surfaceFor(site!.id, version!.id)).toBe("site");
@@ -233,17 +397,91 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
     ).toBe("web");
     await shared!
       .admin`update workspace_artifacts set status = 'archived', title = 'Renamed' where id = ${site!.id}`;
-    const renamed = await resolveSiteSessionOrigin(
-      client.db,
-      grant.workspaceId,
-      site!.id,
-      version!.id,
-    );
+    const renamed = await resolveSiteSessionOrigin(client.db, grant, site!.id, version!.id);
     const replay = await withSiteSessionOrigin(renamed!, () =>
       callMcpTool<McpMutationReceiptType>(server, "session_create", args),
     );
     expect(replay.resource.id).toBe(sessionId);
-    expect((await durableCounts(grant.workspaceId, sessionId)).workspaceSessions).toBe(1);
+    expect((await durableCounts(grant.workspaceId, sessionId)).workspaceSessions).toBe(2);
+  }, 60_000);
+
+  test("files a new Site conversation in the project of the chat that created the Site", async () => {
+    if (!available) return;
+    const userId = crypto.randomUUID();
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Site project owner",
+    });
+    const grant = {
+      ...access.workspaceGrants.find(
+        (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+      )!,
+      principalKind: "human_session" as const,
+    };
+    const workflow = new FakeWorkflowClient();
+    const settings = testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" });
+    const project = await createChannel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "UI/UX",
+    });
+    const other = await createChannel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "Bugfixes",
+    });
+    const context = {
+      grant,
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: grant.subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    };
+    const create = (payload: Record<string, unknown>) =>
+      createSessionForRequestWithOutcome(
+        buildDeps(workflow, settings),
+        grant,
+        grant.workspaceId,
+        {
+          model: "scripted-model",
+          sandboxBackend: "none",
+          idempotencyKey: crypto.randomUUID(),
+          ...payload,
+        } as Parameters<typeof createSessionForRequestWithOutcome>[3],
+        context,
+      );
+    const chat = await create({ initialMessage: "Build the audit", channelId: project.id });
+    expect(chat.session.channelId).toBe(project.id);
+    // The chat publishes the Site.
+    const [site] = await shared!.admin<{ id: string }[]>`
+      insert into workspace_artifacts (account_id, workspace_id, slug, title, created_by_subject_id)
+      values (${grant.accountId}, ${grant.workspaceId}, 'project-test', 'Audit', ${grant.subjectId}) returning id`;
+    const version = await shared!.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      const [row] = await tx<{ id: string }[]>`
+        insert into workspace_artifact_versions (account_id, workspace_id, artifact_id, revision,
+          content_key, size_bytes, operation_key, source_session_id, source_turn_id,
+          source_attempt_id, source_execution_generation, created_by_subject_id)
+        values (${grant.accountId}, ${grant.workspaceId}, ${site!.id}, 1, 'synthetic.html', 1,
+          ${crypto.randomUUID()}, ${chat.session.id}, ${crypto.randomUUID()},
+          ${crypto.randomUUID()}, 1, ${grant.subjectId}) returning id`;
+      return row!;
+    });
+    const origin = await resolveSiteSessionOrigin(client.db, grant, site!.id, version.id);
+    // The console's Site panel names no project.
+    const asked = await withSiteSessionOrigin(origin!, () =>
+      create({ initialMessage: "Hello test", visibility: "private" }),
+    );
+    expect(asked.session.channelId).toBe(project.id);
+    expect((await getSession(client.db, grant.workspaceId, asked.session.id))!.channelId).toBe(
+      project.id,
+    );
+    // A project the caller names still wins.
+    const filed = await withSiteSessionOrigin(origin!, () =>
+      create({ initialMessage: "File it here", visibility: "private", channelId: other.id }),
+    );
+    expect(filed.session.channelId).toBe(other.id);
   }, 60_000);
 
   test("MCP project selection files a new session and survives keyed replay", async () => {
@@ -293,6 +531,19 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
     const grant = await freshGrant();
     const idempotencyKey = `repair-${crypto.randomUUID()}`;
     const initialMessage = `repair fixture ${crypto.randomUUID()}`;
+    const settings = testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" });
+    // This shell represents a create already admitted by the public boundary,
+    // including its immutable agent configuration, but not yet initialized.
+    const acceptedAgent = resolveSessionAgentConfigForCreate({
+      settings,
+      creator: "api",
+      request: undefined,
+      instructions: undefined,
+      workspaceSettings: (await requireWorkspace(client.db, grant.workspaceId)).settings,
+      parent: null,
+      goal: false,
+    }).config;
+    expect(acceptedAgent).not.toBeNull();
     const seeded = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -304,6 +555,7 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
       reasoningEffort: "medium",
       latencyMode: "standard",
       sandboxBackend: "none",
+      agentConfig: acceptedAgent,
       createIdempotencyKey: idempotencyKey,
     });
     expect(await durableCounts(grant.workspaceId, seeded.id)).toMatchObject({
@@ -315,13 +567,22 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
     });
 
     const workflow = new FakeWorkflowClient();
-    const server = buildServer(grant, workflow);
+    const server = buildServer(grant, workflow, settings);
     const args = {
       initialMessage,
       model: "scripted-model",
       sandboxBackend: "none",
       idempotencyKey,
     };
+    const beforeConflict = await durableCounts(grant.workspaceId, seeded.id);
+    const conflict = await callMcpTool<{ error: { code: string } }>(server, "session_create", {
+      ...args,
+      agent: { capabilities: "none" },
+    });
+    expect(conflict).toMatchObject({ error: { code: "session_create_conflict" } });
+    expect(await durableCounts(grant.workspaceId, seeded.id)).toEqual(beforeConflict);
+    expect(workflow.wakeups).toHaveLength(0);
+
     const repaired = await callMcpTool<McpMutationReceiptType>(server, "session_create", args);
     expect(repaired).toMatchObject({
       operation: "session_create",
@@ -341,6 +602,9 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
       usageEvents: 1,
     });
     expect(workflow.wakeups).toHaveLength(1);
+    expect((await getSession(client.db, grant.workspaceId, seeded.id))!.agent).toEqual(
+      acceptedAgent,
+    );
 
     const wakeRepair = await callMcpTool<McpMutationReceiptType>(server, "session_create", args);
     expect(wakeRepair).toMatchObject({

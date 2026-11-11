@@ -1,9 +1,9 @@
-# OpenGeni Browser privacy notice
+# Opengeni Browser privacy notice
 
-Effective September 7, 2026. Published by Cloudgeni AS.
+Effective October 27, 2026. Published by Cloudgeni AS.
 
-OpenGeni Browser connects a Chrome profile to the OpenGeni machine agent on
-your computer. That agent connects to the OpenGeni deployment you configure.
+Opengeni Browser connects a Chrome profile to the Opengeni machine agent on
+your computer. That agent connects to the Opengeni deployment you configure.
 This notice describes the extension; your deployment operator and configured
 model providers also govern the information they receive.
 
@@ -14,20 +14,41 @@ and a tab-inventory revision in Chrome local extension storage. It sends profile
 and browser metadata, and open-tab titles, URLs, and state, to the local machine
 agent when connected. It updates this inventory as tabs change.
 
-When OpenGeni operates a tab, the extension can read page structure and content,
+When Opengeni operates a tab, the extension can read page structure and content,
 capture screenshots, perform navigation and input, and return browser events,
 network information, and operation results. Depending on the sites and tasks,
 this may include personal details, communications, financial or health
 information, authentication information, and location information present in
 pages or browser responses. Use a profile containing only information you intend
-to make available to your OpenGeni deployment.
+to make available to your Opengeni deployment.
+
+When a tab Opengeni operates downloads a file, the extension looks up that
+download in Chrome's download list (completed downloads of the same address
+started since then) to find where Chrome saved it, so the machine agent can copy
+the file for the task. The file stays in your downloads folder.
+
+Chrome does not let an extension control a tab that shows another extension's
+page, which password managers and similar extensions add for their inline
+menus. When that stops Opengeni from controlling a tab, the extension removes
+those other-extension frames from that tab's page and nothing else. It does
+not read or change the other extension's data.
+
+If you allow it on the extension's own page, Opengeni agents can allow or block
+camera, microphone, location and notifications for the exact site (scheme, host
+and port) shown in a tab the agent opened itself and no other agent is using,
+never in your own tabs. The extension keeps a list of these
+changes (site, permission, setting and time) in Chrome local extension storage
+and shows it in its popup, where you can remove each change. Chrome shows these
+settings as set by an extension in its site settings. Turning this off on the
+extension's page removes every change and the permission. The extension does
+not read or change any other site settings.
 
 ## Purpose and destinations
 
 Information is used to identify the connected profile and perform browser tasks
-through OpenGeni. The extension communicates through the local native messaging
+through Opengeni. The extension communicates through the local native messaging
 host `ai.opengeni.browser`; it does not include an advertising or analytics SDK.
-The machine agent can forward browser information to your configured OpenGeni
+The machine agent can forward browser information to your configured Opengeni
 deployment. That deployment can process it using its configured model providers
 and task tools, and retain it in session history, audit records, and artifacts.
 Information therefore does not necessarily remain on your computer.
@@ -35,7 +56,7 @@ Information therefore does not necessarily remain on your computer.
 The extension itself does not sell information, use it for advertising, or
 determine creditworthiness. Browser data is handled to provide its browser
 automation functionality. The extension does not impose one retention period
-across independently operated OpenGeni deployments.
+across independently operated Opengeni deployments.
 
 ## Controls and retention
 
@@ -48,5 +69,5 @@ to a tab. Chrome-restricted pages cannot be controlled.
 
 ## Contact
 
-For extension privacy questions: jorgen@cloudgeni.ai.
+For extension privacy questions: support@opengeni.ai.
 Cloudgeni AS, Falkeveien 2A, 1476 Rasta, Norway.

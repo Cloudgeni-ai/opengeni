@@ -106,6 +106,15 @@ describe("Docker sandbox route selection", () => {
     ).toEqual({ reason: "could not inspect Docker network missing" });
   });
 
+  test("refuses a bindable address absent from the host interface snapshot", async () => {
+    expect(await canListenOn("127.0.0.1")).toBe(true);
+    // Models a gateway owned by another namespace even when the OS permits
+    // binding nonlocal addresses; does not depend on changing host sysctls.
+    expect(await canListenOn("127.0.0.1", {})).toBe(false);
+    expect(await canListenOn("0.0.0.0")).toBe(false);
+    expect(await canListenOn("localhost")).toBe(false);
+  });
+
   test("probes host addresses by listening on them", async () => {
     expect(await canListenOn("127.0.0.1")).toBe(true);
     // TEST-NET-1 is never assigned to a host interface.
@@ -198,6 +207,33 @@ describe("Docker sandbox route forwarder", () => {
     const { base, seen } = await startBridge("172.18.0.0/16");
     const response = await fetch(`${base}/v1/workspaces/ws-1/mcp`, { method: "POST", body: "{}" });
     expect(response.status).toBe(403);
+    expect(seen).toHaveLength(0);
+  });
+
+  test("answers the launcher health probe from a peer outside the sandbox network", async () => {
+    // Hosts that source-NAT their own loopback-routed traffic make the
+    // launcher's probe arrive from outside the Docker subnet.
+    const { base, port, seen } = await startBridge("172.18.0.0/16");
+    const health = await fetch(`${base}${SANDBOX_BRIDGE_HEALTH_PATH}`);
+    expect(health.status).toBe(200);
+    expect(await health.json()).toEqual({ ok: true });
+
+    // Every other route, including ones that only normalize to the health
+    // path's neighbours, stays refused for such a peer.
+    for (const path of [
+      "/v1/workspaces/ws-1/mcp",
+      "/v1/workspaces/ws-1/codemode/run",
+      "/v1/workspaces/ws-1/sessions",
+      `${SANDBOX_BRIDGE_HEALTH_PATH}/extra`,
+    ]) {
+      const response = await fetch(`${base}${path}`, { method: "POST", body: "{}" });
+      expect(response.status).toBe(403);
+    }
+    const traversal = await rawRequest(
+      port,
+      `${SANDBOX_BRIDGE_HEALTH_PATH}/../v1/workspaces/ws-1/mcp`,
+    );
+    expect(traversal).toStartWith("HTTP/1.1 403");
     expect(seen).toHaveLength(0);
   });
 

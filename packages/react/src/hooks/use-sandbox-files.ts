@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   FileSystemRouteIdentity,
   FsChangedPayload,
@@ -15,6 +16,9 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type ClientOverride, useOpenGeni } from "../provider";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
+import { createOpenGeniText, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+
+const englishText = createOpenGeniText();
 
 /** The git-status overlay a file row may carry (tints modified files in the tree). */
 export type FileTreeStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
@@ -30,13 +34,14 @@ export class CapturedFileUnavailableError extends Error {
   constructor(
     readonly path: string,
     readonly reason: CapturedFileUnavailableReason,
+    t: OpenGeniText = englishText,
   ) {
     super(
       reason === "too-large"
-        ? `${path} exceeds the captured preview limit.`
+        ? t("hooks.useSandboxFiles.pathExceedsTheCapturedPreview", { path })
         : reason === "content-missing"
-          ? `${path} is no longer available in this capture.`
-          : `${path} was not changed in this captured turn.`,
+          ? t("hooks.useSandboxFiles.pathIsNoLongerAvailable", { path })
+          : t("hooks.useSandboxFiles.pathWasNotChangedIn", { path }),
     );
     this.name = "CapturedFileUnavailableError";
   }
@@ -49,8 +54,9 @@ export class FileWriteConflictError extends Error {
     readonly path: string,
     readonly expectedContent: string,
     readonly liveContent: string,
+    t: OpenGeniText = englishText,
   ) {
-    super(`${path} changed on the machine. Reload it or explicitly overwrite the live version.`);
+    super(t("hooks.useSandboxFiles.pathChangedOnTheMachine", { path }));
     this.name = "FileWriteConflictError";
   }
 }
@@ -79,7 +85,7 @@ export type FileTreeNode = {
   truncated?: boolean | undefined;
 };
 
-export type UseSandboxFilesOptions = ClientOverride & {
+export type UseSandboxFilesOptions = ClientOverride<ChatClient> & {
   /** Live event log (usually `useSessionEvents().events`) — drives auto-refresh
    *  on `fs.changed` / `git.changed`. */
   events?: SessionEvent[] | undefined;
@@ -496,6 +502,7 @@ export function useSandboxFiles(
   sessionId: string | null | undefined,
   options: UseSandboxFilesOptions = {},
 ): UseSandboxFilesResult {
+  const t = useOpenGeniText();
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const active = options.active ?? true;
@@ -789,7 +796,7 @@ export function useSandboxFiles(
       const captured = capture?.files.find((file) => file.path === path && !file.deleted);
       if (source === "capture" && capture) {
         if (!captured) {
-          throw new CapturedFileUnavailableError(path, "not-captured");
+          throw new CapturedFileUnavailableError(path, "not-captured", t);
         }
         // A passive review of a turn-touched file must stay entirely server-side:
         // mint/read its captured after-image, verify the content hash, and never
@@ -817,7 +824,7 @@ export function useSandboxFiles(
             throw new Error("Captured file metadata did not match its manifest.");
           }
           if (result.tooLarge) {
-            throw new CapturedFileUnavailableError(path, "too-large");
+            throw new CapturedFileUnavailableError(path, "too-large", t);
           }
 
           let bytes: Uint8Array;
@@ -850,7 +857,7 @@ export function useSandboxFiles(
             encoding = result.isBinary ? "base64" : "utf8";
             content = result.isBinary ? encodeBase64Bytes(bytes) : new TextDecoder().decode(bytes);
           } else {
-            throw new CapturedFileUnavailableError(path, "content-missing");
+            throw new CapturedFileUnavailableError(path, "content-missing", t);
           }
 
           if (bytes.byteLength !== result.sizeBytes) {
@@ -876,7 +883,7 @@ export function useSandboxFiles(
         { signal },
       );
     },
-    [client, workspaceId, sessionId, capture, source, route],
+    [client, workspaceId, sessionId, capture, source, route, t],
   );
 
   // TARGETED reconcile of a single directory — re-list ONE parent at depth 1 and
@@ -1066,16 +1073,16 @@ export function useSandboxFiles(
               { signal: identitySignal },
             );
             if (identityGenerationRef.current !== identityGeneration) {
-              throw new Error("File save cancelled because the workspace changed.");
+              throw new Error(t("hooks.useSandboxFiles.fileSaveCancelledBecauseThe"));
             }
             const liveContent =
               live.encoding === "base64" ? decodeBase64Text(live.content) : live.content;
             if (live.truncated || live.isBinary || liveContent !== writeOptions.expectedContent) {
-              throw new FileWriteConflictError(path, writeOptions.expectedContent, liveContent);
+              throw new FileWriteConflictError(path, writeOptions.expectedContent, liveContent, t);
             }
           }
           if (identityGenerationRef.current !== identityGeneration) {
-            throw new Error("File save cancelled because the workspace changed.");
+            throw new Error(t("hooks.useSandboxFiles.fileSaveCancelledBecauseThe"));
           }
           return await client.fsWrite(workspaceId, sessionId, {
             path,
@@ -1087,7 +1094,7 @@ export function useSandboxFiles(
         exists ? [] : [parent],
       );
     },
-    [client, workspaceId, sessionId, tree, rootPath, route, runOptimistic],
+    [client, workspaceId, sessionId, tree, rootPath, route, runOptimistic, t],
   );
 
   const createFile = useCallback(
@@ -1101,7 +1108,7 @@ export function useSandboxFiles(
         size: 0,
       };
       await runOptimistic(
-        "create file",
+        t("hooks.useSandboxFiles.createFile"),
         (nodes) => insertNode(nodes, parent, node, rootPath),
         () =>
           client.fsWrite(workspaceId, sessionId, {
@@ -1113,7 +1120,7 @@ export function useSandboxFiles(
         [parent],
       );
     },
-    [client, workspaceId, sessionId, rootPath, route, runOptimistic],
+    [client, workspaceId, sessionId, rootPath, route, runOptimistic, t],
   );
 
   const createDir = useCallback(
@@ -1129,7 +1136,7 @@ export function useSandboxFiles(
         children: [],
       };
       await runOptimistic(
-        "create folder",
+        t("hooks.useSandboxFiles.createFolder"),
         (nodes) => insertNode(nodes, parent, node, rootPath),
         () =>
           client.fsMkdir(workspaceId, sessionId, {
@@ -1140,7 +1147,7 @@ export function useSandboxFiles(
         [parent],
       );
     },
-    [client, workspaceId, sessionId, rootPath, route, runOptimistic],
+    [client, workspaceId, sessionId, rootPath, route, runOptimistic, t],
   );
 
   const deleteEntry = useCallback(

@@ -1,15 +1,24 @@
 import type { TurnHeartbeatDetails } from "../../op-journal";
+import type { AppActionApprovalCard } from "./app-action-confirmation";
 import type { Settings } from "@opengeni/config";
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
-import type { AppendEventInput, ApplySessionTurnSettlementInput } from "@opengeni/db";
 import type {
+  AppendEventInput,
+  ApplySessionTurnSettlementInput,
+  SubscriptionCoreTurnIdentity,
+  SessionEventMutation,
+} from "@opengeni/db";
+import type {
+  BillingOrigin,
   CodexCredentialPolicySnapshotV1,
   ModelContextContributionSummary,
   SessionStatus,
-  XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import type {
   EstablishedSandboxSession,
+  InputWaitGuardResult,
+  InputWaitRequest,
+  InteractionRequestTargetReader,
   OpenGeniRuntime,
   RunCredentialCommandSession,
   SelfhostedSession,
@@ -22,10 +31,15 @@ import type { GitCredentialRenewalController } from "../git-credential-renewal";
 import type { RunCredentialRenewalController } from "../run-credential-renewal";
 import type { createRuntimeBatcher, startActivityHeartbeat } from "../streaming";
 import type { RunAgentTurnResult } from "../types";
-import type { TurnOutcome } from "../../observability-metrics";
+import type {
+  ModelRequestPreDispatchStage,
+  TurnOutcome,
+  TurnRecoveryCause,
+} from "../../observability-metrics";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
-import type { TurnEventPublisher } from "./model-usage";
+import type { TurnBackgroundEventPublisher, TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
+import { InitialModelWireDispatchClock } from "./model-wire-dispatch";
 
 /** Stamps the claimed turn/attempt ids onto a phase's own outcome. */
 export type ClaimedResult = (
@@ -35,7 +49,7 @@ export type ClaimedResult = (
   >,
 ) => RunAgentTurnResult;
 
-export type TurnSettleFn = (input: {
+export type TurnSettleInput = {
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>;
   turnStatus:
     | "queued"
@@ -50,13 +64,31 @@ export type TurnSettleFn = (input: {
   suppressGoalContinuation?: boolean;
   allowanceGoalPause?: ApplySessionTurnSettlementInput["allowanceGoalPause"];
   consumeRequestedCompactionFailure?: boolean;
+  /** Drop a pending `proactive` compaction request with this settlement. */
+  dropProactiveCompactionRequest?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
-}) => Promise<boolean>;
+  notStartedToolCallIds?: readonly string[];
+};
+
+/**
+ * Durable turn settlement. `false` means this attempt lost ownership. With
+ * `requirePendingSteer`, `"pending_steer_withdrawn"` means the precondition
+ * failed under the session lock and nothing was written.
+ */
+export type TurnSettleFn = {
+  (
+    input: TurnSettleInput & { requirePendingSteer: true },
+  ): Promise<boolean | "pending_steer_withdrawn">;
+  (input: TurnSettleInput): Promise<boolean>;
+};
 
 export type TurnControlState = {
   cancellationRequestedAt: number | null;
   activityStatus: RunAgentTurnResult["status"] | "unknown";
   turnMetricOutcome: TurnOutcome | null;
+  /** Set with turnMetricOutcome "recovering"; labels opengeni_turn_recoveries_total. */
+  turnRecoveryCause?: TurnRecoveryCause;
+  turnFailureOrigin?: import("@opengeni/observability").FailureOrigin;
   activityError: unknown;
   acknowledgeQuiescence: boolean;
 };
@@ -67,6 +99,17 @@ export type AttemptIdentityState = {
   triggerEventId: string | undefined;
   executionGeneration: number;
   providerRecoveryCount: number;
+  /** Durable recovery policy reason; never inferred from display wording. */
+  providerRecoveryPolicyCode?: string | undefined;
+  providerRecoveryStartedAt?: number | undefined;
+  providerRecoveryObservation?:
+    | import("./provider-recovery-metrics").ProviderRecoveryObservation
+    | undefined;
+  modelMetricRoute?: { provider: string; model: string };
+  /** Public display labels of the accepted model route, for recovery copy only. */
+  modelRoutePresentation?: { model: string; modelLabel: string; providerLabel: string };
+  /** The stored shared-core lease-busy chain this turn's previous attempt recorded. */
+  subscriptionLeaseBusy?: { startedAt: number; executionGeneration: number } | undefined;
   modelRequestStarted: boolean;
   redispatchesAtDispatch: number;
   // Held for same-turn recovery: an approval-decision rerun must re-enter
@@ -77,14 +120,26 @@ export type AttemptIdentityState = {
 export type BillingState = {
   isCodexTurn: boolean;
   isXaiTurn: boolean;
+  isClaudeTurn: boolean;
   isExternallyBilledTurn: boolean;
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
+  /** The turn's frozen funding origin: API work spends credits only. */
+  billingOrigin?: BillingOrigin;
+  /** Served by the person's own API key: pays the platform fee. */
+  isByokTurn?: boolean;
+  /** Served by the person's own subscription: no fee, needs a paid plan. */
+  isOwnSubscriptionTurn?: boolean;
 };
 
 export type SandboxRuntimeState = {
   resolvedSandbox: ResumedTurnSandbox | null;
   attemptWritersDrained: boolean;
+  /** The command fence the attempt writer drain cancelled and quiesced. Set
+   * together with `attemptWritersDrained`; a cancelled fence also refuses
+   * every later command, so a workspace mutation that writes only through it
+   * can no longer write once this is set. */
+  drainedCommandFence: TurnToolCancellationFence | null;
   lateSandboxesAwaitingWriterDrain: Set<ResumedTurnSandbox>;
   machinePrimarySession: SelfhostedSession | null;
   lazyOwnedSandbox: EstablishedSandboxSession | null;
@@ -96,6 +151,9 @@ export type SandboxRuntimeState = {
   }>;
   turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null;
   resumeManagedGroupBox: (() => Promise<ResumedTurnSandbox>) | null;
+  /** Physical resumeBoxForTurn promises still running for this attempt; the
+   * finalizer joins them so a cancelled establish completes its own cleanup. */
+  inFlightSandboxResumes: Set<Promise<unknown>>;
   prefetchedManagedBox: Promise<ResumedTurnSandbox> | null;
   prefetchedManagedBoxResult: ResumedTurnSandbox | null;
   setupBoxSession: unknown;
@@ -131,34 +189,92 @@ export type RenewalState = {
 export type EventingState = {
   heartbeatDetails: TurnHeartbeatDetails | null;
   heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
-  batcher: ReturnType<typeof createRuntimeBatcher> | null;
+  batcher: ReturnType<typeof createRuntimeBatcher<SessionEventMutation<"event">>> | null;
   preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null;
   toolPreparationReady: Promise<void> | null;
   toolPreparationClosing: boolean;
   codemodeDispatcher: CodemodeAttemptDispatcher | null;
   toolCancellationFenceRef: { current: TurnToolCancellationFence | null };
   publish: TurnEventPublisher | null;
+  /** Startup progress receipts that nothing awaits; ordered before later appends. */
+  publishInBackground: TurnBackgroundEventPublisher | null;
+  /** Settles once every background receipt issued so far has finished; never rejects. */
+  backgroundEventsSettled: (() => Promise<void>) | null;
   settle: TurnSettleFn | null;
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
+  /** Set by the stream attempt: refuses a wait that would leave a person unanswered. */
+  inputWaitReplyGuard: ((request: InputWaitRequest) => Promise<InputWaitGuardResult>) | null;
+  /** Reads the target an interaction_request_human pause names, as it is now. */
+  interactionRequestTargetReader: InteractionRequestTargetReader | null;
   modelRunSettings: Settings;
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
+  /**
+   * Set by the stream attempt: the model request now in preparation entered
+   * a pre-dispatch stage. Provider transports report their stages here.
+   */
+  enterModelRequestStage: ((stage: ModelRequestPreDispatchStage) => void) | null;
+  initialModelWireDispatch: InitialModelWireDispatchClock;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
   modelVisibleSkillIds: ReadonlySet<string> | null;
+  /**
+   * The question and facts each app-action approval of this attempt shows,
+   * by call id, as its review saved them: the pending approval event says the
+   * same.
+   */
+  appActionApprovalCards: Map<string, AppActionApprovalCard>;
+  /**
+   * Finished-command text appended to tool results for the model and not yet
+   * matched to its result event; the timeline shows each tool's own output.
+   * Absent means nothing was appended.
+   */
+  commandCompletionNotices?: Set<string> | undefined;
 };
 
-/** Rig telemetry (M3): set once the session loads; empty string for a rig-less
- * turn (mirrors variableSetId). Read by the activity span's finally block. */
+/** Rig telemetry: set once the session loads; empty string for a rig-less
+ * turn. Read by the activity span's finally block. */
 export type WorkspaceRefState = {
-  variableSetId: string;
   rigId: string;
   rigVersionId: string;
 };
 
+/** A chat turn placed by the shared subscription core, for any provider. */
+export type SubscriptionCoreTurn = {
+  identity: SubscriptionCoreTurnIdentity;
+  connectionId: string;
+  /** Refresh generation of the connection when it was placed. */
+  placedRefreshGeneration: number;
+  /**
+   * Refresh generation of the credential the latest request carried, when
+   * the provider's resolver reports it (SuperGrok and Claude; Codex keeps its
+   * own field).
+   */
+  credentialVersion?: number;
+  personal: boolean;
+  /**
+   * The accepted product model id, for a provider whose refusals cool one
+   * model of the connection (Claude's per-model rate limits).
+   */
+  productModelId?: string;
+  requests?: import("./subscription-core-requests").CoreSubscriptionRequests;
+  titleRequests?: import("./subscription-core-requests").CoreSubscriptionRequests;
+  /**
+   * The turn's quota observations from its responses (usage headers), when
+   * the provider reports them per response (Claude). `settled` joins every
+   * write so far and is true when one ended a stored exhaustion.
+   */
+  quota?: { settled(): Promise<boolean> };
+};
+
+/** A Codex chat turn running on the shared subscription core (M3 name). */
+export type CodexSubscriptionCoreTurn = SubscriptionCoreTurn;
+
 export type ProviderTurnState = {
+  /** Survives step progress and is persisted on recovery, never inherited by another turn. */
+  persistentModelTransportHttpOnly?: boolean;
   // The Codex account this turn runs on (pin > workspace active), resolved once
   // a codex-billed turn is confirmed and threaded into the token resolver.
   effectiveCodexCredentialId: string | null;
@@ -173,11 +289,30 @@ export type ProviderTurnState = {
   codexProductModelId?: string | null;
   /** Accepted Codex allocator policy captured with the first durable lease. */
   codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
+  /**
+   * Set only when this Codex turn was placed by the shared subscription core
+   * (the account's Codex cutover is enabled). `effectiveCodexCredentialId` is
+   * then a core connection id: legacy Codex tables must never receive it.
+   */
+  codexSubscriptionCore: CodexSubscriptionCoreTurn | null;
+  /** Epoch ms of the latest Codex model call that produced a response. */
+  lastCodexResponseCompletedAt?: number | null;
+  effectiveClaudeCredentialId: string | null;
+  /**
+   * Set only when this Claude turn was placed by the shared subscription core
+   * (the organization's Claude cutover committed and is enabled).
+   * `effectiveClaudeCredentialId` is then a core connection id: legacy Claude
+   * tables must never receive it.
+   */
+  claudeSubscriptionCore: SubscriptionCoreTurn | null;
   effectiveXaiCredentialId: string | null;
-  xaiRotationEnabled: boolean;
-  xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
   xaiRequestContext: XaiSubscriptionRequestContext | null;
-  xaiCredentialQuarantined: boolean;
+  /**
+   * Set when this SuperGrok turn was placed by the shared subscription core,
+   * the only SuperGrok path. `effectiveXaiCredentialId` is then its core
+   * connection id.
+   */
+  xaiSubscriptionCore: SubscriptionCoreTurn | null;
   // The session's Codex credential BEFORE this turn resolved its own — captured
   // before recordSessionActiveCodexCredential overwrites the durable pointer, so
   // a per-call usage log can report whether the serving account CHANGED since the
@@ -191,10 +326,6 @@ export type ProviderTurnState = {
   // scraped. Lives on the turn context so the finalizer sees it; the sink is
   // wired into codexContext.onUsageHeaders by the orchestrator.
   latestCodexUsage: CodexUsageHeaderSnapshot | null;
-  latestClaudeUsage: Map<
-    "workspace" | "organization",
-    import("./claude-usage-observer").CapturedClaudeUsage
-  >;
   lastCodexRequestOpaqueArtifacts: readonly string[];
 };
 
@@ -234,13 +365,16 @@ export function createTurnContext(input: {
     billingState: {
       isCodexTurn: false,
       isXaiTurn: false,
+      isClaudeTurn: false,
       isExternallyBilledTurn: false,
       chargesOpenGeniCredits: true,
       countsTowardTokenCap: true,
+      billingOrigin: "app",
     },
     sandboxState: {
       resolvedSandbox: null,
       attemptWritersDrained: false,
+      drainedCommandFence: null,
       lateSandboxesAwaitingWriterDrain: new Set(),
       machinePrimarySession: null,
       lazyOwnedSandbox: null,
@@ -248,6 +382,7 @@ export function createTurnContext(input: {
       firstModelPreparationNestedSandboxPhases: [],
       turnSandboxProvisioner: null,
       resumeManagedGroupBox: null,
+      inFlightSandboxResumes: new Set(),
       prefetchedManagedBox: null,
       prefetchedManagedBoxResult: null,
       setupBoxSession: null,
@@ -282,18 +417,25 @@ export function createTurnContext(input: {
       codemodeDispatcher: null,
       toolCancellationFenceRef: { current: null },
       publish: null,
+      publishInBackground: null,
+      backgroundEventsSettled: null,
       settle: null,
       turnStartedPublished: false,
       stream: undefined,
+      inputWaitReplyGuard: null,
+      interactionRequestTargetReader: null,
       modelRunSettings: input.settings,
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
+      enterModelRequestStage: null,
+      initialModelWireDispatch: new InitialModelWireDispatchClock(),
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
+      appActionApprovalCards: new Map(),
+      commandCompletionNotices: new Set(),
     },
     workspaceRefs: {
-      variableSetId: "",
       rigId: "",
       rigVersionId: "",
     },
@@ -302,15 +444,35 @@ export function createTurnContext(input: {
       effectiveCodexCredentialVersion: null,
       codexCredentialFailoverLimit: 1,
       codexPolicySnapshot: null,
+      codexSubscriptionCore: null,
+      lastCodexResponseCompletedAt: null,
+      effectiveClaudeCredentialId: null,
+      claudeSubscriptionCore: null,
       effectiveXaiCredentialId: null,
-      xaiRotationEnabled: false,
-      xaiAuthoritySnapshot: null,
       xaiRequestContext: null,
-      xaiCredentialQuarantined: false,
+      xaiSubscriptionCore: null,
       priorSessionCodexCredentialId: null,
       latestCodexUsage: null,
-      latestClaudeUsage: new Map(),
       lastCodexRequestOpaqueArtifacts: [],
     },
   };
 }
+
+/** The turn's shared-core placement, whichever provider placed it (at most one does). */
+export function subscriptionCoreTurnOf(
+  providerTurn: SubscriptionCorePlacedFields,
+): SubscriptionCoreTurn | null {
+  return (
+    providerTurn.codexSubscriptionCore ??
+    providerTurn.xaiSubscriptionCore ??
+    providerTurn.claudeSubscriptionCore ??
+    null
+  );
+}
+
+/** The provider fields that can hold a turn's shared-core placement. */
+export type SubscriptionCorePlacedFields = Pick<
+  ProviderTurnState,
+  "codexSubscriptionCore" | "xaiSubscriptionCore"
+> &
+  Partial<Pick<ProviderTurnState, "claudeSubscriptionCore">>;

@@ -26,7 +26,7 @@ export async function runDevelopmentStack(
     artifactRuntime: "resolve",
   });
   if (options.checkOnly) {
-    console.log("OpenGeni startup prerequisites are satisfied; no services started.");
+    console.log("Opengeni startup prerequisites are satisfied; no services started.");
     return 0;
   }
   // Read the same project authority as the shell, before creating .env or

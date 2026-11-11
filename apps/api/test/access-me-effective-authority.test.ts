@@ -17,12 +17,9 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { OpenGeniClient } from "@opengeni/sdk";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
@@ -337,8 +334,11 @@ describe("GET /v1/access/me API-key effective authority", () => {
     }
     const actor = full.asUser("personal-owner", { source: "access-authority-test" });
     expect((await contextFor(actor)).credential).toBeUndefined();
+    // A key without members:manage never admits a non-member on first use.
+    const readActor = read.asUser("personal-owner", { source: "access-authority-test" });
+    expect((await contextFor(readActor)).credential).toBeUndefined();
     await expect(
-      actor.createSession(workspaceId, {
+      readActor.createSession(workspaceId, {
         initialMessage: "Authority test",
         model: "scripted-model",
       }),

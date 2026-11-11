@@ -1,0 +1,58 @@
+import { expect, test } from "bun:test";
+import { connectionAccountIdentityLabel } from "../src/connection-account-label";
+
+test("uses the authenticated email across provider metadata shapes", () => {
+  for (const key of [
+    "email",
+    "providerEmail",
+    "googleEmail",
+    "gmailEmail",
+    "googleDriveEmail",
+    "atlassianEmail",
+    "linearEmail",
+    "notionEmail",
+    "asanaEmail",
+    "stripeEmail",
+    "oidcEmail",
+  ]) {
+    expect(
+      connectionAccountIdentityLabel(
+        { [key]: "user@example.test", displayName: "User" },
+        "Account",
+      ),
+    ).toBe("user@example.test");
+  }
+});
+
+test("uses real workspace names without displaying provider IDs", () => {
+  expect(
+    connectionAccountIdentityLabel(
+      { slackUserName: "member", slackTeamName: "Community" },
+      "Slack account",
+    ),
+  ).toBe("member · Community");
+  expect(
+    connectionAccountIdentityLabel(
+      { linearEmail: "user@example.test", linearUserId: "u-1", linearWorkspaceName: "Acme" },
+      "Linear account",
+    ),
+  ).toBe("user@example.test · Acme");
+  expect(
+    connectionAccountIdentityLabel({ oidcName: "User", oidcSubject: "sub-1" }, "Account"),
+  ).toBe("User");
+  expect(
+    connectionAccountIdentityLabel({ slackUserId: "U_ONE", slackTeamId: "T_ONE" }, "Slack account"),
+  ).toBe("Slack account");
+});
+
+test("ignores malformed identities and bounds presentation without mutating metadata", () => {
+  const metadata = { email: 123, displayName: "\n", teamName: {}, name: "x".repeat(200) };
+  expect(connectionAccountIdentityLabel(metadata, "Account")).toBe("x".repeat(180));
+  expect(metadata.name).toHaveLength(200);
+  expect(connectionAccountIdentityLabel({ email: [], name: null }, "Account 42")).toBe(
+    "Account 42",
+  );
+  expect(connectionAccountIdentityLabel({ name: "Same", workspaceName: "Same" }, "Account")).toBe(
+    "Same",
+  );
+});

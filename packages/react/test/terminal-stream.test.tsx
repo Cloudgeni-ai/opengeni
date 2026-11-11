@@ -5,6 +5,7 @@ import {
   MAX_PENDING_TERMINAL_INPUT_CODE_UNITS,
   useTerminalStream,
 } from "../src/hooks/use-terminal-stream";
+import { TERMINAL_INPUT_READY_PROTOCOL } from "../src/lib/terminal-input-readiness";
 
 registerDom();
 
@@ -18,6 +19,7 @@ class FakeWebSocket {
   readyState = FakeWebSocket.CONNECTING;
   binaryType = "blob";
   readonly sent: string[] = [];
+  failNextInput = false;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string | ArrayBuffer }) => void) | null = null;
   onerror: (() => void) | null = null;
@@ -32,12 +34,19 @@ class FakeWebSocket {
 
   send(data: string) {
     if (this.readyState !== FakeWebSocket.OPEN) throw new Error("socket is not open");
+    if (this.failNextInput && typeof data === "string" && data.startsWith("0")) {
+      this.failNextInput = false;
+      throw new Error("input was not queued");
+    }
     this.sent.push(data);
   }
 
-  open() {
+  open(preferences: Record<string, unknown> | false = {}) {
     this.readyState = FakeWebSocket.OPEN;
     this.onopen?.();
+    if (this.protocols === "tty" && preferences !== false) {
+      this.onmessage?.({ data: "2" + JSON.stringify(preferences) });
+    }
   }
 
   close() {
@@ -94,7 +103,7 @@ describe("useTerminalStream connection boundary", () => {
     await hook.unmount();
   });
 
-  test("buffers pre-open input and flushes it only after ttyd auth and resize", async () => {
+  test("preserves explicitly legacy input after old ttyd preferences", async () => {
     const hook = await renderHook(
       () => useTerminalStream({ capability: capability("https://terminal.example/one") }),
       undefined,
@@ -112,6 +121,7 @@ describe("useTerminalStream connection boundary", () => {
     await actRun(() => socket.open());
     await flush();
     expect(hook.result.current.status).toBe("open");
+    expect(hook.result.current.inputReadiness).toBe("legacy");
     expect(socket.sent).toHaveLength(3);
     expect(socket.sent[0]).toContain("AuthToken");
     expect(socket.sent[1]?.startsWith("1")).toBe(true);
@@ -134,6 +144,8 @@ describe("useTerminalStream connection boundary", () => {
     await flush();
     expect(socket.sent[0]).toContain("AuthToken");
     expect(socket.sent[1]?.startsWith("1")).toBe(true);
+    expect(socket.sent).toHaveLength(2);
+    await actRun(() => socket.onmessage?.({ data: "2{}" }));
     expect(socket.sent[2]).toBe("0queued-before-auth\n");
     await hook.unmount();
   });
@@ -155,6 +167,82 @@ describe("useTerminalStream connection boundary", () => {
     await actRun(() => fresh.open());
     await flush();
     expect(fresh.sent.at(-1)).toBe("0echo preserved\\n");
+    await hook.unmount();
+  });
+
+  test("plain SSE never acquires input eligibility from a URL or a cold reason alone", async () => {
+    for (const cell of [
+      { ptyCapable: false, reason: "lease_cold" as const },
+      { ptyCapable: true, reason: null },
+    ]) {
+      type Props = Parameters<typeof useTerminalStream>[0];
+      const hook = await renderHook((props: Props) => useTerminalStream(props), {
+        capability: {
+          ...capability("https://terminal.example/untrusted"),
+          ...cell,
+          transport: "sse-events",
+        },
+      } as Props);
+      await flush();
+      const count = FakeWebSocket.instances.length;
+      await actRun(() => hook.result.current.write("must-not-cross\r"));
+      await hook.rerender({ capability: capability("https://terminal.example/granted") });
+      await flush();
+      expect(FakeWebSocket.instances).toHaveLength(count + 1);
+      const socket = FakeWebSocket.instances.at(-1)!;
+      await actRun(() => socket.open());
+      expect(socket.sent.filter((frame) => frame.startsWith("0"))).toEqual([]);
+      await hook.unmount();
+    }
+  });
+
+  test("a real downgrade clears old queued input before a new cold acquisition", async () => {
+    type Props = Parameters<typeof useTerminalStream>[0];
+    const hook = await renderHook((props: Props) => useTerminalStream(props), {
+      capability: capability(null),
+    } as Props);
+    await flush();
+    await actRun(() => hook.result.current.write("old-generation\r"));
+    await hook.rerender({
+      capability: {
+        ...capability(null),
+        transport: "sse-events",
+        ptyCapable: true,
+        reason: "lease_cold",
+      },
+    });
+    await flush();
+    await actRun(() => hook.result.current.write("new-generation\r"));
+    await hook.rerender({ capability: capability("https://terminal.example/new-generation") });
+    await flush();
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await actRun(() => socket.open());
+    expect(socket.sent.filter((frame) => frame.startsWith("0"))).toEqual(["0new-generation\r"]);
+    await hook.unmount();
+  });
+
+  test("cold acquisition overflow rejects the entire pending command", async () => {
+    type Props = Parameters<typeof useTerminalStream>[0];
+    const hook = await renderHook((props: Props) => useTerminalStream(props), {
+      capability: {
+        ...capability(null),
+        transport: "sse-events",
+        ptyCapable: true,
+        reason: "not_provisioned",
+      },
+    } as Props);
+    await flush();
+    await actRun(() => {
+      hook.result.current.write("x".repeat(MAX_PENDING_TERMINAL_INPUT_CODE_UNITS));
+      hook.result.current.write("overflow\r");
+      hook.result.current.write("suffix-must-not-run\r");
+    });
+    expect(hook.result.current.status).toBe("error");
+    await hook.rerender({ capability: capability("https://terminal.example/after-overflow") });
+    await flush();
+    const socket = FakeWebSocket.instances.at(-1)!;
+    await actRun(() => socket.open());
+    expect(socket.sent.filter((frame) => frame.startsWith("0"))).toEqual([]);
     await hook.unmount();
   });
 
@@ -409,6 +497,227 @@ describe("useTerminalStream connection boundary", () => {
     await actRun(() => hook.result.current.write("input-two"));
     const secondInput = new Uint8Array(fresh.sent.at(-1) as unknown as ArrayBuffer);
     expect(StreamFrame.decode(secondInput.subarray(1)).seq).toBe("1");
+    await hook.unmount();
+  });
+});
+
+const readyPreferences = { opengeniInputReady: TERMINAL_INPUT_READY_PROTOCOL };
+const TERMINAL_INPUT_READY_MARKER =
+  "\x1b]777;opengeni-input;hello;0123456789abcdef0123456789abcdef\x07" +
+  "\x1b]777;opengeni-input;ready;0123456789abcdef0123456789abcdef\x07";
+const inputFrames = (socket: FakeWebSocket) => socket.sent.filter((data) => data.startsWith("0"));
+
+describe("negotiated ttyd input readiness", () => {
+  test("intentional disconnect cancels a previously scheduled reconnect", async () => {
+    const hook = await renderHook(
+      () => useTerminalStream({ capability: capability("https://terminal.example") }),
+      undefined,
+    );
+    try {
+      const socket = FakeWebSocket.instances.at(-1)!;
+      await actRun(() => {
+        socket.open(readyPreferences);
+        socket.close();
+      });
+      const count = FakeWebSocket.instances.length;
+      await actRun(() => hook.result.current.disconnect());
+      await flush(125);
+      expect(FakeWebSocket.instances.length).toBe(count);
+      expect(hook.result.current.status).toBe("closed");
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("a synchronous live-input send failure retains only unsent input until fresh readiness", async () => {
+    const hook = await renderHook(
+      () => useTerminalStream({ capability: capability("https://terminal.example") }),
+      undefined,
+    );
+    try {
+      const socket = FakeWebSocket.instances.at(-1)!;
+      await actRun(() => {
+        socket.open(readyPreferences);
+        socket.onmessage?.({ data: "0" + TERMINAL_INPUT_READY_MARKER });
+        hook.result.current.write("already-sent\r");
+        socket.failNextInput = true;
+        hook.result.current.write("not-sent\r");
+      });
+      await flush(125);
+      const fresh = FakeWebSocket.instances.at(-1)!;
+      await actRun(() => fresh.open(readyPreferences));
+      expect(fresh.sent.filter((value) => value.startsWith("0"))).toEqual([]);
+      await actRun(() => fresh.onmessage?.({ data: "0" + TERMINAL_INPUT_READY_MARKER }));
+      expect(fresh.sent.filter((value) => value.startsWith("0"))).toEqual(["0not-sent\r"]);
+    } finally {
+      await hook.unmount();
+    }
+  });
+  test("buffers before and after open; banners/control frames do not flush; split READY flushes once", async () => {
+    const output: string[] = [];
+    const hook = await renderHook(
+      () =>
+        useTerminalStream({
+          capability: capability("https://terminal.example/ready"),
+          onOutput: (data) => output.push(data),
+        }),
+      undefined,
+    );
+    await flush();
+    const socket = FakeWebSocket.instances[0]!;
+    await actRun(() => hook.result.current.write("echo "));
+    await actRun(() => socket.open(readyPreferences));
+    await actRun(() => hook.result.current.write("SYNTHETIC\r"));
+    for (const data of ["1bash", "0Starting...\r\n", "0", "2{}"]) {
+      await actRun(() => socket.onmessage?.({ data }));
+    }
+    expect(inputFrames(socket)).toEqual([]);
+    expect(hook.result.current.inputReadiness).toBe("waiting");
+    expect(hook.result.current.connected).toBe(false);
+    await actRun(() => hook.result.current.resize(101, 31));
+    for (const part of [
+      TERMINAL_INPUT_READY_MARKER.slice(0, 7),
+      TERMINAL_INPUT_READY_MARKER.slice(7),
+    ]) {
+      await actRun(() => socket.onmessage?.({ data: new TextEncoder().encode("0" + part).buffer }));
+    }
+    expect(socket.sent.at(-2)).toBe('1{"columns":101,"rows":31}');
+    expect(inputFrames(socket)).toEqual(["0echo SYNTHETIC\r"]);
+    expect(hook.result.current.inputReadiness).toBe("ready");
+    expect(hook.result.current.connected).toBe(true);
+    await actRun(() => socket.onmessage?.({ data: "0" + TERMINAL_INPUT_READY_MARKER }));
+    await actRun(() => hook.result.current.write("next\r"));
+    expect(inputFrames(socket)).toEqual(["0echo SYNTHETIC\r", "0next\r"]);
+    expect(output.join("")).toBe("Starting...\r\n");
+    await hook.unmount();
+  });
+
+  test("silent shells need no visible prompt once explicit READY arrives", async () => {
+    const hook = await renderHook(
+      () => useTerminalStream({ capability: capability("https://terminal.example/silent") }),
+      undefined,
+    );
+    await flush();
+    const socket = FakeWebSocket.instances[0]!;
+    await actRun(() => socket.open(readyPreferences));
+    await actRun(() => hook.result.current.write("echo silent\r"));
+    expect(inputFrames(socket)).toEqual([]);
+    await actRun(() => socket.onmessage?.({ data: "0" + TERMINAL_INPUT_READY_MARKER }));
+    expect(inputFrames(socket)).toEqual(["0echo silent\r"]);
+    await hook.unmount();
+  });
+
+  test("manual startup input explicitly discards buffered typing and never replays it on late READY", async () => {
+    const hook = await renderHook(
+      () => useTerminalStream({ capability: capability("https://terminal.example/startup-read") }),
+      undefined,
+    );
+    await flush();
+    const socket = FakeWebSocket.instances[0]!;
+    await actRun(() => socket.open(readyPreferences));
+    await actRun(() => hook.result.current.write("must-not-be-password\r"));
+    await actRun(() => hook.result.current.useLegacyInput());
+    expect(hook.result.current.inputReadiness).toBe("legacy");
+    expect(inputFrames(socket)).toEqual([]);
+    await actRun(() => hook.result.current.write("deliberate-startup-answer\r"));
+    await actRun(() => socket.onmessage?.({ data: "0" + TERMINAL_INPUT_READY_MARKER }));
+    expect(inputFrames(socket)).toEqual(["0deliberate-startup-answer\r"]);
+    expect(hook.result.current.inputReadiness).toBe("legacy");
+    await hook.unmount();
+  });
+
+  test("unknown and malformed negotiation require deliberate manual escape", async () => {
+    for (const preferences of ['{"opengeniInputReady":"future-v9"}', "null", "broken"]) {
+      const hook = await renderHook(
+        () => useTerminalStream({ capability: capability("https://terminal.example/unknown") }),
+        undefined,
+      );
+      await flush();
+      const socket = FakeWebSocket.instances.at(-1)!;
+      await actRun(() => socket.open(false));
+      await actRun(() => hook.result.current.write("pending\r"));
+      await actRun(() => socket.onmessage?.({ data: "2" + preferences }));
+      await actRun(() => socket.onmessage?.({ data: "0" + TERMINAL_INPUT_READY_MARKER }));
+      expect(hook.result.current.inputReadiness).toBe("waiting");
+      expect(inputFrames(socket)).toEqual([]);
+      await actRun(() => hook.result.current.useLegacyInput());
+      expect(hook.result.current.inputReadiness).toBe("legacy");
+      expect(inputFrames(socket)).toEqual([]);
+      await hook.unmount();
+    }
+  });
+
+  test("failed queue send reconnects, waits for new READY and sends unsent input only once", async () => {
+    const hook = await renderHook(
+      () => useTerminalStream({ capability: capability("https://terminal.example/retry-ready") }),
+      undefined,
+    );
+    await flush();
+    const old = FakeWebSocket.instances[0]!;
+    await actRun(() => old.open(readyPreferences));
+    await actRun(() => hook.result.current.write("unsent\r"));
+    old.failNextInput = true;
+    await actRun(() => old.onmessage?.({ data: "0" + TERMINAL_INPUT_READY_MARKER }));
+    expect(inputFrames(old)).toEqual([]);
+    await actRun(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 125));
+    });
+    const fresh = FakeWebSocket.instances[1]!;
+    await actRun(() => fresh.open(readyPreferences));
+    expect(inputFrames(fresh)).toEqual([]);
+    await actRun(() => fresh.onmessage?.({ data: "0" + TERMINAL_INPUT_READY_MARKER }));
+    expect(inputFrames(fresh)).toEqual(["0unsent\r"]);
+    await hook.unmount();
+  });
+
+  test("rotation fences old READY and does not reuse readiness or replay dispatched commands", async () => {
+    const hook = await renderHook(
+      (props: { url: string }) => useTerminalStream({ capability: capability(props.url) }),
+      { url: "https://terminal.example/old-ready" },
+    );
+    await flush();
+    const old = FakeWebSocket.instances[0]!;
+    await actRun(() => old.open(readyPreferences));
+    await actRun(() => hook.result.current.write("once\r"));
+    await actRun(() => old.onmessage?.({ data: "0" + TERMINAL_INPUT_READY_MARKER }));
+    const staleMessage = old.onmessage;
+    const staleClose = old.onclose;
+    await hook.rerender({ url: "https://terminal.example/new-ready" });
+    await flush();
+    const fresh = FakeWebSocket.instances[1]!;
+    await actRun(() => fresh.open(readyPreferences));
+    await actRun(() => hook.result.current.write("new\r"));
+    await actRun(() => {
+      staleMessage?.({ data: "0" + TERMINAL_INPUT_READY_MARKER });
+      staleClose?.();
+    });
+    expect(inputFrames(fresh)).toEqual([]);
+    expect(hook.result.current.inputReadiness).toBe("waiting");
+    await actRun(() => fresh.onmessage?.({ data: "0" + TERMINAL_INPUT_READY_MARKER }));
+    expect(inputFrames(old)).toEqual(["0once\r"]);
+    expect(inputFrames(fresh)).toEqual(["0new\r"]);
+    await hook.unmount();
+  });
+
+  test("overflow while waiting rejects the whole command, including late READY/manual escape", async () => {
+    const hook = await renderHook(
+      () =>
+        useTerminalStream({ capability: capability("https://terminal.example/ready-overflow") }),
+      undefined,
+    );
+    await flush();
+    const socket = FakeWebSocket.instances[0]!;
+    await actRun(() => socket.open(readyPreferences));
+    const lateReady = socket.onmessage;
+    await actRun(() =>
+      hook.result.current.write("x".repeat(MAX_PENDING_TERMINAL_INPUT_CODE_UNITS + 1)),
+    );
+    await actRun(() => {
+      lateReady?.({ data: "0" + TERMINAL_INPUT_READY_MARKER });
+      hook.result.current.useLegacyInput();
+    });
+    expect(hook.result.current.status).toBe("error");
+    expect(inputFrames(socket)).toEqual([]);
     await hook.unmount();
   });
 });

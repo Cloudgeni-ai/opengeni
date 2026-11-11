@@ -2,6 +2,10 @@ import { afterAll, expect, mock, test } from "bun:test";
 import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
 import { SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION, type EventBus } from "@opengeni/events";
 
+const allControl = {
+  visibleControlEvents: async (events: readonly WorkspaceControlEvent[]) => [...events],
+};
+
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const fakeDb = {};
@@ -54,32 +58,55 @@ function titleEvent(sequence: number, title: string): SessionEvent {
 }
 
 const realDb = await import("@opengeni/db");
-const realListSessionEvents = realDb.listSessionEvents;
+const realListSessionEventPage = realDb.listSessionEventPage;
 const realListWorkspaceControlEvents = realDb.listWorkspaceControlEvents;
+const realGetWorkspaceControlEvent = realDb.getWorkspaceControlEvent;
 const realGetWorkspaceInteractionRevisionState = realDb.getWorkspaceInteractionRevisionState;
+const realReadSessionEventStorageGapEnd = realDb.readSessionEventStorageGapEnd;
 mock.module("@opengeni/db", () => ({
   ...realDb,
-  listSessionEvents: async (
+  getWorkspaceControlEvent: async (db: unknown, workspaceId: string, eventId: string) => {
+    if (db !== fakeDb) return realGetWorkspaceControlEvent(db as never, workspaceId, eventId);
+    return durableControlEvents.find((entry) => entry.id === eventId) ?? null;
+  },
+  readSessionEventStorageGapEnd: async (
     db: unknown,
     workspaceId: string,
     sessionId: string,
-    afterOrOptions: number | { after?: number; limit?: number },
-    legacyLimit?: number,
+    after: number,
   ) => {
     if (db !== fakeDb) {
-      return await realListSessionEvents(
-        db as never,
-        workspaceId,
-        sessionId,
-        afterOrOptions as never,
-        legacyLimit,
-      );
+      return await realReadSessionEventStorageGapEnd(db as never, workspaceId, sessionId, after);
     }
-    const after = typeof afterOrOptions === "number" ? afterOrOptions : (afterOrOptions.after ?? 0);
-    const limit =
-      typeof afterOrOptions === "number" ? (legacyLimit ?? 500) : (afterOrOptions.limit ?? 500);
+    // The fake log stores every sequence it has; nothing is omitted.
+    const next = durableEvents.find((candidate) => candidate.sequence > after);
+    const last = durableEvents.at(-1)?.sequence ?? after;
+    return Math.max(after, next ? next.sequence - 1 : last);
+  },
+  listSessionEventPage: async (
+    db: unknown,
+    workspaceId: string,
+    sessionId: string,
+    options: { after?: number; limit?: number; maxBytes?: number },
+  ) => {
+    if (db !== fakeDb) {
+      return await realListSessionEventPage(db as never, workspaceId, sessionId, options);
+    }
+    const after = options.after ?? 0;
+    const limit = options.limit ?? 500;
     durableReads.push({ after, limit });
-    return durableEvents.filter((candidate) => candidate.sequence > after).slice(0, limit);
+    const remaining = durableEvents.filter((candidate) => candidate.sequence > after);
+    const candidates = remaining.slice(0, limit);
+    const events: SessionEvent[] = [];
+    const maxBytes = options.maxBytes ?? realDb.SESSION_EVENT_DB_PAGE_MAX_BYTES;
+    let bytes = 2;
+    for (const candidate of candidates) {
+      const eventBytes = Buffer.byteLength(JSON.stringify(candidate));
+      if (events.length > 0 && bytes + eventBytes + 1 > maxBytes) break;
+      events.push(candidate);
+      bytes += eventBytes + (events.length > 1 ? 1 : 0);
+    }
+    return { events, bytes, hasMore: events.length < remaining.length };
   },
   listWorkspaceControlEvents: async (
     db: unknown,
@@ -203,7 +230,7 @@ test("HTTP/1 browser fallback reads a finite durable snapshot without opening su
       0,
       0,
       new AbortController().signal,
-      options,
+      { ...allControl, ...options },
     ),
   ]);
   const sessionBody = await sessionResponse.text();
@@ -371,7 +398,7 @@ test("workspace live SSE carries both durable domains over one response", async 
     0,
     0,
     controller.signal,
-    { pollIntervalMs: 100, heartbeatIntervalMs: 1_000 },
+    { ...allControl, pollIntervalMs: 100, heartbeatIntervalMs: 1_000 },
   );
   const reader = response.body!.getReader();
   expect((await readSequences(reader, 2)).sort((a, b) => a - b)).toEqual([2, 7]);
@@ -662,10 +689,9 @@ test("an open session stream catches up after an accepted embedding publish whil
   // heartbeat both remain read-free.
   reconnect?.(1);
   expect(new TextDecoder().decode((await reader.read()).value)).toBe(": heartbeat\n\n");
-  // The short page requires one EOF probe: byte-selected pages can be short
-  // even when more exact events remain. Neither heartbeat nor duplicate
-  // recovery notification starts another read after that probe.
-  expect(durableReads).toHaveLength(3);
+  // Explicit continuation proves the durable snapshot is exhausted. A short
+  // page alone would not; no extra EOF probe or heartbeat read is needed.
+  expect(durableReads).toHaveLength(2);
 
   await reader.cancel();
   expect(reconnectReleased).toBe(1);
@@ -835,7 +861,10 @@ test("every long-lived SSE surface closes when its current workspace authority i
   const signal = () => new AbortController().signal;
   const responses = await Promise.all([
     sseSessionStream(fakeDb as never, bus, WORKSPACE_ID, SESSION_ID, 0, signal(), revoked()),
-    sseWorkspaceControlStream(fakeDb as never, bus, WORKSPACE_ID, 0, signal(), revoked()),
+    sseWorkspaceControlStream(fakeDb as never, bus, WORKSPACE_ID, 0, signal(), {
+      ...allControl,
+      ...revoked(),
+    }),
     sseWorkspaceInteractionRevisionStream(
       fakeDb as never,
       "00000000-0000-4000-8000-000000000010",
@@ -852,7 +881,7 @@ test("every long-lived SSE surface closes when its current workspace authority i
       0,
       0,
       signal(),
-      { ...revoked(), pollIntervalMs: 100 },
+      { ...allControl, ...revoked(), pollIntervalMs: 100 },
     ),
   ]);
   for (const response of responses) {
@@ -890,6 +919,7 @@ test("workspace-control SSE uses the same one-frame stall bound", async () => {
     0,
     new AbortController().signal,
     {
+      ...allControl,
       stallTimeoutMs: 20,
       onObservation: (observation) => observations.push(observation),
     },
@@ -925,7 +955,7 @@ test("workspace-control replay bounds a poison row and reconnect advances past i
     WORKSPACE_ID,
     0,
     new AbortController().signal,
-    { stallTimeoutMs: 100 },
+    { ...allControl, stallTimeoutMs: 100 },
   );
   const reader = response.body!.getReader();
   const replayed = await readControlEvents(reader, 2);
@@ -945,7 +975,7 @@ test("workspace-control replay bounds a poison row and reconnect advances past i
     WORKSPACE_ID,
     1,
     new AbortController().signal,
-    { stallTimeoutMs: 100 },
+    { ...allControl, stallTimeoutMs: 100 },
   );
   const resumedReader = resumed.body!.getReader();
   const resumedEvents = await readControlEvents(resumedReader, 1);
@@ -966,7 +996,7 @@ test("workspace-control SSE accepts a migration-created sparse first revision", 
     WORKSPACE_ID,
     0,
     new AbortController().signal,
-    { stallTimeoutMs: 100 },
+    { ...allControl, stallTimeoutMs: 100 },
   );
   const reader = response.body!.getReader();
 
@@ -990,7 +1020,7 @@ test("workspace-control SSE reconnects across a legitimate sparse revision gap",
     WORKSPACE_ID,
     0,
     new AbortController().signal,
-    { stallTimeoutMs: 100 },
+    { ...allControl, stallTimeoutMs: 100 },
   );
   const reader = response.body!.getReader();
 
@@ -1001,6 +1031,38 @@ test("workspace-control SSE reconnects across a legitimate sparse revision gap",
     { after: 0, limit: 100 },
     { after: 1, limit: 6 },
   ]);
+  await reader.cancel();
+});
+
+test("workspace-control live fanout rechecks durable actor visibility and never forwards a private bus payload", async () => {
+  durableControlEvents = [];
+  let publish: ((event: WorkspaceControlEvent) => void) | undefined;
+  const bus = {
+    subscribeWorkspaceControl: async (
+      _workspaceId: string,
+      listener: (event: WorkspaceControlEvent) => void,
+    ) => {
+      publish = listener;
+      return () => {};
+    },
+  } as unknown as EventBus;
+  const response = await sseWorkspaceControlStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    0,
+    new AbortController().signal,
+    { ...allControl, stallTimeoutMs: 1_000 },
+  );
+  const reader = response.body!.getReader();
+  await waitFor(() => publish !== undefined);
+  publish!({ ...controlEvent(1), reason: "Private visitor content", actor: "guest-secret" });
+  durableControlEvents = [controlEvent(2)];
+  publish!(controlEvent(2));
+  const received = await readControlEvents(reader, 1);
+  expect(received.map((entry) => entry.sequence)).toEqual([2]);
+  expect(JSON.stringify(received)).not.toContain("Private visitor content");
+  expect(JSON.stringify(received)).not.toContain("guest-secret");
   await reader.cancel();
 });
 
@@ -1064,7 +1126,7 @@ test("a live subscription that ends under an open stream fails it retryably for 
     WORKSPACE_ID,
     0,
     new AbortController().signal,
-    { heartbeatIntervalMs: 1_000, stallTimeoutMs: 1_000 },
+    { ...allControl, heartbeatIntervalMs: 1_000, stallTimeoutMs: 1_000 },
   );
   const controlReader = controlResponse.body!.getReader();
   expect(
@@ -1126,6 +1188,51 @@ async function readSessionEvents(
   }
   return events;
 }
+
+test("workspace-control streams omit chat events the reader cannot see and still advance", async () => {
+  const hiddenChat = "44444444-4444-4444-8444-444444444444";
+  const privateEvent = (sequence: number): WorkspaceControlEvent => ({
+    ...controlEvent(sequence),
+    scope: "session",
+    rootSessionId: hiddenChat,
+    reason: "private reason",
+  });
+  const onlyWorkspace = {
+    visibleControlEvents: async (events: readonly WorkspaceControlEvent[]) =>
+      events.filter((candidate) => candidate.scope === "workspace"),
+  };
+  durableControlEvents = [privateEvent(1), controlEvent(2), privateEvent(3)];
+  const bus = {
+    subscribeWorkspaceControl: async () => () => {},
+  } as unknown as EventBus;
+  const response = await sseWorkspaceControlStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    0,
+    new AbortController().signal,
+    { ...onlyWorkspace, stallTimeoutMs: 100 },
+  );
+  const reader = response.body!.getReader();
+  expect((await readControlEvents(reader, 1)).map((candidate) => candidate.sequence)).toEqual([2]);
+  await reader.cancel();
+
+  const batch = await sseWorkspaceControlStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    0,
+    new AbortController().signal,
+    { ...onlyWorkspace, ...browserSseDeliveryOptions("http1-bounded") },
+  );
+  const body = await batch.text();
+  expect(body).not.toContain(hiddenChat);
+  expect(body).not.toContain("private reason");
+  expect(body).toContain('"sequence":2');
+  expect(body).toContain(
+    `data: {"type":"workspace.control.cursor","workspaceId":"${WORKSPACE_ID}","sequence":3}`,
+  );
+});
 
 async function readControlEvents(
   reader: ReadableStreamDefaultReader<Uint8Array>,

@@ -2,10 +2,10 @@ import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import type { SlackInstallationBinding } from "@/types";
+import type { SlackInstallationBinding } from "@opengeni/react/app/types";
 
 const context: { current: Record<string, unknown> } = { current: {} };
-mock.module("@/context", () => ({ useAppContext: () => context.current }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context.current }));
 const { useSlackInstallationDiscovery } = await import("./use-slack-installation-discovery");
 const { localConnectedSlackPreview } = await import("./use-slack-integration");
 beforeAll(() => {

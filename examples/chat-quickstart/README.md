@@ -11,26 +11,22 @@ Those components do not consume this simplified chat-handler protocol.
 Before running, an organization owner or admin must enable **Only me chats**
 in the web app under **Organization settings > Security & data**. If the
 setting is unavailable, ask the installation operator to activate private
-chats first. The chat facade defaults to private chats; neither onboarding
-nor the chat handler enables this organization setting. Until it is enabled,
-chat requests fail closed with `OPENGENI_SETUP_REQUIRED` (`OpenGeniSetupError`
-in the SDK) instead of creating a chat or changing the setting.
+chats first. The chat facade defaults to private chats; the chat handler
+never enables this organization setting. Until it is enabled, chat requests
+fail closed with `OPENGENI_SETUP_REQUIRED` (`OpenGeniSetupError` in the SDK)
+instead of creating a chat or changing the setting.
 
 ```bash
 cd examples/chat-quickstart
 cp .env.example .env.local
-# Set OPENGENI_API_KEY (a full-access organization key) and OPENGENI_ORGANIZATION_ID.
-bun run onboard u_42
+# Set OPENGENI_API_KEY (a full-access organization key).
 bun run server
 ```
 
-`bun run onboard u_42` creates the demo tenant's workspace and makes the
-product user `u_42` a member with the permissions the chat needs
-(`CHAT_USER_PERMISSIONS` in `quickstart.ts`). Chat requests never grant
-workspace membership, so without this step the API answers `403`. A real
-product runs the same `onboardChatUser` call once, when it admits a user to a
-tenant, not on every message. The command prints its operation id before
-calling; after an uncertain result, retry with `bun run onboard u_42 <that id>`.
+There is no onboarding step. The demo tenant's workspace is created on first
+use, and Opengeni adds the product user `u_42` to it on their first request
+with conversation permissions (the organization key needs `members:manage`,
+which full access includes). The organization id is derived from the key.
 
 Send a message with the demo-only identity header:
 
@@ -48,7 +44,7 @@ answers a pending decision. Replace the spoofable demo identity header with
 real server-side authentication before exposing this server to other users;
 it listens on 127.0.0.1 only.
 
-Conversation ids are not namespaced per user: OpenGeni authorization decides
+Conversation ids are not namespaced per user: Opengeni authorization decides
 who may open a conversation, so a real product also checks that the
 authenticated user may use the conversation id the page sends.
 

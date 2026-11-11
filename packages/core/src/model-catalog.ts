@@ -1,5 +1,6 @@
 import { modelAllowedByConnections, type ConnectionModelRestrictions } from "@opengeni/db";
 import {
+  withDirectModelProviders,
   applyModelCatalogDocument,
   CLAUDE_CONNECTION_KINDS,
   claudeProviderId,
@@ -12,13 +13,17 @@ import {
   configuredModelNotes,
   configuredOpenRouterWorkspaceProductModelIds,
   configuredOpenRouterOrganizationProductModelIds,
+  configuredOpperWorkspaceProductModelIds,
+  configuredOpperOrganizationProductModelIds,
   configuredProviders,
   validateModelCatalogSettings,
   withCodexCatalogProvider,
   withOrganizationGatewayCatalogProvider,
   withOrganizationOpenRouterCatalogProvider,
+  withOrganizationOpperCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
   withWorkspaceOpenRouterCatalogProvider,
+  withWorkspaceOpperCatalogProvider,
   withXaiSubscriptionCatalogProvider,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
@@ -26,6 +31,18 @@ import {
   ORGANIZATION_OPENROUTER_PROVIDER_ID,
   ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
   ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
+  WORKSPACE_OPPER_MODEL_ID_PREFIX,
+  WORKSPACE_OPPER_PROVIDER_ID,
+  ORGANIZATION_OPPER_MODEL_ID_PREFIX,
+  ORGANIZATION_OPPER_PROVIDER_ID,
+  ORGANIZATION_AZURE_OPENAI_PROVIDER_ID,
+  ORGANIZATION_OPENAI_PROVIDER_ID,
+  organizationDirectModelIdPrefix,
+  organizationDirectModelProviderOf,
+  withOrganizationDirectCatalogProvider,
+  withOrganizationCompatibleProviders,
+  type OrganizationCompatibleEndpointOverlay,
+  type OrganizationDirectModelProvider,
   type ConfiguredModel,
   type Settings,
 } from "@opengeni/config";
@@ -34,20 +51,27 @@ import {
   type ModelAvailabilityV1,
   type ModelCredentialReadinessV1,
   type WorkspaceModelPolicyContract,
+  type LatencyMode,
 } from "@opengeni/contracts";
 import {
+  CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX,
+  claudeSubscriptionUpstreamModelId,
+} from "@opengeni/contracts/claude-subscription-model-ids";
+import {
+  loadWorkspaceModelCatalogInputs,
   getDeploymentModelCatalog,
-  listWorkspaceProviderCustomModels,
+  listWorkspaceProviderCustomModelsByKind,
   getWorkspaceProviderCustomModelForExecution,
   lockActiveWorkspaceProviderCustomModelForAdmission,
   getWorkspaceGatewayCustomModelForExecution,
   getWorkspaceOpenRouterCustomModelForExecution,
   getOrganizationModelProviderCustomModelForExecution,
-  listWorkspaceGatewayCustomModels,
-  listWorkspaceOpenRouterCustomModels,
-  listOrganizationModelProviderCustomModelsForWorkspace,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
   type Database,
+  type OrganizationClaudeModelAdmissionAuthority,
+  type WorkspaceCustomModelProviderKind,
+  type WorkspaceGatewayCustomModel,
+  type WorkspaceOpenRouterCustomModel,
 } from "@opengeni/db";
 
 export type ResolvedCatalogSettings = {
@@ -76,16 +100,66 @@ export function isWorkspaceOpenRouterCustomModelId(settings: Settings, modelId: 
   );
 }
 
-export type WorkspaceCustomModelReference = {
-  scope: "workspace" | "organization";
-  providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription";
-  upstreamModelId: string;
-};
+export function isWorkspaceOpperCustomModelId(settings: Settings, modelId: string): boolean {
+  return (
+    modelId.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX) &&
+    !configuredOpperWorkspaceProductModelIds(settings).includes(modelId)
+  );
+}
+
+/** Overlay the organization's own OpenAI and Azure OpenAI catalogs, secret-free. */
+function withOrganizationDirectCatalogProviders(
+  settings: Settings,
+  providers: Partial<
+    Record<
+      OrganizationDirectModelProvider,
+      {
+        endpoint?: string | null | undefined;
+        models: readonly { upstreamModelId: string; label?: string | null }[];
+      }
+    >
+  >,
+): Settings {
+  let result = settings;
+  for (const provider of ["openai", "azure_openai"] as const) {
+    const entry = providers[provider];
+    if (entry) result = withOrganizationDirectCatalogProvider(result, provider, entry);
+  }
+  return result;
+}
+
+export type WorkspaceCustomModelReference =
+  | {
+      scope: "workspace" | "organization";
+      providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper";
+      upstreamModelId: string;
+    }
+  | {
+      // Organization OpenAI models and Azure deployments exist only at organization scope.
+      scope: "organization";
+      providerKind: OrganizationDirectModelProvider;
+      upstreamModelId: string;
+    };
 
 export function workspaceCustomModelReference(
   settings: Settings,
   modelId: string,
 ): WorkspaceCustomModelReference | null {
+  // A canonical `claude/` id names the model of whichever Claude list
+  // offers it here (the workspace list first), as the catalog aliases it.
+  if (modelId.startsWith(CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX)) {
+    const upstreamModelId = claudeSubscriptionUpstreamModelId(modelId);
+    if (upstreamModelId === null) return null;
+    const owner = configuredModels(settings).find((model) => model.aliases.includes(modelId));
+    return {
+      scope:
+        owner?.providerId === claudeProviderId("claude_subscription", "workspace")
+          ? "workspace"
+          : "organization",
+      providerKind: "claude_subscription",
+      upstreamModelId,
+    };
+  }
   for (const scope of ["workspace", "organization"] as const)
     for (const kind of CLAUDE_CONNECTION_KINDS) {
       const prefix = claudeProviderId(kind, scope) + "/";
@@ -108,6 +182,33 @@ export function workspaceCustomModelReference(
       scope: "workspace",
       providerKind: "openrouter",
       upstreamModelId: modelId.slice(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX.length),
+    };
+  }
+  if (isWorkspaceOpperCustomModelId(settings, modelId)) {
+    return {
+      scope: "workspace",
+      providerKind: "opper",
+      upstreamModelId: modelId.slice(WORKSPACE_OPPER_MODEL_ID_PREFIX.length),
+    };
+  }
+  if (
+    modelId.startsWith(ORGANIZATION_OPPER_MODEL_ID_PREFIX) &&
+    !configuredOpperOrganizationProductModelIds(settings).includes(modelId)
+  ) {
+    return {
+      scope: "organization",
+      providerKind: "opper",
+      upstreamModelId: modelId.slice(ORGANIZATION_OPPER_MODEL_ID_PREFIX.length),
+    };
+  }
+  // Every organization OpenAI or Azure OpenAI model is an organization-curated
+  // row; there are no deployment-configured products to skip.
+  const directProvider = organizationDirectModelProviderOf(modelId);
+  if (directProvider) {
+    return {
+      scope: "organization",
+      providerKind: directProvider,
+      upstreamModelId: modelId.slice(organizationDirectModelIdPrefix(directProvider).length),
     };
   }
   if (
@@ -137,12 +238,37 @@ export function isWorkspaceCustomModelId(settings: Settings, modelId: string): b
   return workspaceCustomModelReference(settings, modelId) !== null;
 }
 
+/**
+ * The upstream model a retained product model id names in one scope's
+ * Claude list: its own legacy form, or the canonical `claude/` form, which
+ * either list may define. Null for any other id.
+ */
+export function retainedClaudeUpstreamModelId(
+  productModelId: string | null | undefined,
+  kind: (typeof CLAUDE_CONNECTION_KINDS)[number],
+  scope: "workspace" | "organization",
+): string | null {
+  if (!productModelId) return null;
+  const prefix = claudeProviderId(kind, scope) + "/";
+  if (productModelId.startsWith(prefix)) return productModelId.slice(prefix.length) || null;
+  return kind === "claude_subscription" &&
+    productModelId.startsWith(CLAUDE_SUBSCRIPTION_MODEL_ID_PREFIX)
+    ? claudeSubscriptionUpstreamModelId(productModelId)
+    : null;
+}
+
 export async function lockActiveCustomModelForAdmission(
   db: Database,
   input: {
     accountId: string;
     workspaceId: string;
     reference: WorkspaceCustomModelReference;
+    /**
+     * The accepted Claude authority this admission re-reads. Every caller
+     * states it: an organization Claude model is never admitted without it,
+     * so an omitted value would refuse that model silently.
+     */
+    claudeAuthority: OrganizationClaudeModelAdmissionAuthority | null;
   },
 ): Promise<boolean> {
   if (input.reference.scope === "organization") {
@@ -151,6 +277,7 @@ export async function lockActiveCustomModelForAdmission(
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         providerKind: input.reference.providerKind,
+        ...(input.claudeAuthority ? { claudeAuthority: input.claudeAuthority } : {}),
         upstreamModelId: input.reference.upstreamModelId,
       }),
     );
@@ -211,6 +338,10 @@ export async function resolveWorkspaceCatalogSettings(
     workspaceId: string;
     retainedProductModelId?: string | null;
     retainedProductModelIds?: readonly (string | null | undefined)[];
+    /** This call's already loaded metadata for the exact workspace and provider set. */
+    catalogInputs?: Awaited<ReturnType<typeof loadWorkspaceModelCatalogInputs>>;
+    /** This invocation's deployment catalog, before workspace overlays. */
+    deploymentCatalog?: ResolvedCatalogSettings;
   },
 ): Promise<ResolvedCatalogSettings> {
   // A few pure catalog tests inject the historical minimal DB port and mock the
@@ -218,9 +349,12 @@ export async function resolveWorkspaceCatalogSettings(
   // expose transactions; keep that narrow test port compatible.
   const supportsOrganizationProviderReads =
     typeof (db as Database & { transaction?: unknown }).transaction === "function";
+  // Response pages often contain many sessions using the same model. Retention
+  // is a set of model identities, not one live catalog read per session row.
+  // Preserve first-seen order and deduplicate the singular compatibility field
+  // too; the result is local to this resolution, never reused across requests.
   const retainedProductModelIds = [
-    ...(input.retainedProductModelIds ?? []),
-    input.retainedProductModelId,
+    ...new Set([...(input.retainedProductModelIds ?? []), input.retainedProductModelId]),
   ];
   const retainedGatewayUpstreamModelIds = retainedProductModelIds.flatMap((productModelId) =>
     productModelId?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)
@@ -244,26 +378,82 @@ export async function resolveWorkspaceCatalogSettings(
         ? [productModelId.slice(ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX.length)]
         : [],
   );
+  const retainedOpperUpstreamModelIds = retainedProductModelIds.flatMap((productModelId) =>
+    productModelId?.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX)
+      ? [productModelId.slice(WORKSPACE_OPPER_MODEL_ID_PREFIX.length)]
+      : [],
+  );
+  const retainedOrganizationOpperUpstreamModelIds = retainedProductModelIds.flatMap(
+    (productModelId) =>
+      productModelId?.startsWith(ORGANIZATION_OPPER_MODEL_ID_PREFIX)
+        ? [productModelId.slice(ORGANIZATION_OPPER_MODEL_ID_PREFIX.length)]
+        : [],
+  );
+  const retainedOrganizationDirectModels = [
+    ...new Set(
+      retainedProductModelIds.filter(
+        (productModelId): productModelId is string =>
+          organizationDirectModelProviderOf(productModelId) !== null,
+      ),
+    ),
+  ].map((productModelId) => {
+    const providerKind = organizationDirectModelProviderOf(productModelId)!;
+    return {
+      providerKind,
+      upstreamModelId: productModelId.slice(organizationDirectModelIdPrefix(providerKind).length),
+    };
+  });
+  // One scope for all public catalog families. The readers keep each provider's
+  // filters, bound and overflow error. The Claude subscription flag is env-only (the catalog
+  // document never changes it), so it decides the requested kinds up front.
+  const workspaceCustomModelKinds: WorkspaceCustomModelProviderKind[] = [
+    "vercel_gateway",
+    "openrouter",
+    "opper",
+    ...(supportsOrganizationProviderReads
+      ? CLAUDE_CONNECTION_KINDS.filter(
+          (kind) => kind !== "claude_subscription" || envSettings.claudeSubscriptionEnabled,
+        )
+      : []),
+  ];
+  const publicCatalog = input.catalogInputs
+    ? Promise.resolve(input.catalogInputs)
+    : supportsOrganizationProviderReads
+      ? loadWorkspaceModelCatalogInputs(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          providerKinds: workspaceCustomModelKinds,
+          organizationProviderKinds: [
+            "vercel_gateway",
+            "openrouter",
+            "opper",
+            "openai",
+            "azure_openai",
+            ...CLAUDE_CONNECTION_KINDS,
+          ],
+        })
+      : undefined;
   const [
     resolved,
-    activeGatewayCustomModels,
-    activeOpenRouterCustomModels,
+    workspaceCustomModels,
     retainedGatewayCustomModels,
     retainedOpenRouterCustomModels,
-    organizationGatewayCustomModels,
-    organizationOpenRouterCustomModels,
+    organizationProviders,
     retainedOrganizationGatewayCustomModels,
     retainedOrganizationOpenRouterCustomModels,
+    directConnections,
+    retainedOpperCustomModels,
+    retainedOrganizationOpperCustomModels,
+    retainedOrganizationDirectCustomModels,
+    organizationCompatibleEndpoints,
   ] = await Promise.all([
-    resolveCatalogSettings(db, envSettings),
-    listWorkspaceGatewayCustomModels(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-    }),
-    listWorkspaceOpenRouterCustomModels(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-    }),
+    input.deploymentCatalog ?? resolveCatalogSettings(db, envSettings),
+    publicCatalog?.then((catalog) => catalog.workspaceCustomModels) ??
+      listWorkspaceProviderCustomModelsByKind(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        providerKinds: workspaceCustomModelKinds,
+      }),
     Promise.all(
       [...new Set(retainedGatewayUpstreamModelIds)].map(
         async (upstreamModelId) =>
@@ -284,20 +474,7 @@ export async function resolveWorkspaceCatalogSettings(
           }),
       ),
     ),
-    supportsOrganizationProviderReads
-      ? listOrganizationModelProviderCustomModelsForWorkspace(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          providerKind: "vercel_gateway",
-        })
-      : Promise.resolve([]),
-    supportsOrganizationProviderReads
-      ? listOrganizationModelProviderCustomModelsForWorkspace(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          providerKind: "openrouter",
-        })
-      : Promise.resolve([]),
+    publicCatalog?.then((catalog) => catalog.organizationProviders) ?? null,
     supportsOrganizationProviderReads
       ? Promise.all(
           [...new Set(retainedOrganizationGatewayUpstreamModelIds)].map(
@@ -324,6 +501,48 @@ export async function resolveWorkspaceCatalogSettings(
           ),
         )
       : Promise.resolve([]),
+    publicCatalog?.then((catalog) => catalog.workspaceConnections) ?? Promise.resolve([]),
+    Promise.all(
+      [...new Set(retainedOpperUpstreamModelIds)].map(
+        async (upstreamModelId) =>
+          await getWorkspaceProviderCustomModelForExecution(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "opper",
+            upstreamModelId,
+          }),
+      ),
+    ),
+    supportsOrganizationProviderReads
+      ? Promise.all(
+          [...new Set(retainedOrganizationOpperUpstreamModelIds)].map(
+            async (upstreamModelId) =>
+              await getOrganizationModelProviderCustomModelForExecution(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                providerKind: "opper",
+                upstreamModelId,
+              }),
+          ),
+        )
+      : Promise.resolve([]),
+    supportsOrganizationProviderReads
+      ? Promise.all(
+          retainedOrganizationDirectModels.map(
+            async ({ providerKind, upstreamModelId }) =>
+              await getOrganizationModelProviderCustomModelForExecution(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                providerKind,
+                upstreamModelId,
+              }),
+          ),
+        )
+      : Promise.resolve([]),
+    // The organization's own OpenAI-compatible endpoints this workspace can
+    // use, read in the same scope as the other public catalog families.
+    publicCatalog?.then((catalog) => catalog.organizationCompatibleEndpoints) ??
+      Promise.resolve([]),
   ]);
   const includeRetainedModels = <T extends { upstreamModelId: string }>(
     activeModels: readonly T[],
@@ -343,59 +562,65 @@ export async function resolveWorkspaceCatalogSettings(
     return customModels;
   };
   const gatewayCustomModels = includeRetainedModels(
-    activeGatewayCustomModels,
+    workspaceCustomModels.vercel_gateway as WorkspaceGatewayCustomModel[],
     retainedGatewayCustomModels,
   );
   const openRouterCustomModels = includeRetainedModels(
-    activeOpenRouterCustomModels,
+    workspaceCustomModels.openrouter as WorkspaceOpenRouterCustomModel[],
     retainedOpenRouterCustomModels,
   );
   const organizationGatewayModels = includeRetainedModels(
-    organizationGatewayCustomModels,
+    organizationProviders?.vercel_gateway.models ?? [],
     retainedOrganizationGatewayCustomModels,
   );
   const organizationOpenRouterModels = includeRetainedModels(
-    organizationOpenRouterCustomModels,
+    organizationProviders?.openrouter.models ?? [],
     retainedOrganizationOpenRouterCustomModels,
   );
+  const opperCustomModels = includeRetainedModels(
+    workspaceCustomModels.opper ?? [],
+    retainedOpperCustomModels,
+  );
+  const organizationOpperModels = includeRetainedModels(
+    organizationProviders?.opper.models ?? [],
+    retainedOrganizationOpperCustomModels,
+  );
+  const organizationDirectModels = (provider: OrganizationDirectModelProvider) =>
+    includeRetainedModels(
+      organizationProviders?.[provider]?.models ?? [],
+      retainedOrganizationDirectCustomModels.filter((model) => model?.providerKind === provider),
+    );
   const claudeConnections: ClaudeConnectionCatalog = {};
-  if (supportsOrganizationProviderReads)
+  if (organizationProviders)
     for (const kind of CLAUDE_CONNECTION_KINDS) {
-      const models = await listOrganizationModelProviderCustomModelsForWorkspace(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        providerKind: kind,
-      });
-      const prefix = claudeProviderId(kind) + "/";
-      for (const productId of retainedProductModelIds)
-        if (productId?.startsWith(prefix)) {
+      const models = [...organizationProviders[kind].models];
+      for (const productId of retainedProductModelIds) {
+        const upstreamModelId = retainedClaudeUpstreamModelId(productId, kind, "organization");
+        if (upstreamModelId !== null) {
           const retained = await getOrganizationModelProviderCustomModelForExecution(db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             providerKind: kind,
-            upstreamModelId: productId.slice(prefix.length),
+            upstreamModelId,
           });
           if (retained && !models.some((model) => model.id === retained.id)) models.push(retained);
         }
+      }
       claudeConnections[kind] = { models };
     }
   const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
   if (supportsOrganizationProviderReads)
     for (const kind of CLAUDE_CONNECTION_KINDS) {
       if (kind === "claude_subscription" && !resolved.settings.claudeSubscriptionEnabled) continue;
-      const models = await listWorkspaceProviderCustomModels(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        providerKind: kind,
-      });
-      const prefix = claudeProviderId(kind, "workspace") + "/";
+      const models = [...workspaceCustomModels[kind]];
       for (const productId of retainedProductModelIds) {
-        if (!productId?.startsWith(prefix)) continue;
+        const upstreamModelId = retainedClaudeUpstreamModelId(productId, kind, "workspace");
+        if (upstreamModelId === null) continue;
         const retained = await getWorkspaceProviderCustomModelForExecution(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           providerKind: kind,
-          upstreamModelId: productId.slice(prefix.length),
+          upstreamModelId,
         });
         if (retained && !models.some((model) => model.id === retained.id)) models.push(retained);
       }
@@ -403,22 +628,46 @@ export async function resolveWorkspaceCatalogSettings(
     }
   return {
     ...resolved,
-    settings: withClaudeConnectionCatalog(
+    settings: withDirectModelProviders(
       withClaudeConnectionCatalog(
-        withOrganizationOpenRouterCatalogProvider(
-          withOrganizationGatewayCatalogProvider(
-            withWorkspaceOpenRouterCatalogProvider(
-              withWorkspaceGatewayCatalogProvider(resolved.settings, gatewayCustomModels),
-              openRouterCustomModels,
+        withClaudeConnectionCatalog(
+          withOrganizationDirectCatalogProviders(
+            withOrganizationOpperCatalogProvider(
+              withWorkspaceOpperCatalogProvider(
+                withOrganizationOpenRouterCatalogProvider(
+                  withOrganizationGatewayCatalogProvider(
+                    withWorkspaceOpenRouterCatalogProvider(
+                      withWorkspaceGatewayCatalogProvider(
+                        withOrganizationCompatibleProviders(
+                          resolved.settings,
+                          organizationCompatibleEndpoints,
+                        ),
+                        gatewayCustomModels,
+                      ),
+                      openRouterCustomModels,
+                    ),
+                    organizationGatewayModels,
+                  ),
+                  organizationOpenRouterModels,
+                ),
+                opperCustomModels,
+              ),
+              organizationOpperModels,
             ),
-            organizationGatewayModels,
+            {
+              openai: { models: organizationDirectModels("openai") },
+              azure_openai: {
+                endpoint: organizationProviders?.azure_openai?.endpoint ?? null,
+                models: organizationDirectModels("azure_openai"),
+              },
+            },
           ),
-          organizationOpenRouterModels,
+          claudeConnections,
         ),
-        claudeConnections,
+        workspaceClaudeConnections,
+        "workspace",
       ),
-      workspaceClaudeConnections,
-      "workspace",
+      directConnections,
     ),
   };
 }
@@ -427,6 +676,11 @@ export type ModelAvailabilityObservation = {
   status: "available" | "degraded" | "unavailable";
   reason: "not_entitled" | "provider_unhealthy" | null;
   checkedAt: string;
+  /**
+   * Speeds the model declares that no account serving this workspace offers
+   * (for example Ultrafast on plans without it). Omitted when unknown.
+   */
+  unavailableLatencyModes?: readonly LatencyMode[];
 };
 
 export type ModelCredentialReadinessObservation =
@@ -448,10 +702,12 @@ export type WorkspaceModelSelectionInput = {
   xaiSubscriptionActive?: boolean;
   workspaceGatewayConnectionActive?: boolean;
   workspaceOpenRouterConnectionActive?: boolean;
+  workspaceOpperConnectionActive?: boolean;
   claudeConnections?: ClaudeConnectionCatalog;
   workspaceClaudeConnections?: ClaudeConnectionCatalog;
   organizationGatewayConnectionActive?: boolean;
   organizationOpenRouterConnectionActive?: boolean;
+  organizationOpperConnectionActive?: boolean;
   workspaceGatewayCustomModels?: readonly {
     upstreamModelId: string;
     label?: string | null;
@@ -468,6 +724,36 @@ export type WorkspaceModelSelectionInput = {
     upstreamModelId: string;
     label?: string | null;
   }[];
+  workspaceOpperCustomModels?: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[];
+  organizationOpperCustomModels?: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[];
+  /**
+   * Organization OpenAI and Azure OpenAI: readiness of each organization
+   * connection, Azure's non-secret endpoint, and the curated models. A
+   * provider is absent when the caller's settings already carry it (or the
+   * organization has none).
+   */
+  organizationDirect?: Partial<
+    Record<
+      OrganizationDirectModelProvider,
+      {
+        active: boolean;
+        endpoint?: string | null | undefined;
+        models: readonly { upstreamModelId: string; label?: string | null }[];
+      }
+    >
+  >;
+  /**
+   * The organization's own OpenAI-compatible endpoints this workspace can use
+   * (only active ones), with their models. Absent when the caller's settings
+   * already carry them.
+   */
+  organizationCompatibleEndpoints?: readonly OrganizationCompatibleEndpointOverlay[];
   credentialReadinessObservations?:
     | Readonly<Record<string, ModelCredentialReadinessObservation>>
     | undefined;
@@ -481,6 +767,8 @@ export type WorkspaceModelSelection = {
   credentialReadiness: ModelCredentialReadinessV1;
   policyAllowed: boolean;
   availability: ModelAvailabilityV1;
+  /** Declared speeds no account serving this workspace offers; see the observation. */
+  unavailableLatencyModes?: readonly LatencyMode[];
 };
 
 function modelDefinitionRunnable(model: ConfiguredModel): boolean {
@@ -567,10 +855,13 @@ function credentialReadinessFor(input: {
   xaiSubscriptionActive: boolean;
   workspaceGatewayConnectionActive: boolean;
   workspaceOpenRouterConnectionActive: boolean;
+  workspaceOpperConnectionActive: boolean;
   claudeConnections?: ClaudeConnectionCatalog | undefined;
   workspaceClaudeConnections?: ClaudeConnectionCatalog | undefined;
   organizationGatewayConnectionActive: boolean;
   organizationOpenRouterConnectionActive: boolean;
+  organizationOpperConnectionActive: boolean;
+  organizationDirectConnectionActive: Partial<Record<OrganizationDirectModelProvider, boolean>>;
   observation: ModelCredentialReadinessObservation | undefined;
   nowMs: number;
   maxAgeMs: number;
@@ -578,7 +869,14 @@ function credentialReadinessFor(input: {
   const source = input.model.credentialSource;
   if (source.kind === "connected_subscription") {
     const active =
-      source.provider === "xai" ? input.xaiSubscriptionActive : input.codexSubscriptionActive;
+      source.provider === "xai"
+        ? input.xaiSubscriptionActive
+        : source.provider === "claude"
+          ? (input.model.providerId === claudeProviderId("claude_subscription", "workspace")
+              ? input.workspaceClaudeConnections
+              : input.claudeConnections
+            )?.claude_subscription?.active === true
+          : input.codexSubscriptionActive;
     return active
       ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
       : {
@@ -592,11 +890,18 @@ function credentialReadinessFor(input: {
     const claudeKind = CLAUDE_CONNECTION_KINDS.find(
       (kind) => claudeProviderId(kind, "workspace") === input.model.providerId,
     );
-    const connectionActive = claudeKind
-      ? input.workspaceClaudeConnections?.[claudeKind]?.active === true
-      : input.model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
-        ? input.workspaceOpenRouterConnectionActive
-        : input.workspaceGatewayConnectionActive;
+    const connectionActive =
+      input.provider?.kind === "direct-openai-workspace" ||
+      input.provider?.kind === "direct-azure-workspace" ||
+      input.provider?.kind === "direct-compatible-workspace"
+        ? true
+        : claudeKind
+          ? input.workspaceClaudeConnections?.[claudeKind]?.active === true
+          : input.model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
+            ? input.workspaceOpenRouterConnectionActive
+            : input.model.providerId === WORKSPACE_OPPER_PROVIDER_ID
+              ? input.workspaceOpperConnectionActive
+              : input.workspaceGatewayConnectionActive;
     return connectionActive
       ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
       : {
@@ -607,6 +912,10 @@ function credentialReadinessFor(input: {
         };
   }
   if (source.kind === "organization_connection") {
+    // An organization's own endpoint is in the catalog only while it is
+    // active and reaches this workspace.
+    if (input.provider?.kind === "direct-compatible-organization")
+      return { status: "ready", reason: null, basis: "connection", checkedAt: null };
     const claudeKind = CLAUDE_CONNECTION_KINDS.find(
       (kind) => claudeProviderId(kind) === input.model.providerId,
     );
@@ -614,7 +923,13 @@ function credentialReadinessFor(input: {
       ? input.claudeConnections?.[claudeKind]?.active === true
       : input.model.providerId === ORGANIZATION_OPENROUTER_PROVIDER_ID
         ? input.organizationOpenRouterConnectionActive
-        : input.organizationGatewayConnectionActive;
+        : input.model.providerId === ORGANIZATION_OPPER_PROVIDER_ID
+          ? input.organizationOpperConnectionActive
+          : input.model.providerId === ORGANIZATION_OPENAI_PROVIDER_ID
+            ? input.organizationDirectConnectionActive.openai === true
+            : input.model.providerId === ORGANIZATION_AZURE_OPENAI_PROVIDER_ID
+              ? input.organizationDirectConnectionActive.azure_openai === true
+              : input.organizationGatewayConnectionActive;
     return connectionActive
       ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
       : {
@@ -700,6 +1015,8 @@ function availabilityFor(input: {
   model: ConfiguredModel;
   credentialReadiness: ModelCredentialReadinessV1;
   policyAllowed: boolean;
+  /** Blocked only because the workspace turned Opengeni credits off. */
+  creditsDisabled?: boolean;
   observation?: ModelAvailabilityObservation | undefined;
   nowMs: number;
   maxAgeMs: number;
@@ -729,7 +1046,7 @@ function availabilityFor(input: {
     return {
       status: "unavailable",
       selectable: false,
-      reason: "policy_blocked",
+      reason: input.creditsDisabled ? "credits_disabled" : "policy_blocked",
       checkedAt: null,
     };
   }
@@ -773,20 +1090,34 @@ export function resolveWorkspaceModelSelection(
   const xaiSettings = input.settings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionCatalogProvider(codexSettings)
     : codexSettings;
+  const directCatalogSettings = (settings: Settings) => {
+    const direct = withOrganizationDirectCatalogProviders(settings, input.organizationDirect ?? {});
+    return input.organizationCompatibleEndpoints
+      ? withOrganizationCompatibleProviders(direct, input.organizationCompatibleEndpoints)
+      : direct;
+  };
   const catalogSettings = withClaudeConnectionCatalog(
     withClaudeConnectionCatalog(
-      withOrganizationOpenRouterCatalogProvider(
-        withOrganizationGatewayCatalogProvider(
-          withWorkspaceOpenRouterCatalogProvider(
-            withWorkspaceGatewayCatalogProvider(
-              xaiSettings,
-              input.workspaceGatewayCustomModels ?? [],
+      directCatalogSettings(
+        withOrganizationOpperCatalogProvider(
+          withWorkspaceOpperCatalogProvider(
+            withOrganizationOpenRouterCatalogProvider(
+              withOrganizationGatewayCatalogProvider(
+                withWorkspaceOpenRouterCatalogProvider(
+                  withWorkspaceGatewayCatalogProvider(
+                    xaiSettings,
+                    input.workspaceGatewayCustomModels ?? [],
+                  ),
+                  input.workspaceOpenRouterCustomModels ?? [],
+                ),
+                input.organizationGatewayCustomModels ?? [],
+              ),
+              input.organizationOpenRouterCustomModels ?? [],
             ),
-            input.workspaceOpenRouterCustomModels ?? [],
+            input.workspaceOpperCustomModels ?? [],
           ),
-          input.organizationGatewayCustomModels ?? [],
+          input.organizationOpperCustomModels ?? [],
         ),
-        input.organizationOpenRouterCustomModels ?? [],
       ),
       input.claudeConnections ?? {},
     ),
@@ -812,11 +1143,27 @@ export function resolveWorkspaceModelSelection(
     .filter((model) => isModelAvailableForNewSelection(catalogSettings, model.id))
     .map((model) => {
       const provider = providers.get(model.providerId);
-      const policyAllowed =
-        evaluateWorkspaceModelPolicy(input.policy, {
-          providerId: model.providerId,
-          modelId: model.id,
-        }).allowed && modelAllowedByConnections(input.connectionModelRestrictions ?? {}, model.id);
+      const verdict = evaluateWorkspaceModelPolicy(input.policy, {
+        providerId: model.providerId,
+        modelId: model.id,
+        chargesCredits: model.cost === "credits",
+      });
+      const allowedByConnections = modelAllowedByConnections(
+        input.connectionModelRestrictions ?? {},
+        model.id,
+      );
+      const policyAllowed = verdict.allowed && allowedByConnections;
+      // Name the credit switch only when it is the sole reason; an allowlist
+      // or connection restriction keeps the generic policy reason.
+      const creditsDisabled =
+        !verdict.allowed &&
+        verdict.reason === "credits" &&
+        allowedByConnections &&
+        input.policy != null &&
+        evaluateWorkspaceModelPolicy(
+          { ...input.policy, allowCreditModels: true },
+          { providerId: model.providerId, modelId: model.id, chargesCredits: true },
+        ).allowed;
       const credentialReadiness = credentialReadinessFor({
         model,
         provider,
@@ -824,23 +1171,33 @@ export function resolveWorkspaceModelSelection(
         xaiSubscriptionActive: input.xaiSubscriptionActive === true,
         workspaceGatewayConnectionActive: input.workspaceGatewayConnectionActive === true,
         workspaceOpenRouterConnectionActive: input.workspaceOpenRouterConnectionActive === true,
+        workspaceOpperConnectionActive: input.workspaceOpperConnectionActive === true,
         claudeConnections: input.claudeConnections,
         workspaceClaudeConnections: input.workspaceClaudeConnections,
         organizationGatewayConnectionActive: input.organizationGatewayConnectionActive === true,
         organizationOpenRouterConnectionActive:
           input.organizationOpenRouterConnectionActive === true,
+        organizationOpperConnectionActive: input.organizationOpperConnectionActive === true,
+        organizationDirectConnectionActive: {
+          openai: input.organizationDirect?.openai?.active === true,
+          azure_openai: input.organizationDirect?.azure_openai?.active === true,
+        },
         observation: input.credentialReadinessObservations?.[model.definitionVersion],
         nowMs,
         maxAgeMs,
       });
+      const unavailableLatencyModes =
+        input.observations?.[model.definitionVersion]?.unavailableLatencyModes;
       return {
         model,
         credentialReadiness,
         policyAllowed,
+        ...(unavailableLatencyModes?.length ? { unavailableLatencyModes } : {}),
         availability: availabilityFor({
           model,
           credentialReadiness,
           policyAllowed,
+          creditsDisabled,
           observation: input.observations?.[model.definitionVersion],
           nowMs,
           maxAgeMs,

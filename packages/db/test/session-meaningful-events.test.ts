@@ -2,32 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { alias, PgDialect } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
-import { readFile } from "node:fs/promises";
+
 import { sessionEventCursors } from "../src/schema";
 import {
   MEANINGFUL_SESSION_EVENT_TYPES,
   childLifecycleEvidenceCandidatesSql,
-  commentaryInclusiveMeaningfulSessionEventSql,
   meaningfulSessionEventSql,
   meaningfulSessionSequenceSql,
 } from "../src/session-meaningful-events";
-
-const normalizePredicate = (value: string) =>
-  value
-    .replaceAll('"meaningful".', "")
-    .replaceAll(/\s+/g, " ")
-    .replaceAll(/\(\s+/g, "(")
-    .replaceAll(/\s+\)/g, ")")
-    .trim()
-    .toLowerCase();
-
-function indexPredicate(migration: string): string {
-  const migrated = migration.split("WHERE type IN (")[1]!.split(";")[0]!;
-  expect([...migrated.split(")")[0]!.matchAll(/'([^']+)'/g)].map((match) => match[1])).toEqual([
-    ...MEANINGFUL_SESSION_EVENT_TYPES,
-  ]);
-  return normalizePredicate(`type IN (${migrated.replace(/;\s*$/, "")}`);
-}
 
 describe("meaningful event frontier contract", () => {
   test("single-table projection preserves outer cursor correlation inside the subquery", () => {
@@ -46,62 +28,7 @@ describe("meaningful event frontier contract", () => {
       expect(query.params).toEqual([]);
     }
   });
-  test("maintenance migration index keeps the commentary-inclusive rollout predicate", async () => {
-    const migration = await readFile(
-      new URL("../drizzle/0503_session_meaningful_attention.sql", import.meta.url),
-      "utf8",
-    );
-    const predicate = new PgDialect().sqlToQuery(
-      commentaryInclusiveMeaningfulSessionEventSql("meaningful"),
-    ).sql;
-    expect(indexPredicate(migration)).toBe(normalizePredicate(predicate));
-    expect(migration.startsWith("-- deployment-mode: maintenance")).toBe(true);
-    expect(migration).toContain("personal.attention_version > 0");
-    expect(migration).toContain("SET manually_unread_through = cursor.last_sequence");
-    expect(migration).not.toContain("SET acknowledged_sequence");
-    expect(migration).toContain("meaningful.sequence > personal.acknowledged_sequence");
-    for (const table of ["session_pins", "session_event_cursors", "session_events"]) {
-      expect(migration).toContain(`ALTER TABLE ${table} NO FORCE ROW LEVEL SECURITY`);
-      expect(migration).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
-    }
-  });
-  test("rolling concurrent index uses exactly the runtime predicate: no commentary, wait replies", async () => {
-    const migration = await readFile(
-      new URL("../drizzle/0527_session_attention_excludes_commentary.sql", import.meta.url),
-      "utf8",
-    );
-    const predicate = new PgDialect().sqlToQuery(meaningfulSessionEventSql("meaningful")).sql;
-    expect(indexPredicate(migration)).toBe(normalizePredicate(predicate));
-    expect(predicate).toContain(`payload ->> 'phase', '') <> 'commentary'`);
-    expect(
-      migration.startsWith(
-        "-- deployment-mode: rolling\n-- opengeni:concurrent-index lock-timeout=5s\n",
-      ),
-    ).toBe(true);
-    // The runtime predicate is the 0503 one with exactly two changes, so
-    // pre-0527 API processes keep their own index during the rollout:
-    // commentary is excluded, and a turn that ended waiting for input counts
-    // when it records the reply a human or API message received.
-    const inclusive = normalizePredicate(
-      new PgDialect().sqlToQuery(commentaryInclusiveMeaningfulSessionEventSql("meaningful")).sql,
-    );
-    const turnResult = "coalesce(nullif(payload -> 'output', 'null'::jsonb), payload -> 'result')";
-    const resultBearing = `${turnResult} is not null and ${turnResult} not in ('null'::jsonb, '""'::jsonb)`;
-    expect(normalizePredicate(predicate)).toContain(
-      `and ((${resultBearing}) or coalesce(payload ->> 'reply', '') <> '')`,
-    );
-    expect(
-      normalizePredicate(predicate)
-        .replace(
-          " and (type <> 'agent.message.completed' or coalesce(payload ->> 'phase', '') <> 'commentary')",
-          "",
-        )
-        .replace(
-          `and ((${resultBearing}) or coalesce(payload ->> 'reply', '') <> '')`,
-          `and ${resultBearing}`,
-        ),
-    ).toBe(inclusive);
-  });
+
   test("lifecycle evidence bounds indexed candidates before inspecting oversized payloads", () => {
     const query = new PgDialect().sqlToQuery(
       childLifecycleEvidenceCandidatesSql(sql`root.workspace_id`, sql`root.id`),

@@ -494,6 +494,51 @@ describe("curated AI Gateway catalogue", () => {
     ).toThrow("Invalid AI Gateway inference cost");
   });
 
+  test("deployment margin override wins for built-in, explicit, and Gateway model rates", () => {
+    const base = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
+    const usage = { inputTokens: 100_000 };
+    expect(calculateModelUsageCostMicros(base, "gpt-5.6-luna", usage)).toBe(21_000);
+
+    const zero = { ...base, creditMarginBpsOverride: 0 };
+    expect(calculateModelUsageCostMicros(zero, "gpt-5.6-luna", usage)).toBe(20_000);
+    expect(
+      calculateGatewayReportedCostMicros(
+        zero,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "1.23456789",
+      ),
+    ).toBe(1_234_568);
+
+    const nonDefault = { ...base, creditMarginBpsOverride: 1_250 };
+    expect(calculateModelUsageCostMicros(nonDefault, "gpt-5.6-luna", usage)).toBe(22_500);
+    expect(
+      calculateGatewayReportedCostMicros(
+        nonDefault,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "1.23456789",
+      ),
+    ).toBe(1_388_889);
+
+    const explicitPrice = {
+      ...base,
+      modelPricingJson: JSON.stringify({
+        "gpt-5.6-luna": {
+          inputMicrosPerMillionTokens: 2_000_000,
+          outputMicrosPerMillionTokens: 12_000_000,
+          marginBps: 2_000,
+        },
+      }),
+    };
+    expect(calculateModelUsageCostMicros(explicitPrice, "gpt-5.6-luna", usage)).toBe(240_000);
+    expect(
+      calculateModelUsageCostMicros(
+        { ...explicitPrice, creditMarginBpsOverride: 1_250 },
+        "gpt-5.6-luna",
+        usage,
+      ),
+    ).toBe(225_000);
+  });
+
   test("reads exact Gateway provider cost without requiring a product price", () => {
     expect(calculateGatewayReportedProviderCostMicros("0.00000325")).toBe(4);
     expect(calculateGatewayReportedProviderCostMicros("1.23456789")).toBe(1_234_568);
@@ -1026,6 +1071,7 @@ describe("productLabelForModelId", () => {
     expect(productLabelForModelId("gpt-5.6-terra")).toBe("GPT-5.6 Terra");
     expect(productLabelForModelId("gpt-6-astra")).toBe("GPT-6 Astra");
     expect(productLabelForModelId("codex/gpt-6-astra")).toBe("GPT-6 Astra");
+    expect(productLabelForModelId("codex/gpt-6.1-terra")).toBe("GPT-6.1 Terra");
     expect(productLabelForModelId("gpt-5.4-mini")).toBe("GPT-5.4 Mini");
   });
 });
@@ -1039,6 +1085,8 @@ describe("productShortLabelForModelId", () => {
     expect(productShortLabelForModelId("gpt-6-sol")).toBe("6 Sol");
     expect(productShortLabelForModelId("gpt-6-luna")).toBe("6 Luna");
     expect(productShortLabelForModelId("codex/gpt-6-astra")).toBe("6 Astra");
+    expect(productShortLabelForModelId("codex/gpt-6.1-sol")).toBe("6.1 Sol");
+    expect(productShortLabelForModelId("gpt-6.1-terra")).toBe("6.1 Terra");
     expect(productShortLabelForModelId("grok-4.7")).toBe("4.7");
     expect(productShortLabelForModelId("gpt-5.4-mini")).toBeNull();
   });
@@ -1160,6 +1208,7 @@ describe("configuredModels", () => {
     expect(astra?.capabilities.latencyModes.map(({ id, runnable }) => ({ id, runnable }))).toEqual([
       { id: "standard", runnable: true },
       { id: "fast", runnable: true },
+      { id: "ultrafast", runnable: true },
     ]);
     expect(astra?.capabilities.inputModalities).toEqual(["text", "image"]);
   });
@@ -1449,7 +1498,7 @@ describe("configuredModels", () => {
 });
 
 describe("normalized model definitions", () => {
-  function definitionFor(input?: {
+  type DefinitionInput = {
     apiKey?: string;
     providerLabel?: string;
     modelLabel?: string;
@@ -1460,7 +1509,9 @@ describe("normalized model definitions", () => {
     publicQueryValue?: string;
     publicHeaderNameCase?: string;
     modelOverrides?: Record<string, unknown>;
-  }) {
+  };
+
+  function settingsFor(input?: DefinitionInput) {
     const registry = JSON.stringify([
       {
         id: "acme",
@@ -1501,20 +1552,23 @@ describe("normalized model definitions", () => {
         ],
       },
     ]);
-    const settings = withEnv(
+    return withEnv(
       {
         OPENGENI_OPENAI_API_KEY: "sk-test",
         OPENGENI_MODEL_PROVIDERS_JSON: registry,
       },
       () => getSettings(),
     );
-    return configuredModels(settings).find((model) => model.id === "acme/model")!;
+  }
+
+  function definitionFor(input?: DefinitionInput) {
+    return configuredModels(settingsFor(input)).find((model) => model.id === "acme/model")!;
   }
 
   test("pins the V1 digest and excludes labels, aliases, API keys, and secret metadata values", () => {
     const baseline = definitionFor();
     expect(baseline.definitionVersion).toBe(
-      "sha256:a26eefb346f36932c41dcd0df64ebe3dfc5841fc02dd7a1c32cc8551adc98314",
+      "sha256:c6a6a89a12c29e8b646ffb2f8a4a3cbccb1641bfda614da39bd603e6f1343a7c",
     );
     expect(
       definitionFor({
@@ -1562,6 +1616,81 @@ describe("normalized model definitions", () => {
     ];
     for (const variant of variants) {
       expect(variant).not.toBe(baseline);
+    }
+  });
+
+  test("preserves optional hosted-search context and binds it to execution identity", () => {
+    const baseline = definitionFor();
+    expect(baseline).not.toHaveProperty("hostedWebSearchContextSize");
+    for (const size of ["low", "medium", "high"] as const) {
+      const model = definitionFor({ modelOverrides: { hostedWebSearchContextSize: size } });
+      expect(model.hostedWebSearchContextSize).toBe(size);
+      expect(model.definitionVersion).not.toBe(baseline.definitionVersion);
+    }
+    expect(() =>
+      definitionFor({ modelOverrides: { hostedWebSearchContextSize: "tiny" } }),
+    ).toThrow();
+  });
+
+  const policyInput = {
+    modelId: "acme/model",
+    requestedModelId: null,
+    modelSource: "continuation",
+    reasoningEffort: "medium",
+    reasoningSource: "continuation",
+  } as const;
+
+  test("a context-size change never silently rewrites an accepted turn's search tool", () => {
+    const accepted = resolveTurnExecutionPolicyV1(settingsFor(), policyInput);
+    const changed = settingsFor({ modelOverrides: { hostedWebSearchContextSize: "low" } });
+    expect(() => assertTurnExecutionPolicyMatchesConfigV1(changed, accepted, policyInput)).toThrow(
+      TurnExecutionPolicyDefinitionMismatchError,
+    );
+    const next = resolveTurnExecutionPolicyV1(changed, policyInput);
+    expect(next.definitionVersion).not.toBe(accepted.definitionVersion);
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(changed, next, policyInput),
+    ).not.toThrow();
+  });
+
+  test("keeps the automatic-compaction default out of the executable identity", () => {
+    // Workspace and organization compaction preferences already replace this
+    // trigger live, so a changed default must not strand accepted turns.
+    const accepted = resolveTurnExecutionPolicyV1(settingsFor(), policyInput);
+    const current = settingsFor({ modelOverrides: { autoCompactTokenLimit: 30_000 } });
+    expect(definitionFor({ modelOverrides: { autoCompactTokenLimit: 30_000 } })).toMatchObject({
+      autoCompactTokenLimit: 30_000,
+      definitionVersion: accepted.definitionVersion,
+    });
+    expect(assertTurnExecutionPolicyMatchesConfigV1(current, accepted, policyInput).policy).toEqual(
+      accepted,
+    );
+  });
+
+  test("keeps a turn accepted before the compaction trigger left the digest runnable", () => {
+    // The pinned V1 digest of this exact definition when it still included
+    // the compaction trigger.
+    const preExclusion = {
+      ...resolveTurnExecutionPolicyV1(settingsFor(), policyInput),
+      definitionVersion: "sha256:a26eefb346f36932c41dcd0df64ebe3dfc5841fc02dd7a1c32cc8551adc98314",
+    };
+    expect(
+      assertTurnExecutionPolicyMatchesConfigV1(settingsFor(), preExclusion, policyInput).policy,
+    ).toEqual(preExclusion);
+    // The compatibility digest reproduces only the current trigger and still
+    // binds every executable field.
+    for (const modelOverrides of [
+      { autoCompactTokenLimit: 30_000 },
+      { contextWindowTokens: 100_001 },
+      { toolOutputTruncationTokens: 9_001 },
+    ]) {
+      expect(() =>
+        assertTurnExecutionPolicyMatchesConfigV1(
+          settingsFor({ modelOverrides }),
+          preExclusion,
+          policyInput,
+        ),
+      ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
     }
   });
 });
@@ -1821,14 +1950,29 @@ describe("turn execution policy V1", () => {
       reasoningEffort: "low" as const,
       reasoningSource: "continuation" as const,
     };
-    const accepted = resolveTurnExecutionPolicyV1(historical, input);
+    // Turns accepted before the implicit-caching rollout carry this digest,
+    // which still included the automatic-compaction trigger.
+    const accepted = {
+      ...resolveTurnExecutionPolicyV1(historical, input),
+      definitionVersion: "sha256:3b9f79cc6958b71ef6e14c4dc16797e83b9bbceb070ecd44048f0a685e3a1c2a",
+    };
     const newer = resolveTurnExecutionPolicyV1(current, input);
-    expect(accepted.definitionVersion).toBe(
-      "sha256:3b9f79cc6958b71ef6e14c4dc16797e83b9bbceb070ecd44048f0a685e3a1c2a",
-    );
     expect(newer.definitionVersion).toBe(
-      "sha256:fc4b0bc9ec1a5cc2c302da88c407a633ae5fec0bcc0166668eca3acf1fa49479",
+      "sha256:3728b7c579458cf7f853d0d2bf24942b93b56d793e432576125c0f8337dc7ab9",
     );
+    // The same current definition accepted before the compaction trigger left
+    // the digest.
+    expect(
+      assertTurnExecutionPolicyMatchesConfigV1(
+        current,
+        {
+          ...newer,
+          definitionVersion:
+            "sha256:fc4b0bc9ec1a5cc2c302da88c407a633ae5fec0bcc0166668eca3acf1fa49479",
+        },
+        input,
+      ).policy.definitionVersion,
+    ).toBe("sha256:fc4b0bc9ec1a5cc2c302da88c407a633ae5fec0bcc0166668eca3acf1fa49479");
     const before = structuredClone(accepted);
     for (const policy of [accepted, newer]) {
       expect(settingsForAcceptedSubscriptionTurn(current, policy, input)).toBe(current);
@@ -2321,7 +2465,7 @@ describe("configuredModelPricing", () => {
     });
   });
 
-  test("keeps gateway provider cost separate from OpenGeni credit markup", () => {
+  test("keeps gateway provider cost separate from Opengeni credit markup", () => {
     const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
     expect(
       calculateGatewayReportedCostBreakdown(
@@ -2451,7 +2595,7 @@ describe("validateSettings registry checks", () => {
         },
         () => getSettings(),
       ),
-    ).toThrow("reserved for a reviewed OpenGeni provider");
+    ).toThrow("reserved for a reviewed Opengeni provider");
   });
 
   test("rejects duplicate registry provider ids", () => {

@@ -11,14 +11,14 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { DiffView } from "@/components/ui/diff-view";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Field, TextArea } from "@/components/ui/field";
-import { HelpLink, InlineHelp } from "@/components/ui/inline-help";
-import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
+import { Button } from "@opengeni/react/ui/button";
+import { DiffView } from "@opengeni/react/ui/diff-view";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Field, TextArea } from "@opengeni/react/ui/field";
+import { HelpLink, InlineHelp } from "@opengeni/react/ui/inline-help";
+import { ListRow, ListRowSkeleton, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
 
 import type { ReviewKind } from "../../fixtures";
 import { useElementWidth } from "./frame";

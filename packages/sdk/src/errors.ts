@@ -1,4 +1,17 @@
-/** Error for a non-2xx OpenGeni API response. */
+import {
+  parseSessionUsageLimitReachedRefusal,
+  type ParsedSessionUsageLimitReachedRefusal,
+} from "@opengeni/contracts/session-usage-limit-refusal";
+
+/**
+ * Stable `OpenGeniApiError.code` for a deployment parked for maintenance or an
+ * update. The parked API answers every request with `{"error":"maintenance"}`
+ * (normally HTTP 503) before any application code runs, so nothing was
+ * accepted: the error is retryable and never outcome-unknown.
+ */
+export const OPENGENI_MAINTENANCE_ERROR_CODE = "maintenance";
+
+/** Error for a non-2xx Opengeni API response. */
 export class OpenGeniApiError extends Error {
   readonly status: number;
   readonly code: string | undefined;
@@ -25,13 +38,22 @@ export class OpenGeniApiError extends Error {
     const correlationId = decoded?.requestId ?? boundedCorrelationId(options.correlationId);
     const gatewayFailure = status >= 502 && status <= 504;
     const fromResponse = options.mutation !== undefined;
+    const maintenance = decoded?.code === OPENGENI_MAINTENANCE_ERROR_CODE;
     const message = decoded?.message ?? (fromResponse ? "Request failed." : body || "(empty body)");
     const displayMessage =
       options.displayMessage ??
-      (gatewayFailure && fromResponse
-        ? (decoded?.message ?? "OpenGeni is temporarily unavailable — retry.")
-        : `OpenGeni API ${status}: ${message}`);
-    super(correlationId ? `${displayMessage} Reference: ${correlationId}.` : displayMessage);
+      (maintenance && fromResponse
+        ? "The service is updating. Try again in a moment."
+        : gatewayFailure && fromResponse
+          ? (decoded?.message ?? "The workspace is temporarily unavailable — retry.")
+          : `API ${status}: ${message}`);
+    // A maintenance answer comes from the parked responder, not the request
+    // handler, so a reference would point nowhere useful.
+    super(
+      correlationId && !(maintenance && fromResponse)
+        ? `${displayMessage} Reference: ${correlationId}.`
+        : displayMessage,
+    );
     this.name = "OpenGeniApiError";
     this.status = status;
     this.code =
@@ -93,6 +115,145 @@ export class OpenGeniAllowanceExhaustedError extends OpenGeniApiError {
   }
 }
 
+/**
+ * The task's root usage limit is reached: recorded API-equivalent model usage
+ * is at or above the limit. Not a credit or billing failure and not retryable
+ * by waiting; a person can raise or remove the limit, then send again.
+ */
+export class OpenGeniSessionUsageLimitReachedError extends OpenGeniApiError {
+  readonly rootSessionId: string | undefined;
+  readonly limitMicros: number | undefined;
+  readonly usedMicros: number | undefined;
+
+  constructor(
+    status: number,
+    body: string,
+    options: ConstructorParameters<typeof OpenGeniApiError>[2] = {},
+  ) {
+    super(status, body, {
+      ...options,
+      code: "session_usage_limit_reached",
+      retryable: false,
+      outcomeUnknown: false,
+    });
+    this.name = "OpenGeniSessionUsageLimitReachedError";
+    const refusal = sessionUsageLimitReachedFields(body);
+    this.rootSessionId = refusal?.rootSessionId;
+    this.limitMicros = refusal?.limitMicros;
+    this.usedMicros = refusal?.usedMicros;
+  }
+}
+
+/**
+ * The server did not accept or confirm a requested task usage limit, so it
+ * predates usage limits (or limits are not enabled there). `sessionId` is null
+ * when the server rejected the create before creating anything; otherwise the
+ * session exists without a confirmed limit and no initial work was started by
+ * this SDK's request (an older server rejects it up front).
+ */
+export class OpenGeniSessionUsageLimitUnsupportedError extends Error {
+  readonly code = "session_usage_limit_unsupported";
+  readonly sessionId: string | null;
+
+  constructor(message: string, options: { sessionId?: string | null; cause?: unknown } = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "OpenGeniSessionUsageLimitUnsupportedError";
+    this.sessionId = options.sessionId ?? null;
+  }
+}
+
+/**
+ * True only when a create was refused because the server rejected the
+ * `startMode` field itself: servers that predate usage limits accept only
+ * `realtime` there. Matches the session create route's 422 validation
+ * envelope (`Invalid session create request: <fields> failed schema
+ * validation`) and a 400 request-body envelope whose issues name `startMode`.
+ * Any other validation error stays an ordinary API error.
+ */
+export function rejectsStartModeField(error: OpenGeniApiError): boolean {
+  if (error.status !== 400 && error.status !== 422) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(error.body);
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== "object") return false;
+  const record = parsed as Record<string, unknown>;
+  const envelope =
+    record.error && typeof record.error === "object"
+      ? (record.error as Record<string, unknown>)
+      : record;
+  const message = typeof envelope.message === "string" ? envelope.message : "";
+  const fields = /^Invalid session create request: (.+) failed schema validation$/.exec(message);
+  if (
+    envelope.code === "INVALID_SESSION_CREATE_REQUEST" &&
+    fields?.[1]?.split(/,\s*/).includes("startMode")
+  ) {
+    return true;
+  }
+  const details =
+    envelope.details && typeof envelope.details === "object"
+      ? (envelope.details as Record<string, unknown>)
+      : null;
+  const issues = Array.isArray(details?.issues) ? details.issues : [];
+  return issues.some((issue) => {
+    if (!issue || typeof issue !== "object") return false;
+    const path = (issue as Record<string, unknown>).path;
+    return (
+      path === "startMode" || (Array.isArray(path) && path.length === 1 && path[0] === "startMode")
+    );
+  });
+}
+
+/** The committed limit differs from the one requested: never report success. */
+export function sessionUsageLimitNotConfirmed(
+  sessionId: string,
+): OpenGeniSessionUsageLimitUnsupportedError {
+  return new OpenGeniSessionUsageLimitUnsupportedError(
+    "The server did not confirm the requested usage limit; it may not support usage limits. Read the limit again before relying on it.",
+    { sessionId },
+  );
+}
+
+/** Whether the committed state is the limit and recurring window that were requested. */
+export function sessionUsageLimitConfirmed(
+  request: {
+    limitMicros: number | null;
+    window?: { period: "day"; timeZone: string } | null | undefined;
+  },
+  committed: {
+    limitMicros: number | null;
+    window?: { period: "day"; timeZone: string } | undefined;
+  },
+): boolean {
+  if (committed.limitMicros !== request.limitMicros) return false;
+  if (request.window === undefined) return true;
+  if (request.window === null) return committed.window === undefined;
+  return (
+    committed.window?.period === request.window.period &&
+    committed.window.timeZone === request.window.timeZone
+  );
+}
+
+/** Parse a session usage limit refusal from an API error envelope body. */
+export function sessionUsageLimitReachedFields(
+  body: string,
+): ParsedSessionUsageLimitReachedRefusal | null {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const root = parsed as Record<string, unknown>;
+    return parseSessionUsageLimitReachedRefusal(
+      root.error && typeof root.error === "object" && !Array.isArray(root.error)
+        ? root.error
+        : root,
+    );
+  } catch {
+    return null;
+  }
+}
+
 /** Accept both the API error envelope and the standalone admission refusal. */
 export function allowanceExhaustedFields(body: string): {
   scope: "workspace" | "member";
@@ -139,12 +300,44 @@ export class OpenGeniSecureContextRequiredError extends Error {
   constructor(reason: OpenGeniSecureContextRequiredReason) {
     super(
       reason === "insecure_context"
-        ? "Couldn’t attach this file because OpenGeni is open over HTTP. Attachments require a secure HTTPS connection. Open the secure site or configure HTTPS for this deployment."
+        ? "Couldn’t attach this file because this page is open over HTTP. Attachments require a secure HTTPS connection. Open the secure site or configure HTTPS for this deployment."
         : "Couldn’t attach this file because secure browser cryptography is unavailable. Attachments require HTTPS and Web Crypto support. Open a secure site in a supported browser or configure HTTPS for this deployment.",
     );
     this.name = "OpenGeniSecureContextRequiredError";
     this.reason = reason;
   }
+}
+
+/**
+ * True when the API answered with the maintenance marker: the deployment is
+ * being updated and will answer again on its own. Retry later; do not show it
+ * as a failure of the request itself.
+ */
+export function isMaintenanceError(error: unknown): boolean {
+  if (error instanceof OpenGeniApiError) return error.code === OPENGENI_MAINTENANCE_ERROR_CODE;
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    typeof (error as { status?: unknown }).status === "number" &&
+    (error as { code?: unknown }).code === OPENGENI_MAINTENANCE_ERROR_CODE
+  );
+}
+
+/**
+ * Stable `details.code` of the 403 for approving an action that runs on
+ * another person's own (Only me) login: only that person, through their own
+ * session, personal API key or `asUser` token, can approve it. Anyone who can
+ * control the chat may still decline it. The message names who can approve.
+ */
+export const APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE = "APPROVAL_REQUIRES_ACCOUNT_OWNER";
+
+/** True when an approval was refused because only the account's owner can approve it. */
+export function isApprovalRequiresAccountOwnerError(error: unknown): error is OpenGeniApiError {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 403 &&
+    error.details?.code === APPROVAL_REQUIRES_ACCOUNT_OWNER_CODE
+  );
 }
 
 function decodeApiErrorBody(body: string): {
@@ -160,6 +353,22 @@ function decodeApiErrorBody(body: string): {
     const decoded: unknown = JSON.parse(body);
     if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return null;
     const record = decoded as Record<string, unknown>;
+    // The parked maintenance server answers `{"error":"maintenance"}`: a bare
+    // marker string instead of the error envelope. Nothing ran, so it is
+    // retryable and the outcome of a mutation is known (not accepted).
+    if (
+      typeof record.error === "string" &&
+      record.error.trim().toLowerCase() === OPENGENI_MAINTENANCE_ERROR_CODE
+    ) {
+      return {
+        code: OPENGENI_MAINTENANCE_ERROR_CODE,
+        message: undefined,
+        requestId: undefined,
+        retryable: true,
+        outcomeUnknown: false,
+        details: undefined,
+      };
+    }
     const nested =
       record.error && typeof record.error === "object" && !Array.isArray(record.error)
         ? (record.error as Record<string, unknown>)
@@ -193,6 +402,12 @@ function decodeApiErrorBody(body: string): {
   }
 }
 
+const PUBLIC_BILLING_ACTIONS: ReadonlySet<string> = new Set([
+  "upgrade",
+  "add_credits",
+  "upgrade_plan",
+]);
+
 function boundedApiDetails(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const entries = Object.entries(value as Record<string, unknown>).slice(0, 16);
@@ -204,6 +419,22 @@ function boundedApiDetails(value: unknown): Record<string, unknown> | undefined 
       if (bounded !== undefined) details[key] = bounded;
     } else if (typeof entry === "number" || typeof entry === "boolean" || entry === null) {
       details[key] = entry;
+    } else if (Array.isArray(entry) && entry.every((item) => typeof item === "string")) {
+      // A short list of names (repositories, allowed modes), each bounded.
+      details[key] = entry
+        .slice(0, 16)
+        .map((item) => boundedApiField(item))
+        .filter((item): item is string => item !== undefined);
+    } else if (
+      key === "action" &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      PUBLIC_BILLING_ACTIONS.has(String((entry as Record<string, unknown>).type)) &&
+      (entry as Record<string, unknown>).href === "/billing"
+    ) {
+      // Preserve the bounded public billing actions (seat limit, Add credits,
+      // Upgrade to Pro), not arbitrary nested data.
+      details.action = { type: String((entry as Record<string, unknown>).type), href: "/billing" };
     }
   }
   return Object.keys(details).length > 0 ? details : undefined;
@@ -235,7 +466,7 @@ export class OpenGeniApiContractMismatchError extends Error {
   readonly actual: string;
 
   constructor(expected: string, actual: string) {
-    super(`OpenGeni API contract mismatch: client expects ${expected}, API serves ${actual}`);
+    super(`API contract mismatch: client expects ${expected}, API serves ${actual}`);
     this.name = "OpenGeniApiContractMismatchError";
     this.expected = expected;
     this.actual = actual;
@@ -248,6 +479,121 @@ export class OpenGeniStreamError extends Error {
     super(message);
     this.name = "OpenGeniStreamError";
   }
+}
+
+/**
+ * Brand-neutral end-user copy for a failed SDK operation. Error.message, body,
+ * details and typed fields remain unchanged for diagnostics and host policy.
+ * Never use this to rewrite user, assistant or tool content.
+ */
+export function formatErrorMessage(
+  error: unknown,
+  fallback = "The request could not be completed.",
+): string {
+  if (error instanceof OpenGeniApiError) {
+    let message: string;
+    if (error.outcomeUnknown) {
+      message = "The request could not be confirmed. Check its status before retrying.";
+    } else if (error.code === OPENGENI_MAINTENANCE_ERROR_CODE) {
+      // A planned update, not a failure: the reference would only name the
+      // maintenance responder, so it is omitted.
+      return "The service is updating. Try again in a moment.";
+    } else if (
+      error instanceof OpenGeniSetupError ||
+      error.code === "OPENGENI_SETUP_REQUIRED" ||
+      error.code === "SESSION_TENANCY_NOT_ACTIVATED"
+    ) {
+      message = "Private conversations are unavailable. Ask an administrator to enable them.";
+    } else if (error.details?.code === "not_available_for_viewer") {
+      message = "This Site's assistant is not available for this viewer.";
+    } else if (error.details?.code === "site_budget_exhausted") {
+      message = "This Site's assistant has reached its usage limit for now.";
+    } else if (error.details?.code === "site_budget_busy") {
+      message = "This Site's assistant is busy. Try again in a moment.";
+    } else if (error.details?.code === "site_platform_brake_engaged") {
+      message = "This Site's assistant is paused for visitors right now.";
+    } else if (error.code === "allowance_exhausted") {
+      message = "Usage limit reached. Wait for the reset or ask an administrator for more usage.";
+    } else if (error.code === "seat_limit_reached") {
+      // The refusal names the one plan that adds the seat when the server knows it.
+      const label = error.details?.upgradePlanLabel;
+      const named = typeof label === "string" && label.trim() ? label.trim() : null;
+      message =
+        error.details?.askOwner === true
+          ? !named
+            ? "This organization is full. Ask an organization owner to upgrade."
+            : error.details?.upgradePlan === "enterprise"
+              ? `Ask an organization owner about ${named}.`
+              : `Ask an organization owner to upgrade to ${named}.`
+          : !named
+            ? "Your organization has reached its seat limit. Upgrade the plan to add people."
+            : error.details?.upgradePlan === "enterprise"
+              ? `Talk to us about ${named} to add more people.`
+              : `Upgrade to ${named} to add more people.`;
+    } else if (error instanceof OpenGeniSessionListCursorError) {
+      message = "The conversation list changed. Refresh and try again.";
+    } else if (error.status === 401) {
+      message = "Sign in to continue.";
+    } else if (error.details?.code === "subscription_api_unavailable") {
+      message =
+        "Connected subscriptions are only available in the Opengeni apps. Choose a credit-billed model for API use.";
+    } else if (error.status === 403) {
+      message = "You don’t have permission to do that.";
+    } else if (error.status === 404) {
+      message = "The requested item is unavailable.";
+    } else if (error.details?.code === "api_credits_required") {
+      message = "API usage uses credits, not your plan credit. Add credits to continue.";
+    } else if (error.details?.code === "byok_paid_credit_required") {
+      message =
+        error.details?.action &&
+        (error.details.action as { type?: unknown }).type === "upgrade_plan"
+          ? "Upgrade to Pro to use your own key."
+          : "Add credits to use your own key.";
+    } else if (error.details?.code === "subscription_plan_required") {
+      message = "Upgrade to Pro to use your own subscription.";
+    } else if (error.status === 402 || error.code === "payment_required") {
+      message = "There are not enough credits to continue.";
+    } else if (error.status === 429 || error.code === "rate_limited") {
+      message = error.retryable
+        ? "Too many requests. Wait a moment and try again."
+        : "This request is unavailable. Ask an administrator for help.";
+    } else if (error.status === 409) {
+      message = "The request conflicts with the current state. Refresh and try again.";
+    } else if (error.status === 400 || error.status === 422) {
+      message = "The request could not be accepted. Check your input and try again.";
+    } else if (error.status === 408 || error.status === 425 || error.status === 0) {
+      message = error.retryable
+        ? "The connection could not be completed. Try again later."
+        : fallback;
+    } else if (error.status >= 500) {
+      message = error.retryable
+        ? "The service is temporarily unavailable. Try again later."
+        : "The service is unavailable. Ask an administrator for help.";
+    } else {
+      message = fallback;
+    }
+    // A refusal the person can act on (a 4xx) is only what to do; the request
+    // reference is for support, so it stays with unexpected failures.
+    const expected = error.status >= 400 && error.status < 500 && !error.outcomeUnknown;
+    return error.correlationId && !expected
+      ? `${message} Reference: ${error.correlationId}.`
+      : message;
+  }
+  if (
+    error instanceof OpenGeniSecureContextRequiredError ||
+    (error instanceof Error && "code" in error && error.code === "secure_context_required")
+  ) {
+    return "reason" in error && error.reason === "insecure_context"
+      ? "Attachments require HTTPS. Open this page over a secure connection."
+      : "Attachments require secure browser cryptography. Use a supported browser over HTTPS.";
+  }
+  if (error instanceof OpenGeniApiContractMismatchError) {
+    return "This page is out of date. Reload it before trying again.";
+  }
+  if (error instanceof OpenGeniStreamError) {
+    return "The live connection could not be restored. Refresh to check the latest state.";
+  }
+  return fallback;
 }
 
 export function isAbortError(error: unknown): boolean {

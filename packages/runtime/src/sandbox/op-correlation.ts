@@ -22,18 +22,48 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 interface ToolCallCorrelation {
+  /** Exact model call identity, kept separate from the transport token. */
+  sourceCallId: string;
   /** The sanitized sdk tool call id (a legal NATS subject-token fragment). */
   callId: string;
   /** The next sub-op ordinal within this tool invocation (mutable). */
   ordinal: number;
-  /** Called before the durable adoption transaction starts. From this point
-   * the op-stream yield path owns exact cancellation if adoption is rejected. */
+  /** Called before durable adoption starts. The live op-stream client owns
+   * cancellation during the transaction, but joined cleanup is not settled. */
   onDurableOpOwnershipTransferStarted?: (opId: string) => void;
+  /** The live transfer/cleanup rejected without committed session ownership. */
+  onDurableOpOwnershipTransferFailed?: (opId: string) => void;
   /** Called synchronously after durable session adoption commits. This lets
    * observers distinguish a completed transfer from its earlier cancellation
-   * handoff; the turn fence has already relinquished cancellation authority. */
+   * delegation; only this completed handoff releases the turn fence. */
   onDurableOpOwnershipTransferred?: (opId: string) => void;
+  /** Local preflight or exact zero-frame terminal proof releases this command's
+   * custody. Remote error codes/text alone are never this proof. */
+  onRemoteOperationNotDispatched?: (opId: string) => void;
+  /** Pins cancellation/observation to the exact backend selected for this op. */
+  onRemoteOperationTransportSelected?: (transport: RemoteOperationControl) => void;
 }
+
+export type RemoteOperationObservation =
+  | { status: "running"; result?: unknown }
+  | { status: "completed"; result: unknown; failure?: unknown };
+
+/** Exact provider control surface for one already-dispatched operation. */
+export type RemoteOperationControl = {
+  cancelExecCommand?(opId: string): Promise<boolean>;
+  observeExecCommand?(opId: string): Promise<RemoteOperationObservation>;
+  /** After the foreground consumer ends without terminal proof, transfer this
+   * exact operation to the durable command ledger with a stop request. True
+   * means custody committed, never merely that cancellation was requested. */
+  abandonExecCommand?(opId: string): Promise<boolean>;
+  /**
+   * End this operation's foreground wait now, as if its yield window ended: a
+   * command that may continue in the background returns its handle and keeps
+   * running. False when the operation has no background yield. Used when a
+   * Steer is waiting; it never cancels or settles the operation.
+   */
+  yieldExecCommand?(opId: string): boolean;
+};
 
 const storage = new AsyncLocalStorage<ToolCallCorrelation>();
 
@@ -60,22 +90,40 @@ export function runWithToolCallCorrelation<T>(
   fn: () => T,
   options: {
     onDurableOpOwnershipTransferStarted?: (opId: string) => void;
+    onDurableOpOwnershipTransferFailed?: (opId: string) => void;
     onDurableOpOwnershipTransferred?: (opId: string) => void;
+    onRemoteOperationNotDispatched?: (opId: string) => void;
+    onRemoteOperationTransportSelected?: (transport: RemoteOperationControl) => void;
   } = {},
 ): T {
   return storage.run(
     {
+      sourceCallId: callId,
       callId: sanitizeOpIdToken(callId),
       ordinal: 0,
       ...(options.onDurableOpOwnershipTransferStarted
         ? { onDurableOpOwnershipTransferStarted: options.onDurableOpOwnershipTransferStarted }
         : {}),
+      ...(options.onDurableOpOwnershipTransferFailed
+        ? { onDurableOpOwnershipTransferFailed: options.onDurableOpOwnershipTransferFailed }
+        : {}),
       ...(options.onDurableOpOwnershipTransferred
         ? { onDurableOpOwnershipTransferred: options.onDurableOpOwnershipTransferred }
+        : {}),
+      ...(options.onRemoteOperationNotDispatched
+        ? { onRemoteOperationNotDispatched: options.onRemoteOperationNotDispatched }
+        : {}),
+      ...(options.onRemoteOperationTransportSelected
+        ? { onRemoteOperationTransportSelected: options.onRemoteOperationTransportSelected }
         : {}),
     },
     fn,
   );
+}
+
+/** The exact tool whose result owns this async chain's foreground op output. */
+export function currentOpToolCallId(): string | null {
+  return storage.getStore()?.sourceCallId ?? null;
 }
 
 /**
@@ -95,15 +143,33 @@ export function nextDurableOpId(): string | null {
   return `${context.callId}:${ordinal}`;
 }
 
-/** Relinquish attempt-level cancellation before durable adoption starts. The
- * op-stream yield path exact-cancels the provider op if the transaction later
- * rejects, so there is never a period with no cancellation owner. */
+/** Delegate cancellation to the live transfer path without settling joined
+ * cleanup. A pending transaction is not durable ownership evidence. */
 export function notifyDurableOpOwnershipTransferStarted(opId: string): void {
   storage.getStore()?.onDurableOpOwnershipTransferStarted?.(opId);
+}
+
+/** Restore turn cancellation when the live transfer/cleanup rejected without
+ * committed adoption. The exact operation remains retained and observable. */
+export function notifyDurableOpOwnershipTransferFailed(opId: string): void {
+  storage.getStore()?.onDurableOpOwnershipTransferFailed?.(opId);
 }
 
 /** Report that one exact provider operation completed its transfer into
  * durable session ownership. Failed adoption deliberately emits no signal. */
 export function notifyDurableOpOwnershipTransferred(opId: string): void {
   storage.getStore()?.onDurableOpOwnershipTransferred?.(opId);
+}
+
+/** Release exact operation custody after local preflight prevented dispatch,
+ * or the pinned runner proves a terminal operation with no output frames.
+ * The latter may have had effects before spawn cleanup, but nothing remains
+ * live. An RPC error alone or an uncertain observation is never proof. */
+export function notifyRemoteOperationNotDispatched(opId: string): void {
+  storage.getStore()?.onRemoteOperationNotDispatched?.(opId);
+}
+
+/** Bind the current operation to its already-resolved physical backend. */
+export function notifyRemoteOperationTransportSelected(transport: RemoteOperationControl): void {
+  storage.getStore()?.onRemoteOperationTransportSelected?.(transport);
 }

@@ -13,21 +13,29 @@
  *    `OPENGENI_PUBLIC_API_BASE_REF`, or diff against a file with
  *    `OPENGENI_PUBLIC_API_BASE_SNAPSHOT`) against the regenerated surface. Every
  *    breaking finding (removal, retyping, narrowing, new required request field)
- *    must match an entry in `scripts/public-api/breaking-changes.json` that
- *    references its deprecation and names a removal major greater than the base
- *    major, AND the candidate must carry the major bump (a pending changeset
- *    declaring `"@opengeni/sdk": major`, or an SDK package version already at
- *    that major). A `securityException` entry skips the major requirement.
+ *    fails. Only an entry in `scripts/public-api/breaking-changes.json` that
+ *    records a security exception or a linked owner approval admits one; a
+ *    major release, changeset or deprecation period never does.
+ * 4. Fails when a route that a published `@opengeni/sdk` calls
+ *    (`scripts/public-api/published-sdk.gen.json`) is no longer registered.
+ *
+ * Pending changesets that declare a major release of `@opengeni/sdk` or
+ * `@opengeni/react` are checked separately on every PR and batch by
+ * `scripts/ci/changeset-plan.ts` (see `major-changesets.ts`).
  *
  * Flags: `--write` regenerates the snapshot; `--json` prints findings as JSON.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { z } from "zod";
-import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
-import { createApp } from "../../apps/api/src/app";
+import { SDK_COMPATIBILITY_MATRIX_PATH, sdkCompatibilityFailures } from "./sdk-compatibility";
+import {
+  PUBLISHED_SDK_PATH,
+  publishedSdkFindings,
+  validatePublishedInventory,
+} from "./published-sdk";
+import { registeredRoutes } from "./registered-routes";
 import {
   ALLOWLIST_PATH,
   SNAPSHOT_PATH,
@@ -41,45 +49,6 @@ import {
 } from "./surface";
 
 const root = resolve(import.meta.dir, "..", "..");
-
-function registeredRoutes(): { method: string; path: string }[] {
-  // Every deployment flag that gates route registration is enabled so the
-  // inventory is the maximal surface a managed deployment can expose.
-  const settings = testSettings({
-    authRequired: true,
-    accessKey: "public-api-surface",
-    productAccessMode: "configured",
-    integrationsEnabled: true,
-    codexSubscriptionEnabled: true,
-    supergrokSubscriptionEnabled: true,
-    sandboxSelfhostedEnabled: true,
-    sandboxDesktopEnabled: true,
-    streamControlEnabled: true,
-    mcpOauthEnabled: true,
-  });
-  const observability = createObservability(settings, { component: "api" });
-  observability.info = () => undefined;
-  observability.warn = () => undefined;
-  const app = createApp({
-    settings,
-    observability,
-    db: {} as never,
-    bus: {} as never,
-    workflowClient: {} as never,
-    managedAuth: null,
-  });
-  const seen = new Set<string>();
-  const routes: { method: string; path: string }[] = [];
-  for (const route of app.routes) {
-    // Middleware (`(c, next)`) and catch-all mounts are not callable routes.
-    if (route.method === "ALL" || route.handler.length >= 2) continue;
-    const key = `${route.method} ${route.path}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    routes.push({ method: route.method, path: route.path });
-  }
-  return routes;
-}
 
 async function contractSchemas(): Promise<Map<string, unknown>> {
   const manifest = JSON.parse(
@@ -144,25 +113,13 @@ function baseSnapshot(): { ref: string; snapshot: Snapshot } | null {
   return null;
 }
 
-/** Pending changesets that declare a major release for the SDK. */
-function pendingSdkMajorBump(): boolean {
-  const directory = join(root, ".changeset");
-  if (!existsSync(directory)) return false;
-  for (const file of readdirSync(directory)) {
-    if (!file.endsWith(".md")) continue;
-    const text = readFileSync(join(directory, file), "utf8");
-    const frontmatter = /^---\n([\s\S]*?)\n---/.exec(text)?.[1] ?? "";
-    if (/["']?@opengeni\/sdk["']?\s*:\s*major\b/.test(frontmatter)) return true;
-  }
-  return false;
-}
-
 async function main(): Promise<void> {
   const write = process.argv.includes("--write");
   const asJson = process.argv.includes("--json");
+  const routes = registeredRoutes();
   const generated = generateSnapshot({
     repositoryRoot: root,
-    registeredRoutes: registeredRoutes(),
+    registeredRoutes: routes,
     contractSchemas: await contractSchemas(),
     toJsonSchema,
   });
@@ -173,21 +130,36 @@ async function main(): Promise<void> {
 
   const base = baseSnapshot();
   const failures: string[] = [];
+  const matrixBase = git([
+    "merge-base",
+    "HEAD",
+    process.env.OPENGENI_PUBLIC_API_BASE_REF?.trim() || "origin/main",
+  ])?.trim();
+  const previousMatrix = matrixBase
+    ? git(["show", `${matrixBase}:${SDK_COMPATIBILITY_MATRIX_PATH}`])
+    : null;
+  failures.push(
+    ...sdkCompatibilityFailures(
+      JSON.parse(readFileSync(join(root, SDK_COMPATIBILITY_MATRIX_PATH), "utf8")),
+      previousMatrix ? JSON.parse(previousMatrix) : undefined,
+    ),
+  );
   let findings: Finding[] = [];
   if (base) {
     findings = diffSnapshots(base.snapshot, generated);
-    const sdkMajor = generated.sdkMajor;
-    const majorBumped = pendingSdkMajorBump() || sdkMajor > base.snapshot.sdkMajor;
     for (const finding of findings.filter((candidate) => candidate.breaking)) {
-      const entry = allowlisted(finding, allowlist, base.snapshot.sdkMajor);
-      if (!entry) {
+      if (!allowlisted(finding, allowlist))
         failures.push(`BREAKING ${finding.message}\n    id: ${finding.id}`);
-      } else if (!entry.securityException && !majorBumped) {
-        failures.push(
-          `BREAKING ${finding.message}\n    id: ${finding.id}\n    allowlisted for removal in major ${entry.removedInMajor}, but no pending changeset declares "@opengeni/sdk": major`,
-        );
-      }
     }
+  }
+
+  const published = validatePublishedInventory(
+    JSON.parse(readFileSync(join(root, PUBLISHED_SDK_PATH), "utf8")),
+  );
+  const publishedResult = publishedSdkFindings(published, routes);
+  for (const finding of publishedResult.breaking) {
+    if (!allowlisted({ ...finding, breaking: true }, allowlist))
+      failures.push(`BREAKING ${finding.message}\n    id: ${finding.id}`);
   }
 
   for (const call of generated.unmatchedSdkCalls) {
@@ -209,7 +181,7 @@ async function main(): Promise<void> {
 
   if (asJson) {
     process.stdout.write(
-      `${JSON.stringify({ base: base?.ref ?? null, findings, failures }, null, 2)}\n`,
+      `${JSON.stringify({ base: base?.ref ?? null, findings, published: publishedResult, failures }, null, 2)}\n`,
     );
   } else {
     process.stdout.write(
@@ -218,6 +190,14 @@ async function main(): Promise<void> {
     if (generated.unmatchedSdkCalls.length > 0) {
       process.stdout.write(
         `[public-api] note: ${generated.unmatchedSdkCalls.length} SDK call sites match no registered route (recorded in the snapshot)\n`,
+      );
+    }
+    process.stdout.write(
+      `[public-api] published SDKs checked: ${published.packages.map((pkg) => `${pkg.name}@${pkg.version}`).join(", ") || "none"}\n`,
+    );
+    for (const gap of publishedResult.resolvedGaps) {
+      process.stdout.write(
+        `[public-api] note: accepted gap is served again and can be removed from ${PUBLISHED_SDK_PATH}: ${gap}\n`,
       );
     }
     if (!base) {
@@ -238,7 +218,7 @@ async function main(): Promise<void> {
       `\n[public-api] FAILED\n${failures.map((line) => `  ${line}`).join("\n")}\n`,
     );
     process.stderr.write(
-      "\nBreaking public API changes need a deprecation, Sunset headers, and a new major; see docs/design/api-compatibility-policy.md.\n",
+      "\nOpengeni does not ship breaking public API changes, in any release. Keep the old behaviour and add the new one alongside it (a new optional field, route or versioned surface over shared logic); see docs/design/api-compatibility-policy.md.\n",
     );
     process.exit(1);
   }

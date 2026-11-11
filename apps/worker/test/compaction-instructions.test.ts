@@ -2,14 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { DEFAULT_AGENT_INSTRUCTIONS } from "@opengeni/config";
 import { allAgentCapabilities, noneAgentCapabilities } from "@opengeni/contracts";
 import {
+  AGENT_INSTRUCTIONS_PREAMBLE,
+  UNATTENDED_SESSION_GUIDANCE,
   appendSessionInstructions,
-  appendWorkspaceGovernance,
   appendWorkspaceMemory,
   composeAgentInstructions,
   inspectPersistentAgentInstructions,
   type ResolvedAgentConfig,
 } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { standaloneCompactionInstructions } from "../src/activities/agent-turn/compaction-prep";
 
 const settings = testSettings({ sandboxBackend: "docker" });
@@ -30,22 +31,18 @@ function agentConfig(overrides: Partial<ResolvedAgentConfig> = {}): ResolvedAgen
 const context = {
   workspaceAgentInstructions: "You are Acme Assistant. {{core}}",
   workspaceAgentIdentity: "You are Acme Assistant.",
-  workspaceGovernance: "GOVERNANCE",
   structuredWorkspacePolicyActive: true,
   workspaceMemory: "MEMORY",
   rig: { name: "python", version: 2 },
 };
 
 describe("standalone compaction instructions (AC16)", () => {
-  test("a legacy session keeps the historical composition byte-for-byte", () => {
+  test("a legacy session keeps the turn composition byte-for-byte", () => {
     const session = { agent: null, instructions: "SESSION", resources: [] };
     expect(standaloneCompactionInstructions({ settings, session, ...context })).toBe(
       appendWorkspaceMemory(
         appendSessionInstructions(
-          appendWorkspaceGovernance(
-            composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, undefined, context.rig),
-            "GOVERNANCE",
-          ),
+          composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, undefined, context.rig),
           "SESSION",
         ),
         "MEMORY",
@@ -64,7 +61,6 @@ describe("standalone compaction instructions (AC16)", () => {
     const turn = inspectPersistentAgentInstructions(settings, {
       agentConfig: config,
       workspaceAgentIdentity: context.workspaceAgentIdentity,
-      workspaceGovernance: "GOVERNANCE",
       workspaceMemory: "MEMORY",
       sessionInstructions: "SESSION",
       rig: context.rig,
@@ -74,6 +70,139 @@ describe("standalone compaction instructions (AC16)", () => {
     expect(instructions).toContain("# Goals");
     expect(instructions).toContain("# Links and rendering");
     expect(instructions).not.toContain("knowledge_search");
-    expect(instructions).toContain("GOVERNANCE");
+    // Governance is a durable history item, never part of the system prompt.
+    expect(instructions).not.toContain("governance");
+  });
+
+  test("a configured session with a search router keeps Tool discovery, as its turn does", () => {
+    const lazySettings = testSettings({ sandboxBackend: "docker", lazyToolSearchEnabled: true });
+    const config = agentConfig();
+    const session = { agent: config, instructions: "SESSION", resources: [] };
+    const turnOptions = {
+      agentConfig: config,
+      workspaceAgentIdentity: context.workspaceAgentIdentity,
+      workspaceMemory: "MEMORY",
+      sessionInstructions: "SESSION",
+      rig: context.rig,
+    };
+    // The turn installs the router: lazy search is on and the route has a transport.
+    const turn = inspectPersistentAgentInstructions(lazySettings, {
+      ...turnOptions,
+      lazyToolTransport: "generic_dispatch",
+      agentPromptToolAvailability: { unavailable: [] },
+    }).composed;
+    expect(turn).toContain("## Tool discovery");
+    expect(
+      standaloneCompactionInstructions({
+        settings: lazySettings,
+        session,
+        ...context,
+        lazyToolTransport: "generic_dispatch",
+        toolRouterInHistory: false,
+      }),
+    ).toBe(turn);
+    // Router history installs the router even with lazy search off.
+    const historyTurn = inspectPersistentAgentInstructions(settings, {
+      ...turnOptions,
+      toolRouterInHistory: true,
+      agentPromptToolAvailability: { unavailable: [] },
+    }).composed;
+    expect(historyTurn).toContain("## Tool discovery");
+    expect(
+      standaloneCompactionInstructions({
+        settings,
+        session,
+        ...context,
+        toolRouterInHistory: true,
+      }),
+    ).toBe(historyTurn);
+  });
+
+  test("an unattended session keeps its guidance through compaction", () => {
+    const metadata = { _opengeniUnattended: true };
+    const legacy = { agent: null, instructions: "SESSION", resources: [], metadata };
+    expect(standaloneCompactionInstructions({ settings, session: legacy, ...context })).toBe(
+      appendWorkspaceMemory(
+        appendSessionInstructions(
+          composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, undefined, context.rig, undefined, {
+            unattended: true,
+          }),
+          "SESSION",
+        ),
+        "MEMORY",
+      ),
+    );
+    const config = agentConfig();
+    const configured = { agent: config, instructions: "SESSION", resources: [], metadata };
+    const instructions = standaloneCompactionInstructions({
+      settings,
+      session: configured,
+      ...context,
+    });
+    expect(instructions).toBe(
+      inspectPersistentAgentInstructions(settings, {
+        agentConfig: config,
+        workspaceAgentIdentity: context.workspaceAgentIdentity,
+        workspaceMemory: "MEMORY",
+        sessionInstructions: "SESSION",
+        rig: context.rig,
+        unattended: true,
+      }).composed,
+    );
+    expect(instructions).toContain(UNATTENDED_SESSION_GUIDANCE);
+    // An interactive session never carries it.
+    expect(
+      standaloneCompactionInstructions({
+        settings,
+        session: { ...configured, metadata: {} },
+        ...context,
+      }),
+    ).not.toContain(UNATTENDED_SESSION_GUIDANCE);
+  });
+
+  test("an agent chat carries its agent instructions exactly as its turns do", () => {
+    const agentInstructions = "Answer as a pirate.";
+    const config = agentConfig();
+    const configured = { agent: config, instructions: "SESSION", resources: [] };
+    const instructions = standaloneCompactionInstructions({
+      settings,
+      session: configured,
+      ...context,
+      agentInstructions,
+    });
+    expect(instructions).toBe(
+      inspectPersistentAgentInstructions(settings, {
+        agentConfig: config,
+        workspaceAgentIdentity: context.workspaceAgentIdentity,
+        workspaceMemory: "MEMORY",
+        sessionInstructions: "SESSION",
+        agentInstructions,
+        rig: context.rig,
+      }).composed,
+    );
+    expect(instructions).toContain(`${AGENT_INSTRUCTIONS_PREAMBLE}${agentInstructions}`);
+    const legacy = { agent: null, instructions: "SESSION", resources: [] };
+    expect(
+      standaloneCompactionInstructions({
+        settings,
+        session: legacy,
+        ...context,
+        agentInstructions,
+      }),
+    ).toBe(
+      appendWorkspaceMemory(
+        `${composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, undefined, context.rig)}\n\n${AGENT_INSTRUCTIONS_PREAMBLE}${agentInstructions}\n\nSESSION`,
+        "MEMORY",
+      ),
+    );
+    // A deleted agent (no instructions) composes the plain chat's text.
+    expect(
+      standaloneCompactionInstructions({
+        settings,
+        session: legacy,
+        ...context,
+        agentInstructions: null,
+      }),
+    ).toBe(standaloneCompactionInstructions({ settings, session: legacy, ...context }));
   });
 });

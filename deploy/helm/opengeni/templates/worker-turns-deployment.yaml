@@ -1,5 +1,12 @@
 {{- if .Values.worker.enabled }}
-{{- $extraEnv := include "opengeni.extraEnv" (dict "root" . "entries" .Values.worker.extraEnv "reserved" (list "OPENGENI_WORKER_ROLE" "OPENGENI_WORKER_HTTP_PORT" "OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE")) }}
+{{- $shutdownEnv := include "opengeni.turnWorkerShutdownEnv" . | trim }}
+{{- $reservedEnv := list "OPENGENI_WORKER_ROLE" "OPENGENI_WORKER_HTTP_PORT" "OPENGENI_POD_UID" "OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE" }}
+{{- if $shutdownEnv }}
+{{- range (fromYamlArray $shutdownEnv) }}
+{{- $reservedEnv = append $reservedEnv .name }}
+{{- end }}
+{{- end }}
+{{- $extraEnv := include "opengeni.extraEnv" (dict "root" . "entries" .Values.worker.extraEnv "reserved" $reservedEnv) }}
 {{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" (.Values.worker.turns.priorityClassName | default .Values.worker.priorityClassName) "tier" "execution") }}
 apiVersion: apps/v1
 kind: Deployment
@@ -9,7 +16,7 @@ metadata:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker-turns
 spec:
-  replicas: {{ .Values.worker.turns.replicaCount }}
+  {{- include "opengeni.replicas" (dict "root" . "name" (printf "%s-worker-turns" (include "opengeni.fullname" .)) "replicaCount" .Values.worker.turns.replicaCount "autoscaling" .Values.worker.turns.autoscaling) | indent 2 }}
   {{- with .Values.worker.turns.strategy }}
   strategy:
     {{- toYaml . | nindent 4 }}
@@ -36,7 +43,7 @@ spec:
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
       enableServiceLinks: false
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
-      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ include "opengeni.turnWorkerTerminationGracePeriodSeconds" . }}
       {{- if $priorityClassName }}
       priorityClassName: {{ $priorityClassName | quote }}
       {{- end }}
@@ -45,6 +52,10 @@ spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with include "opengeni.computeControl.trustInitContainer" (dict "root" . "workload" .Values.worker) }}
+      initContainers:
+        {{- . | nindent 8 }}
       {{- end }}
       containers:
         - name: worker
@@ -72,15 +83,30 @@ spec:
               value: {{ .Values.worker.containerPort | quote }}
             - name: OPENGENI_WORKER_ROLE
               value: turn
+            - name: OPENGENI_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            {{- with $shutdownEnv }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
             {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .)) | nindent 12 }}
             {{- end }}
+            {{- with include "opengeni.computeControl.trustEnv" . }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "opengeni.databasePasswordFiles.env" . }}{{ . | nindent 12 }}{{- end }}
             {{- with $extraEnv }}
             {{- . | nindent 12 }}
             {{- end }}
-          {{- with .Values.worker.extraVolumeMounts }}
+          {{- $computeTrusted := include "opengeni.computeControl.trusted" . }}
+          {{- $databasePasswordFiles := include "opengeni.databasePasswordFiles.enabled" . }}
+          {{- if or .Values.worker.extraVolumeMounts $computeTrusted $databasePasswordFiles }}
           volumeMounts:
+            {{- with include "opengeni.computeControl.trustVolumeMount" . }}{{ . | nindent 12 }}{{- end }}
+            {{- with include "opengeni.databasePasswordFiles.volumeMount" . }}{{ . | nindent 12 }}{{- end }}
+            {{- with .Values.worker.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           {{- if (((.Values.worker).probes).readiness).enabled }}
           readinessProbe:
@@ -94,9 +120,13 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- with .Values.worker.extraVolumes }}
+      {{- if or .Values.worker.extraVolumes $computeTrusted $databasePasswordFiles }}
       volumes:
+        {{- with include "opengeni.computeControl.trustVolume" . }}{{ . | nindent 8 }}{{- end }}
+        {{- with include "opengeni.databasePasswordFiles.volume" . }}{{ . | nindent 8 }}{{- end }}
+        {{- with .Values.worker.extraVolumes }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       {{- if ((.Values.worker).topologySpreadConstraints).enabled }}
       topologySpreadConstraints:

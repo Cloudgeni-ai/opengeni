@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  ChatInteractiveBlock,
   PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
   PublishedHtmlArtifactFrame,
   openGeniSiteBridgePortFromBootstrap,
@@ -55,6 +56,23 @@ describe("published HTML artifacts", () => {
     ).toContain('aria-label="Preview"');
   });
 
+  it("lets the host replace or hide the Live indicator", () => {
+    const replaced = renderToStaticMarkup(
+      <ArtifactSandbox
+        html="<h1>App</h1>"
+        title="Status"
+        liveStatus={<a href="https://status.sites.example/">Open status</a>}
+      />,
+    );
+    expect(replaced).toContain('href="https://status.sites.example/"');
+    expect(replaced).not.toContain(">Live<");
+    const hidden = renderToStaticMarkup(
+      <ArtifactSandbox html="<h1>App</h1>" title="Status" liveStatus={null} />,
+    );
+    expect(hidden).not.toContain("Live");
+    expect(hidden).toContain('aria-label="Reload Site"');
+  });
+
   it("promotes the chat preview to the modal top layer without replacing its iframe", async () => {
     const showModal = spyOn(HTMLDialogElement.prototype, "showModal");
     const show = spyOn(HTMLDialogElement.prototype, "show");
@@ -66,6 +84,8 @@ describe("published HTML artifacts", () => {
       const dialog = container.querySelector("dialog")!;
       const iframe = dialog.querySelector("iframe")!;
       expect(dialog.open).toBe(true);
+      expect(dialog.hasAttribute("data-artifact-fullscreen")).toBe(false);
+      expect(dialog.querySelector("[data-window-drag]")).toBeNull();
       await act(async () =>
         (
           container.querySelector('[aria-label="Open Site full screen"]') as HTMLButtonElement
@@ -74,6 +94,8 @@ describe("published HTML artifacts", () => {
       expect(showModal).toHaveBeenCalledTimes(1);
       expect(dialog.querySelector("iframe")).toBe(iframe);
       expect(dialog.className).toContain("fixed");
+      expect(dialog.getAttribute("data-artifact-fullscreen")).toBe("true");
+      expect(dialog.querySelector("[data-window-drag]")?.contains(iframe)).toBe(false);
       await act(async () =>
         [...container.querySelectorAll("button")]
           .find((button) => button.textContent === "Back")!
@@ -82,11 +104,118 @@ describe("published HTML artifacts", () => {
       expect(show).toHaveBeenCalledTimes(1);
       expect(dialog.querySelector("iframe")).toBe(iframe);
       expect(dialog.open).toBe(true);
+      expect(dialog.hasAttribute("data-artifact-fullscreen")).toBe(false);
+      expect(dialog.querySelector("[data-window-drag]")).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();
       showModal.mockRestore();
       show.mockRestore();
+    }
+  });
+
+  it("lets the host control full screen and reports the person's requests", async () => {
+    const showModal = spyOn(HTMLDialogElement.prototype, "showModal");
+    const requests: boolean[] = [];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const render = (fullScreen: boolean) =>
+      root.render(
+        <ArtifactSandbox
+          html="<h1>App</h1>"
+          title="Site"
+          fullScreen={fullScreen}
+          onFullScreenChange={(next) => requests.push(next)}
+        />,
+      );
+    try {
+      await act(async () => render(true));
+      const dialog = container.querySelector("dialog")!;
+      expect(showModal).toHaveBeenCalledTimes(1);
+      expect(dialog.getAttribute("data-artifact-fullscreen")).toBe("true");
+      const back = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Back",
+      )!;
+      await act(async () => back.click());
+      // The host owns the state: a request alone does not leave full screen.
+      expect(requests).toEqual([false]);
+      expect(dialog.getAttribute("data-artifact-fullscreen")).toBe("true");
+      await act(async () => render(false));
+      expect(dialog.hasAttribute("data-artifact-fullscreen")).toBe(false);
+      await act(async () =>
+        (
+          container.querySelector('[aria-label="Open Site full screen"]') as HTMLButtonElement
+        ).click(),
+      );
+      expect(requests).toEqual([false, true]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      showModal.mockRestore();
+    }
+  });
+
+  it("sizes an inline chat visual to its content, up to a bound", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const client = {
+      getWorkspaceArtifact: async () => {
+        throw new Error("not used");
+      },
+      getWorkspaceArtifactHtml: async () => {
+        throw new Error("not used");
+      },
+    } as unknown as Parameters<typeof ChatInteractiveBlock>[0]["client"];
+    try {
+      await act(async () =>
+        root.render(
+          <ChatInteractiveBlock
+            workspaceId="ws-1"
+            kind="html"
+            content='<div class="chart">five bars</div>'
+            client={client}
+          />,
+        ),
+      );
+      // Load the deferred preview, as scrolling it into view would.
+      await act(async () => container.querySelector("button")!.click());
+      const iframe = container.querySelector("iframe")!;
+      // No fixed-height slot around the frame: the frame decides the height.
+      expect(iframe.closest("[style*='height: 410px']")).toBeNull();
+      expect(iframe.style.height).toBe("360px");
+      const report = async (height: number) =>
+        act(async () => {
+          window.dispatchEvent(
+            new MessageEvent("message", {
+              data: { type: "opengeni.preview.height", height },
+              source: iframe.contentWindow,
+            }),
+          );
+        });
+      // A short chart whose content is slightly taller than the old fixed
+      // viewport gets its full height, so no inner scrollbar.
+      await report(372.4);
+      expect(iframe.style.height).toBe("373px");
+      await report(214);
+      expect(iframe.style.height).toBe("214px");
+      // Very tall content stops at the bound and scrolls inside.
+      await report(5000);
+      expect(iframe.style.height).toBe("640px");
+      // Reports from any other window are ignored.
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            data: { type: "opengeni.preview.height", height: 100 },
+            source: window,
+          }),
+        );
+      });
+      expect(iframe.style.height).toBe("640px");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
     }
   });
 

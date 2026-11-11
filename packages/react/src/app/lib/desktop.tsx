@@ -1,0 +1,222 @@
+/**
+ * The web app inside an Opengeni desktop app. The desktop shell exposes a
+ * small bridge (`window.opengeniDesktop`); everything here degrades to the
+ * plain web when it is absent or lacks a capability.
+ */
+import { OPENGENI_DESKTOP_APP_HEADER } from "@opengeni/contracts";
+import {
+  DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT,
+  getDesktopBridge,
+  hasDesktopCapability,
+  type DesktopBridge,
+  type DesktopCapability,
+  type DesktopPlatform,
+} from "@opengeni/sdk/desktop-bridge";
+
+import { reportDesktopBridgeMissing } from "./client-signals";
+
+export const desktopBridge: DesktopBridge | null =
+  typeof window === "undefined" ? null : getDesktopBridge();
+
+/**
+ * The name a window this app opens without an opener handle carries
+ * (`openBlankTab`), so its page still knows it is not the app's own window.
+ */
+export const OPENED_WINDOW_NAME = "opengeni-opened-window";
+
+/**
+ * The platform of the Opengeni desktop app from its user agent, which
+ * Electron writes as `… Opengeni/<version> Chrome/… Electron/<version> …`;
+ * null anywhere else, including other Electron apps.
+ */
+export function desktopPlatformFromUserAgent(userAgent: string): DesktopPlatform | null {
+  if (!/\bOpengeni\/\d[^\s]*\s.*\bElectron\/\d/u.test(userAgent)) return null;
+  if (/\bMacintosh\b|\bMac OS X\b/u.test(userAgent)) return "macos";
+  if (/\bWindows\b/u.test(userAgent)) return "windows";
+  return "linux";
+}
+
+/** The desktop app's version from its user agent (`Opengeni/<version>`), or null. */
+export function desktopAppVersionFromUserAgent(userAgent: string): string | null {
+  return /\bOpengeni\/(\d[^\s]*)\s.*\bElectron\/\d/u.exec(userAgent)?.[1] ?? null;
+}
+
+/** The parts of a window that decide whether it is the desktop app's own. */
+export type DesktopWindowView = {
+  opener: unknown;
+  top: unknown;
+  name: string;
+  navigator: { userAgent: string };
+};
+
+/**
+ * The desktop app's platform in a window. The bridge says so; without it (a
+ * page the shell's preload didn't reach) the app's user agent still does, so
+ * the page keeps room for the native window controls drawn over it.
+ * Capabilities come only from the bridge. A window the page opened (sign-in
+ * and connect flows, `openBlankTab`) has the system title bar and no bridge,
+ * so it keeps the web layout; so does a page in a frame.
+ */
+export function desktopPlatformIn(
+  bridge: DesktopBridge | null,
+  view: DesktopWindowView,
+): DesktopPlatform | null {
+  if (bridge) return bridge.platform;
+  if (view.opener || view.top !== view || view.name === OPENED_WINDOW_NAME) return null;
+  return desktopPlatformFromUserAgent(view.navigator.userAgent);
+}
+
+/** The desktop app's platform for this page; see `desktopPlatformIn`. */
+export const desktopPlatform: DesktopPlatform | null =
+  typeof window === "undefined" ? null : desktopPlatformIn(desktopBridge, window);
+
+/**
+ * Count once when the page is the desktop app's own window by its user agent
+ * but the shell's bridge is missing, so we learn how often and where that
+ * happens. Call after the client signal reporter is installed; while the page
+ * loads, pass the pattern of the route the router is loading, since the
+ * route it shows is not resolved yet.
+ */
+export function reportMissingDesktopBridge(routePattern?: () => string): void {
+  if (desktopBridge || !desktopPlatform) return;
+  reportDesktopBridgeMissing(
+    desktopPlatform,
+    desktopAppVersionFromUserAgent(navigator.userAgent),
+    routePattern,
+  );
+}
+
+/**
+ * Whether the page runs in the macOS app.
+ * @deprecated The desktop window bar now holds the window controls above the
+ * page, so no page layout needs to make room for them.
+ */
+export const windowControlsInPage = desktopPlatform === "macos";
+
+export function desktopCapability(capability: DesktopCapability): DesktopBridge | null {
+  return hasDesktopCapability(desktopBridge, capability) ? desktopBridge : null;
+}
+
+/**
+ * Marks the console's API requests inside the desktop app, so a sign-in that
+ * finishes in the person's browser brings them back to the app.
+ */
+export function desktopAppHeaders(): Record<string, string> {
+  return desktopBridge ? { [OPENGENI_DESKTOP_APP_HEADER]: desktopBridge.platform } : {};
+}
+
+declare global {
+  interface Window {
+    /** The shell calls this to move the app to a path without a reload. */
+    __opengeniDesktopNavigate?: ((path: string) => void) | undefined;
+  }
+}
+
+/**
+ * How far down the macOS window the traffic lights' centre is, in CSS pixels
+ * at the page's zoom, or null for other platforms (and without the bridge,
+ * where the page keeps the current shell's 22px). The sidebar toggle and a
+ * chat's header are centred on this line, so they line up with the lights.
+ * The shell centres the lights on its window bar (`windowBarHeight`); shells
+ * that don't report it (0.1.33 and older) centre them on a 56px row.
+ */
+export function desktopWindowControlsCentre(bridge: DesktopBridge | null): number | null {
+  if (bridge?.platform !== "macos") return null;
+  const reported = bridge.windowBarHeight;
+  const height =
+    typeof reported === "number" && Number.isFinite(reported) && reported > 0
+      ? reported
+      : DESKTOP_LEGACY_MAC_WINDOW_BAR_HEIGHT;
+  return height / 2 / desktopZoom(bridge);
+}
+
+/** The page's zoom factor in the desktop app (1 at 100%, and in shells that don't report it). */
+function desktopZoom(bridge: DesktopBridge | null): number {
+  let zoom = 1;
+  try {
+    zoom = bridge?.zoomFactor?.() ?? 1;
+  } catch {
+    // An older or failing shell: assume 100%.
+  }
+  return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+}
+
+/**
+ * Tells the page where the traffic lights' centre line is
+ * (`--og-window-controls-center`) and its zoom (`--og-window-zoom`), so the
+ * window bar's controls keep their place in the window beside the lights;
+ * kept up to date when the page zooms (which resizes its viewport). See
+ * `desktopWindowControlsCentre`.
+ */
+export function applyDesktopWindowBar(root: HTMLElement, bridge: DesktopBridge | null): void {
+  const apply = () => {
+    const centre = desktopWindowControlsCentre(bridge);
+    if (centre == null) return;
+    root.style.setProperty("--og-window-controls-center", `${centre}px`);
+    root.style.setProperty("--og-window-zoom", String(desktopZoom(bridge)));
+  };
+  apply();
+  if (bridge?.platform === "macos")
+    root.ownerDocument.defaultView?.addEventListener("resize", apply);
+}
+
+/**
+ * Before the first render: mark the document so the desktop layout applies
+ * from the first frame (the window bar for the window controls, draggable title areas,
+ * window materials), and let the shell navigate client-side.
+ */
+export function installDesktopShell(navigate: (path: string) => void): void {
+  if (desktopPlatform) document.documentElement.dataset.desktop = desktopPlatform;
+  applyDesktopWindowBar(document.documentElement, desktopBridge);
+  if (!desktopBridge) return;
+  window.__opengeniDesktopNavigate = (path: string) => {
+    if (typeof path === "string" && path.startsWith("/") && !path.startsWith("//")) navigate(path);
+  };
+}
+
+/**
+ * The desktop app is one long-lived window: once it is idle after opening,
+ * fetch the code for the pages people move between, so the first visit to
+ * each one renders at once instead of showing a loading state.
+ */
+export function warmDesktopPages(
+  pages: readonly { preload?: (() => unknown) | undefined }[],
+): void {
+  if (!desktopBridge) return;
+  const warm = () => {
+    for (const page of pages) {
+      try {
+        void Promise.resolve(page.preload?.()).catch(() => undefined);
+      } catch {
+        // A page that fails to load now loads (and reports) on its first visit.
+      }
+    }
+  };
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(warm, { timeout: 3_000 });
+  } else {
+    window.setTimeout(warm, 1_500);
+  }
+}
+
+const RESTORE_KEY = "opengeni.desktop.webSessionRestoredAt";
+
+/**
+ * The page found itself signed out inside the desktop app. The app is still
+ * signed in, so it renews the window's web sign-in and the page reloads. At
+ * most once a minute, so a server that keeps refusing can't loop the page.
+ */
+export async function restoreDesktopWebSession(): Promise<boolean> {
+  const bridge = desktopCapability("accounts");
+  if (!bridge) return false;
+  try {
+    const last = Number(window.sessionStorage.getItem(RESTORE_KEY) ?? 0);
+    if (Date.now() - last < 60_000) return false;
+    window.sessionStorage.setItem(RESTORE_KEY, String(Date.now()));
+  } catch {
+    return false;
+  }
+  const restored = await bridge.accounts.restoreWebSession().catch(() => false);
+  if (restored) window.location.reload();
+  return restored;
+}

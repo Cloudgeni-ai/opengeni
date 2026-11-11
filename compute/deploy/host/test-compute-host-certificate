@@ -1,0 +1,380 @@
+#!/usr/bin/env bash
+# Tests compute-host-certificate against a stand-in for the control service
+# and the metadata server (a curl shim that signs requests with a test
+# authority), on Linux with openssl, jq and flock:
+#
+#   compute/deploy/host/test-compute-host-certificate
+#
+# - a current, matching pair is left alone (no request);
+# - a pair whose key is not the certificate's, as an interrupted renewal
+#   of the old layout left it, or whose certificate does not verify against
+#   ca.pem, is not current and is renewed;
+# - each renewal publishes key and certificate together: host.pem and
+#   host.key point through one symlink, switched in one rename;
+# - a run waits for another one's lock;
+# - off GCP, with no certificate, the request is left in request/, and the
+#   certificate put back there is installed by the next run;
+# - activation is recoverable: a run that fails after switching the pair,
+#   in cleaning up, in asking systemd whether the agent runs, or in
+#   restarting the agent, leaves the restart owed, and the next run
+#   restarts the agent first, even when the failed restart stopped it; with
+#   nothing owed, no restart;
+# - a run stopped between pointing host.pem and host.key through the new
+#   pair (moving from the old layout) is finished from the published pair
+#   by the next one, on GCP and off it, with no new certificate.
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+script="$here/compute-host-certificate"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+failures=0
+ok() { echo "ok: $*"; }
+bad() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
+
+# The test authority, and a second one no pair here verifies against.
+authority() {
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
+    -subj "/CN=$2" -keyout "$1.key" -out "$1.pem" 2>/dev/null
+}
+authority "$work/ca" "test hosts"
+authority "$work/other" "other hosts"
+
+# A certificate of authority `$1` for the request `$2`, valid `$3` days.
+sign() {
+  openssl x509 -req -in "$2" -CA "$1.pem" -CAkey "$1.key" -CAcreateserial -days "$3" \
+    -extfile <(printf 'subjectAltName=DNS:host-1\nextendedKeyUsage=serverAuth,clientAuth\n') 2>/dev/null
+}
+
+# The shims: curl answers the metadata server (when $work/gce exists) and
+# the certificate route, logging each call. systemctl logs each call; the
+# agent is active when $work/active exists, systemd cannot be asked when
+# $work/fail-show does, and a restart starts the agent, or fails when
+# $work/fail-restart exists (and leaves the agent stopped and failed when
+# $work/stop-on-fail does too). The failure points: rm fails on a pair
+# under certificates/ when $work/fail-rm exists, mv on host.key when
+# $work/fail-mv does, and mv on restart-owed when $work/fail-mv-owed does.
+real_rm=$(command -v rm)
+real_mv=$(command -v mv)
+mkdir -p "$work/bin"
+cat >"$work/bin/curl" <<EOF
+#!/usr/bin/env bash
+out= data= url=
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) out=\$2; shift 2 ;;
+    --data-binary) data=\${2#@}; shift 2 ;;
+    -H | --cacert | --cert | --key | --max-time | --retry | --data-urlencode) shift 2 ;;
+    -*) shift ;;
+    *) url=\$1; shift ;;
+  esac
+done
+echo "\$url" >>"$work/calls"
+case "\$url" in
+  *computeMetadata*/instance/id) [ -e "$work/gce" ] && echo 123 ;;
+  *computeMetadata*/identity*) [ -e "$work/gce" ] && echo a.b.c ;;
+  */v1/hosts/certificate)
+    [ -e "$work/slow" ] && sleep 3
+    jq -r .csr "\$data" >"$work/asked.csr"
+    certificate=\$(openssl x509 -req -in "$work/asked.csr" -CA "$work/ca.pem" -CAkey "$work/ca.key" \
+      -CAcreateserial -days 7 2>/dev/null)
+    jq -n --arg certificate "\$certificate" --rawfile authorities "$work/ca.pem" \
+      '{name: "host-1", certificate: \$certificate, authorities: \$authorities, not_after_ms: 0}' >"\$out" ;;
+  *) exit 22 ;;
+esac
+EOF
+cat >"$work/bin/systemctl" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$work/systemctl.log"
+case "\$1" in
+  is-active) [ -e "$work/active" ] ;;
+  show)
+    if [ -e "$work/fail-show" ]; then
+      echo "Failed to connect to bus: No such file or directory" >&2
+      exit 1
+    fi
+    if [ -e "$work/active" ]; then echo active
+    elif [ -e "$work/unit-failed" ]; then echo failed
+    else echo inactive
+    fi ;;
+  restart)
+    if [ -e "$work/fail-restart" ]; then
+      if [ -e "$work/stop-on-fail" ]; then
+        rm -f "$work/active"
+        : >"$work/unit-failed"
+      fi
+      exit 1
+    fi
+    rm -f "$work/unit-failed"
+    : >"$work/active" ;;
+esac
+EOF
+cat >"$work/bin/rm" <<EOF
+#!/usr/bin/env bash
+if [ -e "$work/fail-rm" ]; then
+  for arg in "\$@"; do
+    case "\$arg" in certificates/*) echo "rm: injected failure on \$arg" >&2; exit 1 ;; esac
+  done
+fi
+exec "$real_rm" "\$@"
+EOF
+cat >"$work/bin/mv" <<EOF
+#!/usr/bin/env bash
+if [ -e "$work/fail-mv" ] && [ "\${!#}" = host.key ]; then
+  echo "mv: injected failure on host.key" >&2
+  exit 1
+fi
+if [ -e "$work/fail-mv-owed" ] && [ "\${!#}" = restart-owed ]; then
+  echo "mv: injected failure on restart-owed" >&2
+  exit 1
+fi
+exec "$real_mv" "\$@"
+EOF
+chmod +x "$work/bin/curl" "$work/bin/systemctl" "$work/bin/rm" "$work/bin/mv"
+export PATH="$work/bin:$PATH"
+
+etc="$work/etc"
+mkdir -p "$etc"
+cp "$work/ca.pem" "$etc/ca.pem"
+printf 'COMPUTE_CONTROL=https://control.example:8443\nCOMPUTE_NAME=host-1\n' >"$etc/host.env"
+run() {
+  : >"$work/calls"
+  : >"$work/systemctl.log"
+  COMPUTE_CERTIFICATE_DIR="$etc" COMPUTE_METADATA_URL=http://metadata.invalid/computeMetadata/v1 \
+    "$script" --config "$etc/host.env" "$@"
+}
+requests() { grep -c '/v1/hosts/certificate' "$work/calls" || true; }
+restarts() { grep -c '^restart compute-host' "$work/systemctl.log" || true; }
+matches() {
+  [ "$(openssl x509 -in "$etc/host.pem" -noout -pubkey)" = "$(openssl pkey -in "$etc/host.key" -pubout)" ]
+}
+
+# The old layout: plain files, a current matching pair.
+touch "$work/gce"
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=host-1 \
+  -keyout "$etc/host.key" -out "$work/old.csr" 2>/dev/null
+sign "$work/ca" "$work/old.csr" 7 >"$etc/host.pem"
+run >/dev/null
+[ "$(requests)" = 0 ] && ok "a current matching pair is left alone" || bad "a current pair was renewed"
+
+# An interrupted renewal of the old layout: the new key, the old certificate.
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$etc/host.key" 2>/dev/null
+run >/dev/null
+if [ "$(requests)" = 1 ] && matches && [ -L "$etc/host.pem" ] && [ -L "$etc/host.key" ] &&
+  [ "$(readlink "$etc/host.pem")" = certificate/host.pem ] &&
+  [ "$(readlink "$etc/host.key")" = certificate/host.key ] && [ -L "$etc/certificate" ]; then
+  ok "a mismatched pair is renewed, and the pair published through one symlink"
+else
+  bad "a mismatched pair: requests $(requests), matches $(matches && echo yes || echo no)"
+fi
+first=$(readlink "$etc/certificate")
+run >/dev/null
+[ "$(requests)" = 0 ] && ok "the published pair is current" || bad "the published pair was renewed"
+
+# A pair that does not verify against ca.pem.
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=host-1 \
+  -keyout "$work/foreign.key" -out "$work/foreign.csr" 2>/dev/null
+dir=$etc/$(readlink "$etc/certificate")
+sign "$work/other" "$work/foreign.csr" 7 >"$dir/host.pem"
+cp "$work/foreign.key" "$dir/host.key"
+run >/dev/null
+if [ "$(requests)" = 1 ] && matches && openssl verify -CAfile "$etc/ca.pem" "$etc/host.pem" >/dev/null 2>&1 &&
+  [ "$(readlink "$etc/certificate")" != "$first" ] && [ "$(find "$etc/certificates" -mindepth 1 -maxdepth 1 | wc -l)" = 1 ]; then
+  ok "a pair of another authority is renewed; one pair is kept"
+else
+  bad "a foreign pair: requests $(requests)"
+fi
+
+# --force renews a current pair; a second run waits for the first's lock.
+touch "$work/slow"
+start=$(date +%s)
+run --force >/dev/null &
+sleep 1
+run >/dev/null
+wait
+rm -f "$work/slow"
+elapsed=$(($(date +%s) - start))
+if [ "$elapsed" -ge 3 ] && matches; then
+  ok "a run waits for another's lock (${elapsed} s)"
+else
+  bad "a run did not wait for the lock (${elapsed} s)"
+fi
+
+# Off GCP with nothing current: the request is left, and the certificate
+# put back is installed.
+rm -f "$work/gce"
+rm -rf "$etc/certificates" "$etc/certificate" "$etc/host.pem" "$etc/host.key"
+if run >/dev/null 2>&1; then
+  bad "off GCP with no certificate, the run succeeded"
+elif [ -s "$etc/request/host.csr" ] && [ -s "$etc/request/host.key" ]; then
+  ok "off GCP with no certificate, the request is left in request/"
+else
+  bad "no request left"
+fi
+sign "$work/ca" "$etc/request/host.csr" 7 >"$etc/request/host.pem"
+run >/dev/null
+if [ "$(requests)" = 0 ] && matches && [ ! -e "$etc/request" ]; then
+  ok "the certificate issued for the request is installed"
+else
+  bad "the issued certificate was not installed"
+fi
+# And then renews by itself, with that certificate.
+run --force >/dev/null
+[ "$(requests)" = 1 ] && matches && ok "it renews by its certificate" || bad "no renewal by certificate"
+
+# Activation. The agent runs from here on.
+touch "$work/gce" "$work/active"
+run >/dev/null
+[ "$(restarts)" = 0 ] && ok "with nothing owed, a current pair restarts nothing" ||
+  bad "a current pair restarted the agent $(restarts) times"
+
+# A failure cleaning up after the switch: the new pair is published, the
+# agent not restarted; the next run restarts it, with no new certificate.
+before=$(readlink "$etc/certificate")
+touch "$work/fail-rm"
+if run --force >/dev/null 2>&1; then
+  bad "a run whose cleanup failed succeeded"
+elif [ "$(readlink "$etc/certificate")" != "$before" ] && matches && [ "$(restarts)" = 0 ] &&
+  [ -e "$etc/restart-owed" ]; then
+  ok "a cleanup failure after the switch leaves the new pair published and the restart owed"
+else
+  bad "after a cleanup failure: restarts $(restarts), owed $([ -e "$etc/restart-owed" ] && echo yes || echo no)"
+fi
+rm -f "$work/fail-rm"
+run >/dev/null
+if [ "$(restarts)" = 1 ] && [ "$(requests)" = 0 ] && [ ! -e "$etc/restart-owed" ]; then
+  ok "the next run restarts the agent for it, with no new certificate"
+else
+  bad "the next run: restarts $(restarts), requests $(requests)"
+fi
+run >/dev/null
+[ "$(restarts)" = 0 ] && ok "once restarted, nothing is owed" || bad "restarted again"
+
+# A failed restart: owed until a restart succeeds.
+touch "$work/fail-restart"
+if run --force >/dev/null 2>&1; then
+  bad "a run whose restart failed succeeded"
+elif [ "$(restarts)" = 1 ] && [ -e "$etc/restart-owed" ] && matches; then
+  ok "a failed restart leaves the restart owed"
+else
+  bad "after a failed restart: restarts $(restarts)"
+fi
+run >/dev/null 2>&1 || true
+[ -e "$etc/restart-owed" ] && [ "$(restarts)" = 1 ] && ok "it stays owed while the restart fails" ||
+  bad "the owed restart was dropped while failing"
+rm -f "$work/fail-restart"
+run >/dev/null
+if [ "$(restarts)" = 1 ] && [ "$(requests)" = 0 ] && [ ! -e "$etc/restart-owed" ]; then
+  ok "the next run's restart pays it"
+else
+  bad "the owed restart: restarts $(restarts), requests $(requests)"
+fi
+
+# systemd cannot be asked whether the agent runs: the restart stays owed.
+touch "$work/fail-show"
+if run --force >/dev/null 2>&1; then
+  bad "a run that could not ask systemd succeeded"
+elif [ "$(restarts)" = 0 ] && [ -e "$etc/restart-owed" ] && matches; then
+  ok "a run that cannot ask systemd leaves the restart owed"
+else
+  bad "without systemd's answer: restarts $(restarts), owed $([ -e "$etc/restart-owed" ] && echo yes || echo no)"
+fi
+rm -f "$work/fail-show"
+run >/dev/null
+if [ "$(restarts)" = 1 ] && [ "$(requests)" = 0 ] && [ ! -e "$etc/restart-owed" ]; then
+  ok "the next run, with systemd's answer, restarts the agent"
+else
+  bad "after systemd answered again: restarts $(restarts), requests $(requests)"
+fi
+
+# A restart that stopped the agent and failed to start it: the next run
+# starts it, though it no longer runs.
+touch "$work/fail-restart" "$work/stop-on-fail"
+if run --force >/dev/null 2>&1; then
+  bad "a run whose restart stopped the agent succeeded"
+elif [ ! -e "$work/active" ] && [ "$(cat "$etc/restart-owed")" = tried ]; then
+  ok "a restart that stopped the agent leaves the restart owed, marked tried"
+else
+  bad "after a restart that stopped the agent: owed $(cat "$etc/restart-owed" 2>/dev/null || echo none)"
+fi
+# A tried restart is not marked again: a run stopped while marking it
+# cannot unmark it.
+rm -f "$work/stop-on-fail"
+touch "$work/fail-mv-owed"
+marked=$(stat -c '%i %y' "$etc/restart-owed")
+run >/dev/null 2>&1 || true
+if [ "$(restarts)" = 1 ] && [ "$(cat "$etc/restart-owed")" = tried ] &&
+  [ "$(stat -c '%i %y' "$etc/restart-owed")" = "$marked" ]; then
+  ok "a retry of a tried restart keeps it marked tried, without marking it again"
+else
+  bad "a retry of a tried restart: restarts $(restarts), owed $(cat "$etc/restart-owed" 2>/dev/null || echo none)"
+fi
+rm -f "$work/fail-restart" "$work/fail-mv-owed"
+run >/dev/null
+if [ "$(restarts)" = 1 ] && [ -e "$work/active" ] && [ "$(requests)" = 0 ] && [ ! -e "$etc/restart-owed" ]; then
+  ok "the next run starts the agent the failed restart stopped"
+else
+  bad "the stopped agent: restarts $(restarts), running $([ -e "$work/active" ] && echo yes || echo no)"
+fi
+
+# A run stopped while marking a restart tried leaves the debt as it was,
+# and the next run pays it.
+touch "$work/fail-mv-owed"
+if run --force >/dev/null 2>&1; then
+  bad "a run that could not mark the restart succeeded"
+elif [ "$(restarts)" = 0 ] && [ -e "$etc/restart-owed" ] && [ ! -s "$etc/restart-owed" ]; then
+  ok "a run stopped while marking the restart leaves it owed and untried"
+else
+  bad "after a failed marking: restarts $(restarts), owed $(cat "$etc/restart-owed" 2>/dev/null || echo none)"
+fi
+rm -f "$work/fail-mv-owed"
+run >/dev/null
+[ "$(restarts)" = 1 ] && [ ! -e "$etc/restart-owed" ] && ok "the next run pays it" ||
+  bad "after a failed marking, the next run: restarts $(restarts)"
+
+# The agent not running: nothing to restart, it starts with the new pair.
+rm -f "$work/active"
+run --force >/dev/null
+[ "$(restarts)" = 0 ] && [ ! -e "$etc/restart-owed" ] && [ ! -e "$work/active" ] &&
+  ok "an agent not running is owed nothing, and not started" ||
+  bad "an agent not running: restarts $(restarts)"
+# Nor one that failed on its own before the switch.
+: >"$work/unit-failed"
+run --force >/dev/null
+[ "$(restarts)" = 0 ] && [ ! -e "$etc/restart-owed" ] && ok "an agent that failed by itself is not started" ||
+  bad "a failed agent: restarts $(restarts)"
+rm -f "$work/unit-failed"
+touch "$work/active"
+
+# Moving from the old layout, stopped after host.pem pointed through the
+# new pair and before host.key did: the public paths do not match.
+migration() {
+  rm -rf "$etc/certificates" "$etc/certificate" "$etc/host.pem" "$etc/host.key" "$etc/restart-owed"
+  openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=host-1 \
+    -keyout "$etc/host.key" -out "$work/flat.csr" 2>/dev/null
+  sign "$work/ca" "$work/flat.csr" 7 >"$etc/host.pem"
+  touch "$work/gce" "$work/fail-mv"
+  if run --force >/dev/null 2>&1; then
+    bad "$1: the interrupted migration succeeded"
+    return
+  fi
+  rm -f "$work/fail-mv"
+  if [ -L "$etc/host.pem" ] && [ ! -L "$etc/host.key" ] && ! matches; then
+    ok "$1: the interrupted migration left host.pem and host.key mismatched"
+  else
+    bad "$1: the injected failure did not leave a mismatch"
+  fi
+  [ "$1" = "off GCP" ] && rm -f "$work/gce"
+  run >/dev/null
+  if [ "$(requests)" = 0 ] && matches && [ "$(readlink "$etc/host.key")" = certificate/host.key ] &&
+    [ ! -e "$etc/request" ] && [ "$(restarts)" = 1 ] && [ ! -e "$etc/restart-owed" ]; then
+    ok "$1: the next run finishes it from the published pair, with no new certificate, and restarts the agent"
+  else
+    bad "$1: finishing the migration: requests $(requests), restarts $(restarts), request/ $([ -e "$etc/request" ] && echo left || echo none)"
+  fi
+}
+migration "on GCP"
+migration "off GCP"
+
+[ "$failures" = 0 ] || { echo "$failures failed" >&2; exit 1; }
+echo "all passed"

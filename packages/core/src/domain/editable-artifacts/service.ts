@@ -78,6 +78,7 @@ import {
   type ApplyEditableArtifactTransactionRequest,
   type ApplyEditableArtifactTransactionResult,
   type CreateEditableArtifactRequest,
+  type EditableArtifactAudience,
   type CreateEditableArtifactResult,
   type EditableArtifactOriginalImport,
   type ImportEditableArtifactRequest,
@@ -121,6 +122,7 @@ export const EDITABLE_ARTIFACT_MAX_COMMITTED_TRANSACTION_BYTES =
   EDITABLE_ARTIFACT_MAX_OPERATION_BYTES_PER_TRANSACTION;
 export const EDITABLE_ARTIFACT_OPERATION_PROTOCOL_VERSION = COMMITTED_TRANSACTION_PROTOCOL_VERSION;
 export const EDITABLE_ARTIFACT_MAX_COMMIT_ATTEMPTS = 4;
+export const EDITABLE_ARTIFACT_READ_BATCH_LIMIT = 8;
 /** Compact well before hard replay ceilings so one maximum transaction cannot cross them. */
 export const EDITABLE_ARTIFACT_COMPACTION_TRANSACTION_THRESHOLD = 1_024;
 export const EDITABLE_ARTIFACT_COMPACTION_BYTE_THRESHOLD = 16 * 1024 * 1024;
@@ -298,6 +300,7 @@ export class EditableArtifactService {
         modality: request.modality,
         title: request.title,
         createdBySubjectId: actor.subjectId,
+        ...(request.audience ? { audience: request.audience } : {}),
         genesisSnapshot,
         outbox,
       });
@@ -444,6 +447,7 @@ export class EditableArtifactService {
         modality: request.modality,
         title: request.title,
         createdBySubjectId: actor.subjectId,
+        ...(request.audience ? { audience: request.audience } : {}),
         genesisSnapshot,
         originalImport,
         outbox,
@@ -465,11 +469,75 @@ export class EditableArtifactService {
     actor: EditableArtifactActor;
   }): Promise<EditableArtifact> {
     const context = normalizeBoundaryContext(input);
-    let authorizationRevision = await this.requirePermission({
+    const authorizationRevision = await this.requirePermission({
       ...context,
       permission: "read",
     });
-    for (let attempt = 1; attempt <= EDITABLE_ARTIFACT_MAX_COMMIT_ATTEMPTS; attempt += 1) {
+    return this.readAuthorizedArtifact(
+      context,
+      authorizationRevision,
+      EDITABLE_ARTIFACT_MAX_COMMIT_ATTEMPTS,
+    );
+  }
+
+  /** Authorize every item normally; only the subsequent metadata reads are batched. */
+  async getArtifacts(input: {
+    scope: EditableArtifactScope;
+    artifactIds: readonly EditableArtifact["id"][];
+    actor: EditableArtifactActor;
+  }): Promise<readonly PromiseSettledResult<EditableArtifact>[]> {
+    if (input.artifactIds.length > EDITABLE_ARTIFACT_READ_BATCH_LIMIT) {
+      throw new EditableArtifactInvalidRequestError("Artifact read batch is too large");
+    }
+    const contexts = input.artifactIds.map((artifactId) =>
+      normalizeBoundaryContext({ ...input, artifactId }),
+    );
+    const readBatch = this.dependencies.store.readArtifactsAtAuthorizationRevisions;
+    if (!readBatch) return Promise.allSettled(contexts.map((context) => this.getArtifact(context)));
+    const revisions = await Promise.allSettled(
+      contexts.map((context) => this.requirePermission({ ...context, permission: "read" })),
+    );
+    const authorized = contexts.flatMap((context, index) => {
+      const revision = revisions[index]!;
+      return revision.status === "fulfilled"
+        ? [{ artifactId: context.artifactId, expectedAuthorizationRevision: revision.value }]
+        : [];
+    });
+    // A denied item never reaches storage. Retain per-item errors for ordered callers.
+    const outcomes = authorized.length
+      ? await readBatch.call(this.dependencies.store, contexts[0]!.scope, authorized)
+      : [];
+    if (outcomes.length !== authorized.length)
+      throw new Error("Artifact batch read returned mismatched results");
+    let nextOutcome = 0;
+    return Promise.allSettled(
+      contexts.map(async (context, index) => {
+        const revision = revisions[index]!;
+        if (revision.status === "rejected") throw revision.reason;
+        const outcome = outcomes[nextOutcome++]!;
+        if (outcome.status === "rejected") throw outcome.reason;
+        if (outcome.value.kind === "result") {
+          if (!outcome.value.artifact) throw new EditableArtifactNotFoundError();
+          return outcome.value.artifact;
+        }
+        // Reauthorize stale items individually, with the same total retry budget
+        // as a single read. A peer's successful read is never retried or reused.
+        const currentRevision = await this.requirePermission({ ...context, permission: "read" });
+        return this.readAuthorizedArtifact(
+          context,
+          currentRevision,
+          EDITABLE_ARTIFACT_MAX_COMMIT_ATTEMPTS - 1,
+        );
+      }),
+    );
+  }
+
+  private async readAuthorizedArtifact(
+    context: ReturnType<typeof normalizeBoundaryContext>,
+    authorizationRevision: number,
+    attempts: number,
+  ): Promise<EditableArtifact> {
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const outcome = await this.dependencies.store.readArtifactAtAuthorizationRevision(
         context.scope,
         context.artifactId,
@@ -1441,10 +1509,15 @@ function normalizeCreateRequest(
   input: CreateEditableArtifactRequest,
 ): CreateEditableArtifactRequest {
   const record = plainDataRecord(input, "artifact create request");
-  rejectUnknownKeys(record, ["idempotencyKey", "modality", "title"], "artifact create request");
+  rejectUnknownKeys(
+    record,
+    ["idempotencyKey", "modality", "title", "audience"],
+    "artifact create request",
+  );
   const rawIdempotencyKey = dataProperty(record, "idempotencyKey", true);
   const modality = dataProperty(record, "modality", true);
   const title = dataProperty(record, "title", true);
+  const audience = normalizeAudience(dataProperty(record, "audience", false));
   if (
     typeof rawIdempotencyKey !== "string" ||
     typeof title !== "string" ||
@@ -1457,6 +1530,7 @@ function normalizeCreateRequest(
     idempotencyKey: editableArtifactClientTransactionId(rawIdempotencyKey),
     modality,
     title,
+    ...(audience ? { audience } : {}),
   });
 }
 
@@ -1466,7 +1540,7 @@ function normalizeImportRequest(
   const record = plainDataRecord(input, "artifact import request");
   rejectUnknownKeys(
     record,
-    ["idempotencyKey", "modality", "title", "originalImport", "snapshot"],
+    ["idempotencyKey", "modality", "title", "originalImport", "snapshot", "audience"],
     "artifact import request",
   );
   const rawIdempotencyKey = dataProperty(record, "idempotencyKey", true);
@@ -1474,6 +1548,7 @@ function normalizeImportRequest(
   const title = dataProperty(record, "title", true);
   const rawOriginalImport = dataProperty(record, "originalImport", true);
   const rawSnapshot = dataProperty(record, "snapshot", true);
+  const audience = normalizeAudience(dataProperty(record, "audience", false));
   if (
     typeof rawIdempotencyKey !== "string" ||
     typeof title !== "string" ||
@@ -1515,7 +1590,28 @@ function normalizeImportRequest(
     title,
     originalImport,
     snapshot: Object.freeze(snapshot) as ImportEditableArtifactRequest["snapshot"],
+    ...(audience ? { audience } : {}),
   });
+}
+
+function normalizeAudience(input: unknown): EditableArtifactAudience | undefined {
+  if (input === undefined) return undefined;
+  const record = plainDataRecord(input, "artifact audience");
+  rejectUnknownKeys(record, ["visibility", "ownerSubjectId"], "artifact audience");
+  const visibility = dataProperty(record, "visibility", true);
+  const ownerSubjectId = dataProperty(record, "ownerSubjectId", true);
+  if (
+    (visibility !== "workspace_shared" && visibility !== "user_private") ||
+    (ownerSubjectId !== null &&
+      (typeof ownerSubjectId !== "string" ||
+        ownerSubjectId.length < 1 ||
+        ownerSubjectId.length > 256 ||
+        ownerSubjectId.trim() !== ownerSubjectId)) ||
+    (visibility === "user_private" && ownerSubjectId === null)
+  ) {
+    throw new TypeError("Artifact audience is malformed");
+  }
+  return Object.freeze({ visibility, ownerSubjectId });
 }
 
 function normalizeOriginalImport(

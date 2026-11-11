@@ -1,0 +1,445 @@
+import type { ReactNode } from "react";
+import type { ChatClient } from "@opengeni/sdk";
+import { useEffect, useMemo, useState } from "react";
+import { CheckIcon, PencilIcon, UnplugIcon } from "lucide-react";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { ConnectionAccessRows, useConnectionAccess } from "@/components/connection-access-settings";
+import {
+  ProviderTile,
+  organizationReachLabel,
+  RenameAccountDialog,
+  type ModelsScopeLabels,
+  useModelsListLabel,
+} from "@opengeni/react/app/components/models/models-ui";
+import {
+  managesSubscriptionAccount,
+  subscriptionAccountName,
+  type SubscriptionPoolAccount,
+} from "./use-subscription-account-pool";
+import {
+  ACCOUNT_ENABLED_LABELS,
+  EnableAccountRow,
+} from "@/components/models/subscription-account-ui";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import {
+  DetailFact,
+  DetailFacts,
+  DetailSection,
+  DetailSkeleton,
+} from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { Notice } from "@opengeni/react/ui/notice";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
+import { OwnWhereItWorksSection } from "@opengeni/react/app/components/own-where-it-works";
+
+export type SubscriptionAccountPlaces = {
+  scopeName: string;
+  organizationName: string;
+  scope: ModelsScopeLabels;
+  openAccount: (id: string) => void;
+  openConnect: (id?: string) => void;
+  openAccess: (id: string) => void;
+  sharePersonal?: ((id: string) => void) | undefined;
+  /** Your own accounts: choose where each works for your own messages, asked from this workspace. */
+  ownReach?: { workspaceId: string } | undefined;
+  /** A workspace's name in the organization, where the viewer can read it. */
+  workspaceName?: ((workspaceId: string) => string | undefined) | undefined;
+  /**
+   * Workspace admins: stop using another workspace's own account that was
+   * shared with this one. Absent for everyone else.
+   */
+  removeFromWorkspace?: ((accountId: string) => Promise<void>) | undefined;
+  backToList: () => void;
+};
+type AccountSummary = SubscriptionPoolAccount & {
+  status: string;
+  allocatorEnabled: boolean;
+  lastError?: string | null;
+};
+type AccountPool<Account extends AccountSummary> = {
+  accounts: Account[];
+  loading: boolean;
+  loadError: string | null;
+  refresh: () => Promise<void>;
+  canManageAccounts: boolean;
+  inherited: boolean;
+  organizationId?: string | undefined;
+  workspaceId?: string | undefined;
+  activeAccountId: string | null;
+  working: string | null;
+  busy: boolean;
+  setAllocator: (account: Account, enabled: boolean) => Promise<void>;
+  activate: (account: Account) => Promise<void>;
+  rename: (account: Account, label: string) => Promise<void>;
+  disconnect: (account: Account) => Promise<void>;
+};
+export function SubscriptionAccountPage<Account extends AccountSummary>({
+  pool,
+  provider,
+  providerName,
+  connectionKind,
+  plan,
+  renderUsage,
+  renderModels,
+  accountId,
+  places,
+  client,
+}: {
+  pool: AccountPool<Account>;
+  provider: "supergrok" | "claude_subscription";
+  providerName: string;
+  connectionKind: "supergrok" | "claude_subscription";
+  plan: (account: Account) => string;
+  renderUsage: (account: Account) => ReactNode;
+  renderModels?: ((account: Account) => ReactNode) | undefined;
+  accountId: string;
+  places: SubscriptionAccountPlaces;
+  client: ChatClient<OpenGeniBrowserClient>;
+}) {
+  const listLabel = useModelsListLabel();
+  const pageKey = `${provider}:${pool.organizationId ?? pool.workspaceId}:${accountId}`;
+  const pageLifetime = useMemo(() => ({ key: pageKey, active: true }), [pageKey]);
+  useEffect(() => {
+    pageLifetime.active = true;
+    return () => {
+      pageLifetime.active = false;
+    };
+  }, [pageLifetime]);
+  const account = pool.accounts.find((candidate) => candidate.id === accountId) ?? null;
+  const back = { label: listLabel, onClick: places.backToList };
+  if (pool.loading) {
+    return (
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
+        <DetailSkeleton />
+      </DetailPage>
+    );
+  }
+  if (pool.loadError)
+    return (
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
+        <ErrorMessage
+          title={`Couldn't load ${providerName} accounts`}
+          action={<RowButton onClick={() => void pool.refresh()}>Try again</RowButton>}
+        >
+          {pool.loadError}
+        </ErrorMessage>
+      </DetailPage>
+    );
+  if (!account) {
+    return (
+      <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
+        <EmptyState
+          variant="page"
+          icon={<UnplugIcon />}
+          title="This account isn't connected here"
+          description="It may have been disconnected."
+          action={<RowButton onClick={places.backToList}>Back to Models</RowButton>}
+        />
+      </DetailPage>
+    );
+  }
+  return (
+    <SubscriptionAccountDetail
+      pool={pool}
+      provider={provider}
+      providerName={providerName}
+      connectionKind={connectionKind}
+      plan={plan}
+      renderUsage={renderUsage}
+      renderModels={renderModels}
+      account={account}
+      places={{
+        ...places,
+        backToList: () => {
+          if (pageLifetime.active) places.backToList();
+        },
+      }}
+      client={client}
+    />
+  );
+}
+
+function SubscriptionAccountDetail<Account extends AccountSummary>({
+  pool,
+  provider,
+  providerName,
+  connectionKind,
+  plan,
+  renderUsage,
+  renderModels,
+  account,
+  places,
+  client,
+}: {
+  pool: AccountPool<Account>;
+  provider: "supergrok" | "claude_subscription";
+  providerName: string;
+  connectionKind: "supergrok" | "claude_subscription";
+  plan: (account: Account) => string;
+  renderUsage: (account: Account) => ReactNode;
+  renderModels?: ((account: Account) => ReactNode) | undefined;
+  account: Account;
+  places: SubscriptionAccountPlaces;
+  client: ChatClient<OpenGeniBrowserClient>;
+}) {
+  const listLabel = useModelsListLabel();
+  const [renaming, setRenaming] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const name = subscriptionAccountName(account);
+  const canEdit = managesSubscriptionAccount(pool, account);
+  const organization = Boolean(pool.organizationId);
+  // Another workspace's own account shared with this one: that workspace's
+  // admins manage it, and this workspace can only stop using it.
+  const sharedBy =
+    !organization && account.ownerWorkspaceId && account.ownerWorkspaceId !== pool.workspaceId
+      ? account.ownerWorkspaceId
+      : null;
+  const sharedByName = sharedBy ? (places.workspaceName?.(sharedBy) ?? "another workspace") : null;
+  const removable = sharedBy !== null && places.removeFromWorkspace !== undefined;
+  // A workspace also lists the organization's shared accounts; the organization manages them.
+  const organizationManaged =
+    sharedBy === null &&
+    (pool.inherited || (!pool.organizationId && account.scope === "organization"));
+  const status =
+    account.status !== "active"
+      ? "needs_reconnect"
+      : account.allocatorEnabled
+        ? "connected"
+        : "disabled";
+  const access = useConnectionAccess({
+    client,
+    organizationId: pool.organizationId,
+    workspaceId: pool.workspaceId,
+    kind: connectionKind,
+    connectionId: account.id,
+    enabled: canEdit && account.scope !== "user",
+  });
+  const scopeLabel = pool.organizationId
+    ? organizationReachLabel(places.scope, access.data)
+    : sharedByName
+      ? `Shared by ${sharedByName}`
+      : organizationManaged
+        ? places.scope.organization
+        : account.scope === "user"
+          ? places.scope.user
+          : places.scope.workspace;
+  return (
+    <DetailPage
+      back={{ label: listLabel, onClick: places.backToList }}
+      className={FLUSH_DETAIL_PAGE_CLASS}
+    >
+      <DetailPageHeader
+        leading={<ProviderTile provider={provider} />}
+        title={name}
+        chips={status === "connected" ? null : <StatusBadge status={status} variant="outline" />}
+        meta={[
+          plan(account),
+          account.email && account.email !== name ? account.email : null,
+          scopeLabel,
+        ]}
+        actions={
+          canEdit ? (
+            <MoreMenu label={`More actions for ${name}`}>
+              {provider === "claude_subscription" ? (
+                <DropdownMenuItem onSelect={() => places.openConnect(account.id)}>
+                  Sign in again
+                </DropdownMenuItem>
+              ) : null}
+              <DropdownMenuItem variant="destructive" onSelect={() => setDisconnecting(true)}>
+                <UnplugIcon />
+                Disconnect
+              </DropdownMenuItem>
+            </MoreMenu>
+          ) : removable ? (
+            <MoreMenu label={`More actions for ${name}`}>
+              <DropdownMenuItem variant="destructive" onSelect={() => setRemoving(true)}>
+                <UnplugIcon />
+                Remove from this workspace
+              </DropdownMenuItem>
+            </MoreMenu>
+          ) : null
+        }
+      />
+      <DetailPageBody>
+        {sharedByName ? (
+          <ManagedNote>{`Shared with ${places.scopeName} by ${sharedByName}. That workspace's admins manage it.`}</ManagedNote>
+        ) : organizationManaged ? (
+          <ManagedNote>{`Managed by the owners and admins of ${places.organizationName}.`}</ManagedNote>
+        ) : !canEdit ? (
+          <ManagedNote>Only people who can manage connections can change this account.</ManagedNote>
+        ) : null}
+        {account.lastError || account.status !== "active" ? (
+          <DetailSection>
+            <Notice
+              tone="waiting"
+              title={
+                account.status !== "active" ? `Sign in to ${providerName} again` : "Last problem"
+              }
+              action={
+                canEdit && account.status !== "active" ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="default"
+                    onClick={() => places.openConnect(account.id)}
+                    className="rounded-[10px] pointer-coarse:h-11"
+                  >
+                    Sign in again
+                  </Button>
+                ) : undefined
+              }
+            >
+              {account.lastError ?? "This account can't be used until someone signs in again."}
+            </Notice>
+          </DetailSection>
+        ) : null}
+        {renderUsage(account)}
+        {renderModels?.(account)}
+        {canEdit ? (
+          <DetailSection title="Settings">
+            <SettingRowGroup className="-my-3">
+              <EnableAccountRow
+                name={name}
+                checked={account.allocatorEnabled}
+                pending={pool.working === `allocator:${account.id}`}
+                disabled={pool.busy}
+                onCheckedChange={(next) => void pool.setAllocator(account, next)}
+              />
+              {pool.accounts.length > 1 ? (
+                <SettingRow
+                  label="Primary account"
+                  description="New chats start here when work isn’t spread across accounts."
+                  control={
+                    account.id === pool.activeAccountId ? (
+                      <span className="inline-flex h-8 items-center gap-1.5 text-sm font-medium text-fg-muted">
+                        <CheckIcon aria-hidden="true" className="size-4 text-status-idle" />
+                        Primary
+                      </span>
+                    ) : (
+                      <RowButton
+                        disabled={pool.busy || account.status !== "active"}
+                        onClick={() => void pool.activate(account)}
+                      >
+                        Make primary
+                      </RowButton>
+                    )
+                  }
+                />
+              ) : null}
+              <SettingRow
+                label="Name"
+                description={name}
+                control={
+                  <RowButton aria-label={`Rename ${name}`} onClick={() => setRenaming(true)}>
+                    <PencilIcon aria-hidden="true" />
+                    Rename
+                  </RowButton>
+                }
+              />
+              {account.scope !== "user" ? (
+                <ConnectionAccessRows
+                  access={access}
+                  organization={organization}
+                  canManage={canEdit}
+                  onEdit={() => places.openAccess(account.id)}
+                />
+              ) : null}
+              {account.scope === "user" && places.sharePersonal ? (
+                <SettingRow
+                  label="Share with your organization"
+                  description="Choose which workspaces can use this account."
+                  control={
+                    <RowButton
+                      disabled={pool.busy}
+                      onClick={() => places.sharePersonal?.(account.id)}
+                    >
+                      Share account
+                    </RowButton>
+                  }
+                />
+              ) : null}
+            </SettingRowGroup>
+          </DetailSection>
+        ) : (
+          <DetailSection title="Details">
+            <DetailFacts>
+              <DetailFact label="Account">
+                {account.allocatorEnabled ? ACCOUNT_ENABLED_LABELS.on : ACCOUNT_ENABLED_LABELS.off}
+              </DetailFact>
+              {pool.accounts.length > 1 ? (
+                <DetailFact label="Primary">
+                  {account.id === pool.activeAccountId ? "Yes" : "No"}
+                </DetailFact>
+              ) : null}
+            </DetailFacts>
+          </DetailSection>
+        )}
+        {account.scope === "user" && places.ownReach ? (
+          <OwnWhereItWorksSection
+            client={client}
+            workspaceId={places.ownReach.workspaceId}
+            resourceKind="subscription_connection"
+            resourceId={account.id}
+            name={name}
+          />
+        ) : null}
+      </DetailPageBody>
+      <RenameAccountDialog
+        open={renaming}
+        onOpenChange={setRenaming}
+        name={name}
+        label={account.label}
+        provider={providerName}
+        onSave={(label) => pool.rename(account, label)}
+      />
+      <DestructiveConfirm
+        open={disconnecting}
+        onOpenChange={setDisconnecting}
+        title={`Disconnect ${name}?`}
+        consequences={[
+          organization
+            ? `Workspaces that use ${name} stop using it for new work.`
+            : `${name} stops paying for new work in ${places.scopeName}.`,
+          "Work already running finishes first.",
+          `You'll need to sign in to ${providerName} again to reconnect it.`,
+        ]}
+        confirmLabel="Disconnect"
+        pendingLabel="Disconnecting…"
+        onConfirm={async () => {
+          await pool.disconnect(account);
+          places.backToList();
+        }}
+      />
+      {removable ? (
+        <DestructiveConfirm
+          open={removing}
+          onOpenChange={setRemoving}
+          title={`Stop using ${name} in ${places.scopeName}?`}
+          consequences={[
+            `${name} stops paying for new work in ${places.scopeName}.`,
+            "Running work here stops using it before its next model call.",
+            `Only the admins of ${sharedByName} or the organization can share it here again.`,
+          ]}
+          confirmLabel="Remove"
+          pendingLabel="Removing…"
+          onConfirm={async () => {
+            await places.removeFromWorkspace!(account.id);
+            places.backToList();
+          }}
+        />
+      ) : null}
+    </DetailPage>
+  );
+}
+
+function ManagedNote({ children }: { children: ReactNode }) {
+  return <p className="m-0 pt-2 pb-6 text-sm leading-5 text-fg-muted">{children}</p>;
+}

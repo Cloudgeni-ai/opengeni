@@ -15,6 +15,7 @@ import {
   SandboxResumeIdentityMismatchError,
   SandboxResumeIdentityUnavailableError,
   SandboxResumeStateUnavailableError,
+  TurnSandboxCommandCancelledError,
   WorkspaceArchiveIntegrityError,
   classifyProviderSandboxFailure,
 } from "@opengeni/runtime";
@@ -90,9 +91,17 @@ export class SandboxDeadlineRotationError extends Error {
  * resource. The wrapper error must never fall through as an ordinary turn
  * failure: doing so would omit the quiescence receipt and strand a committed
  * Steer/Pause behind `control-pending`.
+ *
+ * A sandbox command the turn's tool fence cancelled carries the activity's
+ * own cancellation as its cause. That is the same Temporal cancellation
+ * (for example a worker shutdown during startup file downloads) and must
+ * reach the same recovery path, not settle as an ordinary failure.
  */
 export function turnOperationCancellationFailure(error: unknown): CancelledFailure | null {
   if (error instanceof CancelledFailure) return error;
+  if (error instanceof TurnSandboxCommandCancelledError) {
+    return error.cause instanceof CancelledFailure ? error.cause : null;
+  }
   if (!(error instanceof TurnOperationCancelledError)) return null;
   return error.reason instanceof CancelledFailure
     ? error.reason
@@ -150,6 +159,60 @@ export async function waitForTurnOperation<T>(
     throw error;
   } finally {
     signal.removeEventListener("abort", cancel);
+  }
+}
+
+/**
+ * Upper bound for joining a cancelled attempt's in-flight provider establish.
+ * Ordinary user or replacement cancellation has no worker deadline. During a
+ * turn-worker shutdown, turns cancelled with WORKER_SHUTDOWN after the natural
+ * drain (default 90s) have only the checkpoint window before the SDK force
+ * time (default 105s) and process exit (115s); an establish still running past
+ * that is left to the lease reaper, as after a crash.
+ */
+export const PHYSICAL_SANDBOX_RESUME_DRAIN_TIMEOUT_MS = 60_000;
+
+/** Register the PHYSICAL lease acquire/provider establish promise, not the
+ * cancellable wrapper awaiting it. */
+export function trackPhysicalSandboxResume<T>(
+  inFlight: Set<Promise<unknown>>,
+  operation: Promise<T>,
+): Promise<T> {
+  inFlight.add(operation);
+  const settle = (): void => {
+    inFlight.delete(operation);
+  };
+  operation.then(settle, settle);
+  return operation;
+}
+
+/**
+ * Join every lease acquire/provider establish this attempt started, even after
+ * the turn-facing wrapper rejected on cancellation. An establish has no
+ * portable abort: after cancellation it still finishes its own exact cleanup
+ * (terminate an unpublished box and roll warming back to cold, or keep a
+ * published box and drop its holder). If the activity returned first, a
+ * shutting-down worker exited mid-cleanup and stranded a warming lease naming a
+ * terminated box; the replacement attempt then waited out the warming TTL and
+ * inherited a lost-workspace verdict. This wait is deliberately independent of
+ * the finalizer cancellation signal (cancellation is what started it) and is
+ * bounded so an uncooperative provider call cannot pin the activity.
+ */
+export async function drainPhysicalSandboxResumes(
+  inFlight: Set<Promise<unknown>>,
+  timeoutMs: number = PHYSICAL_SANDBOX_RESUME_DRAIN_TIMEOUT_MS,
+): Promise<"none" | "settled" | "timed_out"> {
+  if (inFlight.size === 0) return "none";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.allSettled([...inFlight]).then(() => "settled" as const),
+      new Promise<"timed_out">((resolve) => {
+        timer = setTimeout(() => resolve("timed_out"), Math.max(1, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -361,12 +424,15 @@ export function classifySandboxLogicalProvisionFailure(
 
 export function isLazySandboxProvisionRetryable(error: unknown): boolean {
   const chain = sandboxProvisionErrorChain(error);
-  // Rotation resumes through the durable lifecycle wake. Retrying here holds
-  // a turn worker and can repeat the entire lease wait for every skill root.
+  // Rotation resumes through the durable lifecycle wake. An exhausted sibling
+  // warming wait also yields to same-turn recovery. Retrying either here holds
+  // a turn worker and repeats the entire lease wait for every skill root.
   if (
     chain.some(
       (value) =>
-        value instanceof SandboxLeaseTransitionError && value.reason === "rotation_in_progress",
+        value instanceof SandboxLeaseTransitionError &&
+        (value.reason === "rotation_in_progress" ||
+          (value.reason === "provider_recovery_in_progress" && value.liveness === "warming")),
     )
   )
     return false;

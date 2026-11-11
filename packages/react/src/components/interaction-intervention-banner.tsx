@@ -1,6 +1,7 @@
 import type { InteractionIntervention } from "@opengeni/sdk/interaction";
 import { CheckIcon, CircleAlertIcon, LoaderCircleIcon, XIcon } from "lucide-react";
 import { cn } from "../lib/cn";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type InteractionInterventionBannerProps = {
   interventions: InteractionIntervention[];
@@ -20,6 +21,7 @@ export function InteractionInterventionBanner({
   onOpen,
   onResolve,
 }: InteractionInterventionBannerProps) {
+  const t = useOpenGeniText();
   const intervention = interventions[0];
   if (!intervention) return null;
   const targetOpen = activeTargetId === undefined || activeTargetId === intervention.targetId;
@@ -36,14 +38,14 @@ export function InteractionInterventionBanner({
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5 text-og-control font-medium text-og-fg">
-          {interventionTitle(intervention.kind)}
+          {interventionTitle(t, intervention.kind)}
           {interventions.length > 1 ? (
-            <span className="rounded-full bg-og-surface-2 px-1.5 py-0.5 text-[10px] font-normal text-og-muted">
+            <span className="rounded-full bg-og-surface-2 px-1.5 py-0.5 text-[10px] font-normal text-og-fg-muted">
               +{interventions.length - 1}
             </span>
           ) : null}
         </span>
-        <span className="block truncate text-og-xs text-og-muted">{intervention.reason}</span>
+        <span className="block truncate text-og-xs text-og-fg-muted">{intervention.reason}</span>
       </span>
       {!targetOpen && onOpen ? (
         <button
@@ -52,7 +54,7 @@ export function InteractionInterventionBanner({
           disabled={mutating}
           className="h-7 shrink-0 rounded-og-sm border border-og-primary-border bg-og-primary px-2.5 text-og-control font-medium text-og-primary-fg transition hover:bg-og-primary-hover disabled:opacity-50"
         >
-          Open
+          {t("interactionInterventionBanner.open")}
         </button>
       ) : (
         <button
@@ -66,16 +68,16 @@ export function InteractionInterventionBanner({
           ) : (
             <CheckIcon className="size-3" />
           )}
-          Done
+          {t("interactionInterventionBanner.done")}
         </button>
       )}
       <button
         type="button"
         onClick={() => onResolve(intervention, "dismissed")}
         disabled={mutating}
-        className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
-        aria-label="Cancel request"
-        title="Cancel request"
+        className="grid size-7 shrink-0 place-items-center rounded-og-sm text-og-fg-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
+        aria-label={t("interactionInterventionBanner.cancelRequest")}
+        title={t("interactionInterventionBanner.cancelRequest")}
       >
         <XIcon className="size-3.5" />
       </button>
@@ -83,17 +85,17 @@ export function InteractionInterventionBanner({
   );
 }
 
-function interventionTitle(kind: InteractionIntervention["kind"]): string {
+function interventionTitle(t: OpenGeniText, kind: InteractionIntervention["kind"]): string {
   switch (kind) {
     case "manual_login":
-      return "Sign in needed";
+      return t("interactionInterventionBanner.signInNeeded");
     case "mfa":
-      return "Verification needed";
+      return t("interactionInterventionBanner.verificationNeeded");
     case "external_action":
-      return "Action needed";
+      return t("interactionInterventionBanner.actionNeeded");
     case "confirmation":
-      return "Confirmation needed";
+      return t("interactionInterventionBanner.confirmationNeeded");
     case "other":
-      return "Agent needs your help";
+      return t("interactionInterventionBanner.agentNeedsYourHelp");
   }
 }

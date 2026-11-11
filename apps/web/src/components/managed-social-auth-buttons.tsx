@@ -1,6 +1,6 @@
 import { Loader2Icon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 
 export type ManagedSocialProvider = "google" | "github";
 

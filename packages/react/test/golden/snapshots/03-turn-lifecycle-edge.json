@@ -10,7 +10,7 @@
     },
     {
       "kind": "startup-phase",
-      "id": "00000000-0000-4000-8000-000000000303-queue",
+      "id": "aaaaaaaa-0000-4000-8000-000000000003-queue",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000003",
       "occurredAt": "2026-01-02T12:00:02.000Z",
       "phase": "queue",
@@ -41,7 +41,8 @@
       "turnId": "aaaaaaaa-0000-4000-8000-000000000003",
       "occurredAt": "2026-01-02T12:00:05.000Z",
       "outcome": "failed",
-      "failureText": "model provider unavailable"
+      "failureText": "The turn stopped unexpectedly",
+      "failureDetail": "model provider unavailable"
     },
     {
       "kind": "user-message",
@@ -53,7 +54,7 @@
     },
     {
       "kind": "startup-phase",
-      "id": "00000000-0000-4000-8000-000000000308-queue",
+      "id": "aaaaaaaa-0000-4000-8000-000000000004-queue",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000004",
       "occurredAt": "2026-01-02T12:00:07.000Z",
       "phase": "queue",
@@ -69,7 +70,8 @@
       "turnId": "aaaaaaaa-0000-4000-8000-000000000004",
       "occurredAt": "2026-01-02T12:00:09.000Z",
       "outcome": "failed",
-      "failureText": "provider context window exceeded"
+      "failureText": "The turn stopped unexpectedly",
+      "failureDetail": "provider context window exceeded"
     }
   ],
   "groups": [
@@ -88,14 +90,15 @@
       "kind": "turn",
       "id": "turn-aaaaaaaa-0000-4000-8000-000000000003",
       "outcome": "failed",
-      "failureText": "model provider unavailable",
+      "failureText": "The turn stopped unexpectedly",
+      "failureDetail": "model provider unavailable",
       "startedAt": "2026-01-02T12:00:02.000Z",
       "endedAt": "2026-01-02T12:00:05.000Z",
       "groupCount": 1,
       "groups": [
         {
           "kind": "activity",
-          "id": "activity-00000000-0000-4000-8000-000000000303-queue",
+          "id": "activity-aaaaaaaa-0000-4000-8000-000000000003-queue",
           "itemCount": 2,
           "itemKinds": {
             "startup-phase": 1,
@@ -105,7 +108,7 @@
           "items": [
             {
               "kind": "startup-phase",
-              "id": "00000000-0000-4000-8000-000000000303-queue",
+              "id": "aaaaaaaa-0000-4000-8000-000000000003-queue",
               "turnId": "aaaaaaaa-0000-4000-8000-000000000003",
               "occurredAt": "2026-01-02T12:00:02.000Z",
               "phase": "queue",
@@ -149,14 +152,15 @@
       "kind": "turn",
       "id": "turn-aaaaaaaa-0000-4000-8000-000000000004",
       "outcome": "failed",
-      "failureText": "provider context window exceeded",
+      "failureText": "The turn stopped unexpectedly",
+      "failureDetail": "provider context window exceeded",
       "startedAt": "2026-01-02T12:00:07.000Z",
       "endedAt": "2026-01-02T12:00:09.000Z",
       "groupCount": 1,
       "groups": [
         {
           "kind": "activity",
-          "id": "activity-00000000-0000-4000-8000-000000000308-queue",
+          "id": "activity-aaaaaaaa-0000-4000-8000-000000000004-queue",
           "itemCount": 1,
           "itemKinds": {
             "startup-phase": 1
@@ -165,7 +169,7 @@
           "items": [
             {
               "kind": "startup-phase",
-              "id": "00000000-0000-4000-8000-000000000308-queue",
+              "id": "aaaaaaaa-0000-4000-8000-000000000004-queue",
               "turnId": "aaaaaaaa-0000-4000-8000-000000000004",
               "occurredAt": "2026-01-02T12:00:07.000Z",
               "phase": "queue",

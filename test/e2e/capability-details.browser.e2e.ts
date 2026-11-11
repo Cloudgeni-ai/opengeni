@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { chromium } from "playwright";
-import { freePort, startProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess } from "@opengeni/testing/process";
 
 test("capability details are centered, bounded, and restore the single catalog opener", async () => {
   const port = await freePort();

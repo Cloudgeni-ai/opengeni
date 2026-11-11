@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.4.0",
-  "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
+  "version": "6.14.0",
+  "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -18,13 +18,109 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./machine-access": {
+      "types": "./src/machine-access.ts",
+      "default": "./src/machine-access.ts"
+    },
+    "./encrypted-reasoning-refusal": {
+      "types": "./src/encrypted-reasoning-refusal.ts",
+      "default": "./src/encrypted-reasoning-refusal.ts"
+    },
+    "./browser-response-headers": {
+      "types": "./src/browser-response-headers.ts",
+      "default": "./src/browser-response-headers.ts"
+    },
+    "./billing-credit-notifications": {
+      "types": "./src/billing-credit-notifications.ts",
+      "default": "./src/billing-credit-notifications.ts"
+    },
+    "./event-triggers": {
+      "types": "./src/event-triggers.ts",
+      "default": "./src/event-triggers.ts"
+    },
+    "./automation-templates": {
+      "types": "./src/automation-templates.ts",
+      "default": "./src/automation-templates.ts"
+    },
+    "./mcp-elicitation": {
+      "types": "./src/mcp-elicitation.ts",
+      "default": "./src/mcp-elicitation.ts"
+    },
+    "./mcp-elicitation-model": {
+      "types": "./src/mcp-elicitation-model.ts",
+      "default": "./src/mcp-elicitation-model.ts"
+    },
+    "./prepared-mcp-setup": {
+      "types": "./src/prepared-mcp-setup.ts",
+      "default": "./src/prepared-mcp-setup.ts"
+    },
+    "./connection-account-label": {
+      "types": "./src/connection-account-label.ts",
+      "default": "./src/connection-account-label.ts"
+    },
+    "./personal-integration-setup": {
+      "types": "./src/personal-integration-setup.ts",
+      "default": "./src/personal-integration-setup.ts"
+    },
+    "./modal-native-proof-v2": {
+      "types": "./src/modal-native-proof-v2.ts",
+      "default": "./src/modal-native-proof-v2.ts"
+    },
+    "./billing-origin": {
+      "types": "./src/billing-origin.ts",
+      "default": "./src/billing-origin.ts"
+    },
     "./allowance-refusal": {
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
     },
+    "./timeline-order": {
+      "types": "./src/timeline-order.ts",
+      "default": "./src/timeline-order.ts"
+    },
+    "./knowledge-source-sync-retirement": {
+      "types": "./src/knowledge-source-sync-retirement.ts",
+      "default": "./src/knowledge-source-sync-retirement.ts"
+    },
+    "./learning-refusal": {
+      "types": "./src/learning-refusal.ts",
+      "default": "./src/learning-refusal.ts"
+    },
+    "./values": {
+      "types": "./src/values.ts",
+      "default": "./src/values.ts"
+    },
+    "./json-safe": {
+      "types": "./src/json-safe.ts",
+      "default": "./src/json-safe.ts"
+    },
+    "./citation-urls": {
+      "types": "./src/citation-urls.ts",
+      "default": "./src/citation-urls.ts"
+    },
+    "./claude-cite-tags": {
+      "types": "./src/claude-cite-tags.ts",
+      "default": "./src/claude-cite-tags.ts"
+    },
+    "./no-reply": {
+      "types": "./src/no-reply.ts",
+      "default": "./src/no-reply.ts"
+    },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
       "default": "./src/usage-allowances.ts"
+    },
+    "./session-usage-limits": {
+      "types": "./src/session-usage-limits.ts",
+      "default": "./src/session-usage-limits.ts"
+    },
+    "./session-usage-limit-refusal": {
+      "types": "./src/session-usage-limit-refusal.ts",
+      "default": "./src/session-usage-limit-refusal.ts"
+    },
+    "./seat-upgrade": {
+      "types": "./src/seat-upgrade.ts",
+      "default": "./src/seat-upgrade.ts"
     },
     "./browser-storage": {
       "types": "./src/browser-storage.ts",
@@ -33,6 +129,10 @@
     "./managed-sign-in-methods": {
       "types": "./src/managed-sign-in-methods.ts",
       "default": "./src/managed-sign-in-methods.ts"
+    },
+    "./passkey-only-account": {
+      "types": "./src/passkey-only-account.ts",
+      "default": "./src/passkey-only-account.ts"
     },
     "./client-error-report": {
       "types": "./src/client-error-report.ts",
@@ -58,6 +158,14 @@
       "types": "./src/external-identities.ts",
       "default": "./src/external-identities.ts"
     },
+    "./organization-access": {
+      "types": "./src/organization-access.ts",
+      "default": "./src/organization-access.ts"
+    },
+    "./api-key-delegation": {
+      "types": "./src/api-key-delegation.ts",
+      "default": "./src/api-key-delegation.ts"
+    },
     "./connect": {
       "types": "./src/connect.ts",
       "default": "./src/connect.ts"
@@ -66,6 +174,14 @@
       "types": "./src/site-session-http.ts",
       "default": "./src/site-session-http.ts"
     },
+    "./organization-model-usage": {
+      "types": "./src/organization-model-usage.ts",
+      "default": "./src/organization-model-usage.ts"
+    },
+    "./insights-usage": {
+      "types": "./src/insights-usage.ts",
+      "default": "./src/insights-usage.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -73,6 +189,10 @@
     "./slack-bot-scopes": {
       "types": "./src/slack-bot-scopes.ts",
       "default": "./src/slack-bot-scopes.ts"
+    },
+    "./slack-rest-mcp": {
+      "types": "./src/slack-rest-mcp.ts",
+      "default": "./src/slack-rest-mcp.ts"
     },
     "./google-drive": {
       "types": "./src/google-drive.ts",
@@ -93,6 +213,10 @@
     "./atlassian": {
       "types": "./src/atlassian.ts",
       "default": "./src/atlassian.ts"
+    },
+    "./atlassian-native-retirement": {
+      "types": "./src/atlassian-native-retirement.ts",
+      "default": "./src/atlassian-native-retirement.ts"
     },
     "./connector-destinations": {
       "types": "./src/connector-destinations.ts",
@@ -122,6 +246,14 @@
       "types": "./src/session-final-reply.ts",
       "default": "./src/session-final-reply.ts"
     },
+    "./session-history": {
+      "types": "./src/session-history.ts",
+      "default": "./src/session-history.ts"
+    },
+    "./message-time-zone": {
+      "types": "./src/message-time-zone.ts",
+      "default": "./src/message-time-zone.ts"
+    },
     "./managed-auth-session-sets": {
       "types": "./src/managed-auth-session-sets.ts",
       "default": "./src/managed-auth-session-sets.ts"
@@ -138,13 +270,41 @@
       "types": "./src/xai-provider-account-authority.ts",
       "default": "./src/xai-provider-account-authority.ts"
     },
+    "./subscription-personal-authority-v2": {
+      "types": "./src/subscription-personal-authority-v2.ts",
+      "default": "./src/subscription-personal-authority-v2.ts"
+    },
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
     },
+    "./model-display": {
+      "types": "./src/model-display.ts",
+      "default": "./src/model-display.ts"
+    },
+    "./claude-subscription-model-ids": {
+      "types": "./src/claude-subscription-model-ids.ts",
+      "default": "./src/claude-subscription-model-ids.ts"
+    },
+    "./secret-use-approval-question": {
+      "types": "./src/secret-use-approval-question.ts",
+      "default": "./src/secret-use-approval-question.ts"
+    },
+    "./tool-review-presentation": {
+      "types": "./src/tool-review-presentation.ts",
+      "default": "./src/tool-review-presentation.ts"
+    },
+    "./app-actions": {
+      "types": "./src/app-actions.ts",
+      "default": "./src/app-actions.ts"
+    },
     "./workspace-integration-wire": {
       "types": "./src/workspace-integration-wire.ts",
       "default": "./src/workspace-integration-wire.ts"
+    },
+    "./vault-provider-wire": {
+      "types": "./src/vault-provider-wire.ts",
+      "default": "./src/vault-provider-wire.ts"
     },
     "./code-search": {
       "types": "./src/code-search.ts",
@@ -201,6 +361,14 @@
     "./presentation-artifact-query": {
       "types": "./src/presentation-artifact-query.ts",
       "default": "./src/presentation-artifact-query.ts"
+    },
+    "./session-list-entries": {
+      "types": "./src/session-list-entries.ts",
+      "default": "./src/session-list-entries.ts"
+    },
+    "./workspace-control-event": {
+      "types": "./src/workspace-control-event.ts",
+      "default": "./src/workspace-control-event.ts"
     }
   },
   "publishConfig": {
@@ -208,12 +376,13 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "build": "bun ../../scripts/build-typescript-package.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
+    "entities": "^7.0.1",
     "yaml": "2.9.0",
     "zod": "^4.2.1"
   },

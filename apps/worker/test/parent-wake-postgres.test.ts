@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import {
+  adoptConnectedMachineSessionBackgroundCommand,
+  appendSessionEvents,
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -9,12 +11,14 @@ import {
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   markSessionWorkflowWakeDelivered,
+  settleConnectedMachineSessionBackgroundCommand,
+  settleSessionInputWait,
   settleSessionIdleWithParentOutbox,
   waitForSessionInputWithEvent,
   type SessionWorkflowWakeDeliveryResult,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 import { notifyParentOfChildIdle, type NotifyServices } from "../src/activities/parent-wake";
 
@@ -23,6 +27,9 @@ import { notifyParentOfChildIdle, type NotifyServices } from "../src/activities/
 // runs the same durable acknowledgement the production signaler runs.
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
+type PoolSnapshot =
+  | { version: 1; scope: "organization" | "workspace" }
+  | { version: 1; scope: "user"; authorityGeneration: number };
 
 let shared: SharedTestDatabase | null = null;
 let client: ReturnType<typeof createDb> | null = null;
@@ -42,6 +49,279 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
+test.each(["organization", "personal"] as const)(
+  "SUB-ACCESS-01: real child, background-command, and wait-timeout producers coalesce with accepted %s Claude snapshots and copy SuperGrok's verbatim",
+  async (scope) => {
+    if (!shared || !client) return;
+    const admin = shared.admin;
+    const db = client.db;
+    const suffix = crypto.randomUUID();
+    const subjectId = `user:${suffix}`;
+    const [account] = await admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('Worker parent wake SUB-ACCESS-01') returning id`;
+    const accountId = account!.id;
+    const [workspace] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${accountId}, 'Shared test workspace') returning id`;
+    const workspaceId = workspace!.id;
+    const [personalWorkspace] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${accountId}, 'Personal test fixture') returning id`;
+    await admin`insert into workspace_inference_controls (account_id, workspace_id) values (${accountId}, ${workspaceId})`;
+    await admin`
+      insert into organization_memberships (
+        account_id, subject_id, role, status, personal_workspace_id
+      ) values (
+        ${accountId}, ${subjectId}, 'owner', 'active', ${personalWorkspace!.id}
+      )`;
+    await admin`
+      insert into workspace_memberships (
+        account_id, workspace_id, subject_id, role, permissions
+      ) values (
+        ${accountId}, ${workspaceId}, ${subjectId}, 'owner', '[]'::jsonb
+      )`;
+
+    // Already-accepted pre-cutover authority is copied, not recomputed from
+    // today's live pool. No retired credential repository participates.
+    const acceptedClaude: PoolSnapshot =
+      scope === "personal"
+        ? { version: 1, scope: "user", authorityGeneration: 1 }
+        : { version: 1, scope: "organization" };
+
+    async function start(
+      message: string,
+      parent?: {
+        session: { id: string };
+        turn: { id: string; executionGeneration: number };
+        attemptId: string;
+      },
+    ) {
+      const [parentAuthority] = parent
+        ? await admin<{ claude: PoolSnapshot; xai: PoolSnapshot }[]>`
+            select claude_provider_account_authority_snapshot as claude,
+              xai_provider_account_authority_snapshot as xai
+            from session_turns where id = ${parent.turn.id}`
+        : [];
+      const session = await createSession(db, {
+        accountId,
+        workspaceId,
+        subjectId,
+        ...(parent
+          ? {
+              parentSessionId: parent.session.id,
+              initialClaudeProviderAccountAuthoritySnapshot: parentAuthority!.claude,
+              initialXaiProviderAccountAuthoritySnapshot: parentAuthority!.xai,
+              createdByActor: {
+                type: "agent_attempt" as const,
+                attemptId: parent.attemptId,
+                sessionId: parent.session.id,
+                turnId: parent.turn.id,
+                executionGeneration: parent.turn.executionGeneration,
+              },
+            }
+          : { initialClaudeProviderAccountAuthoritySnapshot: acceptedClaude }),
+        initialMessage: message,
+        resources: [],
+        tools: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId },
+        model: "scripted-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
+        sandboxBackend: "none",
+      });
+      await initializeSessionStartAtomically(db, {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        clientEventId: `initial:${session.id}`,
+        reasoningEffortFallback: "low",
+        createdEventPayload: {},
+      });
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(db, workspaceId, {
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: `dispatch-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") throw new Error("turn was not claimed");
+      await appendSessionEvents(db, workspaceId, session.id, [
+        {
+          type: "turn.started",
+          turnId: claimed.turn.id,
+          turnGeneration: claimed.turn.executionGeneration,
+          turnAttemptId: attemptId,
+          payload: { triggerEventId: claimed.turn.triggerEventId },
+        },
+      ]);
+      return { session, turn: claimed.turn, attemptId };
+    }
+
+    async function settleIdle(started: Awaited<ReturnType<typeof start>>) {
+      const result = await applySessionTurnSettlement(db, workspaceId, {
+        sessionId: started.session.id,
+        turnId: started.turn.id,
+        triggerEventId: started.turn.triggerEventId,
+        attemptId: started.attemptId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [{ type: "turn.completed", payload: { reason: "test" } }],
+      });
+      expect(result.action).toBe("settled");
+    }
+
+    const parent = await start("delegate and wait for child work");
+    const [accepted] = await admin<{ claude: PoolSnapshot; xai: PoolSnapshot }[]>`
+      select claude_provider_account_authority_snapshot as claude,
+        xai_provider_account_authority_snapshot as xai
+      from session_turns where id = ${parent.turn.id}`;
+    expect(accepted?.claude.scope).toBe(scope === "personal" ? "user" : "organization");
+    // SuperGrok runs only on the shared core (M4 X4): its v1 carrier is the
+    // workspace default, never computed from live pools, and copied verbatim.
+    expect(accepted?.xai).toEqual({ version: 1, scope: "workspace" });
+
+    const child = await start("complete delegated work", parent);
+    const [childAuthority] = await admin<{ claude: PoolSnapshot; xai: PoolSnapshot }[]>`
+      select claude_provider_account_authority_snapshot as claude,
+        xai_provider_account_authority_snapshot as xai
+      from session_turns where id = ${child.turn.id}`;
+    expect(childAuthority).toEqual(accepted);
+
+    const wait = await waitForSessionInputWithEvent(db, workspaceId, parent.session.id, {
+      reason: "waiting for child completion",
+      timeoutSeconds: 600,
+      command: {
+        accountId,
+        actor: {
+          type: "agent_attempt",
+          sessionId: parent.session.id,
+          turnId: parent.turn.id,
+          attemptId: parent.attemptId,
+          executionGeneration: parent.turn.executionGeneration,
+        },
+        operationKey: crypto.randomUUID(),
+      },
+    });
+    const command = {
+      accountId,
+      workspaceId,
+      sessionId: parent.session.id,
+      commandId: crypto.randomUUID(),
+      controlWorkspaceId: workspaceId,
+      enrollmentId: crypto.randomUUID(),
+      connectionInstanceId: crypto.randomUUID(),
+      opId: crypto.randomUUID(),
+    };
+    await adoptConnectedMachineSessionBackgroundCommand(db, {
+      ...command,
+      turnId: parent.turn.id,
+      attemptId: parent.attemptId,
+      executionGeneration: parent.turn.executionGeneration,
+      command: "printf completed",
+    });
+    await settleConnectedMachineSessionBackgroundCommand(db, {
+      ...command,
+      outcome: "exited",
+      exitCode: 0,
+      reason: "op_exit",
+    });
+
+    await settleIdle(parent);
+    await settleIdle(child);
+    const boundary = await settleSessionIdleWithParentOutbox(db, workspaceId, child.session.id);
+    if (boundary.action !== "settled" || !boundary.notifyParent) {
+      throw new Error("Child terminal-result outbox was not created");
+    }
+    const errors: string[] = [];
+    const services: NotifyServices = {
+      db,
+      bus: { publish: async () => undefined } as unknown as EventBus,
+      settings: {} as Settings,
+      observability: {
+        info: () => undefined,
+        error: (message: string) => errors.push(message),
+      } as unknown as NotifyServices["observability"],
+      wakeSessionWorkflow: async (wake) =>
+        await markSessionWorkflowWakeDelivered(db, {
+          accountId: wake.accountId,
+          workspaceId: wake.workspaceId,
+          sessionId: wake.sessionId,
+          temporalWorkflowId: wake.workflowId,
+          wakeRevision: wake.wakeRevision,
+        }),
+    };
+    await notifyParentOfChildIdle(services, workspaceId, child.session.id, boundary.episodeKey);
+    expect(errors).toEqual([]);
+
+    // Insert the eligible child update before the timeout so inbox planning
+    // selects receiver-owned execution context before coalescing both with the
+    // background-command result.
+    await admin`
+      update sessions set input_wait_until = now() - interval '1 second'
+      where id = ${parent.session.id} and input_wait_turn_id = ${wait.waitTurnId}`;
+    expect(
+      await settleSessionInputWait(db, {
+        accountId,
+        workspaceId,
+        sessionId: parent.session.id,
+        waitTurnId: wait.waitTurnId,
+        disposition: "timeout",
+      }),
+    ).toMatchObject({ action: "timeout" });
+
+    const pending = await admin<
+      { id: string; kind: string; claude: PoolSnapshot; xai: PoolSnapshot }[]
+    >`
+      select id, kind, claude_provider_account_authority_snapshot as claude,
+        xai_provider_account_authority_snapshot as xai
+      from session_system_updates
+      where session_id = ${parent.session.id}
+        and kind = any(${["child_terminal_result", "background_command_result", "session_wait_timeout"]}::text[])
+      order by created_at, id`;
+    expect(pending.map((row) => row.kind).sort()).toEqual([
+      "background_command_result",
+      "child_terminal_result",
+      "session_wait_timeout",
+    ]);
+    for (const update of pending) {
+      expect(update.claude).toEqual(accepted!.claude);
+      expect(update.xai).toEqual(accepted!.xai);
+    }
+
+    const delivered = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(delivered.action).toBe("claimed");
+    if (delivered.action !== "claimed") throw new Error("Coalesced updates were not delivered");
+    const [deliveredAuthority] = await admin<
+      {
+        claude: PoolSnapshot;
+        xai: PoolSnapshot;
+        execution_context_turn_id: string | null;
+      }[]
+    >`
+      select claude_provider_account_authority_snapshot as claude,
+        xai_provider_account_authority_snapshot as xai, execution_context_turn_id
+      from session_turns where id = ${delivered.turn.id}`;
+    expect(deliveredAuthority).toMatchObject(accepted!);
+    expect(deliveredAuthority?.execution_context_turn_id).toBe(parent.turn.id);
+    const deliveredRows = await admin<{ state: string; delivered_turn_id: string | null }[]>`
+      select state, delivered_turn_id from session_system_updates
+      where id = any(${pending.map((row) => row.id)}::uuid[])
+      order by created_at, id`;
+    expect(deliveredRows).toEqual(
+      pending.map(() => ({ state: "delivered", delivered_turn_id: delivered.turn.id })),
+    );
+  },
+);
+
 test("a finished child signals its parent parked in wait_for_input immediately", async () => {
   if (!shared || !client) return;
   const admin = shared.admin;
@@ -59,6 +339,33 @@ test("a finished child signals its parent parked in wait_for_input immediately",
   const grant = access.workspaceGrants[0]!;
   const accountId = grant.accountId;
   const workspaceId = grant.workspaceId!;
+  const [personalWorkspace] = await admin<
+    { id: string }[]
+  >`insert into workspaces (account_id, name)
+    values (${accountId}, 'Parent personal resources') returning id`;
+  await admin`insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+    values (${accountId}, ${grant.subjectId}, 'owner', 'active', ${personalWorkspace!.id})
+    on conflict (account_id, subject_id) do update set personal_workspace_id = excluded.personal_workspace_id`;
+  const [connection] = await admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${accountId}, true),
+      set_config('opengeni.workspace_id', ${personalWorkspace!.id}, true),
+      set_config('opengeni.subject_id', ${grant.subjectId}, true)`;
+    return await tx<{ id: string }[]>`insert into connections
+      (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+      values (${accountId}, ${personalWorkspace!.id}, ${grant.subjectId}, 'mail.test', 'oauth2', 'test-ciphertext')
+      returning id`;
+  });
+  const personalConnections = [
+    {
+      serverId: "mail",
+      connectionId: connection!.id,
+      originWorkspaceId: personalWorkspace!.id,
+      ownerSubjectId: grant.subjectId,
+      providerDomain: "mail.test",
+      kind: "oauth2" as const,
+      connectionType: "mcp" as const,
+    },
+  ];
 
   async function start(
     message: string,
@@ -68,12 +375,23 @@ test("a finished child signals its parent parked in wait_for_input immediately",
       attemptId: string;
     },
   ) {
+    const [parentAuthority] = parent
+      ? await admin<
+          { xai: PoolSnapshot; claude: PoolSnapshot }[]
+        >`select xai_provider_account_authority_snapshot as xai,
+            claude_provider_account_authority_snapshot as claude
+          from session_turns where id = ${parent.turn.id}`
+      : [];
     const session = await createSession(db, {
       accountId,
       workspaceId,
+      subjectId: grant.subjectId,
+      personalConnectionDelegations: personalConnections,
       ...(parent
         ? {
             parentSessionId: parent.session.id,
+            initialXaiProviderAccountAuthoritySnapshot: parentAuthority!.xai,
+            initialClaudeProviderAccountAuthoritySnapshot: parentAuthority!.claude,
             createdByActor: {
               type: "agent_attempt" as const,
               attemptId: parent.attemptId,
@@ -111,6 +429,15 @@ test("a finished child signals its parent parked in wait_for_input immediately",
       trigger: { kind: "next" },
     });
     if (claimed.action !== "claimed") throw new Error("turn was not claimed");
+    await appendSessionEvents(db, workspaceId, session.id, [
+      {
+        type: "turn.started",
+        turnId: claimed.turn.id,
+        turnGeneration: claimed.turn.executionGeneration,
+        turnAttemptId: attemptId,
+        payload: { triggerEventId: claimed.turn.triggerEventId },
+      },
+    ]);
     // The start wake is consumed by this claim long before the turn ends.
     await admin`update session_workflow_wake_outbox set delivered_revision = wake_revision
       where session_id = ${session.id}`;
@@ -182,8 +509,8 @@ test("a finished child signals its parent parked in wait_for_input immediately",
     settings: {} as Settings,
     observability: {
       info: () => undefined,
-      error: (message: string) => {
-        errors.push(message);
+      error: (message: string, attributes: Record<string, unknown>) => {
+        errors.push(`${message}: ${attributes.error}`);
       },
     } as unknown as NotifyServices["observability"],
     wakeSessionWorkflow: async (wake) => {
@@ -212,6 +539,13 @@ test("a finished child signals its parent parked in wait_for_input immediately",
   expect(errors).toEqual([]);
   const pending = await listOutstandingSessionSystemUpdates(db, workspaceId, parent.session.id);
   expect(pending.map((update) => update.kind)).toEqual(["child_terminal_result"]);
+  expect(pending[0]!.lineage).toMatchObject({
+    connectionAuthoritySubjectId: grant.subjectId,
+    parentTurnId: parent.turn.id,
+  });
+  const [accepted] = await admin<{ personal_connection_delegations: unknown }[]>`
+    select personal_connection_delegations from session_system_updates where id = ${pending[0]!.id}`;
+  expect(accepted!.personal_connection_delegations).toMatchObject(personalConnections);
   // The parent is signalled now, on the deadline's revision, instead of waiting
   // for the periodic dispatcher. The acknowledgement keeps the revision open
   // until a claim consumes the result.

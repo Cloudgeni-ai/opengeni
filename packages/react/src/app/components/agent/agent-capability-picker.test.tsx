@@ -1,0 +1,235 @@
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+
+import { ComposerCapabilitiesMenuBody } from "../composer-capabilities-menu-body";
+import { instructionSections } from "../session/model-context-inspector";
+import {
+  capabilityAvailability,
+  draftFromRequest,
+  requestFromDraft,
+  type AgentCapabilityDraft,
+} from "../../lib/agent-capabilities";
+import { AgentCapabilityPicker, AgentCapabilitySummary } from "./agent-capability-picker";
+
+let container: HTMLDivElement;
+let root: Root;
+beforeAll(() => {
+  GlobalRegistrator.register();
+  (
+    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
+});
+beforeEach(() => {
+  container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+});
+afterEach(async () => {
+  await act(async () => root.unmount());
+  container.remove();
+});
+afterAll(() => GlobalRegistrator.unregister());
+
+const noWebSearch = capabilityAvailability({
+  capabilities: [{ id: "webSearch", available: false, reason: "off" }],
+});
+
+test("the picker shows product words, disables what the server doesn't offer, and edits the draft", async () => {
+  let draft: AgentCapabilityDraft = draftFromRequest("none");
+  const change = mock((next: AgentCapabilityDraft) => {
+    draft = next;
+  });
+  await act(async () =>
+    root.render(
+      <AgentCapabilityPicker draft={draft} onChange={change} availability={noWebSearch} />,
+    ),
+  );
+  const text = container.textContent ?? "";
+  expect(text).toContain("Everything this workspace offers");
+  expect(text).toContain("Only what you choose");
+  expect(text).not.toMatch(/goal_set|knowledge_search|web_search/);
+
+  const webSearch = container.querySelector<HTMLInputElement>(
+    '[data-capability="webSearch"] input[type=checkbox]',
+  )!;
+  expect(webSearch.disabled).toBe(true);
+  expect(container.querySelector('[data-capability="webSearch"]')?.textContent).toContain(
+    "Not enabled on this server",
+  );
+
+  const goals = container.querySelector<HTMLInputElement>(
+    '[data-capability="goals"] input[type=checkbox]',
+  )!;
+  await act(async () => goals.click());
+  expect(requestFromDraft(draft, noWebSearch)).toEqual({ from: "none", goals: true });
+});
+
+test("a read-only picker changes nothing", async () => {
+  const change = mock();
+  await act(async () =>
+    root.render(
+      <AgentCapabilityPicker
+        draft={draftFromRequest("all")}
+        onChange={change}
+        availability={capabilityAvailability(null)}
+        disabled
+        disabledReason="Only workspace admins can change these."
+      />,
+    ),
+  );
+  for (const input of container.querySelectorAll<HTMLInputElement>("input[type=checkbox]")) {
+    expect(input.disabled).toBe(true);
+  }
+  expect(container.textContent).toContain("Only workspace admins can change these.");
+});
+
+test("the summary lists what is on, then what is off and what the server doesn't offer", async () => {
+  await act(async () =>
+    root.render(
+      <AgentCapabilitySummary
+        values={draftFromRequest({ from: "none", knowledge: true }).values}
+        availability={noWebSearch}
+      />,
+    ),
+  );
+  const on = [...container.querySelectorAll("[data-capability]")].map((row) =>
+    row.getAttribute("data-capability"),
+  );
+  expect(on).toEqual(["humanInput", "skills", "knowledge"]);
+  expect(container.textContent).toContain("Uses installed Skills.");
+  expect(container.textContent).toContain("Off: Notifications, Images and video, Goals");
+  expect(container.textContent).toContain("Not enabled on this server: Web search.");
+});
+
+test("composer capabilities: read-only until Customize for this chat, then toggles", async () => {
+  const onCustomizedChange = mock();
+  const onChange = mock();
+  const render = (customized: boolean) =>
+    root.render(
+      <ComposerCapabilitiesMenuBody
+        presentation="dialog"
+        capabilities={{
+          customized,
+          draft: draftFromRequest({ from: "none", workspaceConnectors: true }),
+          availability: capabilityAvailability(null),
+          onCustomizedChange,
+          onChange,
+        }}
+        connectorsSelected={2}
+        connectorsTotal={3}
+        onOpenConnectors={() => {}}
+      />,
+    );
+  await act(async () => render(false));
+  const customize = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Customize for this chat"]',
+  )!;
+  expect(customize.getAttribute("aria-checked")).toBe("false");
+  const readOnlyGoals = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Goals, off"]',
+  )!;
+  // Reachable (not disabled) but read as unavailable, and clicking changes nothing.
+  expect(readOnlyGoals.disabled).toBe(false);
+  expect(readOnlyGoals.getAttribute("aria-disabled")).toBe("true");
+  await act(async () => readOnlyGoals.click());
+  expect(onChange).not.toHaveBeenCalled();
+  expect(container.textContent).toContain("2 of 3 connected apps on");
+  await act(async () => customize.click());
+  expect(onCustomizedChange).toHaveBeenCalledWith(true);
+
+  await act(async () => render(true));
+  const goals = container.querySelector<HTMLButtonElement>('button[aria-label="Goals"]')!;
+  expect(goals.getAttribute("role")).toBe("switch");
+  await act(async () => goals.click());
+  expect(requestFromDraft(onChange.mock.calls[0]![0])).toEqual({
+    from: "none",
+    goals: true,
+    workspaceConnectors: true,
+  });
+});
+
+test("in an EU-only workspace the picker and the composer menu say Not supported in EU", async () => {
+  const euOnly = capabilityAvailability({
+    capabilities: [
+      { id: "webSearch", available: false, reason: "Off here", code: "region_restricted" },
+    ],
+  });
+  await act(async () =>
+    root.render(
+      <AgentCapabilityPicker
+        draft={draftFromRequest("all")}
+        onChange={() => {}}
+        availability={euOnly}
+      />,
+    ),
+  );
+  const pickerRow = container.querySelector('[data-capability="webSearch"]')!;
+  expect(pickerRow.textContent).toContain("Not supported in EU");
+  expect(pickerRow.textContent).not.toContain("Off here");
+  expect(pickerRow.querySelector<HTMLInputElement>("input[type=checkbox]")!.disabled).toBe(true);
+
+  const onChange = mock();
+  await act(async () =>
+    root.render(
+      <ComposerCapabilitiesMenuBody
+        presentation="dialog"
+        capabilities={{
+          customized: true,
+          draft: draftFromRequest("all"),
+          availability: euOnly,
+          onCustomizedChange: () => {},
+          onChange,
+        }}
+        connectorsSelected={0}
+        connectorsTotal={0}
+        onOpenConnectors={() => {}}
+      />,
+    ),
+  );
+  const menuRow = container.querySelector('[data-capability="webSearch"]')!;
+  expect(menuRow.textContent).toContain("Not supported in EU");
+  // Even while customizing, it can't be switched on.
+  const control = menuRow.querySelector<HTMLButtonElement>("button")!;
+  expect(control.getAttribute("aria-label")).toBe("Web search, Not supported in EU");
+  await act(async () => control.click());
+  expect(onChange).not.toHaveBeenCalled();
+});
+
+test("inspector sections slice prompt modules out of the operational contract", () => {
+  const content = "Base.\n\nRuntime.";
+  const sections = instructionSections([
+    { id: "identity", title: "Identity", content: "Me.", utf8Bytes: 3, estimatedTokens: 1 },
+    {
+      id: "operational_contract",
+      title: "Operational contract",
+      content,
+      utf8Bytes: content.length,
+      estimatedTokens: 4,
+      modules: [
+        { id: "base_behavior", chars: 5 },
+        { id: "runtime_mechanics", chars: 8 },
+      ],
+    },
+  ]);
+  expect(sections.map((section) => [section.title, section.text, section.depth])).toEqual([
+    ["Identity", "Me.", 0],
+    ["Operational contract", content, 0],
+    ["Base behavior", "Base.", 1],
+    ["Runtime mechanics", "Runtime.", 1],
+  ]);
+  // Lengths that don't add up keep the layer whole.
+  expect(
+    instructionSections([
+      {
+        id: "operational_contract",
+        title: "Operational contract",
+        content,
+        utf8Bytes: content.length,
+        estimatedTokens: 4,
+        modules: [{ id: "base_behavior", chars: 99 }],
+      },
+    ]),
+  ).toHaveLength(1);
+});

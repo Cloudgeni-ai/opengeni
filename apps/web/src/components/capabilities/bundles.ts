@@ -2,9 +2,9 @@ import type {
   IntegrationChip,
   IntegrationMark,
   IntegrationViewModel,
-} from "@/components/capabilities/integration-view-model";
+} from "@opengeni/react/app/components/capabilities/integration-view-model";
 import type { InstalledSourceSkill } from "@/components/capabilities/source-import-flow";
-import type { CapabilityCatalogItem, PluginInstallationSummary } from "@/types";
+import type { CapabilityCatalogItem, PluginInstallationSummary } from "@opengeni/react/app/types";
 
 export type BundleKind = "skill" | "plugin";
 
@@ -43,15 +43,6 @@ export function bundleKindLabel(kind: BundleKind): string {
   }
 }
 
-export function bundleProvenanceLabel(provenance: BundleProvenance): string {
-  switch (provenance) {
-    case "built_in":
-      return "Curated by Opengeni";
-    case "installed_from_source":
-      return "Imported from source";
-  }
-}
-
 function bundleProvenanceSpokenLabel(provenance: BundleProvenance): string {
   switch (provenance) {
     case "built_in":
@@ -71,15 +62,6 @@ export function bundleAccessibleDetail(
 ): string {
   const kindLabel = bundleKindLabel(kind);
   return provenance ? `${kindLabel}, ${bundleProvenanceSpokenLabel(provenance)}` : kindLabel;
-}
-
-/** Catalog rows show only the description; kind and provenance live in the detail. */
-export function bundleRowDescription(
-  _kind: BundleKind,
-  _provenance: BundleProvenance | null,
-  description: string,
-): string {
-  return description.trim();
 }
 
 /** Up to two letters from the bundle's own name; the last-resort mark. */
@@ -114,7 +96,7 @@ export function sourceHost(value: string): string {
 }
 
 /**
- * A Skill that is a catalog row - the curated reviewed library OpenGeni ships,
+ * A Skill that is a catalog row - the curated reviewed library Opengeni ships,
  * and any other directly owned Skill the catalog projects. It keeps the catalog
  * detail sheet: that sheet already owns install/update/remove under the
  * reviewed library identity plus the immutable provenance panel, and
@@ -137,7 +119,7 @@ export function catalogSkillBundleRow(
     kind: "skill",
     provenance: options.provenance,
     name: item.name,
-    description: bundleRowDescription("skill", options.provenance, description),
+    description: description.trim(),
     accessibleDetail: bundleAccessibleDetail("skill", options.provenance),
     mark: mark(item.name, options.logoSrc),
     chip,
@@ -164,7 +146,7 @@ export function importedSkillBundleRow(
   const chip: IntegrationChip = { label: "Installed", tone: "ok" };
   const name = skill.name;
   const rawDescription = skill.description ?? "";
-  const description = bundleRowDescription("skill", "installed_from_source", rawDescription);
+  const description = rawDescription.trim();
   return {
     // Namespaced so it can never collide with the catalog Skill row of the
     // same capability id.
@@ -202,8 +184,7 @@ export function importedSkillBundleRow(
             }
           : {
               kind: "locked",
-              message:
-                "Workspace administrators can install, update, and remove imported Skills and Plugins.",
+              message: "Ask a workspace admin to update or remove this.",
             },
       },
     },
@@ -212,16 +193,46 @@ export function importedSkillBundleRow(
 }
 
 /** A Plugin installed from a reviewed manifest URL. */
+/**
+ * Why an installed plugin can't be updated here, or nothing when it can.
+ * Updating a plugin that is already installed is integration admin work.
+ */
+export function pluginUpdateUnavailable(
+  plugin: Pick<PluginInstallationSummary, "sourceUrl">,
+  canUpdate: boolean,
+): { updateUnavailableReason?: string } {
+  if (!canUpdate) return { updateUnavailableReason: "Only an admin can update this plugin." };
+  return plugin.sourceUrl
+    ? {}
+    : { updateUnavailableReason: "This plugin didn't keep its source link." };
+}
+
+/**
+ * Whether the viewer may remove this plugin. The server decides it (admins
+ * remove any plugin, a member only one they added); an older server omits
+ * it, so the viewer's removal permission stands in.
+ */
+export function pluginRemovable(
+  plugin: Pick<PluginInstallationSummary, "canRemove">,
+  canRemovePlugins: boolean,
+): boolean {
+  return plugin.canRemove ?? canRemovePlugins;
+}
+
 export function pluginBundleRow(
   plugin: PluginInstallationSummary,
   options: {
+    /** Remove plugins (members, connections:write); the plugin's own `canRemove` wins. */
     canManage: boolean;
+    /** Update it (integration admins); defaults to canManage. */
+    canUpdate?: boolean;
     busy: boolean;
     onUpdate: () => void;
     onRemove: () => void;
   },
 ): BundleRow {
   const active = plugin.status === "active";
+  const canRemove = pluginRemovable(plugin, options.canManage);
   const chip: IntegrationChip = active
     ? { label: "Installed", tone: "ok" }
     : { label: "Needs attention", tone: "warn" };
@@ -229,12 +240,17 @@ export function pluginBundleRow(
   // every Plugin that never supplied its own description.
   const rawDescription = plugin.description || "A portable set of tools and instructions.";
   const sourceAvailable = plugin.sourceUrl !== null;
+  const updateUnavailable = !(options.canUpdate ?? options.canManage)
+    ? "Only an admin can update this plugin."
+    : sourceAvailable
+      ? undefined
+      : "This installed Plugin did not retain a source URL.";
   return {
     id: `plugin:${plugin.pluginKey}`,
     kind: "plugin",
     provenance: "installed_from_source",
     name: plugin.name,
-    description: bundleRowDescription("plugin", "installed_from_source", rawDescription),
+    description: rawDescription.trim(),
     accessibleDetail: bundleAccessibleDetail("plugin", "installed_from_source"),
     mark: mark(plugin.name, null),
     chip,
@@ -261,24 +277,21 @@ export function pluginBundleRow(
           { label: "Installation version", value: String(plugin.installationVersion) },
         ],
         options: [],
-        footer: options.canManage
+        footer: canRemove
           ? {
               kind: "actions",
               primary: {
                 label: "Review update",
                 onClick: options.onUpdate,
-                disabled: !sourceAvailable,
-                ...(sourceAvailable
-                  ? {}
-                  : { unavailableReason: "This installed Plugin did not retain a source URL." }),
+                disabled: updateUnavailable !== undefined,
+                ...(updateUnavailable ? { unavailableReason: updateUnavailable } : {}),
               },
               secondary: { label: "Remove", onClick: options.onRemove, destructive: true },
               busy: options.busy,
             }
           : {
               kind: "locked",
-              message:
-                "Workspace administrators can install, update, and remove imported Skills and Plugins.",
+              message: "Ask a workspace admin to update or remove this.",
             },
         ...(active
           ? {}

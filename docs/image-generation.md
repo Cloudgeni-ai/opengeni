@@ -1,7 +1,7 @@
 # Image generation
 
 Image generation is a provider-aware agent tool with one provider-neutral
-artifact contract. Providers create pixels; OpenGeni owns durable operation
+artifact contract. Providers create pixels; Opengeni owns durable operation
 admission, validation, storage, model-history projection, sandbox
 materialization, API retrieval, and timeline rendering.
 
@@ -34,6 +34,12 @@ Selection is deterministic for the accepted turn:
    through the pinned Gateway image-model protocol;
    `OPENGENI_IMAGE_GENERATION_MODEL` selects that image model and defaults to
    `openai/gpt-image-2`.
+4. Otherwise, when the deployment configures its managed Gateway key
+   (`OPENGENI_VERCEL_AI_GATEWAY_API_KEY`), the same adapter and image model run
+   on Opengeni credits. This route is on by default once that key and a price
+   exist; operators turn it off with
+   `OPENGENI_IMAGE_GENERATION_OPENGENI_CREDITS_ENABLED=false`. A workspace that
+   turns Opengeni credits off is not offered this route.
 
 The ordinary text model and image model are intentionally independent. The
 tool is omitted unless permanent object storage and one verified route above
@@ -64,12 +70,41 @@ contract. Current route availability is:
 | Connected SuperGrok/xAI subscription | Native hosted xAI image tool | Typed Responses image input |
 | Managed or workspace Gateway Responses | Workspace Gateway image adapter | Typed image input only for catalogued vision models (Kimi K3 yes; DeepSeek V4 Flash no) |
 | Other registry Responses providers | Workspace Gateway image adapter | Typed image input only when the model declares it |
-| Registry Chat providers | Workspace Gateway image adapter | Disabled until OpenGeni has a proven typed Chat image wire |
+| Registry Chat providers | Workspace Gateway image adapter | Disabled until Opengeni has a proven typed Chat image wire |
 
-“Workspace Gateway image adapter” requires that workspace's Gateway key; the
-managed OpenGeni text-model credential is not reused for separately billed
-image generation. Text-only models can still create images through the adapter,
-but never receive pixel-bearing `view_image` or computer tools.
+“Workspace Gateway image adapter” uses that workspace's Gateway key when it has
+one, and otherwise the deployment's managed Gateway key on Opengeni credits.
+Text-only models can still create images through the adapter, but never
+receive pixel-bearing `view_image` or computer tools.
+
+## Opengeni-credit funding
+
+A credit-funded image freezes Opengeni's customer price on its durable
+operation before the provider request. The price is
+`OPENGENI_IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE` when set, otherwise the
+reviewed price of the configured image model
+(`IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE` in `@opengeni/config`). A deployment
+that bills or meters credits (`OPENGENI_BILLING_MODE=stripe` or
+`OPENGENI_USAGE_LIMITS_MODE=managed`) never offers an image model it cannot
+price; other deployments fund it at no charge, like managed video.
+
+Admission follows prepaid managed video: before the operation advances to
+`provider_started`, the workspace usage allowance (including the initiating
+member's limit) and the spendable credit balance must cover the price. Unlike
+video, which spends general credit only, the spendable balance includes plan
+and trial grants that cover the turn's chat model, as for the chat itself; the
+operation freezes that model with its price. Images of the same workspace that
+are still in their provider request (for up to 15 minutes) hold their price,
+so parallel images cannot all pass admission on one balance. A refusal rolls
+back, so nothing was dispatched or charged, and the tool returns a rejected
+result (`code` `insufficient_credits` or `allowance_exhausted`) that the agent
+can relay instead of failing the turn.
+
+The single `image_generation_debit` ledger entry, its grant allocations and
+the `image_generation.cost` usage event commit in the same transaction that
+makes the image artifact ready and completes the operation. A delivered image
+is therefore always charged, and a failed, ambiguous or unsaved image never
+is, so no refund path is needed.
 
 ## Durable operation and artifact boundary
 
@@ -97,7 +132,7 @@ receipt. A ready receipt is immutable and retrieves through the existing
 workspace artifact/file authority.
 
 JSON/base64 provider responses are decoded incrementally into one bounded byte
-buffer. OpenGeni never retains the full JSON envelope or encoded image string,
+buffer. Opengeni never retains the full JSON envelope or encoded image string,
 and provider adapters never retry an outcome-ambiguous paid request.
 
 ## Conversation and prompt-cache invariants

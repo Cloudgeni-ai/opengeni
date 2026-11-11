@@ -1,10 +1,17 @@
-import type { TranscribeAudioResponse, VoiceInputErrorCode } from "@opengeni/contracts";
+import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
+import type {
+  DictationModelOption,
+  TranscribeAudioResponse,
+  VoiceInputErrorCode,
+} from "@opengeni/contracts";
+import type { CreditDebitAttribution, Database, UsageEventProcessingResidency } from "@opengeni/db";
+import type { RecordingTranscriptionErrorCode } from "./recording-transcription";
 
 /**
  * Server-owned upstream budget for one provider attempt. Resumable recording
  * claims remain fenced for longer than this budget before another worker may
  * reclaim them. Provider adapters must honor the supplied AbortSignal and must
- * not return while their upstream request is still live; OpenGeni does not
+ * not return while their upstream request is still live; Opengeni does not
  * claim remote-side idempotency or cancellation for vendors that cannot meet
  * that adapter contract.
  */
@@ -25,15 +32,64 @@ export type TranscriptionRequest = {
   mimeType: string;
   /** Optional client-reported duration; enforced as a soft ceiling before upstream. */
   durationSeconds?: number | undefined;
+  /** ISO 639 hint for what is spoken; omitted means detect. */
+  language?: string | undefined;
+  /** Names and terms to listen for; a model that can't take them ignores them. */
+  keyterms?: readonly string[] | undefined;
   signal?: AbortSignal | undefined;
   requestId: string;
   /** Absolute server-owned provider deadline persisted for resumable attempts. */
   providerDeadlineAt?: Date | undefined;
   /** Exact provider selected before a resumable segment is first sent upstream. */
   providerId?: string | undefined;
+  /**
+   * The exact model on `providerId` a dictation named; the provider's own
+   * dictation model when omitted. A named model never falls over to another.
+   */
+  model?: string | undefined;
   preferredProvider?: string | null | undefined;
   fallbackEnabled?: boolean | undefined;
   excludedProviders?: readonly string[] | undefined;
+  /**
+   * Credit settlement facts for a deployment-funded provider. Required when
+   * the selected provider is deployment-funded and credit billing is active;
+   * the service fails closed without it.
+   */
+  billing?: TranscriptionBillingContext | undefined;
+  /**
+   * Internal: return `settleBilling` instead of settling before returning, so
+   * a resumable segment's transcript commits before any billing write.
+   */
+  deferBillingSettlement?: boolean;
+};
+
+/**
+ * Trusted, server-built settlement identity for one transcription unit. The
+ * usage receipt and debit idempotency keys derive from `workspaceId` +
+ * `sourceId` (see `voiceInputSettlementKeys`), so a retry or a later
+ * reconciliation settles the same unit exactly once.
+ */
+export type TranscriptionBillingContext = {
+  /**
+   * Server-derived unit identity. Never a client-chosen value: a reused id
+   * settles once, so a client-controlled id would make later calls free.
+   */
+  sourceId: string;
+  /** Trusted payer facts from the authenticated request boundary. */
+  attribution: CreditDebitAttribution;
+  /**
+   * Audio duration measured by the server from WAV bytes it produced (the
+   * resumable segment, or the normalized one-shot upload). Bills whenever the
+   * provider reports no usage this deployment has a price for.
+   */
+  trustedDurationSeconds?: number | undefined;
+  /**
+   * Audio duration a client reported, for audio that never passes through
+   * the server (the live transcript streams from the device straight to the
+   * provider). Bills only without provider usage or a trusted duration, and
+   * the ledger names it `client_reported_duration`.
+   */
+  clientReportedDurationSeconds?: number | undefined;
 };
 
 export type TranscriptionResult = TranscribeAudioResponse & {
@@ -41,28 +97,133 @@ export type TranscriptionResult = TranscribeAudioResponse & {
   providerId: string;
   audioSeconds: number;
   latencyMs: number;
+  /** Opengeni credits charged for this call (0 for subscription/free providers). */
+  creditCostMicros?: number | undefined;
+  /**
+   * Server-only settlement callback; never serialized into a public response.
+   * Never rejects: a settlement failure after provider success is logged and
+   * retried, and the transcript is still delivered.
+   */
+  settleBilling?: () => Promise<void>;
+};
+
+export type TranscriptionBillingRefusalCode =
+  | "insufficient_credits"
+  | "allowance_exhausted"
+  | "monthly_model_cost_limit";
+
+/**
+ * Pre-use refusal for deployment-funded transcription: 402 for credits and
+ * allowances (same codes as session admission), 429 for a static monthly cap.
+ */
+export class TranscriptionBillingRefusedError extends Error {
+  readonly status: 402 | 429;
+  readonly code: TranscriptionBillingRefusalCode;
+  readonly details: { scope?: string; resetsAt?: string | null; subjectId?: string };
+
+  constructor(input: {
+    code: TranscriptionBillingRefusalCode;
+    message: string;
+    details?: { scope?: string; resetsAt?: string | null; subjectId?: string };
+  }) {
+    super(input.message);
+    this.name = "TranscriptionBillingRefusedError";
+    this.code = input.code;
+    this.status = input.code === "monthly_model_cost_limit" ? 429 : 402;
+    this.details = input.details ?? {};
+  }
+}
+
+/**
+ * Credit admission and settlement for deployment-funded transcription.
+ * Subscription providers (Codex, SuperGrok) never reach this port.
+ */
+export type TranscriptionBilling = {
+  /**
+   * Refuse before any audio is sent when the payer cannot fund the call.
+   * `feature` words the refusal for what was refused (voice input by default).
+   */
+  admit(input: {
+    accountId: string;
+    workspaceId: string;
+    attribution: CreditDebitAttribution;
+    feature?: TranscriptionBillingFeature;
+  }): Promise<void>;
+  /**
+   * Record usage and debit credits once per unit, after use. The usage receipt
+   * commits before the debit, so a failed debit leaves a durable receipt that
+   * `admit` reconciles on the workspace's next voice request.
+   */
+  settle(input: TranscriptionSettlement): Promise<{ creditCostMicros: number }>;
+  /**
+   * Record one unit's usage receipt inside the caller's transaction, so the
+   * charge commits with the caller's own write or not at all. `settle` for
+   * the same unit then applies its debit at the recorded amount, and a debit
+   * that fails is applied from the receipt by a later admission.
+   */
+  recordReceipt?(
+    tx: Database,
+    input: TranscriptionSettlement,
+  ): Promise<{ creditCostMicros: number }>;
+  /**
+   * Apply now the debit of every receipt in the workspace whose debit never
+   * committed (as `admit` does on the next voice request), so a meeting's
+   * failed live charges are paid when it is finalized.
+   */
+  reconcile?(input: { accountId: string; workspaceId: string }): Promise<void>;
+};
+
+/** What a billing refusal names: voice input, or a meeting's live transcript. */
+export type TranscriptionBillingFeature = "voice_input" | "live_transcript";
+
+/** One unit of deployment-funded transcription to settle. */
+export type TranscriptionSettlement = {
+  accountId: string;
+  workspaceId: string;
+  providerId: string;
+  model: string;
+  pricing: VoiceInputPricing;
+  usage: VoiceInputUsage | null;
+  billing: TranscriptionBillingContext;
+  /** Where the provider processed the audio (its route's residency claim). */
+  processingResidency?: UsageEventProcessingResidency;
 };
 
 export class TranscriptionServiceError extends Error {
-  readonly code: VoiceInputErrorCode;
+  /** Stable subscription eligibility refusal, distinct from provider availability. */
+  readonly subscriptionCode:
+    | "subscription_api_unavailable"
+    | "subscription_plan_required"
+    | undefined;
+  readonly code: Exclude<VoiceInputErrorCode, TranscriptionBillingRefusalCode>;
   readonly status: number;
   readonly retryable: boolean;
   /** Explicit rejection before any transcription result; safe to try another provider. */
   readonly fallbackSafe: boolean;
+  /**
+   * What the provider said, in the meeting pipeline's words, where voice
+   * input's own code is coarser: a rejected key and a spent balance are both
+   * `unavailable` to voice input, but a meeting tells its owner which.
+   */
+  readonly providerCode: RecordingTranscriptionErrorCode | undefined;
 
   constructor(input: {
-    code: VoiceInputErrorCode;
+    subscriptionCode?: "subscription_api_unavailable" | "subscription_plan_required" | undefined;
+    code: Exclude<VoiceInputErrorCode, TranscriptionBillingRefusalCode>;
     message: string;
     status?: number;
     retryable?: boolean;
     fallbackSafe?: boolean;
+    providerCode?: RecordingTranscriptionErrorCode | undefined;
   }) {
     super(input.message);
     this.name = "TranscriptionServiceError";
+    this.subscriptionCode = input.subscriptionCode;
     this.code = input.code;
     this.status = input.status ?? statusForVoiceInputError(input.code);
     this.retryable = input.retryable ?? false;
     this.fallbackSafe = input.fallbackSafe ?? false;
+    this.providerCode = input.providerCode;
   }
 }
 
@@ -99,46 +260,48 @@ export type TranscriptionAvailabilityContext = {
   preferredProvider?: string | null | undefined;
   fallbackEnabled?: boolean | undefined;
   excludedProviders?: readonly string[] | undefined;
+  /** Account from the caller's verified workspace grant; providers still recheck their pool. */
+  accountId?: string | undefined;
   workspaceId?: string | undefined;
   subjectId?: string | undefined;
-};
-
-/**
- * Extensible transcription provider port. Implementations own credentials and
- * upstream request shape. Selection happens before audio is sent; providers must
- * only fall back after an explicit rejection and before any successful or
- * uncertain provider attempt. Recording persistence owns that eligibility.
- */
-export type TranscriptionProvider = {
-  readonly id: string;
-  /** The adapter guarantees that its upstream transport honors AbortSignal. */
-  readonly supportsServerDeadline: true;
-  readonly experimental?: boolean | undefined;
-  /**
-   * Deployment readiness when called without a workspace. When `workspaceId` is
-   * provided, providers may require a workspace-attached credential (e.g. Codex).
-   */
-  available(context?: TranscriptionAvailabilityContext): boolean | Promise<boolean>;
-  transcribe(input: {
-    audio: Uint8Array;
-    mimeType: string;
-    filename: string;
-    workspaceId: string;
-    accountId: string;
-    subjectId: string;
-    requestId: string;
-    signal?: AbortSignal | undefined;
-  }): Promise<{ text: string; languages: string[] }>;
 };
 
 export type TranscriptionService = {
   limits(): TranscriptionLimits;
   /** True when at least one ready provider can serve requests. */
   available(context?: TranscriptionAvailabilityContext): boolean | Promise<boolean>;
+  availableProviderIds?(context: TranscriptionAvailabilityContext): Promise<string[]>;
+  /** Every model a dictation may name, of each ready provider, in the deployment's order. */
+  availableModels?(context: TranscriptionAvailabilityContext): Promise<DictationModelOption[]>;
+  /** One live readiness read for all client-config voice projections. */
+  availability?(context: TranscriptionAvailabilityContext): Promise<{
+    available: boolean;
+    providers: string[];
+    models: DictationModelOption[];
+  }>;
   /** Select one provider before a durable segment attempt; retries pin this id. */
   selectProvider?(
     context: TranscriptionAvailabilityContext,
   ): string | null | Promise<string | null>;
+  /**
+   * Credit admission for an exact provider before durable work is claimed.
+   * Subscription eligibility is checked during selection and dispatch;
+   * this credit port throws TranscriptionBillingRefusedError
+   * when a deployment-funded provider cannot be paid for.
+   */
+  admit?(input: {
+    providerId: string;
+    accountId: string;
+    workspaceId: string;
+    attribution: CreditDebitAttribution;
+  }): Promise<void>;
+  /**
+   * The credit admission and settlement behind `admit`, for deployment-paid
+   * audio the API meters itself: the live transcript streams straight to the
+   * provider, so the API admits it before minting the grant and charges what
+   * each track streamed.
+   */
+  billing?: TranscriptionBilling;
   transcribe(request: TranscriptionRequest): Promise<TranscriptionResult>;
 };
 
@@ -156,6 +319,8 @@ export type TranscriptionSegmenter = {
     sourceMimeType: string;
     totalDurationMilliseconds: number;
     providerSegmentSeconds: number;
+    /** Hard decode ceiling (`ffmpeg -t`); audio past it is never decoded. */
+    maxDecodeSeconds?: number | undefined;
     chunks: AsyncIterable<Uint8Array>;
     signal?: AbortSignal | undefined;
   }): AsyncIterable<PreparedTranscriptionSegment>;

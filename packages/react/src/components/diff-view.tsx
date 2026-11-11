@@ -2,6 +2,7 @@ import type { GitFileDiff } from "@opengeni/sdk";
 import { type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { PierreDiff } from "./pierre-diff";
+import { useOpenGeniText } from "../messages/runtime";
 
 /**
  * @deprecated Use {@link PierreDiff} directly. Retained only as a thin,
@@ -49,10 +50,11 @@ export function DiffView({
   emptyState,
   className,
 }: DiffViewProps) {
+  const t = useOpenGeniText();
   if (diff.length === 0) {
     return (
       <div className={cn("p-3 text-og-sm text-og-fg-subtle", className)}>
-        {emptyState ?? (isRepo ? "No changes" : "No repository mounted")}
+        {emptyState ?? (isRepo ? t("diffView.noChanges") : t("diffView.noRepositoryMounted"))}
       </div>
     );
   }

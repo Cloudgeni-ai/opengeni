@@ -19,12 +19,14 @@ import { ExternalIdentityReference } from "@opengeni/contracts/external-identiti
 import {
   accountScopedApiKeyWorkspaceAuthority,
   accessGrantAuthorizationFromContext,
+  externalActorContinuationForAuthorization,
   requireAccountAdminAuthorizationStamp,
   requireAccessContext,
   requireAccessGrantAuthorization,
   requireResolvedAccessGrantAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import {
   clearWorkspaceAllowance,
@@ -64,6 +66,13 @@ export function requireAllowanceAuthority(
     authorization.accountGrant?.permissions.includes("account:admin") === true &&
     requireAccountAdminAuthorizationStamp(authorization).accountId === grant.accountId;
   const workspaceAdmin = grant.permissions.includes("workspace:admin");
+  if (
+    sameOrganizationKey?.permissionMode === "explicit" &&
+    (operation === "workspace-write" || operation === "member-write")
+  ) {
+    if (authorization.accountGrant?.permissions.includes("usage_allowances:manage")) return;
+    throw new MissingPermissionRefusal("usage_allowances:manage");
+  }
   if (operation === "own") {
     if (grant.principalKind !== "human_session" || grant.serviceInitiator) {
       throw new HTTPException(403, { message: "Own usage requires an authenticated member" });
@@ -77,13 +86,33 @@ export function requireAllowanceAuthority(
       sameOrganizationKey?.permissions.includes("workspace:read")
     )
       return;
+    // A person who can start chats in the workspace sees its budget (how much
+    // it has and how members share it), never the roster's usage. Agents and
+    // session-bound tokens were refused above. Someone acting through another
+    // product is not such a person, whether a product's user in an embedded
+    // chat or Site (`external_user:`) or anyone acting through an
+    // organization key (asUser), so the product's key gains nothing.
+    if (
+      operation === "budget-read" &&
+      !organizationKey &&
+      !externalActorContinuationForAuthorization(authorization) &&
+      !grant.subjectId.startsWith("external_user:") &&
+      !context.subjectId.startsWith("external_user:") &&
+      grant.principalKind === "human_session" &&
+      !grant.serviceInitiator &&
+      !context.subjectId.startsWith("api_key:") &&
+      grant.permissions.includes("sessions:create")
+    )
+      return;
   } else if (operation === "workspace-write") {
-    // Match organization API-key control: full organization wildcard plus the
-    // literal key-management permission. An asUser context carries no key stamp.
+    // Existing full keys retain key-control budget authority. Setup keys use
+    // literal account allowance authority plus the canonical organization-key
+    // workspace stamp; asUser carries neither account scope nor key stamp.
     if (sameOrganizationKey) {
       if (
         sameOrganizationKey.permissions.includes("workspace:admin") &&
-        sameOrganizationKey.permissions.includes("api_keys:manage")
+        (sameOrganizationKey.permissions.includes("api_keys:manage") ||
+          authorization.accountGrant?.permissions.includes("usage_allowances:manage"))
       )
         return;
     } else if (
@@ -204,10 +233,10 @@ function usageQuery(c: Context, own: boolean) {
 }
 
 function requireAllowanceProducersEnabled(deps: ApiRouteDeps): void {
-  if (!deps.settings.usageAllowancesEnabled) {
+  if (deps.settings.usageAllowancesEnabled === false) {
     throw new HTTPException(409, {
       message:
-        "Usage allowance changes are not enabled. Upgrade every API and worker before enabling usage allowances.",
+        "Usage allowance changes are not enabled on this deployment (OPENGENI_USAGE_ALLOWANCES_ENABLED=false).",
     });
   }
 }
@@ -277,6 +306,9 @@ export function registerUsageAllowanceRoutes(app: Hono, deps: ApiRouteDeps): voi
                         : { member: request.thresholds.member }),
                     },
                   }),
+              ...(request.unbilledUsage === undefined
+                ? {}
+                : { unbilledUsage: request.unbilledUsage }),
             }),
           ),
         ),

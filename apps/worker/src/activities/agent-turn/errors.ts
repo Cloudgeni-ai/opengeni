@@ -1,26 +1,62 @@
+import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
+import type { ProviderAccountRefusal } from "@opengeni/observability";
+import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
+import { findPersonalMachineAccessRequiredError } from "./machine-access";
+import {
+  isSandboxProcessStartFailure,
+  SANDBOX_MACHINE_RESTARTING_CODE,
+  SANDBOX_PROCESS_START_FAILED_CODE,
+  SandboxBoxNotSavedError,
+  SandboxMachineBackError,
+  SandboxMachineReplacingError,
+  SandboxMachineRestartingError,
+  SandboxProcessStartFailedError,
+  sanitizeSandboxProcessStartMessage,
+  SandboxSetupAgentUnavailableError,
+} from "./sandbox-setup-agent-failure";
+import { heldSessionUsageReceiptsForTurn } from "./session-usage-custody";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   nestedPostgresSqlState,
+  databaseFailureCode,
+  isRetryablePersistenceSqlState,
   safeDatabaseErrorFacts,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
+  DatabaseTransactionError,
   SandboxLeaseTransitionError,
+  KnowledgeLearningScopeChangedError,
+  nestedErrorRecords,
+  nestedPostgresMessage,
+  isPersonalMachineAccessRefusal,
+  type SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
+  AnthropicProviderRejection,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
+  classifyProviderAccountRefusalError,
   compactionProviderRejection,
   describeCompactionProviderRejection,
   type CompactionProviderRejection,
   isMcpRequestTimeoutError,
+  isMcpServiceUnavailableError,
+  isFirstPartyMcpSetupUnavailableError,
   isMcpTransportConnectivityError,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
+  isProviderCommandObservationUnavailableError,
+  ProviderCommandInputOutcomeUnknownError,
+  ProviderCommandStartOutcomeUnknownError,
   isRoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
   RoutingWorkspaceRootChangedError,
+  RoutingBackendRecoveryRequiredError,
   ResponsesStreamingTerminalError,
+  classifyModelStreamIdleTimeoutError,
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
   type MaterializationVerificationDiagnostic,
@@ -31,16 +67,34 @@ import {
   providerQuotaExhaustedMessage,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
+  IncompleteChatCompletionError,
+  AnthropicRequestError,
+  findAnthropicRequestSizeError,
+  AnthropicSizeRecoveryExhaustedError,
+  type AnthropicRequestSize,
+  ToolCallError,
+  findInferenceRegionRestrictedError,
+  SandboxBackendNotServedError,
 } from "@opengeni/runtime";
 import {
   mcpTransportRequestFailureDiagnostic,
   type McpTransportRequestFailureDiagnostic,
 } from "@opengeni/runtime/mcp-network";
-import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
-import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
-import { RetainedAttachmentTransportLimitError } from "../run-input";
-import type { CodexAccountStatus } from "@opengeni/db";
 import {
+  ComputeControlError,
+  isSandboxProviderCapacityError,
+  isSandboxProviderError,
+} from "@opengeni/runtime/sandbox";
+import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
+import type { ProviderErrorOutcome } from "@opengeni/subscriptions";
+import { CODEX_USAGE_EXHAUSTED_PCT } from "./codex-usage-policy";
+import {
+  RetainedAttachmentTransportLimitError,
+  RetainedAttachmentUnavailableError,
+} from "../run-input";
+import type { CodexAccountStatus, SafeDatabaseErrorFacts } from "@opengeni/db";
+import {
+  CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
   CODEX_USAGE_LIMIT_ERROR_TYPE,
   CodexReloginRequired,
   classifyCodexEncryptedArtifactRejection,
@@ -54,12 +108,19 @@ import {
   codexPlanEntitlementFailurePayload,
   codexRequestRejectedFailurePayload,
 } from "./codex-plan-entitlement";
+import { SubscriptionCoreCodexTurnError } from "./codex-core-errors";
 import {
+  CodexIncludedUsageExhaustedError,
+  findCodexCreditPolicyError,
+} from "./codex-credit-policy";
+import {
+  classifyXaiSubscriptionClientOutdatedError,
   classifyXaiSubscriptionStreamingTerminalError,
   classifyXaiSubscriptionStreamIdleTimeoutError,
   isXaiSubscriptionHostedToolContinuationError,
   isXaiSubscriptionRateLimitDiagnostic,
   isXaiSubscriptionTransportError,
+  XAI_SUBSCRIPTION_CLIENT_OUTDATED_CODE,
   XaiSubscriptionReloginRequired,
 } from "@opengeni/xai-subscription";
 import type {
@@ -79,19 +140,84 @@ import {
   MandatoryHistoryPersistenceError,
   type MandatoryHistoryPersistenceStage,
 } from "./quiescence";
+import {
+  MODEL_PROVIDER_RECOVERY_CODES,
+  providerRecoveryExhaustedMessage,
+  providerRecoverySubject,
+  type ProviderCondition,
+} from "./provider-recovery-copy";
+import {
+  PROVIDER_OVERLOAD_RECOVERY_CODE,
+  MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
+  PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
+  FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE,
+  FIRST_PARTY_MCP_SETUP_RETRY_MS,
+  MCP_SERVICE_UNAVAILABLE_BACKOFF_MS,
+  MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
+  PROVIDER_UNREACHABLE_BACKOFF_MS,
+  PROVIDER_UNREACHABLE_RECOVERY_CODE,
+  validProviderOverloadRecoveryDelay,
+  windowedRecoveryPolicy,
+} from "./provider-recovery-policy";
+import { errorMessage } from "@opengeni/contracts/values";
+export {
+  PROVIDER_OVERLOAD_RECOVERY_CODE,
+  MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
+  PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
+  MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
+  PROVIDER_UNREACHABLE_RECOVERY_CODE,
+} from "./provider-recovery-policy";
 
 // Retryable provider connectivity/5xx failures start quickly and back off to
 // this ceiling. Explicit rate limits retain the minute-granular fallback.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
+export function providerRecoveryLimit(failureCode: unknown): number | undefined {
+  if (failureCode === FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE) return undefined;
+  return windowedRecoveryPolicy(failureCode)?.maxRecoveries ?? MAX_AUTOMATIC_PROVIDER_RECOVERIES;
+}
+/**
+ * The recovery at which a failing model socket switches to HTTP. A long
+ * offline wait still switches at the usual point, not after its last retry.
+ */
+export function modelSocketFallbackRecoveryLimit(failureCode: unknown): number {
+  if (failureCode === PROVIDER_UNREACHABLE_RECOVERY_CODE) return MAX_AUTOMATIC_PROVIDER_RECOVERIES;
+  return providerRecoveryLimit(failureCode) ?? Infinity;
+}
 /**
  * Minimum wait per rate-limited recovery. Providers such as Azure OpenAI often
  * answer a per-minute token limit with a `retry-after` of about a second, which
  * alone would spend every automatic recovery before the window resets.
  */
 export const PROVIDER_RATE_LIMIT_BACKOFF_MS = [10_000, 20_000, 40_000, 60_000, 120_000] as const;
+/** Positive-only spread: never shorten the provider's minimum delay. */
+export function providerRecoveryJitterMs(delayMs: number, sample: number): number {
+  const bounded = Number.isFinite(sample) ? Math.max(0, Math.min(sample, 1)) : 0;
+  return Math.floor(Math.min(5_000, delayMs * 0.2) * bounded);
+}
 export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
+export const RETAINED_ATTACHMENT_UNAVAILABLE_CODE = "retained_attachment_unavailable";
+/** No sandbox host can take a new or woken sandbox right now. */
+export const SANDBOX_CAPACITY_UNAVAILABLE_CODE = "sandbox_capacity_unavailable";
+/** Any other failure answered by (or reaching) the sandbox control service. */
+export const SANDBOX_SERVICE_UNAVAILABLE_CODE = "sandbox_service_unavailable";
+/** The sandbox control service refused the request (configuration, auth, invalid input). */
+export const SANDBOX_SERVICE_REFUSED_CODE = "sandbox_service_refused";
+
+function findRetainedAttachmentUnavailableError(
+  error: unknown,
+): RetainedAttachmentUnavailableError | null {
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof RetainedAttachmentUnavailableError) return current;
+    if (seen.has(current)) break;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
 
 export class PostCompactionContinuationEmptyError extends Error {
   readonly code = POST_COMPACTION_CONTINUATION_EMPTY_CODE;
@@ -106,24 +232,58 @@ export type ProviderRecoveryResult =
   | {
       status: "recovering";
       continueDelayMs: number;
+      maxProviderRecoveryCount?: number;
     }
   | {
       status: "exhausted";
       providerRecoveryCount: number;
       maxProviderRecoveryCount: number;
+      providerRecoveryExhaustedReason?: "deadline" | "retry_limit" | "invalid_clock";
     };
 
 export function providerRecoveryResult(input: {
   failureCode: string | undefined;
   attemptNumber: number;
   retryAfterMs?: number | null;
+  jitterSample?: number;
+  /** Durable first-failure clock, never a new clock on each replacement attempt. */
+  recoveryStartedAt?: number | undefined;
+  now?: number;
 }): ProviderRecoveryResult {
-  if (input.attemptNumber > MAX_AUTOMATIC_PROVIDER_RECOVERIES) {
+  const overload = input.failureCode === PROVIDER_OVERLOAD_RECOVERY_CODE;
+  const window = windowedRecoveryPolicy(input.failureCode);
+  const limit = providerRecoveryLimit(input.failureCode);
+  if (limit === undefined) {
+    return {
+      status: "recovering",
+      continueDelayMs: Math.max(
+        FIRST_PARTY_MCP_SETUP_RETRY_MS,
+        Number.isFinite(input.retryAfterMs) && (input.retryAfterMs ?? 0) > 0
+          ? Math.ceil(input.retryAfterMs!)
+          : 0,
+      ),
+    };
+  }
+  const exhausted = (
+    reason: "deadline" | "retry_limit" | "invalid_clock",
+  ): Extract<ProviderRecoveryResult, { status: "exhausted" }> => ({
+    status: "exhausted",
+    providerRecoveryCount: Math.min(Math.max(input.attemptNumber - 1, 0), limit),
+    maxProviderRecoveryCount: limit,
+    providerRecoveryExhaustedReason: reason,
+  });
+  if (input.attemptNumber > limit) {
+    if (window) return exhausted("retry_limit");
     return {
       status: "exhausted",
       providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
       maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
     };
+  }
+  const now = input.now ?? Date.now();
+  const startedAt = input.recoveryStartedAt ?? (input.attemptNumber === 1 ? now : NaN);
+  if (window && (!Number.isFinite(startedAt) || !Number.isFinite(now) || startedAt > now)) {
+    return exhausted("invalid_clock");
   }
   const providerDelay =
     input.retryAfterMs !== null &&
@@ -143,27 +303,120 @@ export function providerRecoveryResult(input: {
             )
           ]!,
         )
-      : input.failureCode === "provider_unavailable" ||
-          input.failureCode === "upstream_connectivity_unavailable" ||
-          input.failureCode === "sandbox_command_start_unavailable" ||
-          input.failureCode === "mcp_transport_timeout" ||
-          input.failureCode === "mcp_transport_unavailable" ||
-          input.failureCode === "turn_execution_policy_definition_mismatch" ||
-          input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
+      : input.failureCode === MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE
         ? Math.max(
             providerDelay ?? 0,
-            PROVIDER_CONNECTIVITY_BACKOFF_MS[
+            MCP_SERVICE_UNAVAILABLE_BACKOFF_MS[
               Math.min(
                 Math.max(Math.trunc(input.attemptNumber) - 1, 0),
-                PROVIDER_CONNECTIVITY_BACKOFF_MS.length - 1,
+                MCP_SERVICE_UNAVAILABLE_BACKOFF_MS.length - 1,
               )
             ]!,
           )
-        : PROVIDER_BACKPRESSURE_DELAY_MS;
+        : input.failureCode === PROVIDER_UNREACHABLE_RECOVERY_CODE
+          ? PROVIDER_UNREACHABLE_BACKOFF_MS[
+              Math.min(
+                Math.max(Math.trunc(input.attemptNumber) - 1, 0),
+                PROVIDER_UNREACHABLE_BACKOFF_MS.length - 1,
+              )
+            ]!
+          : overload ||
+              input.failureCode === "provider_unavailable" ||
+              input.failureCode === "upstream_connectivity_unavailable" ||
+              input.failureCode === "sandbox_command_start_unavailable" ||
+              input.failureCode === SANDBOX_MACHINE_RESTARTING_CODE ||
+              input.failureCode === SANDBOX_SERVICE_UNAVAILABLE_CODE ||
+              input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
+              input.failureCode === "mcp_transport_timeout" ||
+              input.failureCode === "mcp_transport_unavailable" ||
+              input.failureCode === "turn_execution_policy_definition_mismatch" ||
+              input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
+            ? Math.max(
+                providerDelay ?? 0,
+                PROVIDER_CONNECTIVITY_BACKOFF_MS[
+                  Math.min(
+                    Math.max(Math.trunc(input.attemptNumber) - 1, 0),
+                    PROVIDER_CONNECTIVITY_BACKOFF_MS.length - 1,
+                  )
+                ]!,
+              )
+            : // Includes sandbox_capacity_unavailable: a full sandbox fleet
+              // frees up as other boxes sleep or end, not within seconds.
+              PROVIDER_BACKPRESSURE_DELAY_MS;
+  const delayMs =
+    continueDelayMs +
+    (overload ||
+    input.failureCode === "provider_rate_limited" ||
+    input.failureCode === "provider_unavailable" ||
+    input.failureCode === "upstream_connectivity_unavailable" ||
+    input.failureCode === PROVIDER_UNREACHABLE_RECOVERY_CODE ||
+    input.failureCode === SANDBOX_CAPACITY_UNAVAILABLE_CODE ||
+    input.failureCode === SANDBOX_SERVICE_UNAVAILABLE_CODE
+      ? providerRecoveryJitterMs(continueDelayMs, input.jitterSample ?? 0)
+      : 0);
+  // Do not shorten Retry-After, or schedule a replacement outside the window.
+  if (window && now + delayMs >= startedAt + window.windowMs) {
+    return exhausted("deadline");
+  }
   return {
     status: "recovering",
-    continueDelayMs,
+    continueDelayMs: delayMs,
+    ...(overload ? { maxProviderRecoveryCount: limit } : {}),
   };
+}
+
+/** A timer/queue delay cannot authorize a provider call after the recovery window. */
+export class ProviderOverloadRecoveryExpiredError extends Error {
+  readonly failure;
+
+  constructor(count: number, reason: "deadline" | "retry_limit" | "invalid_clock") {
+    super("Confirmed provider overload recovery window expired before dispatch");
+    this.name = "ProviderOverloadRecoveryExpiredError";
+    this.failure = providerRecoveryExhaustedFailure(
+      {
+        error: this.message,
+        code: "provider_unavailable",
+        providerCondition: "overloaded" as const,
+      },
+      {
+        status: "exhausted",
+        // The queued replacement has not dispatched; count only prior retries.
+        providerRecoveryCount: Math.min(
+          MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
+          Math.max(0, count - 1),
+        ),
+        maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
+        providerRecoveryExhaustedReason: reason,
+      },
+    );
+  }
+}
+
+export function assertProviderOverloadRecoveryActive(input: {
+  failureCode: unknown;
+  providerRecoveryCount: number;
+  recoveryStartedAt?: number | undefined;
+  now?: number;
+}): void {
+  if (input.failureCode !== PROVIDER_OVERLOAD_RECOVERY_CODE || input.providerRecoveryCount === 0) {
+    return;
+  }
+  if (input.providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES) {
+    throw new ProviderOverloadRecoveryExpiredError(input.providerRecoveryCount, "retry_limit");
+  }
+  const now = input.now ?? Date.now();
+  const startedAt = input.recoveryStartedAt;
+  if (
+    startedAt === undefined ||
+    !Number.isFinite(startedAt) ||
+    !Number.isFinite(now) ||
+    startedAt > now
+  ) {
+    throw new ProviderOverloadRecoveryExpiredError(input.providerRecoveryCount, "invalid_clock");
+  }
+  if (now >= startedAt + PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS) {
+    throw new ProviderOverloadRecoveryExpiredError(input.providerRecoveryCount, "deadline");
+  }
 }
 
 export function providerRecoveryExhaustedFailure<
@@ -177,15 +430,86 @@ export function providerRecoveryExhaustedFailure<
   providerRecoveryCount: number;
   maxProviderRecoveryCount: number;
   lastRetryableError: string;
+  providerRecoveryExhaustedReason?: "deadline" | "retry_limit" | "invalid_clock";
 } {
   return {
     ...failure,
-    error: `Automatic same-turn recovery stopped after ${recovery.providerRecoveryCount} retries because the upstream dependency remained unavailable. Send a new message to retry after the dependency recovers.`,
+    error: providerRecoveryExhaustedMessage({
+      code: typeof failure.code === "string" ? failure.code : null,
+      providerCondition: isProviderCondition(failure.providerCondition)
+        ? failure.providerCondition
+        : null,
+      modelLabel: typeof failure.modelLabel === "string" ? failure.modelLabel : null,
+      providerLabel: typeof failure.providerLabel === "string" ? failure.providerLabel : null,
+      providerRecoveryCount: recovery.providerRecoveryCount,
+    }),
     retryable: false,
     recoveryExhausted: true,
     providerRecoveryCount: recovery.providerRecoveryCount,
     maxProviderRecoveryCount: recovery.maxProviderRecoveryCount,
+    ...(recovery.providerRecoveryExhaustedReason
+      ? { providerRecoveryExhaustedReason: recovery.providerRecoveryExhaustedReason }
+      : {}),
     lastRetryableError: failure.error,
+  };
+}
+
+function isProviderCondition(value: unknown): value is ProviderCondition {
+  return (
+    value === "overloaded" ||
+    value === "unavailable" ||
+    value === "unresponsive" ||
+    value === "rate_limited"
+  );
+}
+
+/**
+ * A retryable failure whose automatic same-turn recovery was not authorized
+ * (for example, request custody could not be checkpointed). The classifier's
+ * "will retry" sentence would be false on a terminal record, so name the
+ * condition and the person's options instead.
+ */
+export function automaticRecoveryUnavailableFailure<
+  T extends Record<string, unknown> & { error: string },
+>(
+  failure: T,
+): T & {
+  retryable: false;
+  automaticRecovery: "unavailable";
+  lastRetryableError: string;
+} {
+  const subject = providerRecoverySubject({
+    code: typeof failure.code === "string" ? failure.code : null,
+    providerCondition: isProviderCondition(failure.providerCondition)
+      ? failure.providerCondition
+      : null,
+    modelLabel: typeof failure.modelLabel === "string" ? failure.modelLabel : null,
+    providerLabel: typeof failure.providerLabel === "string" ? failure.providerLabel : null,
+  });
+  return {
+    ...failure,
+    error: `${subject}. This turn couldn't be retried automatically. Try again, or send a message to continue.`,
+    retryable: false,
+    automaticRecovery: "unavailable",
+    lastRetryableError: failure.error,
+  };
+}
+
+/**
+ * Name the exact accepted model route on model-provider recovery evidence so a
+ * person learns which model is affected. Display labels only: the route's
+ * credentials, base URL and upstream ids never enter the event.
+ */
+export function withModelRoutePresentation<T extends { code?: string | undefined }>(
+  failure: T,
+  route: { model: string; modelLabel: string; providerLabel: string } | undefined,
+): T & { model?: string; modelLabel?: string; providerLabel?: string } {
+  if (!route || !failure.code || !MODEL_PROVIDER_RECOVERY_CODES.has(failure.code)) return failure;
+  return {
+    ...failure,
+    model: route.model,
+    modelLabel: route.modelLabel,
+    providerLabel: route.providerLabel,
   };
 }
 
@@ -224,6 +548,13 @@ export function providerRetryAfterMs(error: unknown, nowMs = Date.now()): number
       value.error && typeof value.error === "object"
         ? (value.error as Record<string, unknown>)
         : null;
+    const milliseconds = Number(
+      headerValue(value.headers, "retry-after-ms") ??
+        headerValue(value.responseHeaders, "retry-after-ms") ??
+        headerValue(body?.headers, "retry-after-ms") ??
+        undefined,
+    );
+    if (Number.isFinite(milliseconds) && milliseconds > 0) return Math.ceil(milliseconds);
     const directSeconds = Number(
       value.retry_after_seconds ?? body?.retry_after_seconds ?? value.retryAfterSeconds,
     );
@@ -248,24 +579,154 @@ export function providerRetryAfterMs(error: unknown, nowMs = Date.now()): number
 }
 
 /**
- * Tell the model when durable MCP policy references are unavailable for this
- * exact turn. The policy projection already bounds and validates these ids;
- * this notice prevents a graceful runtime drop from becoming a silent source-
- * of-truth substitution or a false claim that the disconnected system was read.
+ * Why a connector configured for this turn has no tools in it:
+ * - `not_available`: it is not in this turn's registry (disconnected, turned
+ *   off, removed, or not available to this turn in this workspace).
+ * - `no_account`: it needs a signed-in account and none was accepted with the
+ *   turn (not signed in, sign-in expired or removed, or the sign-in was not
+ *   usable in this workspace when the message was accepted).
+ * - `account_setup_changed`: the accepted accounts no longer fit its setup.
+ * - `unsupported_sign_in`: it uses a sign-in method that is no longer supported.
+ */
+export type UnavailableMcpConnectorReason =
+  | "not_available"
+  | "no_account"
+  | "account_setup_changed"
+  | "unsupported_sign_in";
+
+export type UnavailableMcpConnector = {
+  id: string;
+  name?: string | undefined;
+  reason: UnavailableMcpConnectorReason;
+};
+
+/**
+ * A connector's account that was connected but stopped working: its provider
+ * rejected the saved sign-in, so nothing can use it until it is reconnected.
+ */
+export type McpConnectorAccountNeedingReconnect = {
+  /** The connector it belongs to, as configured for this chat. */
+  connector: { id: string; name?: string | undefined };
+  account: string;
+  ownership: "personal" | "workspace";
+  /** The day it stopped working, YYYY-MM-DD. */
+  stoppedWorkingOn: string;
+  /** Added in this workspace, so a card in this chat can reconnect it. */
+  reconnectHere: boolean;
+};
+
+/** Connectors listed by name in the notice; the rest are counted. */
+const UNAVAILABLE_MCP_NOTICE_MAX_LISTED = 8;
+const UNAVAILABLE_MCP_NAME_MAX_CHARS = 80;
+
+/**
+ * The plain reason, and what the person can do. Shared by the turn notice and
+ * by tool discovery's `unavailableSources`, so both say the same thing.
+ */
+export function unavailableMcpConnectorReasonText(reason: UnavailableMcpConnectorReason): string {
+  switch (reason) {
+    case "no_account":
+      return "no signed-in account for it was available to this turn. The person may not be signed in to it here, their sign-in may have expired or been removed, or their sign-in was not usable in this workspace yet when the message was sent (this can last a few minutes after their workspace access changes). They can sign in to it again, or send the message again shortly if their access just changed.";
+    case "account_setup_changed":
+      return "its account setup changed after the message was sent, so the account accepted for it no longer fits. Sending the message again uses the current setup.";
+    case "unsupported_sign_in":
+      return "it uses a sign-in method that is no longer supported. It needs to be connected again.";
+    case "not_available":
+      return "it is disconnected, turned off, or no longer available to this chat in this workspace. Whoever manages this workspace's connectors can reconnect it or turn it back on.";
+  }
+}
+
+function displayConnector(connector: UnavailableMcpConnector): string {
+  // Workspace-configured text: one bounded line, never instructions.
+  const name = (connector.name ?? "")
+    // oxlint-disable-next-line no-control-regex -- strip control characters
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, UNAVAILABLE_MCP_NAME_MAX_CHARS);
+  return name && name !== connector.id
+    ? `${JSON.stringify(name)} (${connector.id})`
+    : JSON.stringify(connector.id);
+}
+
+/**
+ * Tell the model which connectors configured for this exact turn have no tools
+ * in it, and why, so a missing connector never looks like a connector that has
+ * no such tool and the model never has to guess the cause. Every path that
+ * drops a configured connector before the runtime feeds this one notice: the
+ * tool policy (not in this turn's registry) and account-route expansion (no
+ * usable accepted account). Runtime connect and list failures are reported by
+ * tool discovery as they happen. The notice is part of this turn's own input
+ * and never changes earlier text.
  */
 export function unavailableMcpOperationalContext(input: {
-  droppedIds: readonly string[];
-  droppedCount: number;
+  connectors: readonly UnavailableMcpConnector[];
+  /** Further unavailable connectors the bounded policy projection did not name. */
+  omittedCount?: number;
+  /** Accounts of this chat's connectors that stopped working and need reconnecting. */
+  needsReconnect?: readonly McpConnectorAccountNeedingReconnect[];
 }): string | undefined {
-  if (input.droppedCount <= 0) {
-    return undefined;
+  const unavailable = unavailableMcpConnectorsNotice(input);
+  const reconnect = mcpAccountsNeedingReconnectNotice(input.needsReconnect ?? []);
+  return unavailable && reconnect ? `${unavailable}\n${reconnect}` : (unavailable ?? reconnect);
+}
+
+/**
+ * Name each account of this chat's connectors that stopped working, with the
+ * day, so the model can tell the person what happened instead of offering a
+ * first-time Connect, and knows the card that reconnects that same account.
+ */
+function mcpAccountsNeedingReconnectNotice(
+  accounts: readonly McpConnectorAccountNeedingReconnect[],
+): string | undefined {
+  if (accounts.length === 0) return undefined;
+  const listed = accounts.slice(0, UNAVAILABLE_MCP_NOTICE_MAX_LISTED);
+  const more = accounts.length - listed.length;
+  const lines = listed.map((account) => {
+    const owner = account.ownership === "personal" ? "the person's account" : "the shared account";
+    // Provider-supplied text: one bounded line, never instructions.
+    // oxlint-disable-next-line no-control-regex -- strip control characters
+    const clean = account.account.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/gu, " ");
+    const label = JSON.stringify(clean.trim().slice(0, 180));
+    return `- ${displayConnector({ ...account.connector, reason: "no_account" })}: ${owner} ${label} stopped working on ${account.stoppedWorkingOn}.${
+      account.reconnectHere
+        ? ""
+        : " It was added in another workspace, so the person reconnects it from Connections there."
+    }`;
+  });
+  if (more > 0) lines.push(`- ${more} more account${more === 1 ? "" : "s"} stopped working too.`);
+  return [
+    "Accounts that need reconnecting: these accounts were connected for this chat's connectors but stopped working (their sign-in expired or was revoked), so their tools cannot use them until they are reconnected.",
+    ...lines,
+    "When the person's request needs one of these accounts, tell them plainly that it was connected and stopped working, and when. To offer the fix, capability_catalog_search lists it under setup.reconnect and capability_authorization_request posts a card that reconnects that same account; a new Connect cannot replace it.",
+  ].join("\n");
+}
+
+function unavailableMcpConnectorsNotice(input: {
+  connectors: readonly UnavailableMcpConnector[];
+  omittedCount?: number;
+}): string | undefined {
+  const omitted = Math.max(0, input.omittedCount ?? 0);
+  const unique = [
+    ...new Map(input.connectors.map((connector) => [connector.id, connector])).values(),
+  ].sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+  if (unique.length === 0 && omitted === 0) return undefined;
+  const listed = unique.slice(0, UNAVAILABLE_MCP_NOTICE_MAX_LISTED);
+  const more = unique.length - listed.length + omitted;
+  const lines = listed.map(
+    (connector) =>
+      `- ${displayConnector(connector)}: ${unavailableMcpConnectorReasonText(connector.reason)}`,
+  );
+  if (more > 0) {
+    lines.push(
+      `- ${more} more connector${more === 1 ? " is" : "s are"} unavailable for the same kinds of reasons.`,
+    );
   }
-  const omittedCount = Math.max(0, input.droppedCount - input.droppedIds.length);
-  const listed = input.droppedIds.map((id) => `"${id}"`).join(", ");
-  const inventory = listed
-    ? `${listed}${omittedCount > 0 ? `, plus ${omittedCount} additional unavailable server(s)` : ""}`
-    : `${input.droppedCount} unavailable server(s)`;
-  return `MCP capability availability for this turn: the following session-selected server(s) are disconnected or no longer registered and were skipped: ${inventory}. Do not claim to have read or updated those systems. If the task depends on one as a source of truth, explain the limitation and ask the user to reconnect it or select another authoritative source; continue with unaffected work only when safe.`;
+  return [
+    "Connector availability for this turn: these connectors are configured for this chat, but their tools were not loaded this turn, so tool search and tool lists do not show them.",
+    ...lines,
+    "When the person's request needs one of them, tell them which connector is unavailable and why, using only the reason given here; do not guess another cause or claim to have read or updated that system. Continue with unaffected work only when safe.",
+  ].join("\n");
 }
 
 /**
@@ -302,6 +763,31 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
   });
 }
 
+const MEMBERSHIP_CLAIM_REFUSALS = new Set(["initiating human lacks target-workspace membership"]);
+
+/**
+ * Name the condition that blocked a claim, so the chat can say what fixes it
+ * and start the saved message by itself once it is fixed. A personal machine
+ * refused for lack of approval is machine access whatever SQLSTATE carried it.
+ */
+function preClaimBlockReason(
+  failure: SessionEventPersistenceError,
+):
+  | "initiator_membership_required"
+  | "personal_resource_grant_required"
+  | "database_claim_rejected" {
+  const sqlState = failure.details.sqlState;
+  if (sqlState === "OG001") return "initiator_membership_required";
+  if (sqlState === "OG002" || isPersonalMachineAccessRefusal(failure)) {
+    return "personal_resource_grant_required";
+  }
+  if (sqlState === "42501") {
+    const message = nestedPostgresMessage(failure);
+    if (message && MEMBERSHIP_CLAIM_REFUSALS.has(message)) return "initiator_membership_required";
+  }
+  return "database_claim_rejected";
+}
+
 /**
  * Convert the atomic claim transaction's failure into a small, stable
  * Temporal wire contract. The original error remains in activity diagnostics,
@@ -327,14 +813,7 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
     ...(persistenceFailure && rejectedClaim
       ? {
           sqlState: persistenceFailure.details.sqlState,
-          reason:
-            persistenceFailure.details.stage === "session_attempts.claim" &&
-            persistenceFailure.details.sqlState === "OG001"
-              ? ("initiator_membership_required" as const)
-              : persistenceFailure.details.stage === "session_attempts.claim" &&
-                  persistenceFailure.details.sqlState === "OG002"
-                ? ("personal_resource_grant_required" as const)
-                : ("database_claim_rejected" as const),
+          reason: preClaimBlockReason(persistenceFailure),
           retryPolicy: "explicit_recheck" as const,
         }
       : {}),
@@ -347,20 +826,199 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   });
 }
 
+/** Complete structured-cause graph or no recovery authority. Budget distinct
+ * objects (including array containers), not queue positions/duplicate refs.
+ * The separate link ceiling bounds huge duplicate arrays without truncating
+ * them into permission. Cycles are harmless; overflow/unreadable edges hold. */
+function structuredRecoveryCauseGraph(error: unknown): Map<object, Set<object>> | null {
+  const graph = new Map<object, Set<object>>();
+  const queue: object[] = [];
+  let links = 0;
+  const add = (value: unknown): boolean => {
+    if (!value || typeof value !== "object" || graph.has(value)) return true;
+    if (graph.size >= 64) return false;
+    graph.set(value, new Set());
+    queue.push(value);
+    return true;
+  };
+  if (!add(error)) return null;
+  try {
+    for (const current of queue) {
+      const record = current as Record<string, unknown>;
+      const children = Array.isArray(current)
+        ? current
+        : ["cause", "original", "driverError", "error", "errors"].map((key) => record[key]);
+      for (const child of children) {
+        if (++links > 4096 || !add(child)) return null;
+        if (child && typeof child === "object") graph.get(current)!.add(child);
+      }
+    }
+  } catch {
+    return null;
+  }
+  return graph;
+}
+
 function retryableDatabaseFailureCode(
   error: unknown,
+  requireDatabaseProvenance = false,
 ): PostClaimDatabaseRecoveryDetail["code"] | null {
-  const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
-  const sqlState = persistenceFailure?.details.sqlState ?? null;
-  if (sqlState === null && isRetryableDatabaseTransportFailure(error)) {
-    return "db_failure";
+  try {
+    const graph = structuredRecoveryCauseGraph(error);
+    if (!graph) return null;
+    const transports = new Set<object>();
+    const boundaries = new Set<object>();
+    const ownDatabaseNodes = new Set<object>();
+    const codes = new Set<PostClaimDatabaseRecoveryDetail["code"]>();
+    const ownChildren = (node: object): object[] =>
+      node instanceof DatabaseTransactionError
+        ? // Callback failures retained beside a failed rollback supply vetoes,
+          // never driver provenance for a provider's connection-looking error.
+          [...graph.get(node)!].filter((child) => child === node.cause)
+        : [...graph.get(node)!];
+    // Ask the canonical transport predicate about ONLY this node's facts. Its
+    // recursive search must not pair a DB sibling with an unrelated provider.
+    for (const node of graph.keys()) {
+      if (isRoutingMutationOutcomeUnknownError(node) || isRoutingMutationOutputRejectedError(node))
+        return null;
+      const record = node as Record<string, unknown>;
+      if (
+        requireDatabaseProvenance
+          ? isRunningTurnDatabaseTransportFailure(record)
+          : isRetryableDatabaseTransportFailure({ code: record.code, errno: record.errno })
+      )
+        transports.add(node);
+      const sqlState = isSessionEventPersistenceError(node)
+        ? node.details.sqlState
+        : record.name === "PostgresError" && typeof record.code === "string"
+          ? record.code
+          : null;
+      if (
+        requireDatabaseProvenance
+          ? isRunningTurnDatabaseConnectionSqlState(sqlState)
+          : isDatabaseConnectionSqlState(sqlState)
+      )
+        transports.add(node);
+      if (
+        node instanceof DrizzleQueryError ||
+        node instanceof DatabaseTransactionError ||
+        isSessionEventPersistenceError(node)
+      ) {
+        // Only actual errors raised at our ORM/typed persistence boundary own
+        // their driver subtree. A PostgresError name, SDK wrapper or provider
+        // socket by itself is never own-client provenance for a running turn.
+        const queue: object[] = [node];
+        for (const source of queue) {
+          if (ownDatabaseNodes.has(source)) continue;
+          ownDatabaseNodes.add(source);
+          queue.push(...ownChildren(source));
+        }
+      }
+    }
+    const hasOwnTransport = (boundary: object): boolean => {
+      const seen = new Set<object>();
+      const queue = [boundary];
+      for (const node of queue) {
+        if (seen.has(node)) continue;
+        seen.add(node);
+        if (transports.has(node)) return true;
+        queue.push(...ownChildren(node));
+      }
+      return false;
+    };
+    // Inspect ALL trusted DB evidence before returning a permit. A permanent,
+    // auth or uncertain SQLSTATE vetoes every sibling regardless of traversal
+    // order; a deeper transport/reset cannot override it either.
+    for (const node of graph.keys()) {
+      const record = node as Record<string, unknown>;
+      if (node instanceof DrizzleQueryError || node instanceof DatabaseTransactionError) {
+        boundaries.add(node);
+        if (hasOwnTransport(node)) codes.add("db_failure");
+      }
+      const typed = isSessionEventPersistenceError(node);
+      if (!typed && record.name !== "PostgresError") continue;
+      boundaries.add(node);
+      const sqlState = typed
+        ? node.details.sqlState
+        : typeof record.code === "string"
+          ? record.code
+          : null;
+      const connectionOutage = requireDatabaseProvenance
+        ? isRunningTurnDatabaseConnectionSqlState(sqlState)
+        : isDatabaseConnectionSqlState(sqlState);
+      // PostgreSQL aborts a deadlock or serialization victim's whole
+      // transaction: unlike a lost connection, that write certainly did not
+      // commit, so it is at least as safe for exact-attempt recovery.
+      const rolledBack = isRetryablePersistenceSqlState(sqlState);
+      const code = typed
+        ? retryablePersistenceFailureCode(sqlState)
+        : connectionOutage || rolledBack
+          ? databaseFailureCode(sqlState)
+          : null;
+      if (
+        !code ||
+        (requireDatabaseProvenance &&
+          !connectionOutage &&
+          !rolledBack &&
+          !(sqlState === null && hasOwnTransport(node)))
+      )
+        return null;
+      if (!requireDatabaseProvenance || ownDatabaseNodes.has(node)) codes.add(code);
+    }
+    // Preserve the legacy pre-execution transport-only allowance, but never
+    // borrow it across an explicit DB boundary with no eligible own evidence.
+    if (!requireDatabaseProvenance && boundaries.size === 0 && transports.size > 0)
+      codes.add("db_failure");
+    // Stable classification for multiple positive DB siblings too.
+    for (const code of ["db_failure", "db_deadlock", "db_serialization_failure"] as const)
+      if (codes.has(code)) return code;
+    return null;
+  } catch {
+    // Unreadable structured facts are no more authority than unreadable edges.
+    return null;
   }
+}
+
+const RUNNING_TURN_DATABASE_TRANSPORT_CODES = new Set([
+  // postgres.js reports these for a physically lost connection, including
+  // transaction cleanup after its socket has already closed. Own-client
+  // provenance and the unknown-outcome veto remain mandatory above.
+  "CONNECTION_CLOSED",
+  "CONNECTION_DESTROYED",
+  "CONNECTION_ENDED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "CONNECT_TIMEOUT",
+]);
+
+function isRunningTurnDatabaseTransportFailure(record: Record<string, unknown>): boolean {
+  return [record.code, record.errno].some(
+    (code) => typeof code === "string" && RUNNING_TURN_DATABASE_TRANSPORT_CODES.has(code),
+  );
+}
+
+function isRunningTurnDatabaseConnectionSqlState(sqlState: string | null): boolean {
+  return (
+    sqlState !== null &&
+    (/^08[0-9A-Z]{3}$/.test(sqlState) || ["53300", "57P01", "57P02", "57P03"].includes(sqlState))
+  );
+}
+
+function isDatabaseConnectionSqlState(sqlState: string | null): boolean {
+  return (
+    sqlState !== null &&
+    (sqlState.startsWith("08") || ["53300", "57P01", "57P02", "57P03"].includes(sqlState))
+  );
+}
+
+function retryablePersistenceFailureCode(
+  sqlState: string | null,
+): PostClaimDatabaseRecoveryDetail["code"] | null {
   if (
-    !persistenceFailure ||
     !(
       sqlState === null ||
       sqlState.startsWith("08") ||
-      sqlState.startsWith("40") ||
+      isRetryablePersistenceSqlState(sqlState) ||
       sqlState.startsWith("53") ||
       sqlState === "55P03" ||
       sqlState === "57014" ||
@@ -372,32 +1030,59 @@ function retryableDatabaseFailureCode(
   ) {
     return null;
   }
-  return persistenceFailure.details.code;
+  return databaseFailureCode(sqlState);
 }
 
 /**
- * Carry one exact claimed-but-not-started attempt into the workflow's DB-only
- * recovery lane. Permanent database/state failures remain terminal; only the
- * same operational outage classes that are safe before claim are admitted.
+ * True when an error is a structured database failure that the exact-attempt
+ * database recovery path owns. Callers that translate other failures into
+ * user-visible states must rethrow these unchanged.
+ */
+export function isPostClaimDatabaseRecoveryCandidate(error: unknown): boolean {
+  return retryableDatabaseFailureCode(error, true) !== null;
+}
+
+/**
+ * Carry one exact claimed attempt into the workflow's DB-only
+ * recovery lane. Permanent database/state failures remain terminal. The
+ * running-turn lane additionally requires a closed own-client outage class;
+ * existing pre-execution recovery classifications are unchanged.
  */
 export function postClaimDatabaseRecoveryFailure(input: {
   error: unknown;
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
+  /** Require an actual own-client boundary and the closed running-turn allowlist. */
+  requireDatabaseProvenance?: boolean;
+  sandboxSetupOutcomeUnknown?: true;
+  sandboxSetupRecoveryExhausted?: true;
   providerRecovery?: {
     failureCode: string;
     providerRecoveryCount: number;
+    continueDelayMs?: number;
   };
 }): ApplicationFailure | null {
-  const code = retryableDatabaseFailureCode(input.error);
+  const code = retryableDatabaseFailureCode(input.error, input.requireDatabaseProvenance);
   if (!code || input.executionGeneration < 1) return null;
+  if (
+    (input.sandboxSetupOutcomeUnknown && input.sandboxSetupRecoveryExhausted) ||
+    ((input.sandboxSetupOutcomeUnknown || input.sandboxSetupRecoveryExhausted) &&
+      input.providerRecovery)
+  ) {
+    return null;
+  }
   if (
     input.providerRecovery &&
     (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
       input.providerRecovery.providerRecoveryCount <= 0 ||
-      input.providerRecovery.providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_RECOVERIES ||
-      !/^[a-z][a-z0-9_]{0,63}$/.test(input.providerRecovery.failureCode))
+      input.providerRecovery.providerRecoveryCount >
+        (providerRecoveryLimit(input.providerRecovery.failureCode) ?? Infinity) ||
+      !/^[a-z][a-z0-9_]{0,63}$/.test(input.providerRecovery.failureCode) ||
+      !validProviderOverloadRecoveryDelay(
+        input.providerRecovery.failureCode,
+        input.providerRecovery.continueDelayMs,
+      ))
   ) {
     return null;
   }
@@ -406,13 +1091,21 @@ export function postClaimDatabaseRecoveryFailure(input: {
     triggerEventId: input.triggerEventId,
     executionGeneration: input.executionGeneration,
     code,
+    ...(input.sandboxSetupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
+    ...(input.sandboxSetupRecoveryExhausted ? { sandboxSetupRecoveryExhausted: true } : {}),
     ...(input.providerRecovery
       ? {
           providerFailureCode: input.providerRecovery.failureCode,
           providerRecoveryCount: input.providerRecovery.providerRecoveryCount,
+          ...(input.providerRecovery.continueDelayMs !== undefined
+            ? { providerRecoveryContinueDelayMs: input.providerRecovery.continueDelayMs }
+            : {}),
         }
       : {}),
   };
+  // Known usage whose receipt write failed travels with the exact attempt.
+  const sessionUsageReceipts = heldSessionUsageReceiptsForTurn(input.turnId);
+  if (sessionUsageReceipts.length > 0) detail.sessionUsageReceipts = sessionUsageReceipts;
   return ApplicationFailure.create({
     message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
     type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
@@ -492,6 +1185,41 @@ export function sandboxLifecycleTransitionDiagnostic(
   return null;
 }
 
+export function modelPreparationFailureEventPayload(error: unknown, durationMs: number) {
+  const transition = sandboxLifecycleTransitionDiagnostic(error);
+  return {
+    phase: "model_preparation",
+    durationMs: Math.max(0, Math.round(durationMs)),
+    expectedTransition: transition !== null,
+    ...(transition
+      ? {
+          failureCategory: "drain_capture_wait",
+          failureStage: "lifecycle_wait",
+          failureCode: transition.reason,
+          retryable: true,
+        }
+      : {}),
+  };
+}
+
+/**
+ * The turn's first model request could not be dispatched until the context
+ * was compacted (proactive threshold or an operator-requested Compact). That
+ * is an expected step of preparation, not a failure: the same activity
+ * compacts and then reopens preparation for the retried request.
+ */
+export function compactionFirstPreparationEventPayload(durationMs: number) {
+  return {
+    phase: "model_preparation",
+    durationMs: Math.max(0, Math.round(durationMs)),
+    expectedTransition: true,
+    failureCategory: "context_compaction",
+    failureStage: "context_compaction",
+    failureCode: "compaction_required",
+    retryable: true,
+  } as const;
+}
+
 /**
  * Recognize active-route transitions that cannot finish inside their
  * originating attempt. A Modal-home session may start on a Connected Machine
@@ -504,13 +1232,56 @@ export function sandboxLifecycleTransitionDiagnostic(
  * only those structural error links with a strict bound; never classify from
  * message text, which could originate in model or tool content.
  */
+/**
+ * Only the home resolver's positive pre-dispatch signal permits a fresh attempt.
+ * The same error class can also escape AFTER a provider mutation, so neither its
+ * retryable property nor message alone establishes replay safety. Inspect the
+ * complete bounded SDK cause graph and let uncertain peer outcomes veto this
+ * narrow recovery; unreadable or overflowing graphs fail closed.
+ */
+function isPreDispatchHomeBackendRecoveryRequired(error: unknown): boolean {
+  const graph = structuredRecoveryCauseGraph(error);
+  if (!graph) return false;
+  let found = false;
+  try {
+    for (const node of graph.keys()) {
+      if (
+        isRoutingMutationOutcomeUnknownError(node) ||
+        isRoutingMutationOutputRejectedError(node) ||
+        isRawProviderCommandOutcomeUnknown(node) ||
+        isModalCommandStartOutcomeUnknownError(node) ||
+        isProviderCommandObservationUnavailableError(node)
+      )
+        return false;
+      if (node instanceof RoutingBackendRecoveryRequiredError) {
+        if (
+          node.op !== "resolve_home_backend" ||
+          !Number.isSafeInteger(node.leaseEpoch) ||
+          node.leaseEpoch < 0 ||
+          !node.retryable ||
+          (node.recovery !== "pending" && node.recovery !== "superseded")
+        )
+          return false;
+        found = true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return found;
+}
+
 export function sandboxRouteTransitionCode(
   error: unknown,
 ):
   | "home_unavailable_this_turn"
   | "workspace_root_changed_this_turn"
   | "native_capabilities_changed_this_attempt"
+  | "home_backend_recovery_pending"
   | null {
+  if (isPreDispatchHomeBackendRecoveryRequired(error)) {
+    return "home_backend_recovery_pending";
+  }
   const pending: unknown[] = [error];
   const seen = new WeakSet<object>();
   let inspected = 0;
@@ -559,10 +1330,6 @@ export function sandboxRouteTransitionCode(
   }
 
   return null;
-}
-
-export function isSandboxRouteTransitionError(error: unknown): boolean {
-  return sandboxRouteTransitionCode(error) !== null;
 }
 
 /** Backward-compatible name for callers/tests that only exercised the original
@@ -646,6 +1413,17 @@ export function safeErrorForTelemetry(error: unknown): Error {
 export const COMPACTION_PROVIDER_REJECTION_GUIDANCE =
   "The provider refused this exact request, so repeating it fails the same way until the conversation changes. If a new message fails again, start a new session.";
 
+/**
+ * The provider's own error message for a failed compaction request, bounded
+ * at capture. It is recorded only in the structured `providerMessage` field
+ * of the session's own events (readable by the same people as the
+ * conversation), never in the free-text `error`, which is also copied into
+ * workspace activity for automations, and never logged.
+ */
+export function compactionFailureProviderMessage(error: unknown): string | null {
+  return error instanceof CompactionProviderResponseError ? error.providerMessage : null;
+}
+
 export function compactionFailureReasonFromError(error: unknown): string {
   const rejection = compactionProviderRejection(error);
   if (rejection) {
@@ -687,12 +1465,16 @@ export function compactionFailureTurnEventPayload(
   recovery: "user_message";
   compacted: false;
   providerRejection?: CompactionProviderRejection;
+  providerMessage?: string;
   quotaScope?: ProviderQuotaScope;
+  providerAccountRefusal?: ProviderAccountRefusal;
 } {
   const rejection = compactionProviderRejection(error);
   // The same closed marker as a `provider_quota_exhausted` turn failure, so
   // clients can name the exhausted limit and offer another model here too.
   const quota = rejection ? null : classifyProviderQuotaExhaustionError(error);
+  const accountRefusal = rejection ? null : chatModelProviderAccountRefusal(error);
+  const providerMessage = compactionFailureProviderMessage(error);
   return {
     error: overrides.error ?? compactionFailureReasonFromError(error),
     code: "context_compaction_failed",
@@ -700,8 +1482,38 @@ export function compactionFailureTurnEventPayload(
     recovery: "user_message",
     compacted: false,
     ...(rejection ? { providerRejection: rejection } : {}),
+    ...(providerMessage ? { providerMessage } : {}),
     ...(quota ? { quotaScope: quota.scope } : {}),
+    ...(accountRefusal ? { providerAccountRefusal: accountRefusal } : {}),
   };
+}
+
+/**
+ * The chat model provider's own account refused the request (see
+ * `classifyProviderAccountRefusal`). A function tool's provider and the
+ * subscription transports, which own their account semantics, never count.
+ * Operational attribution only: it changes no retry, copy or recovery.
+ */
+function chatModelProviderAccountRefusal(error: unknown): ProviderAccountRefusal | null {
+  if (
+    isCodexTransportError(error) ||
+    isXaiSubscriptionTransportError(error) ||
+    isClaudeSubscriptionTransportError(error) ||
+    isFunctionToolProviderFailure(error)
+  ) {
+    return null;
+  }
+  return classifyProviderAccountRefusalError(error);
+}
+
+/** Mark a terminal failure with the closed provider-account refusal, if any. */
+function withProviderAccountRefusal(
+  error: unknown,
+  failure: ReturnType<typeof baseAgentRunFailurePayload>,
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  if (failure.retryable === true) return failure;
+  const refusal = chatModelProviderAccountRefusal(error);
+  return refusal ? { ...failure, providerAccountRefusal: refusal } : failure;
 }
 
 export function isCompactionSummaryFailure(error: unknown): boolean {
@@ -712,7 +1524,20 @@ export function isCompactionSummaryFailure(error: unknown): boolean {
 
 export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
   if (!(error instanceof CompactionProviderResponseError)) return false;
+  // The worker's own included-usage refusal (usage exhausted or unverifiable)
+  // happens before dispatch, so the checkpoint request was never sent. It
+  // settles exactly like the same refusal on an ordinary request: recorded
+  // against the account, then the same turn re-places or waits for capacity.
+  if (findCodexCreditPolicyError(error)) return true;
   if (isCodexTransportError(error) && classifyCodexUsageLimitError(error)) return true;
+  // A Claude subscription refusal (rate limit or reconnect) on the checkpoint
+  // request recovers exactly like one on an ordinary request: failure
+  // settlement rotates to another account or waits for capacity on the same
+  // logical turn. Its wording or retry hint never makes it a terminal quota.
+  const claudeRefusal = isClaudeSubscriptionTransportError(error)
+    ? classifyClaudeProviderError(error)
+    : null;
+  if (claudeRefusal?.kind === "unauthorized" || claudeRefusal?.kind === "rate_limited") return true;
   // Codex may reject an opaque artifact it minted itself on the compaction
   // request exactly as it can on an ordinary request. Failure settlement
   // invalidates only the exact participating artifacts and recovers the same
@@ -742,7 +1567,7 @@ export function classifyContextWindowOverflowError(
   if (!matched) {
     return null;
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const code = fields.find((value) => /context[_\s-]*length[_\s-]*exceeded/i.test(value));
   return {
     message,
@@ -777,7 +1602,7 @@ export function classifyMcpTransportTimeoutError(
   if (!matchedText && !sanitizedSdkTimeout) {
     return null;
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const matched = matchedText ?? fields.find((value) => /\bmcp\b/i.test(value));
   return {
     message,
@@ -856,9 +1681,82 @@ export function collectErrorStrings(value: unknown, seen = new WeakSet<object>()
  */
 export const STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE =
   "unable to connect. is the computer able to access the url?";
+/** Bun's exact fetch text when an upstream drops an open connection. */
+export const STATUSLESS_UPSTREAM_SOCKET_CLOSED_MESSAGE =
+  "the socket connection was closed unexpectedly. for more information, pass `verbose: true` in the second argument to fetch()";
+const STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGES = new Set([
+  STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE,
+  STATUSLESS_UPSTREAM_SOCKET_CLOSED_MESSAGE,
+]);
 
 export function isExactStatuslessUpstreamConnectivityMessage(message: string): boolean {
-  return message.trim().toLowerCase() === STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE;
+  return STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGES.has(message.trim().toLowerCase());
+}
+
+/**
+ * Codes that mean the provider could not be reached at all: its name did not
+ * resolve for now, there was no route to it, or nothing accepted the
+ * connection. A dropped or slow connection (ECONNRESET, ETIMEDOUT), a name
+ * that does not exist (ENOTFOUND) and TLS failures are deliberately absent:
+ * they say something about the provider or its configuration, not about the
+ * machine being offline.
+ */
+const PROVIDER_UNREACHABLE_TRANSPORT_CODE =
+  /^(?:EAI_AGAIN|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ENETDOWN|ConnectionRefused|FailedToOpenSocket)$/i;
+/** The OpenAI SDK's message for a request that never got a response. */
+const OPAQUE_CONNECTION_ERROR_MESSAGE = "Connection error.";
+
+/**
+ * Whether a statusless transport failure shows the provider was unreachable,
+ * as during a lost internet connection, rather than a provider fault.
+ */
+export function isProviderUnreachableTransportError(error: unknown): boolean {
+  let current = error;
+  const seen = new Set<unknown>();
+  let opaqueConnectionError = false;
+  let otherCode = false;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const value = current as { code?: unknown; message?: unknown; cause?: unknown };
+    if (typeof value.code === "string" && value.code.length > 0) {
+      if (PROVIDER_UNREACHABLE_TRANSPORT_CODE.test(value.code)) return true;
+      otherCode = true;
+    }
+    if (typeof value.message === "string") {
+      if (value.message.trim().toLowerCase() === STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE) {
+        return true;
+      }
+      if (value.message === OPAQUE_CONNECTION_ERROR_MESSAGE) opaqueConnectionError = true;
+    }
+    current = value.cause;
+  }
+  // The SDK can drop the transport cause. With no code anywhere, nothing
+  // shows a provider fault, and the request never reached the provider.
+  return opaqueConnectionError && !otherCode;
+}
+
+const TRANSIENT_TRANSPORT_CODE =
+  /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE|ENETUNREACH|EHOSTUNREACH|ENETDOWN)$/i;
+
+/**
+ * A network fault code anywhere on the Error.cause chain. SDK and runner
+ * wrappers often keep the transport error only as `cause`, so the outermost
+ * error's own `code` is not enough.
+ */
+function transientTransportCode(error: unknown): string | undefined {
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const value = current as { code?: unknown; cause?: unknown };
+    if (typeof value.code === "string" && TRANSIENT_TRANSPORT_CODE.test(value.code)) {
+      return value.code;
+    }
+    current = value.cause;
+  }
+  return undefined;
 }
 
 function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
@@ -867,7 +1765,7 @@ function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
   }
   return collectErrorStrings(error).find(
     (value) =>
-      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy)$/.test(
+      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy|misalignment_policy_violation)$/.test(
         value,
       ) || /\bthis request was blocked by our safety systems\b/i.test(value),
   );
@@ -877,19 +1775,48 @@ function isProviderSafetyRefusal(error: unknown): boolean {
   return providerSafetyRefusalDiagnostic(error) !== undefined;
 }
 
+/** Preserve the closest real HTTP status through SDK Error.cause wrappers. */
+function providerHttpStatus(error: unknown): number | undefined {
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const value = current as { status?: unknown; statusCode?: unknown; cause?: unknown };
+    const status = Number(value.status ?? value.statusCode);
+    if (Number.isInteger(status) && status >= 100 && status < 600) return status;
+    current = value.cause;
+  }
+  return undefined;
+}
+
+/**
+ * A fetch-layer timeout: the runtime's DOMException `TimeoutError` (message
+ * "The operation timed out."), possibly wrapped by SDK/runner `cause` chains.
+ * Explicit cancellation (`AbortError`) is deliberately not matched.
+ */
+export function isTransportTimeoutError(error: unknown): boolean {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const value = current as { name?: unknown; message?: unknown; cause?: unknown };
+    if (value.name === "TimeoutError" || value.message === "The operation timed out.") {
+      return true;
+    }
+    current = value.cause;
+  }
+  return false;
+}
+
 export function isTransientProviderError(error: unknown): boolean {
   if (error instanceof ResponsesStreamingTerminalError) {
     return error.category === "unavailable";
   }
   // A semantic refusal can arrive inside a 5xx transport envelope.
   if (isProviderSafetyRefusal(error)) return false;
-  const status =
-    typeof error === "object" && error !== null
-      ? Number(
-          (error as { status?: unknown; statusCode?: unknown }).status ??
-            (error as { statusCode?: unknown }).statusCode,
-        )
-      : undefined;
+  const status = providerHttpStatus(error);
   // A real HTTP status is AUTHORITATIVE: a 5xx is transient, and ANY other status
   // (4xx validation/auth/404, plus the 429 the earlier branches already handled) is
   // a request fault that must NOT auto-retry — even if its body happens to read like
@@ -898,18 +1825,16 @@ export function isTransientProviderError(error: unknown): boolean {
   if (status !== undefined && Number.isFinite(status)) {
     return status >= 500 && status < 600;
   }
-  const code =
-    typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code?: unknown }).code)
-      : undefined;
-  if (code && /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE)$/i.test(code)) {
-    return true;
-  }
-  const message = error instanceof Error ? error.message : String(error);
+  if (transientTransportCode(error)) return true;
+  const message = errorMessage(error);
   if (isExactStatuslessUpstreamConnectivityMessage(message)) {
     return true;
   }
-  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
+  // A statusless error is typically a provider error event in the middle of a
+  // streamed response. One that tells the caller to retry (for example an
+  // OpenAI-compatible server that produced a malformed tool call) is a bad
+  // generation, not a request fault.
+  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout|\bplease (?:retry|try again)\b/i.test(
     message,
   );
 }
@@ -925,33 +1850,281 @@ function hasCodexUsageLimitType(error: unknown): boolean {
  * ordinary per-minute rate limit. Retrying within the bounded same-turn budget
  * cannot succeed, so the turn fails promptly instead. Subscription transports
  * own their quota semantics through credential rotation and durable capacity
- * waits, so a Codex or SuperGrok transport error never classifies here.
+ * waits, so a Codex, SuperGrok or Claude subscription transport error never
+ * classifies here.
  */
 export function classifyProviderQuotaExhaustionError(
   error: unknown,
 ): ProviderQuotaExhaustion | null {
-  if (isCodexTransportError(error) || isXaiSubscriptionTransportError(error)) return null;
+  if (
+    isCodexTransportError(error) ||
+    isXaiSubscriptionTransportError(error) ||
+    isClaudeSubscriptionTransportError(error) ||
+    isFunctionToolProviderFailure(error)
+  )
+    return null;
   // The same reader the OpenAI SDK retry veto uses, so the two never disagree.
   return classifyProviderQuotaError(error);
 }
 
-export type XaiCredentialFailure = {
-  kind: "auth" | "forbidden" | "rate_limit";
-  cooldownMs: number | null;
+/**
+ * An error a function tool threw out of its own provider call (an image
+ * gateway, a speech API) is evidence about that tool's provider, never about
+ * the chat model's account: its 402 or 429 must not read as the chat model
+ * being out of credits or rate limited. Subscription transports keep their
+ * own semantics, since a subscription tool shares the chat model's account.
+ */
+export function isFunctionToolProviderFailure(error: unknown): boolean {
+  if (
+    isCodexTransportError(error) ||
+    isXaiSubscriptionTransportError(error) ||
+    isClaudeSubscriptionTransportError(error)
+  ) {
+    return false;
+  }
+  const graph = structuredRecoveryCauseGraph(error);
+  return graph !== null && [...graph.keys()].some((node) => node instanceof ToolCallError);
+}
+
+export const TOOL_PROVIDER_REFUSED_CODE = "tool_provider_refused";
+
+type SandboxServiceFailure = {
+  code:
+    | typeof SANDBOX_CAPACITY_UNAVAILABLE_CODE
+    | typeof SANDBOX_SERVICE_UNAVAILABLE_CODE
+    | typeof SANDBOX_SERVICE_REFUSED_CODE;
+  retryable: boolean;
+  message: string;
+  /** An uncertain mutation outcome in the same failure: it vetoes any retry. */
+  uncertain?: string;
 };
 
+/** Sibling or wrapper outcomes that forbid an automatic replay of the turn. */
+function isUncertainMutationOutcome(node: unknown): boolean {
+  return (
+    isRoutingMutationOutcomeUnknownError(node) ||
+    isRoutingMutationOutputRejectedError(node) ||
+    isRawProviderCommandOutcomeUnknown(node) ||
+    isModalCommandStartOutcomeUnknownError(node) ||
+    isProviderCommandObservationUnavailableError(node)
+  );
+}
+
 /**
- * Only definitive SuperGrok account refusals may move the same logical turn to
- * another credential. A marked HTTP 401/403/429, or an HTTP 200 SSE terminal
- * that is a rate-limit/capacity diagnostic, proves inference was refused
- * without an accepted model response; refresh relogin is equally definitive.
+ * A sandbox service's typed failure at any wrapper depth: `cause` chains, the
+ * agents SDK's ToolCallError (`.error`) when a lazily provisioned sandbox fails
+ * inside a tool call, and AggregateError members. Compute's ComputeControlError
+ * and a provider SDK's typed capacity error (E2B ServiceBusyError) count; a
+ * capacity refusal wins over any other sandbox service failure in the graph.
+ * Retry authority follows the error's own kind, and an uncertain mutation
+ * outcome anywhere in the same graph vetoes it, as for every other recovery.
  */
-export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailure | null {
+function findSandboxServiceFailure(error: unknown): SandboxServiceFailure | null {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  const compute = nodes.filter((node): node is ComputeControlError => {
+    return node instanceof ComputeControlError;
+  });
+  const computeCapacity = compute.find((node) => node.kind === "no_capacity");
+  const providerCapacity = nodes.find(isSandboxProviderCapacityError);
+  const found = computeCapacity ?? providerCapacity ?? compute[0];
+  if (!found) return null;
+  const message = found instanceof Error ? found.message : String(found);
+  const capacity = found === computeCapacity || found === providerCapacity;
+  const retryable = found instanceof ComputeControlError ? found.retryable : true;
+  if (!capacity && !retryable) {
+    return { code: SANDBOX_SERVICE_REFUSED_CODE, retryable: false, message };
+  }
+  const code = capacity ? SANDBOX_CAPACITY_UNAVAILABLE_CODE : SANDBOX_SERVICE_UNAVAILABLE_CODE;
+  return { code, retryable, message, ...uncertainMutationOutcome(graph, nodes) };
+}
+
+/** The first uncertain mutation outcome in the graph; an unreadable graph is uncertain too. */
+function uncertainMutationOutcome(
+  graph: Map<object, Set<object>> | null,
+  nodes: unknown[],
+): { uncertain?: string } {
+  if (!graph) return { uncertain: "the failure's cause graph could not be read" };
+  const node = nodes.find(isUncertainMutationOutcome);
+  if (node === undefined) return {};
+  return { uncertain: node instanceof Error ? node.message : String(node) };
+}
+
+/**
+ * Platform sandbox setup failed only because the machine agent did not answer
+ * (see SandboxSetupAgentUnavailableError). No model-requested command reached
+ * the box, so the same turn retries with the bounded sandbox-setup recovery
+ * budget. An uncertain mutation outcome in the same failure, or an unreadable
+ * graph, still forbids the replay.
+ */
+function sandboxSetupAgentUnavailableFailure(
+  error: unknown,
+): ReturnType<typeof baseAgentRunFailurePayload> | null {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  const setup = nodes.find((node) => node instanceof SandboxSetupAgentUnavailableError);
+  if (!setup) return null;
+  const { uncertain } = uncertainMutationOutcome(graph, nodes);
+  if (uncertain !== undefined) return null;
+  return {
+    error:
+      "The sandbox's agent did not answer while the sandbox was being set up, and nothing the model asked for ran. The same turn will retry after a short delay.",
+    code: "sandbox_command_start_unavailable",
+    retryable: true,
+    detail: setup.message,
+  };
+}
+
+/**
+ * The sandbox could not start programs (see SandboxMachineRestartingError and
+ * SandboxProcessStartFailedError). A restarted box retries the same turn; any
+ * other process-start failure, typed or only marked in a wrapper's text, stops
+ * the turn with short copy, never the agent's raw message or command text.
+ */
+function sandboxProcessStartFailure(
+  error: unknown,
+): ReturnType<typeof baseAgentRunFailurePayload> | null {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  const notSaved = nodes.find((node) => node instanceof SandboxBoxNotSavedError);
+  if (notSaved instanceof SandboxBoxNotSavedError) {
+    return { error: notSaved.message, code: SANDBOX_PROCESS_START_FAILED_CODE, retryable: false };
+  }
+  const back = nodes.find((node) => node instanceof SandboxMachineBackError);
+  if (back instanceof SandboxMachineBackError) {
+    const { uncertain } = uncertainMutationOutcome(graph, nodes);
+    if (uncertain === undefined) {
+      // The box was not restarted: an ordinary sandbox wait, not a restart.
+      return { error: back.message, code: "sandbox_command_start_unavailable", retryable: true };
+    }
+  }
+  const restarting = nodes.find((node) => node instanceof SandboxMachineRestartingError);
+  if (restarting instanceof SandboxMachineRestartingError) {
+    const { uncertain } = uncertainMutationOutcome(graph, nodes);
+    if (uncertain === undefined) {
+      return {
+        error: restarting.message,
+        code: SANDBOX_MACHINE_RESTARTING_CODE,
+        retryable: true,
+      };
+    }
+  }
+  const failed = nodes.find((node) => node instanceof SandboxProcessStartFailedError);
+  if (failed instanceof SandboxProcessStartFailedError) {
+    return {
+      error: failed.message,
+      code: SANDBOX_PROCESS_START_FAILED_CODE,
+      retryable: false,
+      detail: failed.detail,
+    };
+  }
+  if (restarting || back || isSandboxProcessStartFailure(error)) {
+    return {
+      error:
+        "The workspace machine can't start programs, so this turn stopped. Retry in a moment, or start a new chat if it keeps failing.",
+      code: SANDBOX_PROCESS_START_FAILED_CODE,
+      retryable: false,
+      detail: sanitizeSandboxProcessStartMessage(errorMessage(error)).slice(0, 2_000),
+    };
+  }
+  return null;
+}
+
+/**
+ * The failure is the attempt that asked to replace its Modal box (see
+ * SandboxMachineReplacingError), as opposed to a later attempt the same
+ * rotation fenced.
+ */
+export function isSandboxMachineReplacing(error: unknown): boolean {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  return nodes.some((node) => node instanceof SandboxMachineReplacingError);
+}
+
+const SANDBOX_FAILURE_SUBJECT = {
+  [SANDBOX_CAPACITY_UNAVAILABLE_CODE]: "No sandbox capacity is available right now",
+  [SANDBOX_SERVICE_UNAVAILABLE_CODE]: "The sandbox service is temporarily unavailable",
+  [SANDBOX_SERVICE_REFUSED_CODE]: "The sandbox service refused to provide a sandbox for this turn",
+} as const;
+
+function sandboxServiceFailurePayload(failure: SandboxServiceFailure) {
+  const retryable = failure.retryable && failure.uncertain === undefined;
+  return {
+    error: `${SANDBOX_FAILURE_SUBJECT[failure.code]}. ${
+      retryable
+        ? "The same turn will retry after a short delay."
+        : failure.uncertain !== undefined
+          ? "This turn stopped without retrying because an earlier sandbox action may already have taken effect."
+          : "This turn stopped without retrying."
+    }`,
+    code: failure.code,
+    retryable,
+    // Diagnostic only: the person-facing text never appends sandbox service text.
+    detail:
+      failure.uncertain !== undefined
+        ? `${failure.uncertain} (${failure.message})`
+        : failure.message,
+  };
+}
+
+/** Classifier results that name the chat model or its provider. */
+const MODEL_PROVIDER_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "provider_unavailable",
+  "provider_rate_limited",
+  "provider_quota_exhausted",
+]);
+
+/**
+ * A sandbox provider SDK's HTTP failure (for example a Daytona or E2B 5xx or
+ * 429, wrapped by the agents SDK as SandboxProviderError) concerns the sandbox,
+ * not the chat model. Keep the classifier's retry authority; change only the
+ * label and copy so the model is never blamed.
+ */
+function withSandboxProviderAttribution(
+  error: unknown,
+  failure: ReturnType<typeof baseAgentRunFailurePayload>,
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  if (!failure.code || !MODEL_PROVIDER_FAILURE_CODES.has(failure.code)) return failure;
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [];
+  const provider = nodes.find(isSandboxProviderError);
+  if (!provider) return failure;
+  return sandboxServiceFailurePayload({
+    code: SANDBOX_SERVICE_UNAVAILABLE_CODE,
+    retryable: failure.retryable === true,
+    message: provider instanceof Error ? provider.message : String(provider),
+    ...uncertainMutationOutcome(graph, nodes),
+  });
+}
+
+/** A refusal raised by a Claude subscription (OAuth) transport, at any wrapper depth. */
+export function isClaudeSubscriptionTransportError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
+    if (current instanceof AnthropicRequestError && current.subscription) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
+/**
+ * SuperGrok's classification of a failed model request as a shared provider
+ * outcome (the adapter's `classifyError`, SuperGrok track X1b): a refresh
+ * relogin or a marked 401 is `unauthorized`, a marked 403 `forbidden`, and a
+ * marked 429 or HTTP 200 SSE capacity terminal `rate_limited` with the
+ * provider's retry time (null when it gave none: the adapter's fallback
+ * applies). Anything else, a provider safety refusal included, is null: not
+ * a refusal of the account.
+ */
+export function classifyXaiProviderError(error: unknown): ProviderErrorOutcome | null {
   if (isProviderSafetyRefusal(error)) return null;
+  // An outdated Opengeni client is a platform release fault, not the
+  // account's: it must never mark the account unauthorized or forbidden.
+  if (classifyXaiSubscriptionClientOutdatedError(error)) return null;
   let relogin: unknown = error;
   for (let depth = 0; depth < 6 && relogin && typeof relogin === "object"; depth += 1) {
     if (relogin instanceof XaiSubscriptionReloginRequired) {
-      return { kind: "auth", cooldownMs: null };
+      return { kind: "unauthorized" };
     }
     relogin = (relogin as Record<string, unknown>).cause;
   }
@@ -966,10 +2139,10 @@ export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailu
     const status = Number(value.status ?? value.statusCode ?? body?.status ?? body?.statusCode);
     const code = String(value.code ?? body?.code ?? "").toLowerCase();
     if (status === 401 || code === "unauthorized" || code === "invalid_token") {
-      return { kind: "auth", cooldownMs: null };
+      return { kind: "unauthorized" };
     }
     if (status === 403) {
-      return { kind: "forbidden", cooldownMs: null };
+      return { kind: "forbidden" };
     }
     const message = String(value.message ?? body?.message ?? "");
     if (
@@ -979,10 +2152,7 @@ export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailu
         status: Number.isInteger(status) ? status : null,
       })
     ) {
-      return {
-        kind: "rate_limit",
-        cooldownMs: providerRetryAfterMs(error) ?? PROVIDER_BACKPRESSURE_DELAY_MS,
-      };
+      return { kind: "rate_limited", retryAfterMs: providerRetryAfterMs(error) };
     }
     current = value.cause;
   }
@@ -992,30 +2162,305 @@ export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailu
 // The generic turn-failure boundary also receives application/provider errors.
 // A five-character code or generic severity alone does not establish a driver error.
 function findPostgresDriverError(error: unknown): Record<string, unknown> | null {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
-  for (let index = 0; index < queue.length && index < 64; index += 1) {
-    const current = queue[index];
-    if (!current || typeof current !== "object" || seen.has(current)) continue;
-    seen.add(current);
-    const record = current as Record<string, unknown>;
+  for (const record of nestedErrorRecords(error)) {
     if (record.name === "PostgresError") return record;
-    for (const key of ["cause", "original", "driverError", "error", "errors"]) {
-      const nested = record[key];
-      if (Array.isArray(nested)) queue.push(...nested.slice(0, 64));
-      else if (nested !== undefined) queue.push(nested);
-    }
   }
   return null;
+}
+
+function isRawDatabaseQueryError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "query" in error &&
+    typeof error.query === "string" &&
+    "params" in error &&
+    Array.isArray(error.params)
+  );
+}
+
+function anthropicRequestDiagnostic(error: unknown): AnthropicRequestError | undefined {
+  if (error instanceof AnthropicRequestError) return error;
+  return error instanceof Error && error.cause instanceof AnthropicRequestError
+    ? error.cause
+    : undefined;
+}
+
+function isRawProviderCommandOutcomeUnknown(error: unknown): boolean {
+  try {
+    return (
+      error instanceof ProviderCommandInputOutcomeUnknownError ||
+      error instanceof ProviderCommandStartOutcomeUnknownError
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
+  return withProviderAccountRefusal(
+    error,
+    withProviderCondition(
+      error,
+      withSandboxProviderAttribution(
+        error,
+        withProviderWebPageExplained(classifyAgentRunFailurePayload(error, options)),
+      ),
+    ),
+  );
+}
+
+const PROVIDER_WEB_PAGE = /^(\d{3})\s+(?:<!doctype html|<html)/i;
+const PAGE_TITLE = /<title[^>]*>([^<]{1,120})<\/title>/i;
+
+/**
+ * A provider address that serves a web page (a wrong base URL, a proxy or a
+ * sign-in page) instead of its API surfaces as the SDK's `<status> <html…>`
+ * message. Say what happened instead of showing the page's markup.
+ */
+function withProviderWebPageExplained(
+  failure: ReturnType<typeof baseAgentRunFailurePayload>,
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  const page = PROVIDER_WEB_PAGE.exec(failure.error);
+  if (!page) return failure;
+  const title = PAGE_TITLE.exec(failure.error)?.[1]?.trim();
+  return {
+    ...failure,
+    error: `The model provider's address answered with a web page (HTTP ${page[1]}) instead of an API response. Check the provider's base URL in its settings.`,
+    ...(title && !failure.detail ? { detail: `Page title: ${title}` } : {}),
+  };
+}
+
+/** The typed host-backend refusal anywhere in an error's cause chain. */
+export function findSandboxBackendNotServedError(
+  error: unknown,
+): SandboxBackendNotServedError | null {
+  const seen = new Set<unknown>();
+  for (let current = error; current && typeof current === "object";) {
+    if (current instanceof SandboxBackendNotServedError) return current;
+    if (seen.has(current) || seen.size >= 16) return null;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+/**
+ * Record the closed provider condition on a retryable model-provider failure so
+ * clients can say "overloaded" rather than a generic outage. Presentation
+ * evidence only: retry authority and pacing are decided by `code`.
+ */
+function withProviderCondition(
+  error: unknown,
+  failure: ReturnType<typeof baseAgentRunFailurePayload>,
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  if (failure.code === "provider_rate_limited") {
+    return { ...failure, providerCondition: "rate_limited" };
+  }
+  if (failure.code !== "provider_unavailable") return failure;
+  if (failure.timeoutClass) return { ...failure, providerCondition: "unresponsive" };
+  return {
+    ...failure,
+    providerCondition: isProviderOverloadError(error, failure) ? "overloaded" : "unavailable",
+  };
+}
+
+/** HTTP 529, Anthropic `overloaded_error`, or explicit provider "overloaded" wording. */
+export function isProviderOverloadError(
+  error: unknown,
+  failure: { error?: string; detail?: string } = {},
+): boolean {
+  if (providerHttpStatus(error) === 529) return true;
+  const anthropic = anthropicRequestDiagnostic(error);
+  return [...collectErrorStrings(error), anthropic?.detail, failure.error, failure.detail].some(
+    (value) => typeof value === "string" && /\boverload(?:ed)?(?:_error)?\b/i.test(value),
+  );
+}
+
+/** Retry authority must not depend on the looser presentation-only overload label. */
+export function providerRecoveryCode(
+  error: unknown,
+  failure: { code?: string; retryable?: boolean; timeoutClass?: string },
+): string | undefined {
+  if (
+    failure.code === "mcp_transport_unavailable" &&
+    failure.retryable &&
+    isFirstPartyMcpSetupUnavailableError(error)
+  ) {
+    return FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE;
+  }
+  if (
+    failure.code === "mcp_transport_unavailable" &&
+    failure.retryable &&
+    isMcpServiceUnavailableError(error)
+  ) {
+    return MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE;
+  }
+  if (
+    (failure.code === "provider_unavailable" ||
+      failure.code === "upstream_connectivity_unavailable") &&
+    failure.retryable &&
+    !failure.timeoutClass &&
+    providerHttpStatus(error) === undefined &&
+    !isFunctionToolProviderFailure(error) &&
+    isProviderUnreachableTransportError(error)
+  ) {
+    return PROVIDER_UNREACHABLE_RECOVERY_CODE;
+  }
+  if (failure.code !== "provider_unavailable" || !failure.retryable) return failure.code;
+  const status = providerHttpStatus(error);
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    if (
+      current instanceof AnthropicRequestError &&
+      status !== undefined &&
+      status >= 500 &&
+      status < 600 &&
+      (status === 529 || current.errorType === "overloaded_error")
+    ) {
+      return PROVIDER_OVERLOAD_RECOVERY_CODE;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return failure.code;
+}
+
+/** Transport failures that are terminal on ordinary requests only because replay could repeat effects. */
+const REPLAY_SAFE_CHECKPOINT_TRANSPORT_CODES: ReadonlySet<string> = new Set([
+  "invalid_sse_terminal",
+  CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
+]);
+
+function classifyAgentRunFailurePayload(
+  error: unknown,
+  options: { isCodexTurn?: boolean } = {},
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  // EU-only inference refused the route before anything was sent. It is the
+  // same answer on every retry, however an SDK or runner wrapped it.
+  const regionRestricted = findInferenceRegionRestrictedError(error);
+  if (regionRestricted) {
+    return {
+      error: regionRestricted.message,
+      code: regionRestricted.code,
+      retryable: false,
+      model: regionRestricted.modelName,
+    };
+  }
+  // The deployment does not serve the session's host sandbox backend. Nothing
+  // was built, and every retry gives the same answer, however the
+  // provisioning path wrapped it.
+  const backendNotServed = findSandboxBackendNotServedError(error);
+  if (backendNotServed) {
+    return {
+      error: backendNotServed.message,
+      code: backendNotServed.code,
+      retryable: false,
+    };
+  }
+  // The chat's personal machine isn't allowed for this turn. Its cause is the
+  // database's refusal, which is not a database fault: the machine's owner
+  // allows it again, and retrying without that gives the same answer.
+  const machineAccess = findPersonalMachineAccessRequiredError(error);
+  if (machineAccess) {
+    return { error: machineAccess.message, code: machineAccess.code, retryable: false };
+  }
+  // A checkpoint (compaction) request only summarizes history: it runs no
+  // tools and its output is discarded unless it completes. A stream that ended
+  // without a terminal event or timed out is therefore safe to send again,
+  // unlike the same failure on an ordinary request, so recover the same turn.
+  if (
+    error instanceof CompactionProviderResponseError &&
+    error.code !== undefined &&
+    REPLAY_SAFE_CHECKPOINT_TRANSPORT_CODES.has(error.code)
+  ) {
+    // Keep the cause on every retry and on an exhausted terminal: the
+    // checkpoint diagnostics (transport code, status, request), and for a
+    // timeout its own class, request and whether a response was observed.
+    const timeout =
+      error.code === CODEX_RESPONSE_TIMEOUT_ERROR_TYPE
+        ? classifyCodexResponseTimeoutError(error.cause ?? error)
+        : null;
+    return {
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+      ...(timeout
+        ? {
+            timeoutClass: timeout.timeoutClass,
+            responseObserved: timeout.responseObserved,
+            ...(timeout.requestId ? { requestId: timeout.requestId } : {}),
+          }
+        : {}),
+      detail: error.message,
+    };
+  }
+  const sizeError = findAnthropicRequestSizeError(error);
+  if (sizeError)
+    return {
+      error: sizeError.message,
+      code: sizeError.code,
+      retryable: false,
+      requestSize: sizeError.requestSize,
+      ...(sizeError.request_id ? { requestId: sizeError.request_id } : {}),
+    };
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [];
+  const outputRejected = nodes.find(isRoutingMutationOutputRejectedError);
+  if (outputRejected) {
+    // A known receipt applies only to its own mutation. Uncertain peers retain
+    // their established terminal classification, regardless of SDK graph order.
+    const unknown = nodes.find(
+      (node) =>
+        isRoutingMutationOutcomeUnknownError(node) ||
+        isModalCommandStartOutcomeUnknownError(node) ||
+        isProviderCommandObservationUnavailableError(node) ||
+        isRawProviderCommandOutcomeUnknown(node),
+    );
+    if (unknown) return { ...baseAgentRunFailurePayload(unknown, options), retryable: false };
+    return {
+      error: outputRejected.message,
+      code: outputRejected.code,
+      retryable: false,
+    };
+  }
+  const expired = nodes.find((node) => node instanceof ProviderOverloadRecoveryExpiredError);
+  if (expired instanceof ProviderOverloadRecoveryExpiredError) return expired.failure;
   const failure = baseAgentRunFailurePayload(error, options);
   const diagnostic = materializationVerificationDiagnostic(error);
+  const anthropic = anthropicRequestDiagnostic(error);
+  if (anthropic) {
+    const authenticationRejected =
+      anthropic.status === 401 &&
+      (error === anthropic ||
+        (error instanceof Error && (error as Error & { status?: unknown }).status === 401));
+    return {
+      ...failure,
+      code:
+        failure.code ??
+        (authenticationRejected ? "anthropic_authentication_error" : anthropic.code),
+      retryable: failure.retryable ?? false,
+      ...(anthropic.detail ? { detail: anthropic.detail } : {}),
+      ...(anthropic.request_id ? { requestId: anthropic.request_id } : {}),
+    };
+  }
   return diagnostic ? { ...failure, materializationDiagnostic: diagnostic } : failure;
+}
+
+/** Keep Anthropic provider text on terminal failures, never recovery events. */
+export function agentRunRecoveryFailurePayload(
+  error: unknown,
+  failure: ReturnType<typeof agentRunFailurePayload>,
+): ReturnType<typeof agentRunFailurePayload> {
+  if (!anthropicRequestDiagnostic(error)) return failure;
+  // Project a copy: retry exhaustion still needs the terminal diagnostic.
+  const recovery = { ...failure };
+  delete recovery.detail;
+  return recovery;
 }
 
 function baseAgentRunFailurePayload(
@@ -1037,16 +2482,32 @@ function baseAgentRunFailurePayload(
   sqlState?: string | null;
   attempts?: number;
   retryOutcome?: string;
-  database?: Record<string, string>;
+  database?: SafeDatabaseErrorFacts;
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
   materializationDiagnostic?: MaterializationVerificationDiagnostic;
+  requestSize?: AnthropicRequestSize;
   quotaScope?: ProviderQuotaScope;
+  /** Closed provider-account refusal for operational attribution; never changes retries or copy. */
+  providerAccountRefusal?: ProviderAccountRefusal;
   /** Closed Codex plan key on `codex_plan_entitlement` / `codex_request_rejected`. */
   planType?: string | null;
-  /** Product model id a `codex_plan_entitlement` failure refers to. */
+  /** Product model id a `codex_plan_entitlement` or model-provider recovery failure refers to. */
   model?: string | null;
+  /** Display label of the turn's model on model-provider recovery evidence. */
+  modelLabel?: string;
+  /** Display label of the serving provider on model-provider recovery evidence. */
+  providerLabel?: string;
+  /** Closed transient provider condition on `provider_unavailable` / `provider_rate_limited`. */
+  providerCondition?: ProviderCondition;
+  recoveryExhausted?: boolean;
+  providerRecoveryCount?: number;
+  maxProviderRecoveryCount?: number;
+  providerRecoveryExhaustedReason?: "deadline" | "retry_limit" | "invalid_clock";
 } {
+  if (error instanceof KnowledgeLearningScopeChangedError) {
+    return { error: error.message, code: error.code, retryable: false };
+  }
   if (error instanceof SandboxMaterializationVerificationError) {
     return {
       error: error.message,
@@ -1058,8 +2519,22 @@ function baseAgentRunFailurePayload(
   if (error instanceof RetainedAttachmentTransportLimitError) {
     return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
   }
+  if (findRetainedAttachmentUnavailableError(error)) {
+    // Storage may lag after a replica outage. The same turn retries with the
+    // connectivity backoff and never continues without the image's pixels.
+    return {
+      error:
+        "An image from earlier in this conversation can't be read from storage right now. The same turn will retry after a short delay.",
+      code: RETAINED_ATTACHMENT_UNAVAILABLE_CODE,
+      retryable: true,
+    };
+  }
   if (error instanceof MandatoryHistoryPersistenceError) {
-    const underlying = isSessionEventPersistenceError(error.cause)
+    const databaseFailure =
+      isSessionEventPersistenceError(error.cause) ||
+      findPostgresDriverError(error.cause) !== null ||
+      isRawDatabaseQueryError(error.cause);
+    const underlying = databaseFailure
       ? agentRunFailurePayload(error.cause, options)
       : {
           error: error.cause instanceof Error ? error.cause.message : String(error.cause),
@@ -1067,6 +2542,42 @@ function baseAgentRunFailurePayload(
     return {
       ...underlying,
       historyPersistenceStage: error.stage,
+    };
+  }
+  // Raw ORM wrappers can contain the full SQL and its parameters. Classify a
+  // real driver before provider message heuristics; the original cause stays
+  // available to internal diagnostics. This payload grants no replay authority.
+  const postgresDriverError = findPostgresDriverError(error);
+  const rawOrmFailure = isRawDatabaseQueryError(error);
+  if ((postgresDriverError || rawOrmFailure) && !isSessionEventPersistenceError(error)) {
+    const database = safeDatabaseErrorFacts(postgresDriverError ?? error);
+    const sqlState = postgresDriverError ? nestedPostgresSqlState(postgresDriverError) : null;
+    return {
+      error: "A database error occurred.",
+      code: databaseFailureCode(sqlState),
+      sqlState,
+      ...(Object.keys(database).length > 0 ? { database } : {}),
+    };
+  }
+  // The sandbox control service's own typed failure (for example compute's
+  // 503 no_capacity while creating or waking a box) concerns the sandbox,
+  // never the chat model. Its HTTP status would otherwise read as a model
+  // provider 5xx below. Retry authority follows the error's own kind.
+  const sandboxService = findSandboxServiceFailure(error);
+  if (sandboxService) return sandboxServiceFailurePayload(sandboxService);
+  const setupAgentUnavailable = sandboxSetupAgentUnavailableFailure(error);
+  if (setupAgentUnavailable) return setupAgentUnavailable;
+  const processStart = sandboxProcessStartFailure(error);
+  if (processStart) return processStart;
+  if (error instanceof AnthropicSizeRecoveryExhaustedError) {
+    return { error: error.message, code: error.code, retryable: false };
+  }
+  if (error instanceof AnthropicProviderRejection) {
+    return {
+      error: error.message,
+      code: error.code === "content_policy_violation" ? "provider_safety_refusal" : error.code,
+      retryable: false,
+      ...(error.request_id ? { requestId: error.request_id } : {}),
     };
   }
   const safetyRefusalDiagnostic = providerSafetyRefusalDiagnostic(error);
@@ -1114,22 +2625,20 @@ function baseAgentRunFailurePayload(
       detail: error.detail,
     };
   }
-  const message = error instanceof Error ? error.message : String(error);
-  const status =
-    typeof error === "object" && error !== null
-      ? Number(
-          (error as { status?: unknown; statusCode?: unknown }).status ??
-            (error as { statusCode?: unknown }).statusCode,
-        )
-      : undefined;
+  const message = errorMessage(error);
+  const status = providerHttpStatus(error);
   const code =
     typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code)
       : undefined;
   if (error instanceof ActiveSessionHistoryLimitExceededError) {
+    // Over-guard history normally compacts through the bounded recovery view.
+    // This error remains only when even that view cannot fit (for example, the
+    // newest item alone is larger than the recovery budget), so compaction
+    // cannot help. Clearing deactivates rows without reading them.
     return {
       error:
-        "The session's active conversation history exceeds the worker's safe materialization envelope. Clear the session context before retrying; an oversized history cannot be compacted safely in a serving worker.",
+        "The session's active context is too large to load safely, even with inline images and older items left out, so it cannot be compacted. Clear the session context (/clear in chat, or the clearSessionContext action) to restart the model from an empty context, then send the next message; earlier messages stay in the timeline. Alternatively, start a new session.",
       code: error.code,
       retryable: false,
       detail: error.message,
@@ -1150,6 +2659,22 @@ function baseAgentRunFailurePayload(
         "Context compaction completed, but the continuation ended before a new model response. The same turn will retry from the compacted checkpoint.",
       code: POST_COMPACTION_CONTINUATION_EMPTY_CODE,
       retryable: true,
+    };
+  }
+  if (isProviderCommandObservationUnavailableError(error)) {
+    return {
+      error:
+        "A managed sandbox command cannot be observed. Its exact invocation and writer remain retained; setup is blocked without replay until the incomplete operation can be reconciled.",
+      code: "sandbox_command_observation_unavailable",
+      retryable: false,
+    };
+  }
+  if (isModalCommandStartOutcomeUnknownError(error)) {
+    return {
+      error:
+        "A managed sandbox command has an unknown outcome. Its original invocation remains fenced; setup is blocked without replay until the incomplete operation can be reconciled.",
+      code: "sandbox_command_start_outcome_unknown",
+      retryable: false,
     };
   }
   if (
@@ -1177,8 +2702,16 @@ function baseAgentRunFailurePayload(
   if (isXaiSubscriptionHostedToolContinuationError(error)) {
     return {
       error:
-        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved.",
       code: "xai_hosted_tool_continuation_stalled",
+      retryable: false,
+    };
+  }
+  const xaiClientOutdated = classifyXaiSubscriptionClientOutdatedError(error);
+  if (xaiClientOutdated) {
+    return {
+      error: xaiClientOutdated.message,
+      code: XAI_SUBSCRIPTION_CLIENT_OUTDATED_CODE,
       retryable: false,
     };
   }
@@ -1195,8 +2728,7 @@ function baseAgentRunFailurePayload(
   const xaiStreamTimeout = classifyXaiSubscriptionStreamIdleTimeoutError(error);
   if (xaiStreamTimeout) {
     return {
-      error:
-        "SuperGrok stopped sending valid response events. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      error: "SuperGrok stopped sending valid response events. Partial output was preserved.",
       code: "xai_response_stream_idle_timeout",
       retryable: false,
       responseObserved: xaiStreamTimeout.responseObserved,
@@ -1229,6 +2761,10 @@ function baseAgentRunFailurePayload(
   if (error instanceof CodexPlanEntitlementError) {
     return error.payload;
   }
+  // Shared subscription core placement outcomes carry their own typed copy.
+  if (error instanceof SubscriptionCoreCodexTurnError) {
+    return error.payload;
+  }
   const entitlementRejection = classifyCodexEntitlementRejection(error);
   if (entitlementRejection) {
     return entitlementRejection.evidence === "plan_entitlement"
@@ -1259,6 +2795,10 @@ function baseAgentRunFailurePayload(
   // The looser "429 ... usage limit" wording counts only on a Codex transport
   // error: an API-key provider's 429 that says "usage limit" is provider quota
   // evidence, not a ChatGPT/Codex subscription cap.
+  const creditPolicy = findCodexCreditPolicyError(error);
+  if (creditPolicy) {
+    return { error: creditPolicy.message, code: creditPolicy.code, retryable: false };
+  }
   const usageLimit = classifyCodexUsageLimitError(error);
   if (usageLimit && (isCodexTransportError(error) || hasCodexUsageLimitType(error))) {
     return codexUsageLimitFailurePayload(usageLimit, message);
@@ -1269,8 +2809,8 @@ function baseAgentRunFailurePayload(
   if (codexTimeout) {
     return {
       error: codexTimeout.responseObserved
-        ? "The Codex response timed out after streaming began. Observed output was checkpointed; automatic replay is disabled because the upstream operation may still be active."
-        : "The Codex response timed out before any response was observed. Upstream acceptance is unknown, so automatic replay is disabled.",
+        ? "The Codex response timed out after streaming began. Observed output was checkpointed."
+        : "The Codex response timed out before any response was observed.",
       code: "codex_response_timeout",
       retryable: false,
       timeoutClass: codexTimeout.timeoutClass,
@@ -1304,6 +2844,44 @@ function baseAgentRunFailurePayload(
       ...(mcpTransportDiagnostic ? { mcpTransportDiagnostic } : {}),
     };
   }
+  // A generic model stream that went silent mid-response (typed idle bound) or
+  // a transport timeout ("The operation timed out." DOMException TimeoutError
+  // from the fetch layer) is a dead upstream connection, not a request fault:
+  // checkpoint durable truth and recover the same turn within the finite
+  // provider recovery budget. Codex/SuperGrok typed timeouts are classified
+  // above under their own transport policy.
+  const streamIdle = classifyModelStreamIdleTimeoutError(error);
+  if (streamIdle) {
+    const seconds =
+      streamIdle.idleTimeoutMs !== null ? Math.round(streamIdle.idleTimeoutMs / 1_000) : null;
+    const window = seconds !== null ? ` for ${seconds}s` : "";
+    return {
+      error:
+        streamIdle.kind === "progress"
+          ? `The model provider stream stalled: only keepalive traffic and no response progress${window}. The same turn will retry after a short delay.`
+          : `The model provider stopped sending response data${window}. The same turn will retry after a short delay.`,
+      code: "provider_unavailable",
+      retryable: true,
+      timeoutClass: streamIdle.kind === "progress" ? "progress_stream" : "idle_stream",
+      responseObserved: true,
+      detail: streamIdle.message,
+    };
+  }
+  if (status === undefined && isTransportTimeoutError(error)) {
+    return {
+      error:
+        "The model provider connection timed out. The same turn will retry after a short delay.",
+      code: "provider_unavailable",
+      retryable: true,
+      timeoutClass: "transport",
+      detail: message,
+    };
+  }
+  if (error instanceof IncompleteChatCompletionError) {
+    // No terminal evidence means upstream work may already have happened.
+    // Stop without executing the partial tools or authorizing another request.
+    return { error: error.message, code: error.code, retryable: false };
+  }
   if (code === UNKNOWN_MODEL_FINISH_REASON_CODE) {
     return {
       error:
@@ -1316,6 +2894,32 @@ function baseAgentRunFailurePayload(
   // the finite same-turn budget can succeed. Fail the turn promptly with a
   // distinct code so the client can offer another model; ordinary short rate
   // limits fall through to the retryable branch below.
+  //
+  // A tool's own provider refusing first: tools return such a refusal as their
+  // own result, so one that still escapes stops the turn without blaming the
+  // chat model, replaying the tool call, or showing provider account text.
+  if (
+    isFunctionToolProviderFailure(error) &&
+    (status === 402 ||
+      status === 429 ||
+      classifyProviderQuotaError(error) !== null ||
+      code === "rate_limit_exceeded" ||
+      /(?:too many requests|rate.?limit)/i.test(message))
+  ) {
+    return {
+      error: "A tool's provider refused its request, so this turn stopped.",
+      code: TOOL_PROVIDER_REFUSED_CODE,
+      retryable: false,
+    };
+  }
+  if (status === 402 && code === "anthropic_billing_error") {
+    return {
+      error: "Claude could not bill this request. Check the account's billing and payment details.",
+      code: "provider_billing_error",
+      retryable: false,
+      ...(message ? { detail: message } : {}),
+    };
+  }
   const quota = classifyProviderQuotaExhaustionError(error);
   if (quota) {
     return {
@@ -1328,8 +2932,9 @@ function baseAgentRunFailurePayload(
   }
   if (
     status === 429 ||
-    code === "rate_limit_exceeded" ||
-    /(?:too many requests|rate.?limit|\b429\b)/i.test(message)
+    ((status === undefined || !Number.isFinite(status)) &&
+      (code === "rate_limit_exceeded" ||
+        /(?:too many requests|rate.?limit|\b429\b)/i.test(message)))
   ) {
     return {
       error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
@@ -1346,24 +2951,12 @@ function baseAgentRunFailurePayload(
     if (isExactStatuslessUpstreamConnectivityMessage(message)) {
       return {
         error:
-          "OpenGeni could not reach an upstream service. The same turn will retry after a short delay.",
+          "An upstream service could not be reached. The same turn will retry after a short delay.",
         code: "upstream_connectivity_unavailable",
         retryable: true,
       };
     }
     return { error: message, code: "provider_unavailable", retryable: true };
-  }
-  const postgresDriverError = findPostgresDriverError(error);
-  if (postgresDriverError) {
-    const database = safeDatabaseErrorFacts(postgresDriverError);
-    const sqlState = nestedPostgresSqlState(postgresDriverError);
-    if (sqlState !== null || Object.keys(database).length > 0) {
-      return {
-        error: message,
-        sqlState,
-        ...(Object.keys(database).length > 0 ? { database } : {}),
-      };
-    }
   }
   return { error: message };
 }
@@ -1375,6 +2968,7 @@ export type CodexCredentialFailure = {
    */
   kind: "auth" | "forbidden" | "rate_limit" | "quota" | "plan_entitlement";
   cooldownSeconds: number | null;
+  origin?: "included_usage_policy";
 };
 
 export const CODEX_ALLOWANCE_FALLBACK_MS = 5 * 60 * 60_000;
@@ -1439,6 +3033,14 @@ export function codexCredentialCooldownUntil(
  * progress and therefore MUST NOT walk the credential pool automatically.
  */
 export function classifyCodexCredentialFailure(error: unknown): CodexCredentialFailure | null {
+  const creditPolicy = findCodexCreditPolicyError(error);
+  if (creditPolicy instanceof CodexIncludedUsageExhaustedError) {
+    return {
+      kind: "quota",
+      cooldownSeconds: creditPolicy.resetsInSeconds,
+      origin: "included_usage_policy",
+    };
+  }
   // A request safety refusal is not evidence that another account should run it.
   if (isProviderSafetyRefusal(error)) return null;
   // A permanent OAuth refresh failure is definitive and the shared resolver has
@@ -1542,13 +3144,14 @@ export function humanizeResetWindow(resetsInSeconds: number | null): string {
 /**
  * Build the turn.failed payload for a ChatGPT/Codex usage cap: a precise,
  * actionable message naming the reset window, the stable `codex_usage_limit_reached`
- * code, and retryable:false (an auto-retry would just re-hit the cap).
+ * code, retryable:false (an auto-retry would just re-hit the cap), and the
+ * reset instant as `resetsAt` when known, so a chat can say when it resets.
  */
 export function codexUsageLimitFailurePayload(
   info: { resetsInSeconds: number | null },
   detail: string,
-  opts?: { allAccounts?: boolean },
-): { error: string; code: string; retryable: false; detail?: string } {
+  opts?: { allAccounts?: boolean; now?: Date },
+): { error: string; code: string; retryable: false; resetsAt?: string; detail?: string } {
   // P3: when EVERY connected subscription is rate-limited the message names the
   // earliest reset across accounts; the single-account message is unchanged.
   const error = opts?.allAccounts
@@ -1556,10 +3159,16 @@ export function codexUsageLimitFailurePayload(
       `You can switch this session to a different model in the meantime, or wait for a subscription to reset.`
     : `Your ChatGPT/Codex subscription usage limit has been reached. Access resets ${humanizeResetWindow(info.resetsInSeconds)}. ` +
       `You can switch this session to a different model in the meantime, or wait for the limit to reset.`;
+  const resetsIn = info.resetsInSeconds;
+  const resetsAt =
+    resetsIn !== null && Number.isFinite(resetsIn) && resetsIn > 0
+      ? new Date((opts?.now ?? new Date()).getTime() + Math.ceil(resetsIn) * 1000).toISOString()
+      : null;
   return {
     error,
     code: "codex_usage_limit_reached",
     retryable: false,
+    ...(resetsAt ? { resetsAt } : {}),
     ...(detail ? { detail } : {}),
   };
 }
@@ -1568,3 +3177,42 @@ export function codexUsageLimitFailurePayload(
 // open indefinitely for a goal-bearing session; cap the continuation hold so the
 // goal re-evaluates at most this far out (it will re-pause if still capped).
 export const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
+
+/**
+ * Claude's classification of a failed model request as a shared provider
+ * outcome (the adapter's `classifyError`, Claude track C1b), for a request
+ * of the Claude subscription transport only: a reconnect-required refresh or
+ * HTTP 401 is `unauthorized` (the transport already ran the turn's one
+ * forced refresh); 429 is `rate_limited` for the turn's model `modelId`, with
+ * the provider's retry time (null: the adapter's fallback applies); 529 or
+ * `overloaded_error` is `overloaded`, which never moves the turn to another
+ * account; 403 is `fatal`, which never rotates or quarantines the account.
+ * Anything else, a provider safety refusal included, is null: not a refusal
+ * of the account.
+ */
+export function classifyClaudeProviderError(
+  error: unknown,
+  modelId?: string,
+): ProviderErrorOutcome | null {
+  if (isProviderSafetyRefusal(error)) return null;
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
+    if (current instanceof ClaudeSubscriptionReconnectRequired) return { kind: "unauthorized" };
+    if (current instanceof AnthropicRequestError) {
+      if (!current.subscription) return null;
+      if (current.status === 401) return { kind: "unauthorized" };
+      if (current.status === 429)
+        return {
+          kind: "rate_limited",
+          retryAfterMs: providerRetryAfterMs(current),
+          ...(modelId === undefined ? {} : { modelId }),
+        };
+      if (current.status === 529 || current.errorType === "overloaded_error")
+        return { kind: "overloaded" };
+      if (current.status === 403) return { kind: "fatal" };
+      return null;
+    }
+    current = current.cause;
+  }
+  return null;
+}

@@ -2,6 +2,22 @@
 export const CODEX_CAPACITY_RECOVERY_KEY = "codexCapacityRecoveryV1";
 export const CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT = 10;
 
+/**
+ * The terminal code of each core waiter's false-resumption breaker (one per
+ * provider wait vocabulary). The breaker state is shared
+ * (`CODEX_CAPACITY_RECOVERY_KEY`), so a human Retry of a turn that failed
+ * with any of these codes replenishes it.
+ */
+export const SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES = {
+  codex: "codex_capacity_recovery_exhausted",
+  xai: "xai_capacity_recovery_exhausted",
+  claude: "claude_capacity_recovery_exhausted",
+} as const;
+
+export function isSubscriptionCoreWaitExhaustedCode(code: unknown): boolean {
+  return (Object.values(SUBSCRIPTION_CORE_WAIT_EXHAUSTED_CODES) as unknown[]).includes(code);
+}
+
 export type CodexCapacityRecovery = {
   falseResumptions: number;
   resumeGeneration: number | null;

@@ -4,6 +4,7 @@ import {
 } from "@opengeni/contracts";
 import {
   getKnowledgeEntry,
+  getKnowledgeEntries,
   listKnowledgeEntries,
   type Database,
   type KnowledgeContext,
@@ -15,8 +16,12 @@ import { searchKnowledgeEntries } from "./knowledge-search";
 
 const defaults = {
   get: getKnowledgeEntry,
+  getMany: getKnowledgeEntries,
   list: listKnowledgeEntries,
   search: searchKnowledgeEntries,
+};
+type PreparationServices = Omit<typeof defaults, "getMany"> & {
+  getMany?: typeof getKnowledgeEntries;
 };
 // Normal workspaces return the whole map in one call. Larger maps explicitly
 // continue at a complete page boundary, never silently omit collections.
@@ -30,7 +35,7 @@ export async function prepareKnowledgeSave(
   context: KnowledgeContext,
   input: KnowledgeSavePreparationRequest,
   embedder: () => DocumentEmbedder,
-  services = defaults,
+  services: PreparationServices = defaults,
   settings?: Settings,
 ): Promise<KnowledgeSavePreparationResponse> {
   const request = KnowledgeSavePreparationRequest.parse(input);
@@ -48,6 +53,11 @@ export async function prepareKnowledgeSave(
     return {
       model: current.model,
       dimensions: current.dimensions,
+      // Where texts go (EU-only inference reads these): a local embedder
+      // sends nothing, a remote one sends to its endpoint.
+      ...(current.local !== undefined ? { local: current.local } : {}),
+      ...(current.endpoint !== undefined ? { endpoint: current.endpoint } : {}),
+      ...(current.available !== undefined ? { available: current.available } : {}),
       embedMany: (texts) => current.embedMany(texts),
       embedQuery: (query) => (queryEmbedding ??= current.embedQuery(query)),
     };
@@ -89,6 +99,10 @@ export async function prepareKnowledgeSave(
       ...(published.searchMode === "keyword" ? { mode: "keyword" as const } : {}),
     },
     sharedEmbedder,
+    // The query embedding is reused, not sent again, so the second view meters
+    // nothing; it still needs the residency declarations for its region check.
+    undefined,
+    settings,
   );
   const matches = { published, needs_review: needsReview };
   for (const view of ["published", "needs_review"] as const) {
@@ -102,15 +116,24 @@ export async function prepareKnowledgeSave(
         limit: CATALOG_PAGE_SIZE,
         ...(cursor ? { cursor } : {}),
       });
-      const records: Array<Awaited<ReturnType<typeof getKnowledgeEntry>>> = [];
-      for (let offset = 0; offset < page.entries.length; offset += 4) {
-        records.push(
-          ...(await Promise.all(
-            page.entries
-              .slice(offset, offset + 4)
-              .map((summary) => services.get(db, context, summary.id, { view })),
-          )),
-        );
+      const records: Array<Awaited<ReturnType<typeof getKnowledgeEntry>>> = services.getMany
+        ? await services.getMany(
+            db,
+            context,
+            page.entries.map((summary) => summary.id),
+            { view },
+          )
+        : [];
+      if (!services.getMany) {
+        for (let offset = 0; offset < page.entries.length; offset += 4) {
+          records.push(
+            ...(await Promise.all(
+              page.entries
+                .slice(offset, offset + 4)
+                .map((summary) => services.get(db, context, summary.id, { view })),
+            )),
+          );
+        }
       }
       for (const record of records) {
         // Re-read the current view: an exact historical revision may remain

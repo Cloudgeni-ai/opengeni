@@ -20,6 +20,8 @@ import {
   ControlResponse,
   ErrorCode,
   FsEntryKind,
+  OpLostReason,
+  OpState,
   StreamKind,
   type BrowserControlEnsureRequest,
   type BrowserControlEnsureResponse,
@@ -28,9 +30,10 @@ import {
   type ExecRequest,
   type ExecResponse,
   type OperationResourcePolicy,
+  type OpStatus,
   type StreamChannel,
 } from "@opengeni/agent-proto";
-import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
+import { DESKTOP_STREAM_PORT, CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
 import {
   SELFHOSTED_FILE_CHUNK_BYTES,
   fileContentDigest,
@@ -43,15 +46,27 @@ import {
 // Manifest (see the `state` field below); selfhosted exec routes over NATS and
 // does not use the manifest, but the SDK requires it present + well-formed.
 import { Manifest } from "@openai/agents/sandbox";
-import { formatExecResponse } from "@openai/agents-core/sandbox/internal";
+import { formatExecResponse, truncateOutput } from "@openai/agents-core/sandbox/internal";
 import type { ExposedPortEndpoint } from "../stream-port";
 import {
+  BROWSER_CONTROL_HTTP_REPLY_GRACE_MS,
+  type BrowserControlHttpCall,
+  type BrowserControlHttpOutcome,
+} from "../browser-control-http";
+import {
+  AGENT_UNRESPONSIVE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY,
   agentErrorToControlError,
+  commandOutcomeUnknownAfterReplacementAgentError,
   drainingExhaustedError,
   execDeadlineHint,
   SelfhostedControlError,
+  START_CONFIRMED_DETAIL_KEY,
   subjectFor,
+  timeoutAgentError,
   type ControlRpc,
+  type UnresponsiveAgentRecovery,
 } from "./control-rpc";
 import {
   decideSelfhostedRetry,
@@ -62,17 +77,43 @@ import type { SelfhostedOpObservation, SelfhostedOpObserver } from "./op-observe
 import { selfhostedFaultClass } from "./fault-rendering";
 import {
   nextDurableOpId,
+  notifyRemoteOperationTransportSelected,
   notifyDurableOpOwnershipTransferStarted,
+  notifyDurableOpOwnershipTransferFailed,
   notifyDurableOpOwnershipTransferred,
+  notifyRemoteOperationNotDispatched,
+  type RemoteOperationControl,
+  type RemoteOperationObservation,
 } from "../op-correlation";
 import {
+  isOpTombstone,
+  isReleasedOpError,
   OpStreamExecClient,
+  OpTombstonedError,
   runnerFailureToControlError,
   type OpStreamJournal,
   type OpStreamOutputFrame,
+  type OpStreamOutputReceipt,
 } from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
-import { connectedMachineWorkspaceRootsEqual, resolveConnectedMachinePath } from "./workspace-path";
+import {
+  connectedMachineWorkspaceRootsEqual,
+  isConnectedMachineAbsolutePath,
+  isWindowsConnectedMachinePath,
+  relativeConnectedMachinePath,
+  resolveConnectedMachinePath,
+} from "./workspace-path";
+import type { ShellDialect } from "@opengeni/vaults";
+import {
+  carryHasReferences,
+  profileEnvironmentOf,
+  secretExecCarryFor,
+  secretExecEnvironment,
+  secretScopeDirectory,
+  shellDialectFor,
+  spliceCarry,
+} from "../secret-delivery";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -81,6 +122,12 @@ const encoder = new TextEncoder();
 const SELFHOSTED_FS_READ_CHUNK_BYTES = 512 * 1024;
 const SELFHOSTED_PLACEMENT_PRIVATE_PREFIX = "/tmp/opengeni-private/";
 const SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES = 128 * 1024;
+// Private files (secretfile values up to the vault's 256 KiB file limit) stay
+// well below the 1 MiB RPC payload ceiling.
+const SELFHOSTED_PLACEMENT_PRIVATE_FILE_MAX_BYTES = 512 * 1024;
+
+/** Windows PowerShell ships with every supported Windows release; `pwsh` may not. */
+const WINDOWS_EXEC_COMMAND_SHELL = "powershell.exe";
 
 /**
  * Builds the exact argv for an explicitly selected shell.
@@ -179,7 +226,14 @@ const SELFHOSTED_EXEC_REPLY_GRACE_MS = 5_000;
  *  range while also fitting the reply grace. */
 const SELFHOSTED_MAX_EXEC_TIMEOUT_MS = 2_147_483_647 - SELFHOSTED_EXEC_REPLY_GRACE_MS;
 const SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS = 10_000;
-const SELFHOSTED_BACKGROUND_MAX_YIELD_MS = 30_000;
+/**
+ * The longest foreground wait before a command continues in the background:
+ * the command finish floor (COMMAND_FINISH_FLOOR_MS), so a command that ends
+ * within a minute returns its result in the same call, as on a managed
+ * sandbox. A Steer still takes effect at once: the turn ends the wait early
+ * through `yieldExecCommand`.
+ */
+export const SELFHOSTED_BACKGROUND_MAX_YIELD_MS = 60_000;
 
 function normalizeOperationResourcePolicy(
   policy: SelfhostedOperationResourcePolicy | undefined,
@@ -248,6 +302,16 @@ export interface SelfhostedOpStreamDeps {
   ackIntervalMs?: number;
   silenceTimeoutMs?: number;
   reconnectHoldMs?: number;
+  /** How long a command's start may go unanswered (op-stream.ts
+   *  `OP_START_UNANSWERED_MS`). */
+  startUnansweredMs?: number;
+  /** The live runner serves `OpRelease` (Hello `capabilities.op_release`;
+   * every compute agent does): stored output is released in one answered
+   * exchange instead of a final ACK. */
+  outputReleaseSupported?: boolean;
+  /** The enrollment's connection generation, from the same snapshot as the
+   * connection instance; sent in every OpStart. */
+  connectionGeneration?: string;
 }
 
 export interface SelfhostedOperationResourcePolicy {
@@ -262,12 +326,20 @@ export interface SelfhostedBackgroundCommandAdoption {
   connectionInstanceId: string;
   opId: string;
   command: string;
+  /** The exec already failed because the machine stopped answering. Record it
+   * with a stop request instead of as a running background command. */
+  abandoned?: boolean;
 }
 
 /** Exact command-admission snapshot. A worker resolves this immediately before
- * every exec/Git admission; retries and already-started operations retain it. */
+ * every exec admission; retries and already-started operations retain it. */
 export interface SelfhostedOperationAdmission {
   transactionalFsWriteSupported?: boolean;
+  transactionalFsWriteMachineSupported?: boolean;
+  /** The live runner serves in-process browser/computer controller requests. */
+  browserControlHttpSupported?: boolean;
+  /** The live runner honors per-request `runAs` (Hello `capabilities.run_as`). */
+  runAsSupported?: boolean;
   /** Workspace segment of the physical agent/relay route. Personal machines may
    * originate in a different same-organization workspace than the session. */
   workspaceId?: string;
@@ -292,6 +364,14 @@ export interface SelfhostedOperationAdmission {
 export interface SelfhostedSessionDeps {
   /** Exact live daemon capability; absent preserves legacy small-file writes. */
   transactionalFsWriteSupported?: boolean;
+  /** The exact live daemon also accepts machine-addressed (epoch-zero) uploads. */
+  transactionalFsWriteMachineSupported?: boolean;
+  /** Exact live daemon capability; absent keeps controller requests on the
+   * command transport. */
+  browserControlHttpSupported?: boolean;
+  /** Exact live daemon capability; absent means a `runAs` is never sent (reads
+   * and commands run as the agent's account, writes refuse it). */
+  runAsSupported?: boolean;
   /** Authorization/session workspace. */
   workspaceId: string;
   /** Physical control-plane workspace. Defaults to workspaceId for legacy and
@@ -314,7 +394,8 @@ export interface SelfhostedSessionDeps {
   opStream?: SelfhostedOpStreamDeps;
   /** The lease/active epoch this session is fenced under (echoed on every
    *  ControlRequest so the agent can reject a stale op with ERROR_CODE_FENCED).
-   *  Defaults to 0 (no fence) for the negotiation-only / test path. */
+   *  Defaults to 0 for machine-addressed operations, which retain the exact
+   *  connection fence but have no session route epoch. */
   epoch?: number;
   /** The CONTROL-op timeout (ping/fs/desktop/pty and op-stream control RPCs). The
    *  agent's own control liveness must stay responsive, so this is short (the 30s
@@ -341,10 +422,24 @@ export interface SelfhostedSessionDeps {
    * capabilities, op-stream state, and any caller-owned live authority from one
    * authoritative snapshot. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
+  /** The connection instance the agent is live on now, or null when that is
+   * unknown (no live connection). Asked only after a request fails, to tell
+   * an agent connection that was replaced (a new instance) from one briefly
+   * unreachable.
+   * Without it, the instance resolveOperationAdmission reports is used. */
+  liveConnectionInstance?: () => Promise<string | null>;
   /** Durable session ownership transfer for model-facing exec that outlives its
-   * bounded wait. Omitted for one-off/Channel-A callers, which remain terminal. */
+   * bounded wait. Omitted for direct/Channel-A callers, which remain terminal. */
   adoptBackgroundCommand?: (
     input: SelfhostedBackgroundCommandAdoption,
+  ) => Promise<{ commandId: string }>;
+  /** Record, with a stop request bound to its exact connection, a command this
+   * caller already reported as failed without terminal proof. The session's command ledger then stops or settles
+   * it, and the caller does not wait for a machine that may never answer.
+   * For callers without a turn (direct requests); without it, a turn records
+   * the command through adoptBackgroundCommand. */
+  abandonCommand?: (
+    input: Omit<SelfhostedBackgroundCommandAdoption, "abandoned">,
   ) => Promise<{ commandId: string }>;
   captureBackgroundCommandOutput?: (
     commandId: string,
@@ -362,6 +457,8 @@ export interface SelfhostedSessionDeps {
     exitCode: number | null;
     reason: string;
     failure?: import("@opengeni/contracts").SessionCommandFailure;
+    backgroundChildrenStopped?: boolean;
+    outputReceipt?: OpStreamOutputReceipt;
   }) => void | Promise<void>;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
    *  so tests are deterministic; defaults to a real timer + `Math.random()`. */
@@ -422,6 +519,111 @@ export interface SelfhostedExecResult {
   /** Present only for a model-facing command durably transferred to its session. */
   backgroundCommandId?: string;
   backgroundOpId?: string;
+  /** Native cleanup evidence; never injected into structured stdout/stderr. */
+  backgroundChildrenStopped?: boolean;
+}
+
+/** The user a request-reply op asks to act as ("" when none). */
+function requestedRunAs(op: NonNullable<ControlRequest["op"]>): string {
+  switch (op.$case) {
+    case "fsRead":
+      return op.fsRead.runAs;
+    case "fsWrite":
+      return op.fsWrite.runAs;
+    case "fsList":
+      return op.fsList.runAs;
+    case "fsMkdir":
+      return op.fsMkdir.runAs;
+    case "fsMove":
+      return op.fsMove.runAs;
+    case "fsStat":
+      return op.fsStat.runAs;
+    case "fsRemove":
+      return op.fsRemove.runAs;
+    case "ptyOpen":
+      return op.ptyOpen.runAs;
+    case "opStart":
+      switch (op.opStart.op?.$case) {
+        case "exec":
+          return op.opStart.op.exec.runAs;
+        case "fsRead":
+          return op.opStart.op.fsRead.runAs;
+        case "fsWrite":
+          return op.opStart.op.fsWrite.runAs;
+        default:
+          return "";
+      }
+    default:
+      return "";
+  }
+}
+
+/** Whether an op writes files: a direct write or a transactional upload. */
+function writesFiles(op: NonNullable<ControlRequest["op"]>): boolean {
+  return op.$case === "fsWrite" || (op.$case === "opStart" && op.opStart.op?.$case === "fsWrite");
+}
+
+function runAsUnsupportedError(write: boolean): SelfhostedControlError {
+  return new SelfhostedControlError({
+    code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+    message: write
+      ? "Native file writes do not support runAs impersonation; no file was written."
+      : "This machine's agent does not support runAs impersonation; the operation was not sent.",
+    reason: null,
+    retryable: false,
+  });
+}
+
+/** A request-reply op exactly as the runner of its dispatch admission may
+ * receive it. A runner that does not advertise run-as never receives a user (it
+ * would ignore the field and act as its own account). Where acting as the
+ * runner's own account would be wrong (a write, or a session whose sandbox
+ * requires run-as), the op is refused instead. The decision always uses the
+ * admission the op is dispatched with, so a reconnect to a runner without
+ * run-as between a capability check and dispatch can never drop the user. */
+function runAsForRunner(
+  op: NonNullable<ControlRequest["op"]>,
+  runAsSupported: boolean,
+  runAsRequired: boolean,
+): NonNullable<ControlRequest["op"]> {
+  if (runAsSupported || !requestedRunAs(op)) return op;
+  if (runAsRequired || writesFiles(op)) {
+    throw runAsUnsupportedError(writesFiles(op));
+  }
+  switch (op.$case) {
+    case "fsRead":
+      return { ...op, fsRead: { ...op.fsRead, runAs: "" } };
+    case "fsList":
+      return { ...op, fsList: { ...op.fsList, runAs: "" } };
+    case "fsMkdir":
+      return { ...op, fsMkdir: { ...op.fsMkdir, runAs: "" } };
+    case "fsMove":
+      return { ...op, fsMove: { ...op.fsMove, runAs: "" } };
+    case "fsStat":
+      return { ...op, fsStat: { ...op.fsStat, runAs: "" } };
+    case "fsRemove":
+      return { ...op, fsRemove: { ...op.fsRemove, runAs: "" } };
+    case "ptyOpen":
+      return { ...op, ptyOpen: { ...op.ptyOpen, runAs: "" } };
+    case "opStart": {
+      const inner = op.opStart.op;
+      if (inner?.$case === "exec") {
+        return {
+          ...op,
+          opStart: { ...op.opStart, op: { ...inner, exec: { ...inner.exec, runAs: "" } } },
+        };
+      }
+      if (inner?.$case === "fsRead") {
+        return {
+          ...op,
+          opStart: { ...op.opStart, op: { ...inner, fsRead: { ...inner.fsRead, runAs: "" } } },
+        };
+      }
+      return op;
+    }
+    default:
+      return op;
+  }
 }
 
 /** The `exec` args the structural surface accepts (mirrors ChannelAExecArgs). */
@@ -451,11 +653,14 @@ export interface SelfhostedSessionState {
  * consume it unchanged.
  */
 export class SelfhostedSession {
-  readonly backendId = "selfhosted" as const;
+  /** "compute" for a compute sandbox's agent session (a subclass). */
+  readonly backendId: "selfhosted" | "compute" = "selfhosted";
   readonly workspaceId: string;
   readonly controlWorkspaceId: string;
   readonly agentId: string;
   private readonly controlRpc: ControlRpc;
+  /** Attempt scopes this session wrote `{{secretfile:…}}` files under. */
+  private readonly secretScopes = new Set<string>();
   private readonly relay: SelfhostedRelayConfig;
   private readonly terminalScopeId: string;
   private readonly epoch: number;
@@ -469,6 +674,10 @@ export class SelfhostedSession {
    * durability hook; never retarget an already-admitted operation on reconnect. */
   private readonly opStreamClients = new Map<string, OpStreamExecClient>();
   private readonly inFlightOpStreamClients = new Map<string, OpStreamExecClient>();
+  private readonly inFlightOpStreamOutput = new Map<
+    string,
+    { stdout: string[]; stderr: string[]; completed?: RemoteOperationObservation }
+  >();
   private readonly ownedCommandReaders = new Map<string, () => Promise<void>>();
   private readonly commandRefreshes = new Map<string, Promise<void>>();
 
@@ -497,14 +706,19 @@ export class SelfhostedSession {
   private readonly resourcePolicySupported: boolean;
   private readonly operationCpuQuotaSupported: boolean;
   private readonly transactionalFsWriteSupported: boolean;
+  private readonly transactionalFsWriteMachineSupported: boolean;
+  private readonly browserControlHttpSupported: boolean;
+  private readonly runAsSupported: boolean;
   private readonly defaultOpStream: SelfhostedOpStreamDeps | undefined;
   private readonly connectionInstanceId: string;
   private readonly resolveOperationAdmission:
     | (() => Promise<SelfhostedOperationAdmission | null>)
     | undefined;
+  private readonly liveConnectionInstance: (() => Promise<string | null>) | undefined;
   private readonly adoptBackgroundCommand:
     | SelfhostedSessionDeps["adoptBackgroundCommand"]
     | undefined;
+  private readonly abandonCommand: SelfhostedSessionDeps["abandonCommand"] | undefined;
   private readonly settleBackgroundCommand:
     | SelfhostedSessionDeps["settleBackgroundCommand"]
     | undefined;
@@ -570,10 +784,23 @@ export class SelfhostedSession {
     this.resourcePolicySupported = deps.operationResourcePolicySupported === true;
     this.operationCpuQuotaSupported = deps.operationCpuQuotaSupported === true;
     this.transactionalFsWriteSupported = deps.transactionalFsWriteSupported === true;
+    this.transactionalFsWriteMachineSupported = deps.transactionalFsWriteMachineSupported === true;
+    this.browserControlHttpSupported = deps.browserControlHttpSupported === true;
+    this.runAsSupported = deps.runAsSupported === true;
     this.defaultOpStream = deps.opStream;
     this.connectionInstanceId = deps.connectionInstanceId;
     this.resolveOperationAdmission = deps.resolveOperationAdmission;
+    const resolveAdmission = deps.resolveOperationAdmission;
+    this.liveConnectionInstance =
+      deps.liveConnectionInstance ??
+      (resolveAdmission
+        ? async () => (await resolveAdmission())?.connectionInstanceId ?? null
+        : undefined);
     this.adoptBackgroundCommand = deps.adoptBackgroundCommand;
+    const adopt = deps.adoptBackgroundCommand;
+    this.abandonCommand =
+      deps.abandonCommand ??
+      (adopt ? async (command) => await adopt({ ...command, abandoned: true }) : undefined);
     this.settleBackgroundCommand = deps.settleBackgroundCommand;
     this.captureBackgroundCommandOutput = deps.captureBackgroundCommandOutput;
     // A pre-admission tombstone is safe only for a static connection. Dynamic
@@ -588,6 +815,9 @@ export class SelfhostedSession {
             resourcePolicy: this.resourcePolicy,
             opStream: deps.opStream,
             transactionalFsWriteSupported: this.transactionalFsWriteSupported,
+            transactionalFsWriteMachineSupported: this.transactionalFsWriteMachineSupported,
+            browserControlHttpSupported: this.browserControlHttpSupported,
+            runAsSupported: this.runAsSupported,
           })
         : undefined;
     // A valid Manifest whose root is the machine's actual effective root. There
@@ -656,6 +886,9 @@ export class SelfhostedSession {
 
   private async admitOperation(commandPolicy: boolean): Promise<{
     transactionalFsWriteSupported: boolean;
+    transactionalFsWriteMachineSupported: boolean;
+    browserControlHttpSupported: boolean;
+    runAsSupported: boolean;
     controlWorkspaceId: string;
     connectionInstanceId: string;
     subject: string;
@@ -677,6 +910,9 @@ export class SelfhostedSession {
         resourcePolicy: commandPolicy ? this.resourcePolicy : undefined,
         opStream: this.defaultOpStream,
         transactionalFsWriteSupported: this.transactionalFsWriteSupported,
+        transactionalFsWriteMachineSupported: this.transactionalFsWriteMachineSupported,
+        browserControlHttpSupported: this.browserControlHttpSupported,
+        runAsSupported: this.runAsSupported,
       };
     }
 
@@ -712,6 +948,9 @@ export class SelfhostedSession {
       resourcePolicy: commandPolicy ? resourcePolicy : undefined,
       opStream: resolved.opStream,
       transactionalFsWriteSupported: resolved.transactionalFsWriteSupported === true,
+      transactionalFsWriteMachineSupported: resolved.transactionalFsWriteMachineSupported === true,
+      browserControlHttpSupported: resolved.browserControlHttpSupported === true,
+      runAsSupported: resolved.runAsSupported === true,
     };
   }
 
@@ -719,13 +958,43 @@ export class SelfhostedSession {
     return await this.admitOperation(true);
   }
 
+  /** Whether a requested `runAs` must be honored rather than dropped for a
+   * runner that does not advertise run-as. A Connected Machine keeps its legacy
+   * behavior (commands and reads run as the runner's own account; writes are
+   * refused); a session whose sandbox requires run-as overrides this. */
+  protected get runAsRequired(): boolean {
+    return false;
+  }
+
+  /** The exec `runAs` for a dispatch admission (see `runAsForRunner`). */
+  private execRunAs(runAs: string, runAsSupported: boolean): string {
+    if (!runAs || runAsSupported) return runAs;
+    if (this.runAsRequired) throw runAsUnsupportedError(false);
+    return "";
+  }
+
+  /** What this session does about a machine whose agent left a command's
+   *  start unanswered for the op stream's bound. A Connected Machine is the
+   *  person's own, so nothing: they are told it is offline. A compute box may
+   *  be restarted (see `ComputeSandboxSession`). */
+  protected async recoverUnresponsiveAgent(): Promise<UnresponsiveAgentRecovery | null> {
+    return null;
+  }
+
+  /** Whether the live runner honors per-request `runAs` right now. */
+  protected async liveRunAsSupported(): Promise<boolean> {
+    return (await this.admitOperation(false)).runAsSupported;
+  }
+
   /** A proven-unstarted op-stream retry may reuse its stable op id, but it must
    * not reuse mutable authorization or silently retarget the command. Require a
    * fresh admission for the exact same physical route and effective policy;
-   * callers can start a later operation against a newly resolved route. */
+   * callers can start a later operation against a newly resolved route. Returns
+   * the route's current connection generation, which the start compares with
+   * the one it was admitted under. */
   private async revalidateCommandAdmission(
     expected: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const current = await this.admitCommand();
     const samePolicy =
       current.resourcePolicy?.memoryMaxBytes === expected.resourcePolicy?.memoryMaxBytes &&
@@ -745,6 +1014,20 @@ export class SelfhostedSession {
         fenced: true,
       });
     }
+    return current.opStream?.connectionGeneration;
+  }
+
+  /** Whether `admission`'s connection is still the agent's live one (see
+   * ControlRpc). Unknown counts as current. A static session cannot tell. */
+  private connectionCurrentFor(admission: {
+    connectionInstanceId: string;
+  }): (() => Promise<boolean>) | undefined {
+    const live = this.liveConnectionInstance;
+    if (!live) return undefined;
+    return async () => {
+      const instance = await live().catch(() => null);
+      return instance === null || instance === admission.connectionInstanceId;
+    };
   }
 
   private opStreamClientFor(
@@ -755,12 +1038,14 @@ export class SelfhostedSession {
     const key = JSON.stringify([
       admission.controlWorkspaceId,
       admission.connectionInstanceId,
+      stream.connectionGeneration ?? null,
       admission.resourcePolicy?.memoryMaxBytes ?? null,
       admission.resourcePolicy?.memoryHighBytes ?? null,
       admission.resourcePolicy?.cpuMaxMillicores ?? null,
     ]);
     const existing = this.opStreamClients.get(key);
     if (existing) return existing;
+    const connectionCurrent = this.connectionCurrentFor(admission);
     const client = new OpStreamExecClient({
       workspaceId: admission.controlWorkspaceId,
       agentId: this.agentId,
@@ -787,6 +1072,14 @@ export class SelfhostedSession {
         ? { silenceTimeoutMs: stream.silenceTimeoutMs }
         : {}),
       ...(stream.reconnectHoldMs !== undefined ? { reconnectHoldMs: stream.reconnectHoldMs } : {}),
+      ...(stream.startUnansweredMs !== undefined
+        ? { startUnansweredMs: stream.startUnansweredMs }
+        : {}),
+      ...(connectionCurrent ? { connectionCurrent } : {}),
+      ...(stream.outputReleaseSupported === true ? { outputReleaseSupported: true } : {}),
+      ...(stream.connectionGeneration !== undefined
+        ? { connectionGeneration: stream.connectionGeneration }
+        : {}),
     });
     this.opStreamClients.set(key, client);
     return client;
@@ -811,30 +1104,29 @@ export class SelfhostedSession {
   private async call(
     op: NonNullable<ControlRequest["op"]>,
     timeoutMs = this.timeoutMs,
-    admittedCommand?: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
+    admitted?: Awaited<ReturnType<SelfhostedSession["admitOperation"]>>,
   ): Promise<NonNullable<ControlResponse["result"]>> {
     const opKind = op.$case;
     // This is the last shared boundary before every request/reply provider
     // operation. Even a cached routed or pinned session must re-resolve its live
-    // authority here; an already-admitted Git operation threads its exact
-    // snapshot. Exec uses the op-stream client and never enters this helper.
-    const commandOperation = opKind === "git";
-    let operationAdmission = admittedCommand ?? (await this.admitOperation(commandOperation));
+    // authority here; an already-admitted operation threads its exact snapshot.
+    // Exec uses the op-stream client and never enters this helper.
+    let operationAdmission = admitted ?? (await this.admitOperation(false));
     const startedAt = Date.now();
     let drainingRetries = 0;
     let timeoutRetries = 0;
     let neverSentRetries = 0;
     for (;;) {
-      const commandAdmission = opKind === "git" ? operationAdmission : undefined;
-      const resourcePolicy = commandAdmission?.resourcePolicy;
       const req: ControlRequest = {
         requestId: crypto.randomUUID(),
         epoch: this.epoch,
-        resourcePolicy,
-        op,
+        resourcePolicy: undefined,
+        op: runAsForRunner(op, operationAdmission.runAsSupported, this.runAsRequired),
       };
+      const connectionCurrent = this.connectionCurrentFor(operationAdmission);
       const res = await this.controlRpc.request(operationAdmission.subject, req, {
         timeoutMs,
+        ...(connectionCurrent ? { connectionCurrent } : {}),
       });
       if (!res.error && res.result) {
         const retries = drainingRetries + timeoutRetries + neverSentRetries;
@@ -908,7 +1200,7 @@ export class SelfhostedSession {
       // Every physical retry is a new provider dispatch. The retry policy has
       // already proven it safe (never-sent/draining, or read-only timeout), so
       // revalidate live authority without ever replaying an ambiguous mutation.
-      operationAdmission = await this.admitOperation(commandOperation);
+      operationAdmission = await this.admitOperation(false);
       // Advance the counter for the class that was retried (separate budgets).
       if (error.neverSent) {
         neverSentRetries += 1;
@@ -934,65 +1226,221 @@ export class SelfhostedSession {
     return Math.min(configured, SELFHOSTED_MAX_EXEC_TIMEOUT_MS);
   }
 
+  /** Host OS family, from the Hello workspace root (drive letter / UNC => Windows). */
+  private hostOs(): "linux" | "windows" | "unknown" {
+    const root = this.workspaceRoot;
+    if (/^[A-Za-z]:[\\/]/.test(root) || root.startsWith("\\\\")) return "windows";
+    if (root.startsWith("/")) return "linux";
+    return "unknown";
+  }
+
+  /** The splice dialect a command run through `shell` (or the default) uses here. */
+  describeShellDialect(shell?: string): ShellDialect {
+    return shellDialectFor(shell?.trim() || null, this.hostOs());
+  }
+
+  /** Host family for the browser/computer controller transport. */
+  controllerHostOs(): "posix" | "windows" {
+    return this.hostOs() === "windows" ? "windows" : "posix";
+  }
+
+  private async prepareSecretExec(
+    args: SelfhostedExecArgs,
+    requestedShell: string | undefined,
+  ): Promise<{
+    command: string;
+    /** Set when references were spliced: the command must run through this shell. */
+    shell: string | null;
+    env: Record<string, string>;
+    /** Credential profile variables, below every other variable Opengeni sets. */
+    profileEnv: Record<string, string>;
+  } | null> {
+    const carry = secretExecCarryFor(args.cmd);
+    if (!carry) return null;
+    const profileEnv = profileEnvironmentOf(carry);
+    // Profile variables only: the command and its shell stay exactly as given.
+    if (!carryHasReferences(carry)) return { command: args.cmd, shell: null, env: {}, profileEnv };
+    const dialect = carry.spliced ? "posix" : this.describeShellDialect(requestedShell);
+    const spliced = spliceCarry(carry, dialect);
+    const command = carry.spliced ? args.cmd : args.cmd.split(carry.command).join(spliced.text);
+    const env = await secretExecEnvironment(carry, spliced, async (file) => {
+      // Best-effort cleanup covers the scope from before its first write, so
+      // a write that fails part-way is removed too.
+      this.secretScopes.add(carry.scope);
+      await this.writePlacementPrivate({ ...file, createParents: true });
+    });
+    const shell = requestedShell || (dialect === "powershell" ? "powershell" : "/bin/sh");
+    return { command, shell, env, profileEnv };
+  }
+
+  /**
+   * Remove this attempt's secret files from the machine (attempt end). Uses the
+   * recursive filesystem control op, not a shell, so it works on any host OS
+   * and runs even when the consuming command never started.
+   */
+  async clearSecretFilesForAttempt(scope?: string): Promise<void> {
+    const scopes = scope === undefined ? [...this.secretScopes] : [scope];
+    for (const entry of scopes) {
+      const path = selfhostedPlacementPrivatePath(secretScopeDirectory(entry));
+      try {
+        const result = await this.call({
+          $case: "fsRemove",
+          fsRemove: { path, recursive: true, runAs: "" },
+        });
+        if (result.$case !== "fsRemove") {
+          throw new Error(`selfhosted clearSecretFiles: unexpected result ${result.$case}`);
+        }
+      } catch (error) {
+        if (!(error instanceof SelfhostedControlError && error.osNotFound)) throw error;
+      }
+      this.secretScopes.delete(entry);
+    }
+  }
+
   /** Channel-A `exec`: run a command on the machine and return its output. */
   async exec(args: SelfhostedExecArgs): Promise<SelfhostedExecResult> {
     return await this.execInternal(args, false);
   }
 
+  /** Structured counterpart of execCommand: a bounded observation may yield
+   * only after the existing session ledger accepts custody. Never a process
+   * deadline. Callers without adoption hooks remain terminal. */
+  async execWithYield(args: SelfhostedExecArgs): Promise<SelfhostedExecResult> {
+    return await this.execInternal(args, true);
+  }
+
+  /** Internal controller transport: stream private request bytes over the
+   * existing command channel, never through argv, environment or host files. */
+  async execWithInput(
+    args: SelfhostedExecArgs & { stdin: Uint8Array },
+  ): Promise<SelfhostedExecResult> {
+    if (args.stdin.byteLength > SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES) {
+      throw new RangeError("controller command input is too large");
+    }
+    return await this.execInternal(args, false, args.stdin.slice());
+  }
+
   private async execInternal(
     args: SelfhostedExecArgs,
     allowBackground: boolean,
+    stdin: Uint8Array = new Uint8Array(0),
   ): Promise<SelfhostedExecResult> {
-    // Admission is the only mutable-policy read. Everything below retains this
-    // exact connection/capability/policy-revision snapshot through completion.
-    const admission = await this.admitCommand();
+    // Mint once before local preflight so a proven refusal can settle exactly
+    // this command's turn registration, including SDK-rendered error paths.
+    const opId = nextDurableOpId() ?? `anon_${crypto.randomUUID()}`;
+    let admission: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>;
+    let execReq: ExecRequest;
+    let opStreamClient: OpStreamExecClient | undefined;
     // 0 deliberately means no process deadline. That contract is safe only over
     // op-stream: its liveness probes, replay, and cancellation do not depend on a
     // request/reply timer or a monolithic response.
-    const executionTimeoutMs = this.effectiveExecDeadlineMs;
-    const requestedShell = args.shell?.trim();
-    const execReq: ExecRequest = {
-      // An explicit shell is encoded as direct argv so every agent version honors
-      // it. With no explicit shell, preserve the existing machine-owned default
-      // shell behavior byte-for-byte.
-      command: requestedShell
-        ? explicitShellArgv(requestedShell, args.cmd, args.login === true)
-        : [args.cmd],
-      shell: !requestedShell,
-      // Relative paths resolve from the exact host root, while absolute paths
-      // retain their literal machine meaning. In particular, "/workspace" is
-      // sent as the real absolute path "/workspace".
-      cwd: resolveConnectedMachinePath(this.workspaceRoot, args.workdir),
-      // The machine owns its ambient shell environment and ordinary credentials.
-      // Only attempt-local values explicitly supplied by the worker cross here;
-      // snapshot now so a later renewal cannot mutate an in-flight request.
-      env: { ...(this.transientExecEnvironment?.() ?? {}) },
-      stdin: new Uint8Array(0),
-      timeoutMs: executionTimeoutMs,
-    };
-    const opStreamClient = this.opStreamClientFor(admission);
-    if (!opStreamClient) {
-      throw execRequiresOpStream();
-    }
-    try {
-      return await this.execViaOpStream(
-        opStreamClient,
-        admission,
-        execReq,
-        executionTimeoutMs,
-        allowBackground
-          ? Math.min(
-              SELFHOSTED_BACKGROUND_MAX_YIELD_MS,
-              Math.max(1, Math.trunc(args.yieldTimeMs ?? SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS)),
-            )
-          : 0,
-        args.cmd,
-      );
-    } catch (error) {
-      if (error instanceof OpStreamUnavailableError) {
-        throw execRequiresOpStream(error);
+    const totalTimeoutMs = this.effectiveExecDeadlineMs;
+    // One absolute deadline covers admission, preparation, dispatch and every
+    // re-admission; the runner is sent only the time left.
+    const deadlineAt = totalTimeoutMs > 0 ? Date.now() + totalTimeoutMs : 0;
+    // Why an earlier attempt did not run, if one did not.
+    let notRun: unknown;
+    const expired = () => notRun ?? agentErrorToControlError(timeoutAgentError());
+    // A start that provably reached no agent before its connection was
+    // replaced is admitted again, to the new connection, within the same deadline. The
+    // earlier attempt keeps its own destination; nothing is rebound.
+    for (let readmissions = 0; ; readmissions += 1) {
+      let executionTimeoutMs = 0;
+      try {
+        // Admission is the only mutable-policy read. Everything below retains
+        // its exact connection/capability/policy snapshot through completion.
+        admission = await beforeExecDeadline(this.admitCommand(), deadlineAt, expired);
+        const requestedShell = args.shell?.trim();
+        // Secret references (design §10.3, connected machines): splice in the
+        // machine's dialect and deliver the values natively in ExecRequest.env.
+        // With no explicit shell the command is forced through a known one
+        // (`/bin/sh -c` on POSIX, `powershell -NoProfile -NonInteractive
+        // -Command` on Windows) so the splice matches the parser. `args.cmd`
+        // (references) remains the command recorded for background adoption.
+        const secret = await beforeExecDeadline(
+          this.prepareSecretExec(args, requestedShell),
+          deadlineAt,
+          expired,
+        );
+        if (deadlineAt > 0) {
+          executionTimeoutMs = deadlineAt - Date.now();
+          if (executionTimeoutMs <= 0) throw expired();
+        }
+        const commandText = secret?.command ?? args.cmd;
+        const spliced = secret?.shell != null;
+        const shell = secret?.shell ?? requestedShell;
+        execReq = {
+          // An explicit shell is encoded as direct argv so every agent version honors
+          // it. With no explicit shell, preserve the existing machine-owned default
+          // shell behavior byte-for-byte.
+          command: shell
+            ? explicitShellArgv(shell, commandText, spliced ? false : args.login === true)
+            : [commandText],
+          shell: !shell,
+          // Relative paths resolve from the exact host root, while absolute paths
+          // retain their literal machine meaning. In particular, "/workspace" is
+          // sent as the real absolute path "/workspace".
+          cwd: resolveConnectedMachinePath(this.workspaceRoot, args.workdir),
+          // The machine owns its ambient shell environment and ordinary credentials.
+          // Only attempt-local values explicitly supplied by the worker cross here;
+          // snapshot now so a later renewal cannot mutate an in-flight request.
+          // Credential profile variables come first, so Opengeni's own values
+          // win over them and the command's own assignments win over both.
+          env: {
+            ...(secret?.profileEnv ?? {}),
+            ...(this.transientExecEnvironment?.() ?? {}),
+            ...(secret?.env ?? {}),
+          },
+          stdin,
+          timeoutMs: executionTimeoutMs,
+          // Only a runner that advertises run-as receives a user; older runners
+          // keep running the command as their own account unless this session
+          // requires run-as. Decided on the exact admission this command uses.
+          runAs: this.execRunAs(args.runAs ?? "", admission.runAsSupported),
+        };
+        opStreamClient = this.opStreamClientFor(admission);
+        if (!opStreamClient) throw execRequiresOpStream();
+      } catch (error) {
+        // This region has issued no command RPC and registered no live consumer.
+        // This local fact, not the error's code/shape, proves non-dispatch.
+        notifyRemoteOperationNotDispatched(opId);
+        throw error;
       }
-      throw error;
+      try {
+        return await this.execViaOpStream(
+          opStreamClient,
+          admission,
+          execReq,
+          executionTimeoutMs,
+          allowBackground
+            ? Math.min(
+                SELFHOSTED_BACKGROUND_MAX_YIELD_MS,
+                Math.max(1, Math.trunc(args.yieldTimeMs ?? SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS)),
+              )
+            : 0,
+          args.cmd,
+          opId,
+        );
+      } catch (error) {
+        if (error instanceof OpStreamUnavailableError) {
+          throw execRequiresOpStream(error);
+        }
+        if (startReachedNoReplacedAgent(error)) {
+          if (
+            readmissions < SELFHOSTED_EXEC_READMISSIONS_MAX &&
+            (deadlineAt === 0 || Date.now() < deadlineAt)
+          ) {
+            notRun = error;
+            continue;
+          }
+        }
+        // No OpStart reached any agent (a replaced connection, or a deadline
+        // spent before the start was sent): there is nothing to stop or await.
+        if (error instanceof SelfhostedControlError && error.neverSent) {
+          notifyRemoteOperationNotDispatched(opId);
+        }
+        throw error;
+      }
     }
   }
 
@@ -1012,74 +1460,170 @@ export class SelfhostedSession {
     executionTimeoutMs: number,
     backgroundYieldMs: number,
     command: string,
+    opId: string,
   ): Promise<SelfhostedExecResult> {
     const startedAt = Date.now();
-    const opId = nextDurableOpId() ?? `anon_${crypto.randomUUID()}`;
     let adoptedCommandId: string | null = null;
+    let ownershipTransferPending = false;
+    let terminalProof = false;
+    let foregroundFinished = false;
+    let abandonment: Promise<void> | null = null;
+    // The start reached no agent before its connection was replaced: it
+    // never ran.
+    let notDispatched = false;
+    const retainedOutput: {
+      stdout: string[];
+      stderr: string[];
+      completed?: RemoteOperationObservation;
+    } = {
+      stdout: [],
+      stderr: [],
+    };
     this.inFlightOpStreamClients.set(opId, client);
+    this.inFlightOpStreamOutput.set(opId, retainedOutput);
+    const yieldBackground = backgroundYieldMs > 0 && this.adoptBackgroundCommand !== undefined;
+    const earlyYield = new AbortController();
+    const abandon = async (): Promise<void> => {
+      if (adoptedCommandId) return;
+      if (!this.abandonCommand) throw new Error("No durable command custody is available");
+      abandonment ??= (async () => {
+        notifyDurableOpOwnershipTransferStarted(opId);
+        try {
+          const abandoned = await this.abandonCommand!({
+            controlWorkspaceId: admission.controlWorkspaceId,
+            enrollmentId: this.agentId,
+            connectionInstanceId: admission.connectionInstanceId,
+            opId,
+            command,
+          });
+          adoptedCommandId = abandoned.commandId;
+          notifyDurableOpOwnershipTransferred(opId);
+          if (this.inFlightOpStreamClients.get(opId) === client) {
+            this.inFlightOpStreamClients.delete(opId);
+            this.inFlightOpStreamOutput.delete(opId);
+          }
+        } catch (error) {
+          notifyDurableOpOwnershipTransferFailed(opId);
+          throw error;
+        }
+      })();
+      try {
+        await abandonment;
+      } finally {
+        abandonment = null;
+      }
+    };
+    const remoteControl: RemoteOperationControl = {
+      abandonExecCommand: async (requestedOpId) => {
+        if (requestedOpId !== opId || !foregroundFinished || terminalProof || notDispatched)
+          return false;
+        if (!this.abandonCommand) return false;
+        // The command's original consumer has ended. Reuse its exact launch
+        // identity even if the machine never answers again or an earlier
+        // adoption failed. No OpStart, route lookup, or output ACK is needed.
+        await abandon();
+        return true;
+      },
+      yieldExecCommand: (requestedOpId) => {
+        if (requestedOpId !== opId || !yieldBackground) return false;
+        earlyYield.abort();
+        return true;
+      },
+      cancelExecCommand: async (requestedOpId) => {
+        if (requestedOpId !== opId) return false;
+        await client.cancel(opId);
+        return true;
+      },
+      observeExecCommand: async (requestedOpId) => {
+        if (requestedOpId !== opId) {
+          throw new Error("Remote operation observer received a different operation id");
+        }
+        return await this.observeExecCommandWithClient(opId, client, retainedOutput);
+      },
+    };
+    notifyRemoteOperationTransportSelected(remoteControl);
     try {
       const wallMs =
         executionTimeoutMs > 0 ? executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS : 0;
-      const result =
-        backgroundYieldMs > 0 && this.adoptBackgroundCommand
-          ? await client.execWithYield(opId, execReq, executionTimeoutMs, wallMs, {
-              yieldMs: backgroundYieldMs,
-              captureOutput: async (frames) => {
-                if (adoptedCommandId)
-                  await this.captureBackgroundCommandOutput?.(adoptedCommandId, frames);
-              },
-              onYield: async () => {
-                notifyDurableOpOwnershipTransferStarted(opId);
-                const adopted = await this.adoptBackgroundCommand!({
-                  controlWorkspaceId: admission.controlWorkspaceId,
-                  enrollmentId: this.agentId,
-                  connectionInstanceId: admission.connectionInstanceId,
-                  opId,
-                  command,
-                });
-                adoptedCommandId = adopted.commandId;
-                this.ownedCommandReaders.set(adopted.commandId, async () => {
-                  const replay = await client.readExisting(opId, 250, async (frames) => {
+      const result = yieldBackground
+        ? await client.execWithYield(opId, execReq, executionTimeoutMs, wallMs, {
+            yieldMs: backgroundYieldMs,
+            yieldSignal: earlyYield.signal,
+            captureOutput: async (frames) => {
+              if (adoptedCommandId)
+                await this.captureBackgroundCommandOutput?.(adoptedCommandId, frames);
+            },
+            onYield: async () => {
+              ownershipTransferPending = true;
+              notifyDurableOpOwnershipTransferStarted(opId);
+              const adopted = await this.adoptBackgroundCommand!({
+                controlWorkspaceId: admission.controlWorkspaceId,
+                enrollmentId: this.agentId,
+                connectionInstanceId: admission.connectionInstanceId,
+                opId,
+                command,
+              });
+              adoptedCommandId = adopted.commandId;
+              this.ownedCommandReaders.set(adopted.commandId, async () => {
+                let replay: Awaited<ReturnType<OpStreamExecClient["readExisting"]>>;
+                try {
+                  replay = await client.readExisting(opId, 250, async (frames) => {
                     await this.captureBackgroundCommandOutput?.(adopted.commandId, frames);
                   });
-                  const terminal = replay.status === "completed" ? replay : replay.terminal;
-                  if (terminal) {
-                    await this.settleBackgroundCommand?.({
-                      commandId: adopted.commandId,
-                      controlWorkspaceId: admission.controlWorkspaceId,
-                      enrollmentId: this.agentId,
-                      connectionInstanceId: admission.connectionInstanceId,
-                      opId,
-                      outcome: "exited",
-                      exitCode: terminal.outcome.response.exitCode,
-                      reason: terminal.outcome.failure
-                        ? `op_failure_${terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
-                        : "op_exit",
-                      ...(terminal.outcome.failure
-                        ? {
-                            failure: {
-                              code: terminal.outcome.failure.failureCode
-                                .replace(/[^A-Za-z0-9_-]/g, "_")
-                                .slice(0, 128),
-                              detail: terminal.outcome.failure.failureDetail,
-                              retryable: false as const,
-                            },
-                          }
-                        : {}),
-                    });
-                    this.ownedCommandReaders.delete(adopted.commandId);
-                    if (terminal.outcome.failure)
-                      throw runnerFailureToControlError(terminal.outcome.failure);
-                  }
-                });
-                notifyDurableOpOwnershipTransferred(opId);
-              },
-            })
-          : {
-              status: "completed" as const,
-              outcome: await client.exec(opId, execReq, executionTimeoutMs, wallMs),
-            };
+                } catch (error) {
+                  // Its collection already stored and released the result:
+                  // the command record answers the read, not the runner.
+                  if (!isReleasedOpError(error)) throw error;
+                  this.ownedCommandReaders.delete(adopted.commandId);
+                  return;
+                }
+                const terminal = replay.status === "completed" ? replay : replay.terminal;
+                const outputReceipt =
+                  replay.outputReceipt ??
+                  (replay.status === "running" ? replay.terminal?.outputReceipt : undefined);
+                if (terminal) {
+                  await this.settleBackgroundCommand?.({
+                    commandId: adopted.commandId,
+                    controlWorkspaceId: admission.controlWorkspaceId,
+                    enrollmentId: this.agentId,
+                    connectionInstanceId: admission.connectionInstanceId,
+                    opId,
+                    outcome: "exited",
+                    ...(this.captureBackgroundCommandOutput && outputReceipt
+                      ? { outputReceipt }
+                      : {}),
+                    exitCode: terminal.outcome.response.exitCode,
+                    backgroundChildrenStopped: terminal.outcome.response.backgroundChildrenStopped,
+                    reason: terminal.outcome.failure
+                      ? `op_failure_${terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
+                      : "op_exit",
+                    ...(terminal.outcome.failure
+                      ? {
+                          failure: {
+                            code: terminal.outcome.failure.failureCode
+                              .replace(/[^A-Za-z0-9_-]/g, "_")
+                              .slice(0, 128),
+                            detail: terminal.outcome.failure.failureDetail,
+                            retryable: false as const,
+                          },
+                        }
+                      : {}),
+                  });
+                  this.ownedCommandReaders.delete(adopted.commandId);
+                  if (terminal.outcome.failure)
+                    throw runnerFailureToControlError(terminal.outcome.failure);
+                }
+              });
+              ownershipTransferPending = false;
+              notifyDurableOpOwnershipTransferred(opId);
+            },
+          })
+        : {
+            status: "completed" as const,
+            outcome: await client.exec(opId, execReq, executionTimeoutMs, wallMs),
+          };
       if (result.status === "running") {
+        terminalProof = result.terminal !== undefined;
         if (result.terminal && adoptedCommandId) {
           await Promise.resolve(
             this.settleBackgroundCommand?.({
@@ -1089,7 +1633,11 @@ export class SelfhostedSession {
               connectionInstanceId: admission.connectionInstanceId,
               opId,
               outcome: "exited",
+              ...(this.captureBackgroundCommandOutput && result.terminal.outputReceipt
+                ? { outputReceipt: result.terminal.outputReceipt }
+                : {}),
               exitCode: result.terminal.outcome.response.exitCode,
+              backgroundChildrenStopped: result.terminal.outcome.response.backgroundChildrenStopped,
               reason: result.terminal.outcome.failure
                 ? `op_failure_${result.terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
                 : "op_exit",
@@ -1130,6 +1678,7 @@ export class SelfhostedSession {
           backgroundOpId: result.opId,
         };
       }
+      terminalProof = true;
       const outcome = result.outcome;
       if (adoptedCommandId) {
         await Promise.resolve(
@@ -1141,6 +1690,7 @@ export class SelfhostedSession {
             opId,
             outcome: "exited",
             exitCode: outcome.response.exitCode,
+            backgroundChildrenStopped: outcome.response.backgroundChildrenStopped,
             reason: outcome.failure
               ? `op_failure_${outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
               : "op_exit",
@@ -1169,18 +1719,87 @@ export class SelfhostedSession {
         // start retries without heals were admission backpressure (draining).
         ...(retries > 0 ? { faultClass: outcome.heals > 0 ? "reconnecting" : "draining" } : {}),
       });
-      return execResultToChannelA(outcome.response, executionTimeoutMs);
+      const nativeResult = execResultToChannelA(outcome.response, executionTimeoutMs);
+      retainedOutput.completed = { status: "completed", result: nativeResult };
+      return nativeResult;
     } catch (error) {
+      if (
+        !terminalProof &&
+        !adoptedCommandId &&
+        !ownershipTransferPending &&
+        !(error instanceof OpStreamUnavailableError && error.unavailableKind === "transport") &&
+        !(
+          error instanceof SelfhostedControlError &&
+          (error.neverSent || error.agentOffline || error.reason === "agent_reconnecting")
+        )
+      ) {
+        // A refused spawn can leave a terminal registry record without any
+        // output pump or exit frame. An RPC error alone proves nothing; ask the
+        // exact launch runner before releasing the turn's physical writer. A
+        // start or attach that already met the runner's cancel-before-start
+        // tombstone carries that same proof, so it needs no second query.
+        try {
+          if (
+            error instanceof OpTombstonedError ||
+            isZeroFrameTerminalOperation(await client.query(opId), opId)
+          ) {
+            terminalProof = true;
+            notifyRemoteOperationNotDispatched(opId);
+          }
+        } catch {
+          // Preserve both custody and the original failure when proof is lost.
+        }
+      }
+      if (ownershipTransferPending && !adoptedCommandId) {
+        // The live consumer's failed-adoption cleanup has also rejected. Its
+        // exact client remains retained below, so turn cleanup must rejoin it.
+        ownershipTransferPending = false;
+        notifyDurableOpOwnershipTransferFailed(opId);
+      }
       if (error instanceof OpStreamUnavailableError) throw error;
-      const controlError =
+      let controlError =
         error instanceof SelfhostedControlError
           ? error
           : new SelfhostedControlError({
-              message: error instanceof Error ? error.message : String(error),
+              message: errorMessage(error),
               code: ErrorCode.ERROR_CODE_PROTOCOL,
               reason: null,
               retryable: false,
             });
+      // Whether this catch durably recorded a stop request for the command.
+      let stopRecorded = false;
+      if (
+        !terminalProof &&
+        !adoptedCommandId &&
+        !controlError.neverSent &&
+        (machineStoppedAnswering(controlError) || controlError.connectionReplaced) &&
+        this.abandonCommand
+      ) {
+        // The machine went away mid-operation, or its agent came back on a new
+        // connection. The command may still run on the old one (a new
+        // connection does not prove the old process is gone), but only that
+        // agent can stop or report it, so this caller must not wait for it.
+        // Hand it to the session's command ledger with a stop request bound to
+        // the exact old connection; the reconciler stops it if that agent
+        // answers again, or settles it once its runner is retired. If recording
+        // fails, cleanup keeps ownership.
+        try {
+          await abandon();
+          stopRecorded = true;
+        } catch {
+          // Retained exact control retries durable custody during finalization.
+        }
+      }
+      const startConfirmed = controlError.detail[START_CONFIRMED_DETAIL_KEY];
+      if (controlError.connectionReplaced && startConfirmed !== undefined) {
+        // Say a stop was requested only when the ledger has recorded one.
+        controlError = agentErrorToControlError(
+          commandOutcomeUnknownAfterReplacementAgentError({
+            startConfirmed: startConfirmed === "1",
+            stopRequested: stopRecorded,
+          }),
+        );
+      }
       this.emitOp({
         op: "exec",
         outcome: "failed",
@@ -1193,22 +1812,47 @@ export class SelfhostedSession {
         machineId: this.agentId,
         faultClass: selfhostedFaultClass(controlError),
       });
+      // The op stream marks a failure never-sent only when no OpStart
+      // reached any agent: nothing of it ran, so nothing needs custody.
+      if (controlError.neverSent) notDispatched = true;
+      if (controlError.detail[AGENT_UNRESPONSIVE_DETAIL_KEY] !== undefined) {
+        // The agent answered nothing for the bound: say what kind of machine
+        // stopped answering and what was done about it, after the command's
+        // custody is settled above.
+        const recovery = await this.recoverUnresponsiveAgent().catch(
+          () => "restart_failed" as const,
+        );
+        controlError = withDetail(controlError, {
+          [AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY]:
+            this.backendId === "compute" ? "compute" : "connected_machine",
+          [AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY]: recovery ?? "none",
+        });
+      }
       throw controlError;
     } finally {
-      this.inFlightOpStreamClients.delete(opId);
+      foregroundFinished = true;
+      // An observer failure does not prove that the exact provider operation
+      // stopped. Keep its launch client available for cancellation and
+      // readExisting recovery; only terminal proof or durable adoption releases
+      // this process-local custody entry.
+      if (terminalProof || adoptedCommandId || notDispatched) {
+        this.inFlightOpStreamClients.delete(opId);
+        this.inFlightOpStreamOutput.delete(opId);
+      }
     }
   }
 
   /**
-   * The turn-end op-stream durability hook: persists each settled op's frontier
+   * The result/turn-end durability hook: persists each settled op's frontier
    * to the journal, then final-acks it on the wire (licensing the runner to GC
-   * its retained frames). The WORKER calls this after the turn's results are
-   * durably recorded — never mid-turn (the durable-before-wire-ack ordering).
+   * its retained frames). A tool-scoped call releases only that tool's output
+   * after its result is durably recorded. Omit scope only once every settled
+   * result has been accepted at the complete turn or one-off API boundary.
    * A no-op for sessions without the op-stream transport.
    */
-  async finalizeOpStreamOps(): Promise<void> {
+  async finalizeOpStreamOps(toolCallIds?: readonly string[]): Promise<void> {
     for (const client of this.opStreamClients.values()) {
-      await client.finalizeSettledOps();
+      await client.finalizeSettledOps(toolCallIds);
     }
   }
 
@@ -1225,27 +1869,59 @@ export class SelfhostedSession {
    *  stdout/stderr). This path must match that contract: returning raw stdout
    *  made `ls` ENOENT and `npx --help` look like success with empty output.
    *  The structured `exec()` result stays split for Channel-A parsers; the
-   *  deadline hint already lands on stderr there and is included in this body. */
+   *  deadline hint already lands on stderr there and is included in this body.
+   *
+   *  `maxOutputTokens` bounds the body in both branches with the same head-and-
+   *  tail `truncateOutput` (and "Original token count" line) that the SDK local
+   *  shell, Modal and OpenSandbox use. The status header, the background handles
+   *  and the child-cleanup notice stay outside the bound so they are never cut. */
   async execCommand(args: SelfhostedExecArgs): Promise<string> {
     const startedAt = Date.now();
-    const result = await this.execInternal(args, true);
+    const result = await this.execWithYield(this.withExecCommandDefaultShell(args));
+    const output = truncateOutput(
+      joinExecCommandOutput(result.stdout, result.stderr),
+      args.maxOutputTokens,
+    );
     if (result.backgroundCommandId && result.backgroundOpId) {
-      const output = joinExecCommandOutput(result.stdout, result.stderr);
       return [
         `Command running in background with command ID ${result.backgroundCommandId}.`,
         `Connected Machine operation ${result.backgroundOpId} remains pinned to its launch daemon.`,
-        ...(output ? ["", "Output:", output] : []),
+        ...(output.originalTokenCount !== undefined
+          ? [`Original token count: ${output.originalTokenCount}`]
+          : []),
+        ...(output.text ? ["", "Output:", output.text] : []),
       ].join("\n");
     }
     const exitCode =
       typeof result.exitCode === "number" && Number.isSafeInteger(result.exitCode)
         ? result.exitCode
         : 1;
-    return formatExecResponse({
-      output: joinExecCommandOutput(result.stdout, result.stderr),
+    const formatted = formatExecResponse({
+      output: output.text,
       wallTimeSeconds: Math.max(0, Date.now() - startedAt) / 1000,
       exitCode,
+      ...(output.originalTokenCount !== undefined
+        ? { originalTokenCount: output.originalTokenCount }
+        : {}),
     });
+    return result.backgroundChildrenStopped
+      ? `${formatted}\n\n${CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE}`
+      : formatted;
+  }
+
+  /**
+   * `exec_command` with no `shell` runs PowerShell on a Windows machine.
+   *
+   * The machine's own default there is `cmd.exe` (`ComSpec`), but agents writing
+   * commands for Windows write PowerShell, and the rest of this session already
+   * treats PowerShell as the Windows dialect (secret splicing forces it). Choosing
+   * it here, as direct argv, makes the default the same for every enrolled agent
+   * version. An explicit `shell` is always honoured, and internal Channel-A
+   * callers (`exec`) keep the machine default they were written for.
+   */
+  private withExecCommandDefaultShell(args: SelfhostedExecArgs): SelfhostedExecArgs {
+    if (args.shell?.trim() || this.hostOs() !== "windows") return args;
+    return { ...args, shell: WINDOWS_EXEC_COMMAND_SHELL };
   }
 
   /**
@@ -1259,6 +1935,56 @@ export class SelfhostedSession {
     if (!client) return false;
     await client.cancel(opId);
     return true;
+  }
+
+  /** Reconcile the exact retained foreground exec without OpStart or final ACK.
+   * Running/unobservable results keep the pinned client for another attempt. */
+  async observeExecCommand(opId: string): Promise<RemoteOperationObservation> {
+    const client = this.inFlightOpStreamClients.get(opId);
+    if (!client) throw new Error("No retained observer is available for this operation");
+    const output = this.inFlightOpStreamOutput.get(opId);
+    if (!output) throw new Error("No retained output custody is available for this operation");
+    return await this.observeExecCommandWithClient(opId, client, output);
+  }
+
+  private async observeExecCommandWithClient(
+    opId: string,
+    client: OpStreamExecClient,
+    output: { stdout: string[]; stderr: string[]; completed?: RemoteOperationObservation },
+  ): Promise<RemoteOperationObservation> {
+    if (output.completed?.status === "completed") return output.completed;
+    const observed = await client.readExisting(opId, 250, async (frames) => {
+      for (const frame of frames) output[frame.stream].push(frame.chunk);
+    });
+    if (observed.status === "running") {
+      return {
+        status: "running",
+        result: {
+          stdout: output.stdout.join(""),
+          stderr: output.stderr.join(""),
+          exitCode: null,
+        },
+      };
+    }
+    const result = execResultToChannelA(observed.outcome.response, this.effectiveExecDeadlineMs);
+    const completed: RemoteOperationObservation = {
+      status: "completed",
+      result: {
+        ...result,
+        stdout: output.stdout.join(""),
+        stderr: output.stderr.join(""),
+        output: output.stdout.join(""),
+      },
+      ...(observed.outcome.failure
+        ? { failure: runnerFailureToControlError(observed.outcome.failure) }
+        : {}),
+    };
+    output.completed = completed;
+    if (this.inFlightOpStreamClients.get(opId) === client) {
+      this.inFlightOpStreamClients.delete(opId);
+      this.inFlightOpStreamOutput.delete(opId);
+    }
+    return completed;
   }
 
   /** SDK shell capability never calls this (gated on `supportsPty()` which is
@@ -1287,20 +2013,42 @@ export class SelfhostedSession {
   }
 
   /** SDK skills/filesystem `pathExists`: whether a path exists on the machine. */
-  async pathExists(path: string, _runAs?: string): Promise<boolean> {
-    const { exists } = await this.statFile({ path });
+  async pathExists(path: string, runAs?: string): Promise<boolean> {
+    const { exists } = await this.statFile({ path, ...(runAs ? { runAs } : {}) });
     return exists;
   }
 
-  /** SDK skills `listDir`: list a directory as `{name, path, type}[]`. */
+  /** SDK skills `listDir`: list a directory as `{name, path, type}[]`. Like the
+   *  other providers, an entry's `path` is absolute when the listed path was and
+   *  workspace-relative otherwise, so it can be passed straight back to
+   *  `readFile`/`listDir`; the machine reports it relative to the listed
+   *  directory, which is only the bare name. */
   async listDir(args: {
     path: string;
     runAs?: string;
   }): Promise<Array<{ name: string; path: string; type: "file" | "dir" | "other" }>> {
-    const result = await this.listFiles({ path: args.path });
+    const result = await this.listFiles({
+      path: args.path,
+      ...(args.runAs ? { runAs: args.runAs } : {}),
+    });
+    const directory = resolveConnectedMachinePath(this.workspaceRoot, args.path);
+    const windows = isWindowsConnectedMachinePath(this.workspaceRoot);
+    const base = isConnectedMachineAbsolutePath(args.path)
+      ? directory
+      : (relativeConnectedMachinePath(this.workspaceRoot, directory) ?? directory);
+    // Join literally: a POSIX name may contain a backslash or other bytes the
+    // path normalizers reject, and the machine never reports `.` or `..`.
+    const entryPath = (reported: string) => {
+      const relative = windows ? reported.replaceAll("\\", "/") : reported;
+      if (windows ? isConnectedMachineAbsolutePath(relative) : relative.startsWith("/")) {
+        return relative;
+      }
+      if (!base) return relative;
+      return `${base.endsWith("/") ? base : `${base}/`}${relative}`;
+    };
     return result.fsList.entries.map((entry) => ({
       name: entry.name,
-      path: entry.path,
+      path: entryPath(entry.path),
       type:
         entry.kind === FsEntryKind.FS_ENTRY_KIND_DIRECTORY
           ? ("dir" as const)
@@ -1340,6 +2088,14 @@ export class SelfhostedSession {
     const pathExists = (path: string): Promise<boolean> => this.pathExists(path, runAs);
     const readText = async (path: string): Promise<string> =>
       decoder.decode(await this.readFile({ path, ...(runAs ? { runAs } : {}) }));
+    // Direct writes carry the user only to a runner that honors it; older
+    // runners keep their existing behavior.
+    // A session that requires run-as always sends the user, so writeFile refuses
+    // it on a runner without run-as instead of writing as the runner's account.
+    const directWriteUser = async (): Promise<{ runAs?: string }> =>
+      runAs && (this.runAsRequired || (await this.admitOperation(false)).runAsSupported)
+        ? { runAs }
+        : {};
     const writeText = async (
       path: string,
       content: string,
@@ -1351,17 +2107,18 @@ export class SelfhostedSession {
       // Preserve legacy small moves into write-only destinations: their lazy
       // base reader would introduce a new destination-read requirement.
       if (bytes.byteLength <= SELFHOSTED_FILE_CHUNK_BYTES && typeof base === "function") {
-        await this.writeFile({ path, content, createParents: true });
+        await this.writeFile({ path, content, createParents: true, ...(await directWriteUser()) });
         return;
       }
       const initial = await this.admitOperation(false);
-      if (!initial.transactionalFsWriteSupported) {
-        // Older agents may have a larger negotiated message budget. Preserve
-        // their existing writes; a real size rejection remains a typed fault.
-        await this.writeFile({ path, content, createParents: true });
+      if (!this.supportsFileTransfer(initial)) {
+        // Preserve small legacy writes. writeFile preflights an old transactional
+        // agent's missing machine scope; agents with no transactional support
+        // retain their existing single-message transport budget.
+        await this.writeFile({ path, content, createParents: true, ...(await directWriteUser()) });
         return;
       }
-      if (runAs) {
+      if (runAs && !initial.runAsSupported) {
         throw new SelfhostedControlError({
           code: ErrorCode.ERROR_CODE_UNSUPPORTED,
           message:
@@ -1378,6 +2135,7 @@ export class SelfhostedSession {
           path: resolveConnectedMachinePath(this.workspaceRoot, path),
           content: bytes,
           ...(resolvedBase === undefined ? {} : { baseContent: encoder.encode(resolvedBase) }),
+          runAs: runAs ?? "",
           request: requestTransfer,
         });
         // Unlike physical request observations, this is a verified file outcome.
@@ -1416,6 +2174,7 @@ export class SelfhostedSession {
                 path: sourcePath,
                 offset: String(offset),
                 length: String(SELFHOSTED_FILE_CHUNK_BYTES),
+                runAs: runAs ?? "",
               },
             });
             if (reply.error) throw agentErrorToControlError(reply.error);
@@ -1438,7 +2197,7 @@ export class SelfhostedSession {
             throw new Error("Source changed before move cleanup");
           const reply = await requestTransfer(crypto.randomUUID(), {
             $case: "fsRemove",
-            fsRemove: { path: sourcePath, recursive: false },
+            fsRemove: { path: sourcePath, recursive: false, runAs: runAs ?? "" },
           });
           if (reply.error) throw agentErrorToControlError(reply.error);
           if (reply.result?.$case !== "fsRemove")
@@ -1457,6 +2216,7 @@ export class SelfhostedSession {
         fsRemove: {
           path: resolveConnectedMachinePath(this.workspaceRoot, path),
           recursive: true,
+          runAs: runAs ?? "",
         },
       });
       if (result.$case !== "fsRemove") {
@@ -1510,6 +2270,7 @@ export class SelfhostedSession {
           path,
           offset: String(offset),
           length: String(remaining),
+          runAs: args.runAs ?? "",
         },
       });
       if (result.$case !== "fsRead") {
@@ -1539,7 +2300,7 @@ export class SelfhostedSession {
       try {
         const current = await this.admitOperation(false);
         if (
-          !current.transactionalFsWriteSupported ||
+          !this.supportsFileTransfer(current) ||
           current.subject !== initial.subject ||
           current.connectionInstanceId !== initial.connectionInstanceId
         ) {
@@ -1547,6 +2308,12 @@ export class SelfhostedSession {
             "The authorized machine connection changed during the file transfer; the operation was not replayed.",
           );
         }
+        // The exact admission this request is dispatched with decides run-as:
+        // a transfer that asks for a user is refused, never sent without it.
+        if (requestedRunAs(op) !== "" && !current.runAsSupported) {
+          throw runAsUnsupportedError(writesFiles(op));
+        }
+        const connectionCurrent = this.connectionCurrentFor(current);
         const response = await this.controlRpc.request(
           current.subject,
           {
@@ -1555,7 +2322,7 @@ export class SelfhostedSession {
             op,
             resourcePolicy: undefined,
           },
-          { timeoutMs: this.timeoutMs },
+          { timeoutMs: this.timeoutMs, ...(connectionCurrent ? { connectionCurrent } : {}) },
         );
         if (response.requestId !== requestId)
           throw new Error("The machine returned a mismatched file-transfer response identity.");
@@ -1591,6 +2358,15 @@ export class SelfhostedSession {
     };
   }
 
+  private supportsFileTransfer(
+    admission: Awaited<ReturnType<SelfhostedSession["admitOperation"]>>,
+  ): boolean {
+    return (
+      admission.transactionalFsWriteSupported &&
+      (this.epoch !== 0 || admission.transactionalFsWriteMachineSupported)
+    );
+  }
+
   /** Write a file onto the machine (the fs surface the descriptor advertises). */
   async writeFile(args: {
     path: string;
@@ -1600,40 +2376,53 @@ export class SelfhostedSession {
     runAs?: string;
   }): Promise<number> {
     const content = typeof args.content === "string" ? encoder.encode(args.content) : args.content;
-    if (args.runAs) {
-      throw new SelfhostedControlError({
-        code: ErrorCode.ERROR_CODE_UNSUPPORTED,
-        message: "Native file writes do not support runAs impersonation; no file was written.",
-        reason: null,
-        retryable: false,
-      });
-    }
+    const runAs = args.runAs ?? "";
+    // One admission decides run-as support and carries the write: a reconnect
+    // between a separate check and the dispatch could otherwise reach a runner
+    // that never advertised run-as.
+    const initial = await this.admitOperation(false);
+    if (runAs && !initial.runAsSupported) throw runAsUnsupportedError(true);
     if (content.byteLength > SELFHOSTED_FILE_CHUNK_BYTES && !args.append) {
-      const initial = await this.admitOperation(false);
+      if (initial.transactionalFsWriteSupported && !this.supportsFileTransfer(initial)) {
+        throw new SelfhostedControlError({
+          code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+          message:
+            "This Connected Machine's agent requires a session route epoch for transactional writes. Machine-addressed writes are limited to 262144 bytes (256 KiB) until the agent is updated; no file was written.",
+          reason: null,
+          retryable: false,
+        });
+      }
       if (initial.transactionalFsWriteSupported) {
-        const baseContent = (await this.pathExists(args.path))
-          ? await this.readFile({ path: args.path })
+        const asUser = runAs ? { runAs } : {};
+        const baseContent = (await this.pathExists(args.path, runAs || undefined))
+          ? await this.readFile({ path: args.path, ...asUser })
           : undefined;
         await transferEditorFile({
           path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
           content,
           ...(baseContent === undefined ? {} : { baseContent }),
           createParents: args.createParents ?? true,
+          runAs,
           request: this.fileTransferRequest(initial),
         });
         return content.byteLength;
       }
     }
-    const result = await this.call({
-      $case: "fsWrite",
-      fsWrite: {
-        path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
-        content,
-        createParents: args.createParents ?? true,
-        append: args.append ?? false,
-        mode: 0,
+    const result = await this.call(
+      {
+        $case: "fsWrite",
+        fsWrite: {
+          path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
+          content,
+          createParents: args.createParents ?? true,
+          append: args.append ?? false,
+          mode: 0,
+          runAs,
+        },
       },
-    });
+      this.timeoutMs,
+      initial,
+    );
     if (result.$case !== "fsWrite") {
       throw new Error(`selfhosted writeFile: unexpected result ${result.$case}`);
     }
@@ -1652,7 +2441,7 @@ export class SelfhostedSession {
   }): Promise<number> {
     const path = selfhostedPlacementPrivatePath(args.path);
     const content = typeof args.content === "string" ? encoder.encode(args.content) : args.content;
-    if (content.byteLength > SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES) {
+    if (content.byteLength > SELFHOSTED_PLACEMENT_PRIVATE_FILE_MAX_BYTES) {
       throw new TypeError("selfhosted placement-private content is invalid");
     }
     const result = await this.call({
@@ -1663,6 +2452,8 @@ export class SelfhostedSession {
         createParents: args.createParents ?? true,
         append: false,
         mode: 0o600,
+        // Controller-owned authority stays the agent's.
+        runAs: "",
       },
     });
     if (result.$case !== "fsWrite") {
@@ -1671,7 +2462,7 @@ export class SelfhostedSession {
     return Number(result.fsWrite.bytesWritten);
   }
 
-  /** Idempotently remove only an OpenGeni placement-private authority file.
+  /** Idempotently remove only an Opengeni placement-private authority file.
    * This uses the filesystem control op rather than exec, so cleanup still
    * runs when the consuming command fails before a child process starts. */
   async deletePlacementPrivate(path: string, _runAs?: string): Promise<void> {
@@ -1679,7 +2470,7 @@ export class SelfhostedSession {
     try {
       const result = await this.call({
         $case: "fsRemove",
-        fsRemove: { path: privatePath, recursive: false },
+        fsRemove: { path: privatePath, recursive: false, runAs: "" },
       });
       if (result.$case !== "fsRemove") {
         throw new Error(`selfhosted deletePlacementPrivate: unexpected result ${result.$case}`);
@@ -1694,12 +2485,14 @@ export class SelfhostedSession {
   async listFiles(args: {
     path: string;
     recursive?: boolean;
+    runAs?: string;
   }): Promise<NonNullable<ControlResponse["result"]> & { $case: "fsList" }> {
     const result = await this.call({
       $case: "fsList",
       fsList: {
         path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
         recursive: args.recursive ?? false,
+        runAs: args.runAs ?? "",
       },
     });
     if (result.$case !== "fsList") {
@@ -1709,10 +2502,13 @@ export class SelfhostedSession {
   }
 
   /** Stat a path on the machine. */
-  async statFile(args: { path: string }): Promise<{ exists: boolean }> {
+  async statFile(args: { path: string; runAs?: string }): Promise<{ exists: boolean }> {
     const result = await this.call({
       $case: "fsStat",
-      fsStat: { path: resolveConnectedMachinePath(this.workspaceRoot, args.path) },
+      fsStat: {
+        path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
+        runAs: args.runAs ?? "",
+      },
     });
     if (result.$case !== "fsStat") {
       throw new Error(`selfhosted statFile: unexpected result ${result.$case}`);
@@ -1733,6 +2529,99 @@ export class SelfhostedSession {
       throw new Error(`selfhosted ensureBrowserControl: unexpected result ${result.$case}`);
     }
     return result.browserControlEnsure;
+  }
+
+  /** Send one request to the agent-owned controller of an exact authority
+   * scope, served inside the runner over loopback without starting a process.
+   * `unsupported` means this connection's runner does not serve it and nothing
+   * was sent. `controller_absent` means no controller for that scope and
+   * generation accepted the request, so it was not delivered and the caller may
+   * ensure the controller and send again. A body too large for one reply is
+   * drained from the runner's spool; the request is never repeated. */
+  async browserControlHttp(request: BrowserControlHttpCall): Promise<BrowserControlHttpOutcome> {
+    const admission = await this.admitOperation(false);
+    if (!admission.browserControlHttpSupported) return { kind: "unsupported" };
+    // The runner bounds the request by timeoutMs; allow the reply to arrive.
+    const rpcTimeoutMs = request.timeoutMs + BROWSER_CONTROL_HTTP_REPLY_GRACE_MS;
+    let result: NonNullable<ControlResponse["result"]>;
+    try {
+      result = await this.call(
+        {
+          $case: "browserControlHttp",
+          browserControlHttp: {
+            scopeId: request.scopeId,
+            scopeGeneration: request.scopeGeneration,
+            method: request.method,
+            path: request.path,
+            bearerToken: request.bearerToken,
+            body: request.body ?? new Uint8Array(),
+            hasBody: request.body !== undefined,
+            timeoutMs: request.timeoutMs,
+            maxResponseBytes: String(request.maxResponseBytes),
+          },
+        },
+        rpcTimeoutMs,
+        admission,
+      );
+    } catch (error) {
+      if (
+        error instanceof SelfhostedControlError &&
+        error.code === ErrorCode.ERROR_CODE_NOT_FOUND
+      ) {
+        return { kind: "controller_absent" };
+      }
+      throw error;
+    }
+    if (result.$case !== "browserControlHttp") {
+      throw new Error(`selfhosted browserControlHttp: unexpected result ${result.$case}`);
+    }
+    const response = result.browserControlHttp;
+    const totalBytes = Number(response.totalBytes);
+    if (
+      !Number.isSafeInteger(totalBytes) ||
+      totalBytes < response.body.byteLength ||
+      totalBytes > request.maxResponseBytes
+    ) {
+      throw new Error("selfhosted browserControlHttp: response length is invalid");
+    }
+    let body = response.body;
+    if (response.spoolId) {
+      const complete = new Uint8Array(totalBytes);
+      complete.set(response.body, 0);
+      let offset = response.body.byteLength;
+      for (;;) {
+        const read = await this.call(
+          {
+            $case: "browserControlHttpRead",
+            browserControlHttpRead: { spoolId: response.spoolId, offset: String(offset) },
+          },
+          this.timeoutMs,
+          admission,
+        );
+        if (read.$case !== "browserControlHttpRead") {
+          throw new Error(`selfhosted browserControlHttpRead: unexpected result ${read.$case}`);
+        }
+        const part = read.browserControlHttpRead;
+        if (offset + part.data.byteLength > totalBytes) {
+          throw new Error("selfhosted browserControlHttpRead: response exceeds its length");
+        }
+        complete.set(part.data, offset);
+        offset += part.data.byteLength;
+        if (part.done) break;
+        if (part.data.byteLength === 0) {
+          throw new Error("selfhosted browserControlHttpRead: spool made no progress");
+        }
+      }
+      if (offset !== totalBytes) {
+        throw new Error("selfhosted browserControlHttpRead: response is incomplete");
+      }
+      body = complete;
+    } else if (response.body.byteLength !== totalBytes) {
+      throw new Error("selfhosted browserControlHttp: response is incomplete");
+    }
+    const headers = new Map<string, string>();
+    for (const header of response.headers) headers.set(header.name.toLowerCase(), header.value);
+    return { kind: "response", status: response.status, headers, body };
   }
 
   /** Open one browser-native frame producer and return its canonical relay
@@ -1778,7 +2667,7 @@ export class SelfhostedSession {
       requestId: crypto.randomUUID(),
       epoch: this.epoch,
       resourcePolicy: undefined,
-      op: { $case: "ping", ping: { nonce } },
+      op: { $case: "ping", ping: { nonce, controlReplayWindowMs: "0" } },
     };
     const res = await this.controlRpc.request(admission.subject, req, {
       timeoutMs: this.timeoutMs,
@@ -1839,6 +2728,7 @@ export class SelfhostedSession {
           rows: 0,
           term: "xterm-256color",
           scopeId: this.terminalScopeId,
+          runAs: "",
         },
       });
       if (result.$case !== "ptyOpen") {
@@ -1865,16 +2755,23 @@ export class SelfhostedSession {
       // The relay's wss route (`/stream`); buildStreamUrl honors `path`.
       path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
       query: routingQuery,
+      relayChannel: { workspaceId: this.controlWorkspaceId, agentId: this.agentId, channelId },
     };
   }
 
   private relayEndpoint(channel: StreamChannel): ExposedPortEndpoint {
+    // The viewer token is minted for this channel, so it must be this machine's
+    // own: enrolled in the workspace it is addressed in, under its own id.
+    if (channel.workspaceId !== this.controlWorkspaceId || channel.agentId !== this.agentId) {
+      throw new Error("selfhosted stream channel does not belong to this machine");
+    }
     const tls = this.relay.tls ?? true;
     const routingQuery =
       `ws=${encodeURIComponent(channel.workspaceId)}` +
       `&agent=${encodeURIComponent(channel.agentId)}` +
       `&port=${channel.port}` +
-      `&channel=${encodeURIComponent(channel.channelId)}`;
+      `&channel=${encodeURIComponent(channel.channelId)}` +
+      (channel.relayRoute ? `&route=${encodeURIComponent(channel.relayRoute)}` : "");
     return {
       host: this.relay.host,
       port: this.relay.port ?? (tls ? 443 : 80),
@@ -1882,6 +2779,11 @@ export class SelfhostedSession {
       path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
       query: routingQuery,
       protocol: kindToProtocol(channel.kind),
+      relayChannel: {
+        workspaceId: channel.workspaceId,
+        agentId: channel.agentId,
+        channelId: channel.channelId,
+      },
     };
   }
 
@@ -1889,6 +2791,29 @@ export class SelfhostedSession {
   async serializeSessionState(): Promise<SelfhostedSessionState> {
     return { agentId: this.agentId };
   }
+}
+
+function isZeroFrameTerminalOperation(status: OpStatus, opId: string): boolean {
+  const exit = status.exit;
+  if (
+    status.state !== OpState.OP_STATE_COMPLETE ||
+    status.lostReason !== OpLostReason.OP_LOST_REASON_UNSPECIFIED ||
+    !exit
+  )
+    return false;
+  // A cancel-before-start tombstone has no handles, frames or output totals.
+  if (isOpTombstone(status, opId)) return true;
+  // Failed spawn records have handles but no stored frame (watermark zero).
+  // A process may briefly have existed before spawn cleanup killed it; this
+  // proves terminal custody, not that the command had no effects.
+  return (
+    status.nextSeq === "1" &&
+    !exit.cancelled &&
+    !exit.timedOut &&
+    Boolean(exit.failureCode) &&
+    exit.totals.stdout === "0" &&
+    exit.totals.stderr === "0"
+  );
 }
 
 /**
@@ -1925,12 +2850,16 @@ export class SelfhostedSandboxClient {
   private readonly operationResourcePolicySupported: boolean | undefined;
   private readonly operationCpuQuotaSupported: boolean | undefined;
   private readonly transactionalFsWriteSupported: boolean | undefined;
+  private readonly transactionalFsWriteMachineSupported: boolean | undefined;
+  private readonly browserControlHttpSupported: boolean | undefined;
+  private readonly runAsSupported: boolean | undefined;
   private readonly resolveOperationAdmission:
     | (() => Promise<SelfhostedOperationAdmission | null>)
     | undefined;
   private readonly adoptBackgroundCommand:
     | SelfhostedSessionDeps["adoptBackgroundCommand"]
     | undefined;
+  private readonly abandonCommand: SelfhostedSessionDeps["abandonCommand"] | undefined;
   private readonly settleBackgroundCommand:
     | SelfhostedSessionDeps["settleBackgroundCommand"]
     | undefined;
@@ -1953,7 +2882,7 @@ export class SelfhostedSandboxClient {
     /** Exact live daemon process. Optional only for the inert registry client;
      *  any live create()/resume() fails closed until one is bound. */
     connectionInstanceId?: string;
-    /** Stable terminal identity (normally the durable OpenGeni session id). */
+    /** Stable terminal identity (normally the durable Opengeni session id). */
     terminalScopeId?: string;
     epoch?: number;
     /** The control-op timeout threaded into every bound session. */
@@ -1966,8 +2895,12 @@ export class SelfhostedSandboxClient {
     operationResourcePolicySupported?: boolean;
     operationCpuQuotaSupported?: boolean;
     transactionalFsWriteSupported?: boolean;
+    transactionalFsWriteMachineSupported?: boolean;
+    browserControlHttpSupported?: boolean;
+    runAsSupported?: boolean;
     resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
     adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
+    abandonCommand?: SelfhostedSessionDeps["abandonCommand"];
     settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
     captureBackgroundCommandOutput?: SelfhostedSessionDeps["captureBackgroundCommandOutput"];
     /** The run's declared sandbox environment, threaded into every bound session's
@@ -1998,8 +2931,12 @@ export class SelfhostedSandboxClient {
     this.operationResourcePolicySupported = opts.operationResourcePolicySupported;
     this.operationCpuQuotaSupported = opts.operationCpuQuotaSupported;
     this.transactionalFsWriteSupported = opts.transactionalFsWriteSupported;
+    this.transactionalFsWriteMachineSupported = opts.transactionalFsWriteMachineSupported;
+    this.browserControlHttpSupported = opts.browserControlHttpSupported;
+    this.runAsSupported = opts.runAsSupported;
     this.resolveOperationAdmission = opts.resolveOperationAdmission;
     this.adoptBackgroundCommand = opts.adoptBackgroundCommand;
+    this.abandonCommand = opts.abandonCommand;
     this.settleBackgroundCommand = opts.settleBackgroundCommand;
     this.captureBackgroundCommandOutput = opts.captureBackgroundCommandOutput;
     this.environment = opts.environment;
@@ -2042,12 +2979,16 @@ export class SelfhostedSandboxClient {
         ? { operationCpuQuotaSupported: this.operationCpuQuotaSupported }
         : {}),
       transactionalFsWriteSupported: this.transactionalFsWriteSupported === true,
+      transactionalFsWriteMachineSupported: this.transactionalFsWriteMachineSupported === true,
+      browserControlHttpSupported: this.browserControlHttpSupported === true,
+      runAsSupported: this.runAsSupported === true,
       ...(this.resolveOperationAdmission !== undefined
         ? { resolveOperationAdmission: this.resolveOperationAdmission }
         : {}),
       ...(this.adoptBackgroundCommand !== undefined
         ? { adoptBackgroundCommand: this.adoptBackgroundCommand }
         : {}),
+      ...(this.abandonCommand !== undefined ? { abandonCommand: this.abandonCommand } : {}),
       ...(this.settleBackgroundCommand !== undefined
         ? { settleBackgroundCommand: this.settleBackgroundCommand }
         : {}),
@@ -2136,7 +3077,7 @@ export interface SelfhostedSessionBuild {
   connectionInstanceId: string;
   /** The relay-URL shape for stream endpoints. */
   relay: SelfhostedRelayConfig;
-  /** Stable terminal identity; normally the durable OpenGeni session id. */
+  /** Stable terminal identity; normally the durable Opengeni session id. */
   terminalScopeId?: string;
   /** Lazily build the live ControlRpc (the request-scoped NATS connection). */
   controlRpcFactory: () => ControlRpc;
@@ -2162,9 +3103,15 @@ export interface SelfhostedSessionBuild {
   /** Exact live CPU enforcement capability paired with the initial snapshot. */
   operationCpuQuotaSupported?: boolean;
   transactionalFsWriteSupported?: boolean;
+  transactionalFsWriteMachineSupported?: boolean;
+  /** Exact live runner capability for in-process controller requests. */
+  browserControlHttpSupported?: boolean;
+  /** Exact live runner capability for per-request run-as. */
+  runAsSupported?: boolean;
   /** Live last-boundary operation admission resolver; see SelfhostedSessionDeps. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
+  abandonCommand?: SelfhostedSessionDeps["abandonCommand"];
   settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
   captureBackgroundCommandOutput?: SelfhostedSessionDeps["captureBackgroundCommandOutput"];
   /** The per-op observer (out-of-band telemetry). Absent ⇒ no-op. */
@@ -2218,12 +3165,16 @@ export async function buildSelfhostedBackendSession(
       ? { operationCpuQuotaSupported: deps.operationCpuQuotaSupported }
       : {}),
     transactionalFsWriteSupported: deps.transactionalFsWriteSupported === true,
+    transactionalFsWriteMachineSupported: deps.transactionalFsWriteMachineSupported === true,
+    browserControlHttpSupported: deps.browserControlHttpSupported === true,
+    runAsSupported: deps.runAsSupported === true,
     ...(deps.resolveOperationAdmission !== undefined
       ? { resolveOperationAdmission: deps.resolveOperationAdmission }
       : {}),
     ...(deps.adoptBackgroundCommand !== undefined
       ? { adoptBackgroundCommand: deps.adoptBackgroundCommand }
       : {}),
+    ...(deps.abandonCommand !== undefined ? { abandonCommand: deps.abandonCommand } : {}),
     ...(deps.settleBackgroundCommand !== undefined
       ? { settleBackgroundCommand: deps.settleBackgroundCommand }
       : {}),
@@ -2296,6 +3247,7 @@ function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): Selfho
     stderr,
     exitCode: res.exitCode,
     timedOut: res.timedOut,
+    ...(res.backgroundChildrenStopped ? { backgroundChildrenStopped: true } : {}),
   };
 }
 
@@ -2303,8 +3255,8 @@ function execRequiresOpStream(cause?: OpStreamUnavailableError): SelfhostedContr
   const runnerUpgrade = cause?.unavailableKind === "runner" || cause === undefined;
   return new SelfhostedControlError({
     message: runnerUpgrade
-      ? "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the OpenGeni agent. The command was not started."
-      : "The Connected Machine streaming channel is temporarily unavailable. OpenGeni did not downgrade to an ambiguous request/reply command; the command was not started. Retry after the machine reconnects.",
+      ? "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the machine's agent. The command was not started."
+      : "The Connected Machine streaming channel is temporarily unavailable. The platform did not downgrade to an ambiguous request/reply command; the command was not started. Retry after the machine reconnects.",
     code: runnerUpgrade ? ErrorCode.ERROR_CODE_UNSUPPORTED : ErrorCode.ERROR_CODE_STREAM,
     reason: runnerUpgrade ? null : "agent_reconnecting",
     retryable: !runnerUpgrade,
@@ -2365,8 +3317,68 @@ function mediaTypeFromPath(path: string): string | undefined {
   return undefined;
 }
 
+/** The same error with `extra` added to its detail. */
+function withDetail(
+  error: SelfhostedControlError,
+  extra: Record<string, string>,
+): SelfhostedControlError {
+  return new SelfhostedControlError({
+    message: error.message,
+    code: error.code,
+    reason: error.reason,
+    retryable: error.retryable,
+    fenced: error.fenced,
+    draining: error.draining,
+    agentOffline: error.agentOffline,
+    osNotFound: error.osNotFound,
+    payloadTooLarge: error.payloadTooLarge,
+    neverSent: error.neverSent,
+    connectionReplaced: error.connectionReplaced,
+    controlRequestId: error.controlRequestId,
+    detail: { ...error.detail, ...extra },
+  });
+}
+
+/** How many times an exec whose start reached no agent before its
+ *  connection was replaced is admitted again. */
+const SELFHOSTED_EXEC_READMISSIONS_MAX = 2;
+
+/** The op stream reports a start that provably reached no agent before the
+ *  connection it was admitted to was replaced (every later failure of an op
+ *  that may exist is a lost or unknown outcome instead): it never ran. */
+function startReachedNoReplacedAgent(error: unknown): boolean {
+  return error instanceof SelfhostedControlError && error.connectionReplaced && error.neverSent;
+}
+
+/** Before an exec is dispatched, nothing of it runs: its preparation ends
+ * with `expired()` once the exec's absolute deadline (0: none) has passed. */
+async function beforeExecDeadline<T>(
+  work: Promise<T>,
+  deadlineAt: number,
+  expired: () => unknown,
+): Promise<T> {
+  if (deadlineAt <= 0) return await work;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(expired()), Math.max(0, deadlineAt - Date.now()));
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    clearTimeout(timer);
+    void work.catch(() => {});
+  }
+}
+
 /** A random uint64-safe numeric nonce (the wire `PingRequest.nonce` is a uint64,
  *  represented as a numeric string by ts-proto). */
+/** The machine itself stopped answering (offline, reconnecting past the hold
+ * window, or draining), as opposed to an answer that the operation failed. */
+function machineStoppedAnswering(error: SelfhostedControlError): boolean {
+  const faultClass = selfhostedFaultClass(error);
+  return faultClass === "offline" || faultClass === "reconnecting" || faultClass === "draining";
+}
+
 function randomNonce(): string {
   // 2^53-safe random integer as a decimal string.
   return String(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
@@ -2381,22 +3393,4 @@ function kindToProtocol(kind: StreamKind | undefined): string {
     default:
       return "raw";
   }
-}
-
-/**
- * The selfhosted NotFound discriminator — THE load-bearing safety property
- *: for selfhosted, `agent-offline` (no responder) is NEVER a
- * provider NotFound. A user's real machine is not recreatable; if the lease saw
- * agent-offline as NotFound it would cold-create a RIVAL box (a Modal box) for
- * the user's machine. So this ALWAYS returns FALSE for selfhosted — there is no
- * "box gone, recreate it" condition. An OS-level file NotFound is an op-level
- * error the fs layer 404s; it is likewise NOT a session-recreate condition.
- *
- * `establishSandboxSessionFromEnvelope` cold-restores ONLY when the per-backend
- * NotFound discriminator returns true; returning false here guarantees the
- * selfhosted path never cold-creates a rival — the op surfaces agent_offline and
- * the caller backs off / retries.
- */
-export function isSelfhostedProviderNotFoundError(_error: unknown): false {
-  return false;
 }

@@ -1,39 +1,61 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
+import {
+  DEVELOPER_SETUP_API_KEY_PRESET,
+  OWNER_LEVEL_API_KEY_CREATOR_SENTENCE,
+  serviceAccountAllowsPermission,
+  type Permission,
+} from "@opengeni/contracts";
 import { CheckIcon, CopyIcon, KeyRoundIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { ModelsFormPage } from "@/components/models/models-ui";
-import { RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
-import { DestructiveConfirm } from "@/components/ui/destructive-confirm";
-import { Disclosure } from "@/components/ui/disclosure";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { RelativeTime } from "@/components/ui/relative-time";
+import { ModelsFormPage } from "@opengeni/react/app/components/models/models-ui";
+import {
+  PermissionChecklist,
+  WorkspaceScopeFields,
+} from "@/components/organization-access/organization-access-fields";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import { DestructiveConfirm } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { SecretOnce } from "@/components/ui/secret-field";
-import { Section, SectionStack } from "@/components/ui/section";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import {
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import { apiKeyStatus } from "@/lib/api-key-status";
-import type { ApiKey } from "@/types";
+import {
+  isMemberLevelApiKey,
+  memberLevelPermission,
+  policySummary,
+  presetPermissions,
+  scopeSummary,
+  type OrganizationWorkspaceScope,
+} from "@/lib/organization-access";
+import type { ApiKey } from "@opengeni/react/app/types";
 
 type CreateOrganizationApiKeyRequest = Parameters<
-  OpenGeniBrowserClient["createOrganizationApiKey"]
+  ChatClient<OpenGeniBrowserClient>["createOrganizationApiKey"]
 >[1];
-type CreateApiKeyResponse = Awaited<ReturnType<OpenGeniBrowserClient["createOrganizationApiKey"]>>;
+type CreateApiKeyResponse = Awaited<
+  ReturnType<ChatClient<OpenGeniBrowserClient>["createOrganizationApiKey"]>
+>;
 
-export type OrganizationApiKeysSectionProps = {
+type OrganizationApiKeysSectionProps = {
   organizationId: string;
   canManage: boolean;
   listApiKeys: () => Promise<ApiKey[]>;
@@ -45,11 +67,72 @@ export type OrganizationApiKeysSectionProps = {
    */
   view?: "new-key" | undefined;
   onViewChange?: (view: "new-key" | undefined) => void;
-  /** This server accepts agent settings: the quick start shows `agent`. */
-  agentSettings?: boolean;
+  /** Shared workspaces for "Only selected workspaces"; null while loading. */
+  workspaces?: { id: string; name: string }[] | null;
+  /** The organization's service accounts, for "Service account" on Create API key. */
+  listServiceAccounts?: () => Promise<KeyHolder[]>;
+  /** Create API key opened from a service account's page. */
+  initialServiceAccountId?: string;
+  /**
+   * An organization admin who isn't the owner: creates, changes and revokes
+   * only keys that can't manage people, keys or billing, held by member
+   * service accounts, as the server allows.
+   */
+  memberLevelOnly?: boolean;
 };
 
+type KeyHolder = { id: string; name: string; role: "admin" | "member" };
+
 const defaultKeyName = "Organization automation";
+const NEW_HOLDER = "new";
+
+type KeyAccessChoice = "full" | "read" | "developer_setup" | "custom";
+const KEY_ACCESS_CHOICES: SelectOption<KeyAccessChoice>[] = [
+  {
+    value: "full",
+    label: "Full access",
+    description: "Everything, including people, keys, billing and secret values.",
+  },
+  {
+    value: DEVELOPER_SETUP_API_KEY_PRESET.id,
+    label: DEVELOPER_SETUP_API_KEY_PRESET.label,
+    description: DEVELOPER_SETUP_API_KEY_PRESET.description,
+  },
+  {
+    value: "read",
+    label: "Read only",
+    description:
+      "See sessions, files, knowledge and settings. Can't change anything or read secret values.",
+  },
+  {
+    value: "custom",
+    label: "Custom",
+    description: "Pick exactly what it can do.",
+  },
+];
+
+/** What a choice's key would hold, as the server judges it. */
+function choiceKey(choice: KeyAccessChoice): Parameters<typeof isMemberLevelApiKey>[0] {
+  if (choice === "developer_setup")
+    return { permissions: DEVELOPER_SETUP_API_KEY_PRESET.permissions, permissionMode: "legacy" };
+  if (choice === "full")
+    return { permissions: presetPermissions("full"), permissionMode: "explicit" };
+  if (choice === "read")
+    return { permissions: presetPermissions("read_only"), permissionMode: "explicit" };
+  return { permissions: [], permissionMode: "explicit" };
+}
+
+/**
+ * For an organization admin who isn't the owner: choices whose key would hold
+ * people, key or billing administration stay visible, off, saying who can.
+ */
+function memberLevelAccessChoices(): SelectOption<KeyAccessChoice>[] {
+  return KEY_ACCESS_CHOICES.map((choice) =>
+    isMemberLevelApiKey(choiceKey(choice.value))
+      ? choice
+      : { ...choice, disabled: true, disabledReason: OWNER_LEVEL_API_KEY_CREATOR_SENTENCE },
+  );
+}
 
 const COLUMNS: RowListColumn[] = [
   { id: "lastUsed", label: "Last used", width: 116 },
@@ -61,7 +144,7 @@ const COLUMNS: RowListColumn[] = [
  * the integration guide, collapsed.
  */
 export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProps) {
-  const { canManage, listApiKeys } = props;
+  const { canManage, listApiKeys, memberLevelOnly = false } = props;
   const mountedRef = useRef(true);
   const readSequenceRef = useRef(0);
   const mutationSequenceRef = useRef(0);
@@ -155,7 +238,16 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
     return (
       <>
         {status}
-        <CreateApiKeyPage onClose={() => setView(undefined)} onCreate={createKey} />
+        <CreateApiKeyPage
+          onClose={() => setView(undefined)}
+          onCreate={createKey}
+          workspaces={props.workspaces ?? null}
+          memberLevelOnly={memberLevelOnly}
+          {...(props.listServiceAccounts ? { listServiceAccounts: props.listServiceAccounts } : {})}
+          {...(props.initialServiceAccountId
+            ? { initialServiceAccountId: props.initialServiceAccountId }
+            : {})}
+        />
       </>
     );
   }
@@ -175,7 +267,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
   if (!canManage || (apiKeysError && apiKeys.length === 0 && isPermissionDenied(apiKeysError))) {
     body = (
       <Notice tone="muted" title="You can't manage organization API keys">
-        Ask an organization owner to create or revoke them.
+        Ask an organization owner or admin to create or revoke them.
       </Notice>
     );
   } else if (apiKeysError && apiKeys.length === 0) {
@@ -243,9 +335,13 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
                 }
                 description={
                   <>
+                    {apiKey.serviceAccount ? `${apiKey.serviceAccount.name} · ` : null}
                     <span translate="no" className="font-mono">
                       {apiKey.prefix}…
                     </span>
+                    {apiKey.permissionMode === "explicit" && apiKey.policy
+                      ? ` · ${policySummary(apiKey.policy)} · ${scopeSummary(apiKey.policy.workspaceScope, props.workspaces ?? null)}`
+                      : null}
                     {apiKey.description ? ` · ${apiKey.description}` : null}
                   </>
                 }
@@ -258,7 +354,8 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
                   created: <RelativeTime date={apiKey.createdAt} format="date" />,
                 }}
                 control={
-                  keyStatus === "revoked" ? undefined : (
+                  keyStatus === "revoked" ||
+                  (memberLevelOnly && !isMemberLevelApiKey(apiKey)) ? undefined : (
                     <RowButton
                       aria-label={`Revoke organization API key ${apiKey.name}`}
                       disabled={busyKeyId !== null}
@@ -291,10 +388,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
         >
           {body}
         </Section>
-        <IntegrationGuide
-          organizationId={props.organizationId}
-          agentSettings={props.agentSettings === true}
-        />
+        <IntegrationGuide organizationId={props.organizationId} />
         <DestructiveConfirm
           open={revokingKey !== null}
           onOpenChange={(open) => {
@@ -325,12 +419,54 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
 function CreateApiKeyPage({
   onClose,
   onCreate,
+  workspaces,
+  listServiceAccounts,
+  initialServiceAccountId,
+  memberLevelOnly,
 }: {
   onClose: () => void;
   onCreate: (request: CreateOrganizationApiKeyRequest) => Promise<string | null>;
+  workspaces: { id: string; name: string }[] | null;
+  listServiceAccounts?: () => Promise<KeyHolder[]>;
+  initialServiceAccountId?: string;
+  memberLevelOnly: boolean;
 }) {
+  // Who holds the key: a new service account named after it, or an existing one.
+  const [holders, setHolders] = useState<KeyHolder[] | null>(null);
+  const [holder, setHolder] = useState<string>(initialServiceAccountId ?? NEW_HOLDER);
+  const [holderError, setHolderError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!listServiceAccounts) return;
+    let live = true;
+    listServiceAccounts()
+      .then((accounts) => {
+        if (!live) return;
+        // An admin who isn't the owner gives keys only to member service accounts.
+        setHolders(memberLevelOnly ? accounts.filter((each) => each.role === "member") : accounts);
+        if (
+          memberLevelOnly &&
+          accounts.find((each) => each.id === initialServiceAccountId)?.role === "admin"
+        )
+          setHolder(NEW_HOLDER);
+        // A member can't hold Full access; start it at Read only instead.
+        if (accounts.find((each) => each.id === initialServiceAccountId)?.role === "member")
+          setAccess((current) => (current === "full" ? "read" : current));
+      })
+      .catch(() => {
+        if (live) setHolders([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [initialServiceAccountId, listServiceAccounts, memberLevelOnly]);
   const [name, setName] = useState(defaultKeyName);
   const [description, setDescription] = useState("");
+  // Full access and Developer setup manage keys or budgets: the owner's to give.
+  const accessChoices = memberLevelOnly ? memberLevelAccessChoices() : KEY_ACCESS_CHOICES;
+  const [access, setAccess] = useState<KeyAccessChoice>(memberLevelOnly ? "read" : "full");
+  const [custom, setCustom] = useState<string[]>(() => presetPermissions("read_only"));
+  const [scope, setScope] = useState<OrganizationWorkspaceScope>({ kind: "all" });
+  const [accessError, setAccessError] = useState<{ permissions?: string; workspaces?: string }>({});
   const [nameError, setNameError] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -376,7 +512,7 @@ function CreateApiKeyPage({
         backLabel="Developer"
         onClose={onClose}
         title="Create API key"
-        description="For a server that creates and runs shared workspaces for your product. It can't open Personal workspaces or read secret values."
+        description="For servers and agents that can't sign in through a browser. It never opens Personal workspaces."
         submitLabel="Create API key"
         pendingLabel="Creating…"
         onSubmit={async () => {
@@ -385,10 +521,52 @@ function CreateApiKeyPage({
             setNameError("Name the key.");
             return false;
           }
+          const permissions =
+            access === "custom"
+              ? custom
+              : access === "read"
+                ? presetPermissions("read_only")
+                : presetPermissions("full");
+          if (access === "custom" && permissions.length === 0) {
+            setAccessError({ permissions: "Pick at least one permission." });
+            return false;
+          }
+          if (scope.kind === "selected" && scope.workspaceIds.length === 0) {
+            setAccessError({ workspaces: "Choose at least one workspace." });
+            return false;
+          }
+          const chosen = holders?.find((each) => each.id === holder);
+          const keyPermissions =
+            access === "developer_setup"
+              ? [...DEVELOPER_SETUP_API_KEY_PRESET.permissions]
+              : (permissions as Permission[]);
+          if (
+            chosen?.role === "member" &&
+            keyPermissions.some(
+              (permission) => !serviceAccountAllowsPermission("member", permission),
+            )
+          ) {
+            setHolderError(
+              `${chosen.name} is a member, so its keys can't manage people, keys or billing. Choose less access or make it an admin.`,
+            );
+            return false;
+          }
           try {
             const created = await onCreate({
               name: trimmed,
+              ...(holder !== NEW_HOLDER ? { serviceAccountId: holder } : {}),
               ...(description.trim() ? { description: description.trim() } : {}),
+              // Developer setup keeps its own server-defined tier.
+              ...(access === "developer_setup"
+                ? { access }
+                : {
+                    policy: {
+                      preset:
+                        access === "custom" ? "custom" : access === "read" ? "read_only" : "full",
+                      permissions: permissions as Permission[],
+                      workspaceScope: scope,
+                    },
+                  }),
             });
             if (created === null) return false;
             setToken(created);
@@ -423,6 +601,73 @@ function CreateApiKeyPage({
               onChange={(event) => setDescription(event.target.value)}
             />
           </Field>
+          {listServiceAccounts ? (
+            <Field label="Service account" error={holderError ?? undefined}>
+              <SelectMenu
+                options={[
+                  {
+                    value: NEW_HOLDER,
+                    label: "New service account",
+                    description: "Named after this key.",
+                  },
+                  ...(holders ?? []).map((each) => ({
+                    value: each.id,
+                    label: each.name,
+                    meta: each.role === "admin" ? "Admin" : "Member",
+                  })),
+                ]}
+                value={holder}
+                onValueChange={(next) => {
+                  setHolder(next);
+                  setHolderError(null);
+                  if (holders?.find((each) => each.id === next)?.role === "member")
+                    setAccess((current) => (current === "full" ? "read" : current));
+                }}
+                loading={holders === null}
+                className="w-full"
+              />
+            </Field>
+          ) : null}
+          <Field
+            label="Access"
+            hint={accessChoices.find((choice) => choice.value === access)?.description}
+          >
+            <SelectMenu
+              options={accessChoices}
+              value={access}
+              onValueChange={(next) => {
+                setAccess(next);
+                setAccessError({});
+              }}
+              showMetaInTrigger={false}
+              className="w-full"
+            />
+          </Field>
+          {access === "custom" ? (
+            <Field label="Permissions" group error={accessError.permissions}>
+              <PermissionChecklist
+                selected={custom}
+                canGrant={memberLevelOnly ? memberLevelPermission : () => true}
+                {...(memberLevelOnly ? { withheldHint: "only the organization owner" } : {})}
+                onChange={(next) => {
+                  setCustom(next);
+                  setAccessError({});
+                }}
+              />
+            </Field>
+          ) : null}
+          {access === "developer_setup" ? null : (
+            <WorkspaceScopeFields
+              organizationName="this organization"
+              scope={scope}
+              onScopeChange={(next) => {
+                setScope(next);
+                setAccessError({});
+              }}
+              workspaces={workspaces}
+              {...(accessError.workspaces ? { error: accessError.workspaces } : {})}
+            />
+          )}
         </FieldStack>
       </ModelsFormPage>
     </div>
@@ -430,14 +675,8 @@ function CreateApiKeyPage({
 }
 
 /** How an external product uses the key: collapsed, for the people who need it. */
-function IntegrationGuide({
-  organizationId,
-  agentSettings,
-}: {
-  organizationId: string;
-  agentSettings: boolean;
-}) {
-  const quickStart = organizationQuickStart(organizationId, agentSettings);
+function IntegrationGuide({ organizationId }: { organizationId: string }) {
+  const quickStart = organizationQuickStart(organizationId);
   const [copied, setCopied] = useState(false);
   return (
     <div className="min-w-0">
@@ -496,9 +735,8 @@ function IntegrationGuide({
   );
 }
 
-function organizationQuickStart(organizationId: string, agentSettings: boolean): string {
-  if (agentSettings) {
-    return `import { OpenGeniClient } from "@opengeni/sdk";
+function organizationQuickStart(organizationId: string): string {
+  return `import { OpenGeniClient } from "@opengeni/sdk";
 
 const client = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL!,
@@ -524,28 +762,4 @@ const session = await client.createSession(workspace.id, {
 });
 
 // session.agent and session.effectiveTools show what it can do.`;
-  }
-  return `import { OpenGeniClient } from "@opengeni/sdk";
-
-const client = new OpenGeniClient({
-  baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_API_KEY!,
-});
-
-const { workspace } = await client.ensureWorkspace({
-  accountId: "${organizationId}",
-  externalSource: "your-product",
-  externalId: tenant.id,
-  name: tenant.name,
-});
-
-await client.updateWorkspaceSettings(workspace.id, {
-  agentHumanInputEnabled: true,
-});
-
-const session = await client.createSession(workspace.id, {
-  initialMessage: userMessage,
-  idempotencyKey: productRequest.id,
-  skills: selectedSkills,
-});`;
 }

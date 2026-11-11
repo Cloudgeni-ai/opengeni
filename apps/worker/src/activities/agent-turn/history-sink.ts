@@ -1,6 +1,19 @@
-import { appendSessionHistoryItems, upsertSandboxSessionEnvelope } from "@opengeni/db";
-import { sandboxStateEntryFromRunState, type OpenGeniRuntime } from "@opengeni/runtime";
-import type { Settings } from "@opengeni/config";
+import {
+  activeSessionHistoryCompactionPressure,
+  addActiveSessionHistoryFootprint,
+  appendSessionHistoryItems,
+  appendSessionHistoryItemsInTransaction,
+  upsertSandboxSessionEnvelope,
+  type ActiveSessionHistoryFootprint,
+  type ActiveSessionHistoryRecovery,
+  type SessionEventMutation,
+} from "@opengeni/db";
+import {
+  sandboxStateEntryFromRunState,
+  type HistoryFootprintCompactionSignal,
+  type OpenGeniRuntime,
+} from "@opengeni/runtime";
+import { sandboxManifestEnvironmentNamePredicate, type Settings } from "@opengeni/config";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type { SharedActivityServices } from "../types";
 import { compactGeneratedImageHistory } from "../generated-images";
@@ -23,6 +36,14 @@ export type TurnHistorySinkDeps = {
   getStream: () => Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
   getModelRunSettings: () => Settings;
   getExecutionGeneration: () => number;
+};
+
+type HistoryCheckpointOptions = {
+  skipInputOnlyRows?: boolean;
+  requireDurable?: boolean;
+  completedToolCallIds?: string[];
+  /** Commit the prepared history with a structural event's existing write fence. */
+  persist?: (history: SessionEventMutation<"event">) => Promise<boolean>;
 };
 
 /**
@@ -51,6 +72,10 @@ export type TurnHistorySinkDeps = {
 export class TurnHistorySink {
   private readonly prefix = new HistoryPrefixGuard();
   private checkpointTail: Promise<void> = Promise.resolve();
+  // Serialized form of the envelope this sink last made durable. This sink is
+  // the envelope's only writer, and reconcile runs at every model-call and
+  // turn boundary, so an unchanged envelope needs no further write.
+  private persistedEnvelope: string | null = null;
 
   seedHistory(input: string | readonly unknown[] | { readonly history: unknown[] }, count: number) {
     const items =
@@ -69,6 +94,55 @@ export class TurnHistorySink {
   }
   persistedHistoryCount = 0;
   nextHistoryPosition = 0;
+  /**
+   * Stored active-history footprint: measured by the read that prepared this
+   * attempt's input, plus every row this sink has appended since, as measured
+   * by PostgreSQL on insert. Rows written by other writers are picked up at
+   * the next preparation.
+   */
+  private historyFootprint: ActiveSessionHistoryFootprint | null = null;
+  private historyRecovery: ActiveSessionHistoryRecovery | null = null;
+
+  seedHistoryFootprint(
+    footprint: ActiveSessionHistoryFootprint,
+    recovery: ActiveSessionHistoryRecovery | null,
+  ) {
+    this.historyFootprint = footprint;
+    this.historyRecovery = recovery;
+  }
+
+  /**
+   * The stored-size compaction signal for the next model request, or null. A
+   * bounded recovery view must never reach ordinary inference, so it always
+   * signals.
+   */
+  historyFootprintCompactionSignal = (): HistoryFootprintCompactionSignal | null => {
+    if (this.historyRecovery) {
+      return {
+        dimension: this.historyRecovery.limitKind,
+        actual: this.historyRecovery.actual,
+        threshold: this.historyRecovery.maximum,
+        exceeded: true,
+      };
+    }
+    const pressure = this.historyFootprint
+      ? activeSessionHistoryCompactionPressure(this.historyFootprint)
+      : null;
+    return pressure
+      ? {
+          dimension: pressure.limitKind,
+          actual: pressure.actual,
+          threshold: pressure.threshold,
+          ...(pressure.exceeded ? { exceeded: true } : {}),
+        }
+      : null;
+  };
+
+  private recordAppendedFootprint = (delta: ActiveSessionHistoryFootprint) => {
+    if (this.historyFootprint) {
+      this.historyFootprint = addActiveSessionHistoryFootprint(this.historyFootprint, delta);
+    }
+  };
   providerArtifactCandidates: Awaited<ReturnType<typeof turnInput>>["providerArtifactCandidates"] =
     {
       knownHistoryItemIds: [],
@@ -77,9 +151,7 @@ export class TurnHistorySink {
 
   constructor(private readonly deps: TurnHistorySinkDeps) {}
 
-  reconcileConversationTruth = (
-    options: { skipInputOnlyRows?: boolean; requireDurable?: boolean } = {},
-  ): Promise<void> => {
+  reconcileConversationTruth = (options: HistoryCheckpointOptions = {}): Promise<void> => {
     // The provider loop and the stream consumer checkpoint independently.
     // Serialize the complete read/write/acknowledgment boundary, not just the
     // database write: each caller must read history against the latest durable
@@ -89,10 +161,7 @@ export class TurnHistorySink {
     return checkpoint;
   };
 
-  private reconcile = async (options: {
-    skipInputOnlyRows?: boolean;
-    requireDurable?: boolean;
-  }) => {
+  private reconcile = async (options: HistoryCheckpointOptions) => {
     const { media } = this.deps;
     const stream = this.deps.getStream();
     const turnId = this.deps.getTurnId();
@@ -100,6 +169,7 @@ export class TurnHistorySink {
       return;
     }
     const durableTurnId = turnId;
+    let persistenceAttempted = false;
     try {
       const rawHistory = (stream.state as { history?: unknown[] }).history;
       if (Array.isArray(rawHistory)) {
@@ -124,9 +194,10 @@ export class TurnHistorySink {
         );
         const shouldAppendRows =
           rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
-        if (shouldAppendRows) {
+        let checkpointAccepted = true;
+        if (shouldAppendRows || options.completedToolCallIds?.length || options.persist) {
           await runMandatoryHistoryPersistenceStep("history_append", async () => {
-            const appended = await appendSessionHistoryItems(this.deps.db, {
+            const input = {
               accountId: this.deps.accountId,
               workspaceId: this.deps.workspaceId,
               sessionId: this.deps.sessionId,
@@ -135,15 +206,56 @@ export class TurnHistorySink {
               expectedAttemptId: this.deps.attemptId,
               modelToolOutputTruncationTokens:
                 this.deps.getModelRunSettings().modelToolOutputTruncationTokens,
-              items: rows,
-            });
-            if (!appended) {
+              items: shouldAppendRows ? rows : [],
+              ...(options.completedToolCallIds
+                ? { completedToolCallIds: options.completedToolCallIds }
+                : {}),
+            };
+            let delta: ActiveSessionHistoryFootprint | null = null;
+            let historyFailure: unknown;
+            let appended: boolean;
+            if (options.persist) {
+              persistenceAttempted = true;
+              appended = await options.persist(async (tx, fence) => {
+                delta = null;
+                historyFailure = undefined;
+                if (!fence.allowed)
+                  throw new TurnAttemptFencedError(
+                    "turn execution generation was fenced while saving conversation history",
+                  );
+                try {
+                  // The already-incurred result/usage must survive a history
+                  // SQL failure, exactly as the formerly separate commits did.
+                  delta =
+                    input.items.length || input.completedToolCallIds?.length
+                      ? await tx.transaction((historyTx) =>
+                          appendSessionHistoryItemsInTransaction(historyTx, input, fence),
+                        )
+                      : { jsonBytes: 0, rows: 0, jsonNodes: 0, jsonProperties: 0 };
+                } catch (error) {
+                  historyFailure = error;
+                }
+                return true;
+              });
+            } else {
+              appended = await appendSessionHistoryItems(this.deps.db, {
+                ...input,
+                onAppendedFootprint: this.recordAppendedFootprint,
+              });
+            }
+            if (appended && historyFailure) throw historyFailure;
+            if (options.persist && !appended) checkpointAccepted = false;
+            else if (delta) this.recordAppendedFootprint(delta);
+            if (!appended && !options.persist) {
               throw new TurnAttemptFencedError(
                 "turn execution generation was fenced while saving conversation history",
               );
             }
           });
         }
+        // A duplicate response or lost authority can commit its audit without
+        // applying this history. Never advance the durable watermark for it.
+        if (!checkpointAccepted) return;
         if (shouldAppendRows || !options.skipInputOnlyRows) {
           this.prefix.acknowledge(verifiedKeys, nextWatermark);
           this.persistedHistoryCount = nextWatermark;
@@ -154,18 +266,36 @@ export class TurnHistorySink {
           "SDK conversation history is unavailable at a mandatory persistence boundary",
         );
       }
-      const envelope = sandboxStateEntryFromRunState(stream.state);
+      // W1 defensive strip: persist deployment-constant env names only. Built
+      // lazily: only an envelope that carries env needs the settings lookup.
+      let keepEnvironmentName: ((name: string) => boolean) | undefined;
+      const envelope = sandboxStateEntryFromRunState(stream.state, {
+        keepEnvironmentName: (name) =>
+          (keepEnvironmentName ??= sandboxManifestEnvironmentNamePredicate(
+            this.deps.getModelRunSettings(),
+          ))(name),
+      });
       if (envelope) {
-        await runMandatoryHistoryPersistenceStep("sandbox_envelope", () =>
-          upsertSandboxSessionEnvelope(this.deps.db, {
-            accountId: this.deps.accountId,
-            workspaceId: this.deps.workspaceId,
-            sessionId: this.deps.sessionId,
-            envelope,
-          }),
-        );
+        const serialized = JSON.stringify(envelope);
+        if (serialized !== this.persistedEnvelope) {
+          await runMandatoryHistoryPersistenceStep("sandbox_envelope", () =>
+            upsertSandboxSessionEnvelope(this.deps.db, {
+              accountId: this.deps.accountId,
+              workspaceId: this.deps.workspaceId,
+              sessionId: this.deps.sessionId,
+              envelope,
+            }),
+          );
+          this.persistedEnvelope = serialized;
+        }
       }
     } catch (persistError) {
+      if (options.persist && !persistenceAttempted) {
+        // Prefix validation or media preparation can fail before there is a
+        // history transaction. Retain the exact result/audit without advancing
+        // this sink, then surface the original history failure.
+        await options.persist(async () => true);
+      }
       console.error("session history persistence failed", safeErrorDiagnostic(persistError));
       if (options.requireDurable) throw persistError;
     }

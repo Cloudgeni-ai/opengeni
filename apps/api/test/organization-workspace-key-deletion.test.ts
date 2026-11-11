@@ -1,13 +1,18 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Permission, Workspace } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { createApiKey, createDb, createWorkspace, type DbClient } from "@opengeni/db";
 import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+  createApiKey,
+  createDb,
+  createWorkspace,
+  deleteWorkspaceIfQuiescent,
+  nestedPostgresSqlState,
+  safeDatabaseErrorFacts,
+  type DbClient,
+} from "@opengeni/db";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import {
   organizationApiKeyPermissions,
@@ -15,6 +20,7 @@ import {
 } from "../src/routes/api-keys";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 /**
  * An integrating backend provisions organization workspaces with its
@@ -26,6 +32,7 @@ import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
+let scheduleDeletes = 0;
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api-organization-workspace-key-deletion");
@@ -42,7 +49,9 @@ beforeAll(async () => {
     bus: new MemoryEventBus(),
     settings: testSettings({ productAccessMode: "managed", sandboxBackend: "none" }),
     workflowClient: {
-      deleteScheduledTaskSchedule: noop,
+      deleteScheduledTaskSchedule: async () => {
+        scheduleDeletes += 1;
+      },
     } as unknown as SessionWorkflowClient,
     githubStateSecret: "test",
     objectStorage: null,
@@ -62,13 +71,6 @@ afterAll(async () => {
   await client?.close().catch(() => undefined);
   await shared?.release();
 }, 60_000);
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
 
 async function organizationKey(accountId: string, permissions: Permission[]) {
   const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -108,6 +110,63 @@ async function workspaceExists(id: string): Promise<boolean> {
 }
 
 describe("organization API key workspace deletion", () => {
+  test.each(["workspace", "organization"] as const)(
+    "%s deletion retains audit-linked data and rolls back cleanup before returning a conflict",
+    async (route) => {
+      if (!app) return;
+      const { accountId } = await organizationFixture();
+      const tenant = await createWorkspace(client!.db, { accountId, name: "Retained tenant" });
+      const key = await organizationKey(accountId, organizationApiKeyPermissions);
+      const retainedId = crypto.randomUUID();
+      const scheduleId = `retained-workspace-${crypto.randomUUID()}`;
+      // A record kept outside the workspace's own data refuses the deletion
+      // through its restrictive reference, as retained audit records do.
+      await shared!.admin.unsafe(`
+        create table if not exists deletion_retention_fixture (
+          id uuid primary key,
+          workspace_id uuid not null references workspaces(id) on delete restrict
+        )`);
+      await shared!.admin`insert into deletion_retention_fixture (id, workspace_id)
+        values (${retainedId}, ${tenant.id})`;
+      await shared!.admin`insert into scheduled_tasks (
+        account_id, workspace_id, name, schedule, temporal_schedule_id, agent_config
+      ) values (
+        ${accountId}, ${tenant.id}, 'retained schedule',
+        ${shared!.admin.json({ type: "interval", everySeconds: 60 })}, ${scheduleId},
+        ${shared!.admin.json({ prompt: "fixture", resources: [], tools: [], metadata: {} })}
+      )`;
+      const [before] = await shared!
+        .admin`select * from deletion_retention_fixture where id=${retainedId}`;
+      const baselineError = await deleteWorkspaceIfQuiescent(client!.db, {
+        accountId,
+        workspaceId: tenant.id,
+      }).catch((error: unknown) => error);
+      expect(nestedPostgresSqlState(baselineError)).toBe("23503");
+      expect(safeDatabaseErrorFacts(baselineError).constraint).toBe(
+        "deletion_retention_fixture_workspace_id_fkey",
+      );
+      const deletesBefore = scheduleDeletes;
+      const path =
+        route === "workspace"
+          ? `/v1/workspaces/${tenant.id}`
+          : `/v1/organizations/${accountId}/workspaces/${tenant.id}`;
+      const response = await del(path, key);
+      expect(response.status).toBe(409);
+      expect(await response.text()).toContain("retained or linked records");
+      expect(await workspaceExists(tenant.id)).toBe(true);
+      const [after] = await shared!
+        .admin`select * from deletion_retention_fixture where id=${retainedId}`;
+      expect(after).toEqual(before);
+      const [rows] = await shared!.admin<{ schedules: number; cleanups: number }[]>`
+        select
+          (select count(*)::int from scheduled_tasks where temporal_schedule_id=${scheduleId}) as schedules,
+          (select count(*)::int from temporal_schedule_cleanup_outbox where temporal_schedule_id=${scheduleId}) as cleanups`;
+      expect(rows).toEqual({ schedules: 1, cleanups: 0 });
+      expect(scheduleDeletes).toBe(deletesBefore);
+    },
+    60_000,
+  );
+
   test("a full organization key deletes the workspace it provisioned", async () => {
     if (!app) return;
     const { accountId } = await organizationFixture();

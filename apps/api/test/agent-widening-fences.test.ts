@@ -16,16 +16,16 @@ import {
   getScheduledTaskCreatorPolicy,
   getSession,
   initializeSessionStartAtomically,
+  applySessionTurnSettlement,
   persistAttemptToolCatalog,
+  submitHumanPromptInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
@@ -152,7 +152,11 @@ async function narrowedRootSession(
 }
 
 /** Claim a live attempt on the session's initial turn the way the worker does. */
-async function liveAttempt(grant: Grant, sessionId: string): Promise<Attempt> {
+async function liveAttempt(
+  grant: Grant,
+  sessionId: string,
+  initialTimeZone?: string,
+): Promise<Attempt> {
   const started = await initializeSessionStartAtomically(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -160,6 +164,7 @@ async function liveAttempt(grant: Grant, sessionId: string): Promise<Attempt> {
     reasoningEffortFallback: "low",
     createdEventPayload: {},
     goal: null,
+    ...(initialTimeZone ? { initialTimeZone } : {}),
   });
   if (!started.turn) throw new Error("test session did not create an initial turn");
   const attemptId = crypto.randomUUID();
@@ -301,6 +306,33 @@ describe("child first-party tool selection may only narrow (real PostgreSQL)", (
     ).toEqual(["set_session_title", "session_create"]);
   });
 
+  test("an agent's own list naming a tool of a capability it turns off is still refused", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const root = await narrowedRootSession(grant, ["set_session_title", "session_create"]);
+    const attempt = await liveAttempt(grant, root.id);
+    const response = await sessionRoutesApp().request(
+      `/v1/workspaces/${grant.workspaceId}/sessions`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await agentBearer(grant, attempt, ["set_session_title", "session_create"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          initialMessage: "child work",
+          resources: [],
+          firstPartyMcpTools: ["set_session_title", "session_create"],
+          agent: { capabilities: "none" },
+        }),
+      },
+    );
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain(
+      "firstPartyMcpTools lists session_create, but agent capability subagents is off",
+    );
+  });
+
   test("the session_create MCP tool applies the same fence and says so", async () => {
     if (!available) return;
     const grant = await fixture();
@@ -398,13 +430,15 @@ describe("parentless tool policy: agents narrow, humans may widen (real PostgreS
     });
     expect(widened.status).toBe(403);
     expect(await widened.text()).toContain(
-      "an agent may only narrow its session OpenGeni tools: goal_set",
+      "an agent may only narrow its session first-party tools: goal_set",
     );
 
     // Adopting workspace defaults is a widen whenever it adds anything.
     const defaults = await put(agent, { mode: "workspace_default", expectedVersion: 1 });
     expect(defaults.status).toBe(403);
-    expect(await defaults.text()).toContain("an agent may only narrow its session OpenGeni tools");
+    expect(await defaults.text()).toContain(
+      "an agent may not replace a pinned built-in selection with future defaults",
+    );
 
     // Narrowing (here: to nothing) still works for the agent.
     const narrowed = await put(agent, {
@@ -437,6 +471,78 @@ describe("parentless tool policy: agents narrow, humans may widen (real PostgreS
       "set_session_title",
       "goal_set",
     ]);
+  });
+
+  test("PUT /tool-policy grants an existing session new permissions only within the caller's own", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const root = await narrowedRootSession(
+      grant,
+      ["set_session_title"],
+      ["sessions:read", "sessions:control"],
+    );
+    const attempt = await liveAttempt(grant, root.id);
+    const app = sessionRoutesApp();
+    const path = `/v1/workspaces/${grant.workspaceId}/sessions/${root.id}/tool-policy`;
+    const put = (authorization: string, body: Record<string, unknown>) =>
+      app.request(path, {
+        method: "PUT",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const body = (version: number, firstPartyMcpPermissions: Permission[]) => ({
+      mode: "explicit",
+      tools: [],
+      firstPartyMcpTools: ["set_session_title"],
+      firstPartyMcpPermissions,
+      expectedVersion: version,
+    });
+
+    // The agent holds files:read itself, but may not raise its own session.
+    const agent = await agentBearer(
+      grant,
+      attempt,
+      ["set_session_title"],
+      [...AGENT_PERMISSIONS, "files:read"],
+    );
+    const widened = await put(agent, body(1, ["sessions:read", "sessions:control", "files:read"]));
+    expect(widened.status).toBe(403);
+    expect(await widened.text()).toContain(
+      "an agent may only narrow its session first-party permissions: files:read",
+    );
+
+    // A person without files:read cannot hand it out either.
+    const plainHuman = await put(
+      await humanBearer(grant),
+      body(1, ["sessions:read", "sessions:control", "files:read"]),
+    );
+    expect(plainHuman.status).toBe(403);
+
+    // A person who holds it can, and the next attempt signs from the session.
+    const human = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      permissions: ["sessions:read", "sessions:control", "files:read", "files:upload"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    const granted = await put(
+      human,
+      body(1, ["sessions:read", "sessions:control", "files:read", "files:upload"]),
+    );
+    expect(granted.status).toBe(200);
+    expect(await granted.json()).toMatchObject({ toolPolicyVersion: 2 });
+    expect(
+      [
+        ...((await getSession(client.db, grant.workspaceId, root.id))?.firstPartyMcpPermissions ??
+          []),
+      ].sort(),
+    ).toEqual(["files:read", "files:upload", "sessions:control", "sessions:read"]);
+
+    // Narrowing stays open to the agent.
+    const narrowed = await put(agent, body(2, ["sessions:read", "sessions:control"]));
+    expect(narrowed.status).toBe(200);
   });
 });
 
@@ -473,6 +579,145 @@ describe("agent-created scheduled tasks freeze the creator boundary (real Postgr
         "workspace:read",
       ],
       sessionPolicy: expect.objectContaining({}),
+    });
+  });
+
+  test("an agent's schedule without a zone uses the zone of the message that asked for it", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const tools: FirstPartyMcpToolName[] = ["scheduled_tasks_create", "scheduled_tasks_update"];
+    const permissions: Permission[] = [
+      "sessions:read",
+      "sessions:control",
+      "scheduled_tasks:manage",
+      "workspace:read",
+    ];
+    const zonedServer = async (initialTimeZone?: string) => {
+      const root = await narrowedRootSession(grant, tools, permissions);
+      const attempt = await liveAttempt(grant, root.id, initialTimeZone);
+      return buildOpenGeniMcpServer(routeDeps(), agentGrant(grant, attempt, tools));
+    };
+    const mondayAtNine = { type: "calendar", hour: 9, minute: 0, daysOfWeek: ["MONDAY"] };
+    const create = async (server: unknown, schedule: Record<string, unknown>) => {
+      const result = await callMcpTool(server, "scheduled_tasks_create", {
+        name: "Call the doctor",
+        schedule,
+        runMode: "new_session_per_run",
+        agentConfig: {
+          prompt: "Remind me to call the doctor",
+          resources: [],
+          tools: [],
+          metadata: {},
+        },
+      });
+      expect(result.isError, result.text).toBeFalsy();
+      const receipt = JSON.parse(result.text) as {
+        resource: { id: string };
+        facts?: Record<string, unknown>;
+      };
+      const [row] = await shared!.admin<{ schedule: Record<string, unknown> }[]>`
+        select schedule from scheduled_tasks where id = ${receipt.resource.id}`;
+      return { id: receipt.resource.id, facts: receipt.facts, schedule: row!.schedule };
+    };
+
+    const oslo = await zonedServer("Europe/Oslo");
+    const fromMessage = await create(oslo, mondayAtNine);
+    expect(fromMessage.schedule).toMatchObject({ ...mondayAtNine, timeZone: "Europe/Oslo" });
+    expect(fromMessage.facts).toMatchObject({
+      scheduleTimeZone: "Europe/Oslo",
+      scheduleTimeZoneSource: "message",
+    });
+
+    // A zone the agent names is kept as given, and nothing is reported.
+    const named = await create(oslo, { ...mondayAtNine, timeZone: "Asia/Tokyo" });
+    expect(named.schedule.timeZone).toBe("Asia/Tokyo");
+    expect(named.facts?.scheduleTimeZone).toBeUndefined();
+
+    // Moving a schedule to 10 keeps its own zone rather than the sender's.
+    const moved = await callMcpTool(oslo, "scheduled_tasks_update", {
+      id: named.id,
+      schedule: { ...mondayAtNine, hour: 10 },
+    });
+    expect(moved.isError, moved.text).toBeFalsy();
+    expect(JSON.parse(moved.text).facts).toMatchObject({
+      scheduleTimeZone: "Asia/Tokyo",
+      scheduleTimeZoneSource: "existing_schedule",
+    });
+    const [movedRow] = await shared!.admin<{ schedule: Record<string, unknown> }[]>`
+      select schedule from scheduled_tasks where id = ${named.id}`;
+    expect(movedRow!.schedule).toMatchObject({ hour: 10, timeZone: "Asia/Tokyo" });
+
+    // A turn without a zone (an API caller, a scheduled run) falls back to UTC.
+    const unzoned = await create(await zonedServer(), mondayAtNine);
+    expect(unzoned.schedule.timeZone).toBe("UTC");
+    expect(unzoned.facts).toMatchObject({ scheduleTimeZone: "UTC", scheduleTimeZoneSource: "utc" });
+
+    // A later turn no person's message started still uses the zone the
+    // person last wrote from in this chat.
+    const root = await narrowedRootSession(grant, tools, permissions);
+    const first = await liveAttempt(grant, root.id, "Europe/Oslo");
+    const [firstTurn] = await shared!.admin<{ trigger_event_id: string }[]>`
+      select trigger_event_id from session_turns where id = ${first.turnId}`;
+    const settled = await applySessionTurnSettlement(client.db, grant.workspaceId, {
+      sessionId: root.id,
+      turnId: first.turnId,
+      triggerEventId: firstTurn!.trigger_event_id,
+      attemptId: first.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed" as const, payload: { output: "Done." } }],
+    });
+    expect(settled.action).toBe("settled");
+    const service = "service:continuation";
+    await withWorkspaceSubjectSessionActivityRls(client.db, grant.workspaceId, service, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: root.id,
+          subjectId: service,
+          subjectLabel: "Continuation",
+          actor: { type: "service", subjectId: service, subjectLabel: "Continuation" },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Keep going",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "api",
+        }),
+      ),
+    );
+    const attemptId = crypto.randomUUID();
+    const continued = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: root.id,
+      workflowId: `session-${root.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (continued.action !== "claimed")
+      throw new Error(`continuation turn was not claimed: ${JSON.stringify(continued)}`);
+    expect(continued.turn.metadata.messageTimeZone).toBeUndefined();
+    const continuation = buildOpenGeniMcpServer(
+      routeDeps(),
+      agentGrant(
+        grant,
+        {
+          sessionId: root.id,
+          turnId: continued.turn.id,
+          attemptId,
+          executionGeneration: continued.turn.executionGeneration,
+        },
+        tools,
+      ),
+    );
+    const fromSession = await create(continuation, mondayAtNine);
+    expect(fromSession.schedule.timeZone).toBe("Europe/Oslo");
+    expect(fromSession.facts).toMatchObject({
+      scheduleTimeZone: "Europe/Oslo",
+      scheduleTimeZoneSource: "session",
     });
   });
 
@@ -518,6 +763,7 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
     grant: Grant,
     firstPartyMcpTools: FirstPartyMcpToolName[],
     agentConfig?: ResolvedAgentConfig,
+    acceptedTools: FirstPartyMcpToolName[] = firstPartyMcpTools,
   ): Promise<Attempt> {
     const session = await narrowedRootSession(grant, firstPartyMcpTools);
     if (agentConfig) {
@@ -560,7 +806,14 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
       ...attempt,
       generation: 1,
       createdAt: new Date().toISOString(),
-      entries: [],
+      entries: acceptedTools.map((name) => ({
+        identity: { serverId: "opengeni", toolName: name },
+        modelName: `opengeni__${name}`,
+        codemodePath: ["opengeni", name],
+        inputSchema: { type: "object" },
+        source: "opengeni",
+        approval: "none",
+      })),
     };
     await persistAttemptToolCatalog(client.db, {
       ...unsigned,
@@ -601,7 +854,7 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
     const agentConfig = resolveAgentConfig({
       creator: "api",
       request: { capabilities: { from: "none", workspaceAdmin: true } },
-      deployment: { unavailable: {}, admissionEnabled: true, defaultForNewSessions: false },
+      deployment: { unavailable: {} },
       workspace: { defaults: null, humanInputEnabled: true },
       goal: false,
     }).config!;
@@ -691,6 +944,20 @@ describe("Codemode SDK proxy carries only what the selection can exercise (real 
       },
     );
     expect(create.status).toBe(403);
+  });
+
+  test("a live selection cannot grant list access absent from the accepted catalog", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const app = fullApp();
+    const attempt = await seedRunningAttempt(grant, ["sessions_list"], undefined, []);
+    const authorization = await codemodeBearer(grant, attempt);
+    const list = await app.request(
+      `/v1/workspaces/${grant.workspaceId}/codemode/sdk/v1/workspaces/site-host/sessions`,
+      { headers: { authorization } },
+    );
+    expect(list.status).toBe(403);
+    expect(await list.json()).toMatchObject({ error: { code: "forbidden" } });
   });
 
   test("the local dev API serves the proxy on the Docker sandbox route", async () => {

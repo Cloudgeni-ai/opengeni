@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Database } from "@opengeni/db";
+import { getDocumentInventory, type DocumentInventoryInput } from "../src";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(resolve(here, "..", "src", "index.ts"), "utf8");
@@ -11,14 +13,35 @@ const inventorySource = source.slice(
 );
 
 describe("document inventory bounds", () => {
-  test("validates every row and label limit before opening the RLS query", () => {
-    const rlsAt = inventorySource.indexOf("return await withDocumentRls");
-    expect(source).toContain("DOCUMENT_INVENTORY_MAX_BASE_LIMIT = 100");
-    expect(source).toContain("DOCUMENT_INVENTORY_MAX_TOPIC_LIMIT = 100");
-    expect(source).toContain("DOCUMENT_INVENTORY_MAX_TOPIC_CHARS = 256");
-    expect(inventorySource.indexOf("input.baseLimit")).toBeLessThan(rlsAt);
-    expect(inventorySource.indexOf("input.topicLimit")).toBeLessThan(rlsAt);
-    expect(inventorySource.indexOf("input.topicMaxChars")).toBeLessThan(rlsAt);
+  test.each([
+    ["baseLimit", 100],
+    ["topicLimit", 100],
+    ["topicMaxChars", 256],
+  ] as const)("validates %s before accessing the database", async (field, maximum) => {
+    let databaseReads = 0;
+    const databaseBoundary = new Error("database boundary reached");
+    const db = new Proxy({} as Database, {
+      get() {
+        databaseReads += 1;
+        throw databaseBoundary;
+      },
+    });
+    const valid: DocumentInventoryInput = { baseLimit: 1, topicLimit: 1, topicMaxChars: 1 };
+    for (const value of [-1, 0, 1.5, maximum + 1, NaN, Infinity]) {
+      await expect(
+        getDocumentInventory(db, "workspace", { ...valid, [field]: value }),
+      ).rejects.toThrow(`${field} must be an integer between 1 and ${maximum}`);
+      expect(databaseReads).toBe(0);
+    }
+    // Both accepted boundaries must get past validation; rejecting every input
+    // would otherwise make the negative cases green without preserving the API.
+    for (const value of [1, maximum]) {
+      const before = databaseReads;
+      await expect(
+        getDocumentInventory(db, "workspace", { ...valid, [field]: value }),
+      ).rejects.toBe(databaseBoundary);
+      expect(databaseReads).toBeGreaterThan(before);
+    }
   });
 
   test("projects only aggregate columns and bounds base/topic rows in SQL", () => {

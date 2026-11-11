@@ -9,11 +9,17 @@ import {
   ChatComposer,
   ModelPolicyPicker,
   type ComposerState,
+  type FileAttachment,
+  type UseFileAttachmentsResult,
   type SlashCommand,
 } from "@opengeni/react";
 import { RealtimeVoiceControl, type RealtimeModelOption } from "@opengeni/react/realtime";
 import { createRoot } from "react-dom/client";
 import { useMemo, useRef, useState } from "react";
+
+import { MessageContextPills } from "@opengeni/react/app/components/message-context-pills";
+import { AppHostProvider, type AppHost } from "@opengeni/react/app/lib/app-host";
+import { createMessageContextStore } from "@opengeni/react/app/lib/message-context";
 
 import { MANAGER_SESSION_ID, MockOpenGeniClient } from "./mock";
 import "./styles.css";
@@ -24,7 +30,25 @@ const initialDensity = params.get("density") === "compact" ? "compact" : "defaul
 const initialTheme = params.get("theme") === "light" ? "light" : "dark";
 const initialVoiceActive = params.get("voice") === "active";
 const hostBranding = params.get("branding") === "host";
-const widths = [280, 320, 360, 420, 640, 768] as const;
+const openGeniBranding = params.get("branding") === "opengeni";
+const deploymentModelsRequested = params.get("models") === "deployment";
+// `?speed=ultrafast` adds an Ultrafast tier, so the picker shows its Speed choice.
+const ultrafastRequested = params.get("speed") === "ultrafast";
+// `?context=excel` adds a host context pill, as the Excel add-in's selection shows.
+const contextStore =
+  params.get("context") === "excel"
+    ? createMessageContextStore([
+        { id: "workbook", text: "In the open workbook Q3 budget.xlsx." },
+        {
+          id: "selection",
+          label: "Budget · B2:D14",
+          detail: "Budget!B2:D14 in Q3 budget.xlsx",
+          text: "Selected Budget!B2:D14.",
+        },
+      ])
+    : null;
+const contextHost = { messageContext: contextStore ?? undefined } as unknown as AppHost;
+const widths = [280, 320, 360, 390, 420, 640, 768] as const;
 const client = new MockOpenGeniClient();
 
 const commands: readonly SlashCommand[] = [
@@ -74,8 +98,42 @@ const models: ClientModel[] = [
       latencyModes: [
         { id: "standard", upstream: "supported", runnable: true },
         { id: "fast", upstream: "supported", runnable: true },
+        ...(ultrafastRequested
+          ? [
+              {
+                id: "ultrafast" as const,
+                upstream: "supported" as const,
+                runnable: true,
+                billingMultiplierBps: 60_000,
+              },
+            ]
+          : []),
       ],
     },
+  },
+];
+
+// Synthetic catalog facts exercise the real shared picker; no model is invoked.
+const deploymentModels: ClientModel[] = [
+  {
+    ...models[0]!,
+    id: "deployment/credits",
+    label: "Credit-backed model",
+    shortLabel: "Credit model",
+    provider: "openai",
+    providerLabel: "OpenAI",
+    source: "opengeni",
+    cost: "credits",
+  },
+  {
+    ...models[0]!,
+    id: "deployment/free",
+    label: "Free deployment model",
+    shortLabel: "Free model",
+    provider: "openai",
+    providerLabel: "OpenAI",
+    source: "opengeni",
+    cost: "free",
   },
 ];
 
@@ -145,14 +203,51 @@ function ResponsiveComposerHarness() {
   const [width, setWidth] = useState(
     widths.includes(initialWidth as (typeof widths)[number]) ? initialWidth : 320,
   );
+  const [attachmentItems, setAttachmentItems] = useState<FileAttachment[]>(() =>
+    params.has("attachments")
+      ? ["e2e screenshot.png", "neighbor.png"].map((name) => ({
+          id: name,
+          name,
+          contentType: "image/png",
+          sizeBytes: 2048,
+          status: params.get("attachments") === "uploading" ? "uploading" : "ready",
+          previewUrl:
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL2GQAAAABJRU5ErkJggg==",
+        }))
+      : [],
+  );
+  const attachmentState: UseFileAttachmentsResult | undefined = params.has("attachments")
+    ? {
+        attachments: attachmentItems,
+        readyResources: [],
+        uploading: attachmentItems.some((item) => item.status === "uploading"),
+        hasUnresolved: attachmentItems.some((item) => item.status !== "ready"),
+        addFiles: () => {},
+        addFromPaste: () => {},
+        restoreReadyFiles: () => {},
+        retry: () => {},
+        retainPreview: () => undefined,
+        remove: (id) => setAttachmentItems((items) => items.filter((item) => item.id !== id)),
+        removeReadyFiles: () => {},
+        clear: () => setAttachmentItems([]),
+      }
+    : undefined;
   const [density, setDensity] = useState(initialDensity);
   const [theme, setTheme] = useState(initialTheme);
   const [paused, setPaused] = useState(params.get("paused") === "1");
   const [voiceActive, setVoiceActive] = useState(initialVoiceActive);
   const [value, setValue] = useState("A long prompt remains editable while the panel resizes.");
-  const [model, setModel] = useState(models[0]!.id);
+  const [model, setModel] = useState(
+    deploymentModelsRequested
+      ? params.get("selected") === "free"
+        ? "deployment/free"
+        : "deployment/credits"
+      : models[0]!.id,
+  );
   const [effort, setEffort] = useState<ReasoningEffort>("medium");
-  const [latencyMode, setLatencyMode] = useState<LatencyMode>("fast");
+  const [latencyMode, setLatencyMode] = useState<LatencyMode>(
+    ultrafastRequested ? "ultrafast" : "fast",
+  );
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const composer = useMemo<ComposerState>(
@@ -283,46 +378,70 @@ function ResponsiveComposerHarness() {
             style={{ width, maxWidth: "100%" }}
           >
             <ChatComposer
+              header={contextStore ? <MessageContextPills /> : undefined}
               composer={composer}
+              attachments={attachmentState}
               responsiveBasis="container"
               effectiveControl={paused ? pausedControl : activeControl}
               transcription={{}}
               controlsStart={
                 <ModelPolicyPicker
                   models={
-                    hostBranding
-                      ? [
-                          ...models,
-                          {
-                            ...models[0]!,
-                            id: "host/example",
-                            provider: "openai",
-                            source: "opengeni",
-                            label: "Host model",
-                            cost: "credits",
-                          },
-                        ]
-                      : models
+                    deploymentModelsRequested
+                      ? [...deploymentModels, ...models]
+                      : hostBranding
+                        ? [
+                            ...models,
+                            {
+                              ...models[0]!,
+                              id: "host/example",
+                              provider: "openai",
+                              source: "opengeni",
+                              label: "Host model",
+                              cost: "credits",
+                            },
+                          ]
+                        : models
                   }
                   groupPresentation={
-                    hostBranding
+                    openGeniBranding
                       ? {
                           opengeni_credits: {
-                            label: "Acme Assist",
-                            description: "Provided by your workspace",
+                            label: "Opengeni",
+                            // Explicit host-owned branding in the existing 14px slot.
                             icon: (
-                              <svg viewBox="0 0 16 16" aria-hidden="true">
-                                <path fill="currentColor" d="M8 1 15 15H1ZM8 6l-3 7h6Z" />
+                              <svg
+                                viewBox="0 0 176 138.73"
+                                fill="currentColor"
+                                aria-hidden="true"
+                                data-testid="opted-in-opengeni-mark"
+                              >
+                                <path
+                                  transform="translate(-75 -39.5966)"
+                                  d="M251 83.5966L207 109L163 83.5966L119 109L75 83.5966L141 45.4915A44 44 0 0 1 185 45.4915ZM185.25 172.3642A44.5 44.5 0 0 1 140.75 172.3642L75 134.4034L119 109L163 134.4034L207 109L251 134.4034Z"
+                                />
                               </svg>
                             ),
                           },
-                          codex_subscription: {
-                            label: "Your connected plan",
-                            description: null,
-                            icon: null,
-                          },
                         }
-                      : undefined
+                      : hostBranding
+                        ? {
+                            opengeni_credits: {
+                              label: "Acme Assist",
+                              description: "Provided by your workspace",
+                              icon: (
+                                <svg viewBox="0 0 16 16" aria-hidden="true">
+                                  <path fill="currentColor" d="M8 1 15 15H1ZM8 6l-3 7h6Z" />
+                                </svg>
+                              ),
+                            },
+                            codex_subscription: {
+                              label: "Your connected plan",
+                              description: null,
+                              icon: null,
+                            },
+                          }
+                        : undefined
                   }
                   model={model}
                   effort={effort}
@@ -367,4 +486,8 @@ function ResponsiveComposerHarness() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<ResponsiveComposerHarness />);
+createRoot(document.getElementById("root")!).render(
+  <AppHostProvider host={contextHost}>
+    <ResponsiveComposerHarness />
+  </AppHostProvider>,
+);

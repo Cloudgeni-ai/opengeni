@@ -2,16 +2,22 @@ import { describe, expect, test } from "bun:test";
 import { Agent, Runner, tool, setTracingDisabled, type ModelRequest } from "@openai/agents";
 import { z } from "zod";
 import { configuredProviders, type ResolvedModelProvider } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   AnthropicMessagesModel,
+  AnthropicProviderRejection,
   anthropicMessages,
   anthropicResponse,
+  anthropicSse,
   buildAnthropicRequest,
 } from "../src/anthropic-messages";
 import { isModelCallFetch } from "../src/model-provider-transport";
 import { projectHistoryForProvider } from "../src/provider-history-adapter";
 import { MultiProviderModelProvider } from "../src/model-provider-routing";
+import {
+  buildCompactionReplacementHistory,
+  EmptyCompactionSummaryError,
+} from "../src/context-compaction";
 
 setTracingDisabled(true);
 const provider: ResolvedModelProvider = {
@@ -49,6 +55,186 @@ const response = (content: unknown[], stop = "end_turn") => ({
   },
 });
 
+test.each(["low", "medium", "high", "xhigh", "max"] as const)(
+  "native effort %s reaches the wire unchanged for Fable 5.2 and the 5.5 models",
+  (effort) => {
+    for (const model of [
+      "claude-fable-5-2",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-haiku-5-5",
+    ]) {
+      const req = request();
+      req.modelSettings = { reasoning: { effort } };
+      const body = buildAnthropicRequest(req, model, provider, false);
+      // Every model asks for reasoning summaries, so thinking stays readable
+      // in the timeline, including models that write progress updates.
+      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+      expect(body.output_config.effort).toBe(effort);
+      expect(body.max_tokens).toBe(128_000);
+    }
+  },
+);
+
+test("known models reject unsupported effort instead of silently downgrading", () => {
+  const req = request();
+  req.modelSettings = { reasoning: { effort: "xhigh" } };
+  expect(() => buildAnthropicRequest(req, "claude-opus-4-6", provider, false)).toThrow(
+    "does not support this reasoning effort",
+  );
+});
+
+test("nonadaptive managed models never receive adaptive thinking and keep their own output limits", () => {
+  const managed = {
+    ...provider,
+    kind: "anthropic-workspace" as const,
+    anthropic: {
+      auth: "api-key" as const,
+      cacheTtl: "5m" as const,
+      maxOutputTokens: 128_000,
+      streamIdleTimeoutMs: 600_000,
+    },
+  };
+  const req = request();
+  req.modelSettings = { reasoning: { effort: "high" } };
+  for (const [id, limit] of [
+    ["claude-haiku-4-5-20251001", 64_000],
+    ["claude-unknown", 32_000],
+  ] as const) {
+    const body = buildAnthropicRequest(req, id, managed, false);
+    expect(body.thinking).toBeUndefined();
+    expect(body.output_config).toBeUndefined();
+    expect(body.max_tokens).toBe(limit);
+  }
+  req.modelSettings.maxTokens = 1_000;
+  expect(buildAnthropicRequest(req, "claude-opus-5-5", managed, false).max_tokens).toBe(1_000);
+});
+
+test("explicit registry reasoning for an unknown model remains available", () => {
+  const req = request();
+  req.modelSettings = { reasoning: { effort: "xhigh" } };
+  expect(buildAnthropicRequest(req, "claude-custom", provider, false).output_config.effort).toBe(
+    "xhigh",
+  );
+});
+
+test("caller abort interrupts a stalled SSE read without waiting for cleanup", async () => {
+  const abort = new AbortController();
+  const reason = new Error("synthetic caller interruption");
+  let cancelled = false;
+  const model = new AnthropicMessagesModel(
+    provider,
+    "claude-test",
+    (async () =>
+      new Response(
+        new ReadableStream(
+          {
+            pull() {
+              abort.abort(reason);
+            },
+            cancel() {
+              cancelled = true;
+              return new Promise<void>(() => {});
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+      )) as typeof fetch,
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("Abort did not settle")), 1000);
+  });
+  try {
+    const read = async () => {
+      for await (const event of model.getStreamedResponse({ ...request(), signal: abort.signal })) {
+        void event;
+      }
+    };
+    await expect(Promise.race([read(), deadline])).rejects.toBe(reason);
+    expect(cancelled).toBe(true);
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
+test.each([false, true])(
+  "abort at the response boundary cancels the owned body (stream=%s)",
+  async (streamed) => {
+    const abort = new AbortController();
+    const reason = new Error("synthetic response-boundary interruption");
+    let cancelled = false;
+    const model = new AnthropicMessagesModel(provider, "claude-test", (async () => {
+      const body = new ReadableStream({
+        cancel() {
+          cancelled = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      abort.abort(reason);
+      return new Response(body);
+    }) as typeof fetch);
+    const req = { ...request(), signal: abort.signal };
+    const read = async () => {
+      if (!streamed) return model.getResponse(req);
+      for await (const event of model.getStreamedResponse(req)) {
+        void event;
+      }
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Abort did not settle")), 1000);
+    });
+    try {
+      await expect(Promise.race([read(), deadline])).rejects.toBe(reason);
+      expect(cancelled).toBe(true);
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+);
+
+test("SSE cancellation listeners end with each read, including consumer pauses", async () => {
+  const abort = new AbortController();
+  const signal = abort.signal;
+  const listeners = new Set<unknown>();
+  const add = signal.addEventListener.bind(signal);
+  const remove = signal.removeEventListener.bind(signal);
+  signal.addEventListener = (type, listener, options) => {
+    if (type === "abort") listeners.add(listener);
+    add(type, listener, options);
+  };
+  signal.removeEventListener = (type, listener, options) => {
+    if (type === "abort") listeners.delete(listener);
+    remove(type, listener, options);
+  };
+  let count = 0;
+  let cancelled = false;
+  const reason = new Error("Synthetic paused consumer cancellation");
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(`data: {"type":"ping","index":${count++}}\n\n`),
+        );
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const consume = async () => {
+    for await (const event of anthropicSse(body, 1000, signal)) {
+      expect(listeners.size).toBe(0);
+      if (event.index === 7) abort.abort(reason);
+    }
+  };
+  await expect(consume()).rejects.toBe(reason);
+  expect(listeners.size).toBe(0);
+  expect(cancelled).toBe(true);
+});
+
 test("initial system and developer instructions move to top-level while later policy stays in place", () => {
   const input: ModelRequest["input"] = [
     { role: "system", content: "Skill catalog" },
@@ -65,7 +251,11 @@ test("initial system and developer instructions move to top-level while later po
     "Initial policy",
   ]);
   expect(body.system.at(-1).cache_control).toEqual({ type: "ephemeral", ttl: "5m" });
-  expect(body.messages.map((message: any) => message.role)).toEqual(["user", "system", "user"]);
+  expect(body.messages.map((message: any) => message.role)).toEqual(["user", "system"]);
+  expect(body.messages[0].content.map((block: any) => block.text)).toEqual([
+    "Draw a chart",
+    "Continue",
+  ]);
   expect(body.messages[1].content[0].text).toBe("Later policy");
   expect(JSON.stringify(input)).toBe(before);
   expect(() =>
@@ -76,6 +266,236 @@ test("initial system and developer instructions move to top-level while later po
       true,
     ),
   ).toThrow("conversation message");
+});
+
+function expectValidSystemPlacement(messages: any[]) {
+  for (const [index, message] of messages.entries()) {
+    if (message.role !== "system") continue;
+    expect(messages[index - 1]?.role).toBe("user");
+    expect(messages[index + 1]?.role ?? "assistant").toBe("assistant");
+  }
+}
+
+const syntheticCompactedHistories = [false, true].flatMap((userArray) =>
+  [false, true].flatMap((systemArray) =>
+    [false, true].map((summaryArray) => {
+      const content = (texts: string[], array: boolean) =>
+        array ? texts.map((text) => ({ type: "input_text" as const, text })) : texts.join("\n");
+      return {
+        name: `user ${userArray ? "blocks" : "text"}, system ${systemArray ? "blocks" : "text"}, summary ${summaryArray ? "blocks" : "text"}`,
+        input: [
+          { role: "developer", content: "Available test tools" },
+          { role: "user", content: content(["Prepare a plan", "Include a timeline"], userArray) },
+          { role: "system", content: content(["Tool result", "Execution context"], systemArray) },
+          {
+            role: "user",
+            content: content(
+              ["Completed work", "Remaining work", "Continue the task"],
+              summaryArray,
+            ),
+          },
+          { role: "system", content: content(["Updated policy", "Current task state"], true) },
+        ],
+        wireUserBlocks: (userArray ? 2 : 1) + (summaryArray ? 3 : 1),
+        wireSystemBlocks: (systemArray ? 2 : 1) + 2,
+      };
+    }),
+  ),
+);
+
+for (const fixture of syntheticCompactedHistories) {
+  test(`generated compacted history (${fixture.name}) recovers without history writes`, async () => {
+    const input = fixture.input as ModelRequest["input"];
+    const before = JSON.stringify(input);
+    const oldProjection = anthropicMessages(input);
+    oldProjection.shift(); // Leading developer catalog goes to top-level system.
+    expect(oldProjection.map((message) => message.role)).toEqual([
+      "user",
+      "system",
+      "user",
+      "system",
+    ]);
+    let calls = 0;
+    const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async (_url, init) => {
+      calls += 1;
+      const body = JSON.parse(String(init?.body));
+      // Strict provider-shape oracle: the pre-fix request fails this assertion.
+      expectValidSystemPlacement(body.messages);
+      expect(body.messages.map((message: any) => message.role)).toEqual(["user", "system"]);
+      expect(body.messages[0].content).toHaveLength(fixture.wireUserBlocks);
+      expect(body.messages[1].content).toHaveLength(fixture.wireSystemBlocks);
+      const sourceText = fixture.input.flatMap((item) =>
+        typeof item.content === "string" ? [item.content] : item.content.map((block) => block.text),
+      );
+      const wireText = [
+        ...body.system,
+        ...body.messages.flatMap((message: any) => message.content),
+      ].map((block: any) => block.text);
+      for (const text of sourceText)
+        expect(wireText.filter((value: string) => value === text)).toHaveLength(1);
+      return stream(events([{ type: "text", text: "Recovered" }]));
+    }) as typeof fetch);
+    const result: any = (await collect(model, request(input))).at(-1);
+    expect(result.response.output[0].content[0].text).toBe("Recovered");
+    expect(calls).toBe(1);
+    expect(JSON.stringify(input)).toBe(before);
+  });
+}
+
+test("portable compaction's retained user/system inputs and user summary remain valid on Claude", () => {
+  const history = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Task" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Working" }] },
+    { type: "message", role: "system", content: [{ type: "input_text", text: "Child result" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Continuing" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Follow up" }] },
+    { type: "message", role: "system", content: [{ type: "input_text", text: "Goal context" }] },
+  ];
+  const compacted = buildCompactionReplacementHistory(history, "Work already completed");
+  // The canonical replacement deliberately preserves system-role machine input.
+  expect(compacted.map((item) => item.role)).toEqual(["user", "system", "user", "system", "user"]);
+  const input = compacted as ModelRequest["input"];
+  const before = JSON.stringify(input);
+  for (const streamed of [false, true]) {
+    const body = buildAnthropicRequest(request(input), "claude-opus-5-5", provider, streamed);
+    expect(body.messages.map((message: any) => message.role)).toEqual(["user", "system"]);
+    expect(body.messages[1].content.map((block: any) => block.text)).toEqual([
+      "Child result",
+      "Goal context",
+    ]);
+    expect(body.messages[0].content.map((block: any) => block.text)).toEqual([
+      "Task",
+      "Follow up",
+      compacted.at(-1)!.content,
+    ]);
+    expectValidSystemPlacement(body.messages);
+  }
+  expect(JSON.stringify(input)).toBe(before);
+});
+
+test("portable compaction's retained reply of a finished turn remains valid on Claude", () => {
+  const [t1, t2, t3] = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+  const history = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Task" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Working" }] },
+    { type: "message", role: "system", content: [{ type: "input_text", text: "Child result" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "Continuing" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Follow up" }] },
+    { type: "message", role: "system", content: [{ type: "input_text", text: "Goal context" }] },
+  ];
+  const compacted = buildCompactionReplacementHistory(
+    history,
+    "Work already completed",
+    undefined,
+    undefined,
+    undefined,
+    { itemTurnIds: [t1, t1, t2, t2, t3, t3], activeTurnId: t3 },
+  );
+  // The finished "Task" turn keeps its last reply; the running turn does not.
+  expect(compacted.map((item) => item.role)).toEqual([
+    "user",
+    "assistant",
+    "system",
+    "user",
+    "system",
+    "user",
+  ]);
+  const input = compacted as ModelRequest["input"];
+  const before = JSON.stringify(input);
+  for (const streamed of [false, true]) {
+    const body = buildAnthropicRequest(request(input), "claude-opus-5-5", provider, streamed);
+    expect(body.messages.map((message: any) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "system",
+    ]);
+    expect(body.messages[0].content.map((block: any) => block.text)).toEqual(["Task"]);
+    expect(body.messages[1].content.map((block: any) => block.text)).toEqual(["Working"]);
+    expect(body.messages[2].content.map((block: any) => block.text)).toEqual([
+      "Follow up",
+      compacted.at(-1)!.content,
+    ]);
+    expect(body.messages[3].content.map((block: any) => block.text)).toEqual([
+      "Child result",
+      "Goal context",
+    ]);
+    expectValidSystemPlacement(body.messages);
+  }
+  expect(JSON.stringify(input)).toBe(before);
+});
+
+test("system placement preserves assistant phases, tool pairing and exact signed thinking", () => {
+  const thinking = { type: "thinking", thinking: "Thought", signature: "signature" };
+  const input: ModelRequest["input"] = [
+    { role: "user", content: "Task" },
+    { role: "system", content: "First system" },
+    { role: "user", content: "More input" },
+    { type: "reasoning", content: [], providerData: { anthropic: { block: thinking } } },
+    { type: "function_call", name: "lookup", callId: "call_1", arguments: "{}" },
+    { role: "system", content: "Tool phase system" },
+    { type: "function_call_result", name: "lookup", callId: "call_1", output: "Result" },
+    { role: "system", content: "Second tool phase system" },
+    { role: "assistant", content: "Done" },
+    { role: "user", content: "Next turn" },
+  ];
+  const before = JSON.stringify(input);
+  const body = buildAnthropicRequest(request(input), "claude-opus-5-5", provider, true);
+  expect(body.messages.map((message: any) => message.role)).toEqual([
+    "user",
+    "system",
+    "assistant",
+    "user",
+    "system",
+    "assistant",
+    "user",
+  ]);
+  expectValidSystemPlacement(body.messages);
+  expect(body.messages[2].content[0]).toEqual(thinking);
+  expect(body.messages[3].content[0]).toMatchObject({ type: "tool_result", tool_use_id: "call_1" });
+  expect(body.messages[4].content.map((block: any) => block.text)).toEqual([
+    "Tool phase system",
+    "Second tool phase system",
+  ]);
+  expect(JSON.stringify(input)).toBe(before);
+  const continuation = buildAnthropicRequest(
+    request([
+      { role: "user", content: "Task" },
+      { role: "assistant", content: "Done" },
+      { role: "system", content: "Continuation system" },
+      { role: "assistant", content: "More" },
+    ]),
+    "claude",
+    provider,
+    true,
+  );
+  expectValidSystemPlacement(continuation.messages);
+  expect(continuation.messages.map((message: any) => message.role)).toEqual([
+    "user",
+    "assistant",
+    "user",
+    "system",
+    "assistant",
+  ]);
+});
+
+test("successful continuation keeps the compacted request prefix stable on the next turn", () => {
+  const compacted: ModelRequest["input"] = [
+    { role: "user", content: "Retained task" },
+    { role: "system", content: "Retained machine input" },
+    { role: "user", content: "Checkpoint summary" },
+  ];
+  const before = buildAnthropicRequest(request(compacted), "claude-opus-5-5", provider, true);
+  const continued: ModelRequest["input"] = [
+    ...compacted,
+    { role: "assistant", content: "Resumed successfully" },
+    { role: "user", content: "Next turn" },
+    { role: "system", content: "New machine input" },
+  ];
+  const after = buildAnthropicRequest(request(continued), "claude-opus-5-5", provider, true);
+  expect(after.messages.slice(0, before.messages.length)).toEqual(before.messages);
+  expect(after.system).toEqual(before.system);
+  expectValidSystemPlacement(after.messages);
 });
 
 function stream(frames: unknown[], oneByte = false) {
@@ -188,6 +608,40 @@ test("streamed cache creation TTL details survive SDK usage without double count
 });
 
 describe("Claude full-history Messages adapter", () => {
+  test("an empty reply recorded by another provider is left out instead of sent as an empty text block", () => {
+    const messages = anthropicMessages([
+      { type: "message", role: "user", content: "Check the accounts" },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Checking." }],
+      },
+      { type: "message", role: "developer", content: "A goal update" },
+      // Another provider's final answer with no words in it.
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "" }],
+        providerData: { phase: "final_answer" },
+      },
+      { type: "message", role: "developer", content: "Another update" },
+      { type: "message", role: "user", content: "Continue" },
+    ] as any);
+    for (const message of messages)
+      for (const block of message.content)
+        if (block.type === "text") expect(block.text.length).toBeGreaterThan(0);
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "system",
+      "user",
+    ]);
+    expect(messages[2]!.content.map((block) => block.text)).toEqual([
+      "A goal update",
+      "Another update",
+    ]);
+  });
+
   test("stable tool/system prefixes, three cache breakpoints, no thread references or mutation", () => {
     const req = request();
     req.tools = [
@@ -206,7 +660,7 @@ describe("Claude full-history Messages adapter", () => {
     expect(body.system[0].cache_control).toEqual(body.tools[0].cache_control);
     expect(body.messages[0].content[0].cache_control).toEqual(body.tools[0].cache_control);
     expect(body.thread).toBeUndefined();
-    expect(body.max_tokens).toBe(32000);
+    expect(body.max_tokens).toBe(128000);
     expect(req).toEqual(before);
     const uncached = buildAnthropicRequest(
       req,
@@ -253,6 +707,42 @@ describe("Claude full-history Messages adapter", () => {
     expect(messages[2]!.content[0]!.content[0].source.type).toBe("base64");
     expect(messages[2]!.content[1]!.is_error).toBe(true);
     expect(() => anthropicMessages(input.slice(0, 3))).toThrow("missing");
+  });
+
+  test("a system message inside an unfinished tool step moves after the step's results when more of the reply follows", () => {
+    // Another provider ran two tool searches between a call and its result,
+    // and a search notice followed the first search.
+    const search = (id: string) => [
+      { type: "tool_search_call", id: `ts_${id}`, arguments: { query: id }, callId: id },
+      { type: "tool_search_output", id: `to_${id}`, tools: [], callId: id },
+    ];
+    const notice = { type: "message", role: "developer", content: "Search notice" };
+    const input: any[] = [
+      { type: "message", role: "user", content: "check" },
+      { type: "function_call", callId: "a", name: "list", arguments: "{}" },
+      ...search("s1"),
+      notice,
+      ...search("s2"),
+      { type: "function_call_result", callId: "a", output: "listed" },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] },
+    ];
+    const messages = anthropicMessages(input);
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "system",
+      "assistant",
+    ]);
+    expect(messages[1]!.content[0]).toMatchObject({ type: "tool_use", id: "a" });
+    expect(messages[2]!.content).toEqual([
+      { type: "tool_result", tool_use_id: "a", content: [{ type: "text", text: "listed" }] },
+    ]);
+    expect(JSON.stringify(messages[3]!.content)).toContain("Search notice");
+
+    // Followed directly by the results, it keeps its place, as before.
+    const direct = anthropicMessages([input[0], input[1], notice, input[7]]);
+    expect(direct.map((message) => message.role)).toEqual(["user", "assistant", "system", "user"]);
   });
 
   test("signed thinking round trips exactly, including redacted blocks", () => {
@@ -472,6 +962,232 @@ test("HTTP context overflow exposes a typed recovery signal without echoing inpu
   }
 });
 
+test.each([false, true])(
+  "model suspension is a permission rejection (stream=%s)",
+  async (streamed) => {
+    const model = new AnthropicMessagesModel(
+      provider,
+      "claude-test",
+      (async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              type: "permission_error",
+              message:
+                'model: "claude-test" is suspended for this organization until 2031-04-05T06:07:08Z',
+              details: { error_code: "model_access_suspended", private: "synthetic-private-value" },
+            },
+          }),
+          {
+            status: 403,
+            headers: { "request-id": "req_synthetic_suspended", "retry-after": "3600" },
+          },
+        )) as typeof fetch,
+    );
+    const error = await (streamed ? collect(model) : model.getResponse(request())).catch((e) => e);
+    expect(error).toBeInstanceOf(AnthropicProviderRejection);
+    expect(error).toMatchObject({
+      status: 403,
+      code: "anthropic_model_access_suspended",
+      request_id: "req_synthetic_suspended",
+      suspendedUntil: "2031-04-05T06:07:08.000Z",
+      headers: { "retry-after": "3600" },
+    });
+    expect(error.message).toContain("2031-04-05 06:07:08 UTC");
+    expect(error.message).not.toContain("expired");
+    expect(JSON.stringify(error)).not.toContain("synthetic-private-value");
+  },
+);
+
+test.each([
+  'model: "claude-test" is suspended for this organization until 2031-02-30T06:07:08Z',
+  'model: "claude-test" is suspended for this organization until 2031-04-05T06:07:08Z synthetic-private-value',
+  "synthetic-private-value",
+])("suspension diagnostics do not echo malformed or arbitrary details: %s", async (message) => {
+  const model = new AnthropicMessagesModel(
+    provider,
+    "claude-test",
+    (async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            type: "permission_error",
+            message,
+            details: { error_code: "model_access_suspended" },
+          },
+        }),
+        { status: 403 },
+      )) as typeof fetch,
+  );
+  const error = await model.getResponse(request()).catch((e) => e);
+  expect(error).toMatchObject({ status: 403, code: "anthropic_model_access_suspended" });
+  expect(error.suspendedUntil).toBeUndefined();
+  expect(error.message).not.toContain("2031-");
+  expect(error.message).not.toContain("synthetic-private-value");
+});
+
+test.each([
+  "{truncated",
+  JSON.stringify({
+    error: {
+      type: "permission_error",
+      message: "synthetic-private-value",
+    },
+  }),
+])("other HTTP 403 failures remain permission errors without echoed text", async (detail) => {
+  const model = new AnthropicMessagesModel(
+    provider,
+    "claude-test",
+    (async () => new Response(detail, { status: 403 })) as typeof fetch,
+  );
+  const error = await model.getResponse(request()).catch((e) => e);
+  expect(error).toMatchObject({ status: 403, code: "anthropic_permission_denied" });
+  expect(error.message).toContain("permissions");
+  expect(error.message).not.toContain("synthetic-private-value");
+});
+
+test("SSE permission errors preserve the model suspension", async () => {
+  const model = new AnthropicMessagesModel(provider, "claude-test", (async () =>
+    stream([
+      {
+        type: "error",
+        error: {
+          type: "permission_error",
+          message:
+            'model: "claude-test" is suspended for this organization until 2031-04-05T06:07:08Z',
+          details: { error_code: "model_access_suspended" },
+        },
+      },
+    ])) as typeof fetch);
+  await expect(collect(model)).rejects.toMatchObject({
+    status: 403,
+    code: "anthropic_model_access_suspended",
+    request_id: "req_test",
+  });
+});
+
+test("an empty refusal is a terminal policy rejection in the JSON response", async () => {
+  const model = new AnthropicMessagesModel(provider, "claude-test", (async () =>
+    Response.json(
+      {
+        ...response([], "refusal"),
+        stop_details: {
+          type: "refusal",
+          category: "synthetic_policy",
+          explanation: "synthetic-private-value",
+        },
+      },
+      { headers: { "request-id": "req_synthetic_refusal" } },
+    )) as typeof fetch);
+  const error = await model.getResponse(request()).catch((e) => e);
+  expect(error).toBeInstanceOf(AnthropicProviderRejection);
+  expect(error).toMatchObject({
+    status: 200,
+    code: "content_policy_violation",
+    request_id: "req_synthetic_refusal",
+  });
+  expect(error.message).not.toContain("synthetic-private-value");
+});
+
+test.each([false, true])(
+  "the Agents SDK cannot execute a tool from refused output (stream=%s)",
+  async (streamed) => {
+    let requests = 0;
+    let executions = 0;
+    const block = { type: "tool_use", id: "toolu_synthetic", name: "act", input: {} };
+    const model = new AnthropicMessagesModel(provider, "claude-test", (async () => {
+      requests++;
+      return streamed
+        ? stream(events([block], "refusal"))
+        : Response.json(response([block], "refusal"));
+    }) as typeof fetch);
+    const agent = new Agent({
+      name: "Test",
+      model,
+      tools: [
+        tool({
+          name: "act",
+          description: "Synthetic action",
+          parameters: z.object({}),
+          execute: async () => {
+            executions++;
+            return "synthetic result";
+          },
+        }),
+      ],
+    });
+    const runner = new Runner({ tracingDisabled: true });
+    const execute = async () => {
+      if (streamed) {
+        const run = await runner.run(agent, "Run the synthetic tool", { stream: true });
+        for await (const event of run) {
+          void event;
+        }
+      } else await runner.run(agent, "Run the synthetic tool");
+    };
+    await expect(execute()).rejects.toBeInstanceOf(AnthropicProviderRejection);
+    expect(requests).toBe(1);
+    expect(executions).toBe(0);
+  },
+);
+
+test.each([false, true])(
+  "a streamed refusal stops even when completion or cleanup stalls (%s)",
+  async (stalledCleanup) => {
+    const frames = [
+      { type: "message_start", message: response([], null as any) },
+      {
+        type: "message_delta",
+        delta: {
+          stop_reason: "refusal",
+          stop_details: {
+            type: "refusal",
+            explanation: "synthetic-private-value",
+          },
+        },
+        usage: { output_tokens: 0 },
+      },
+    ];
+    let cancelled = false;
+    const model = new AnthropicMessagesModel(
+      provider,
+      "claude-test",
+      (async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  frames.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(""),
+                ),
+              );
+            },
+            cancel() {
+              cancelled = true;
+              if (stalledCleanup) return new Promise<void>(() => {});
+            },
+          }),
+          { headers: { "request-id": "req_synthetic_refusal" } },
+        )) as typeof fetch,
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Terminal refusal did not settle")), 1000);
+    });
+    try {
+      await expect(Promise.race([collect(model), deadline])).rejects.toMatchObject({
+        status: 200,
+        code: "content_policy_violation",
+        request_id: "req_synthetic_refusal",
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    expect(cancelled).toBe(true);
+  },
+  1000,
+);
+
 test("stream idle timeout cancels the body without accepting a partial response", async () => {
   let cancelled = false;
   const model = new AnthropicMessagesModel(
@@ -598,13 +1314,15 @@ test("native title and compaction calls handle output limits without accepting i
       }),
     ).toBe("Fix native stream truncat");
     stop = "max_tokens";
+    // A summary cut off at the output limit is unusable, like a Chat
+    // Completions `length` finish, rather than a provider failure.
     await expect(
       summarizeForCompaction(testSettings(), history, {
         provider: native,
         client,
         model: "claude-test",
       }),
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
     const title = await generateSessionTitle(testSettings(), "Repair streaming", {
       provider: native,
       client,
@@ -724,3 +1442,115 @@ test("stream authentication failures remain permanent rather than becoming retry
   expect(error.status).toBe(401);
   expect(String(error)).not.toContain("do not persist");
 });
+
+test("HTTP and SSE provider type/message reach turn.failed detail without retaining the body or request", async () => {
+  const { agentRunFailurePayload } =
+    await import("../../../apps/worker/src/activities/agent-turn/errors");
+  for (const streamed of [false, true]) {
+    const envelope = {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "messages.2: system must precede assistant",
+        request: "private echoed content",
+      },
+      request: "private body field",
+    };
+    const model = new AnthropicMessagesModel(provider, "claude", (async () =>
+      streamed
+        ? new Response(stream([envelope]).body, { headers: { "request-id": "req_invalid" } })
+        : Response.json(envelope, {
+            status: 400,
+            headers: { "request-id": "req_invalid" },
+          })) as typeof fetch);
+    let error: any;
+    try {
+      if (streamed) await collect(model, request("private outgoing request"));
+      else await model.getResponse(request("private outgoing request"));
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error.status).toBe(400);
+    const failure = agentRunFailurePayload(error);
+    expect(failure).toMatchObject({
+      detail: "invalid_request_error: messages.2: system must precede assistant",
+      requestId: "req_invalid",
+      retryable: false,
+    });
+    expect(JSON.stringify(failure)).not.toContain("private");
+    expect(error.message).not.toContain("system must precede");
+    expect(JSON.stringify(error)).not.toContain("system must precede");
+  }
+});
+
+test("provider diagnostics are UTF-8 bounded and malformed/non-JSON bodies retain status only", async () => {
+  const { agentRunFailurePayload } =
+    await import("../../../apps/worker/src/activities/agent-turn/errors");
+  for (const body of [
+    JSON.stringify({ error: { type: "invalid_request_error", message: "💥".repeat(4000) } }),
+    "private HTML error",
+    '{"error":',
+  ]) {
+    const model = new AnthropicMessagesModel(
+      provider,
+      "claude",
+      (async () => new Response(body, { status: 400 })) as typeof fetch,
+    );
+    let error: any;
+    try {
+      await model.getResponse(request());
+    } catch (caught) {
+      error = caught;
+    }
+    const failure = agentRunFailurePayload(error);
+    expect(failure.code).toBe("anthropic_http_error");
+    expect(failure.retryable).toBe(false);
+    if (body.startsWith('{"error":{"')) {
+      expect(Buffer.byteLength(failure.detail!)).toBeLessThanOrEqual(4096);
+      expect(failure.detail).toEndWith("… [truncated]");
+      expect(failure.detail).not.toContain("\ufffd");
+    } else expect(failure.detail).toBeUndefined();
+  }
+});
+
+test.each([
+  ["Console API key", "sk-ant-api03-synthetic"],
+  ["personal key", "sk-ant-usr-synthetic"],
+  ["service-account key", "sk-ant-svc-synthetic"],
+  ["future key kind", "sk-ant-new07-synthetic"],
+])(
+  "an Anthropic API connection sends a %s as x-api-key and reports its rejection cleanly",
+  async (_label, apiKey) => {
+    let sent: Headers | undefined;
+    const model = new AnthropicMessagesModel(
+      {
+        ...provider,
+        apiKey,
+        anthropic: {
+          auth: "api-key",
+          cacheTtl: "5m",
+          maxOutputTokens: 1000,
+          streamIdleTimeoutMs: 600000,
+        },
+      },
+      "claude",
+      (async (_url, init) => {
+        sent = new Headers(init?.headers);
+        return Response.json(
+          { type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } },
+          { status: 401 },
+        );
+      }) as typeof fetch,
+    );
+    const failure = await model.getResponse(request()).catch((error: unknown) => error);
+    expect(sent?.get("x-api-key")).toBe(apiKey);
+    expect(sent?.has("authorization")).toBe(false);
+    expect(sent?.get("anthropic-beta") ?? "").not.toContain("oauth");
+    expect(failure).toMatchObject({
+      status: 401,
+      subscription: false,
+      message:
+        "Claude credentials expired or were revoked. Replace the key or setup token in Models.",
+    });
+  },
+);

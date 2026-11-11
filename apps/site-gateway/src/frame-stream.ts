@@ -1,0 +1,538 @@
+/**
+ * The Site frame document, streamed.
+ *
+ * `siteFrameDocument(html)` (version.ts) is the Site's HTML with its optional
+ * client tag resolved (`resolveSiteClientScript`) and the bridge bootstrap
+ * inserted after a leading doctype (`injectSiteBridgeBootstrap`). Building it
+ * from one string holds several full copies of the page at once, which a large
+ * Site (tens of megabytes of inlined media) turns into more than a Worker's
+ * 128 MB and Cloudflare's raw "Error 1102". This module produces the same
+ * document while the page streams through. Beyond the read in hand (at most
+ * SITE_FRAME_READ_BYTES) and the piece being handed on (about
+ * SITE_FRAME_PIECE_CHARS, plus at most one SITE_FRAME_REWRITE_CHARS slice's
+ * output) it holds a few kilobytes (a partial token or a
+ * candidate client tag) or, until the bootstrap's place is known, the leading
+ * head (at most about SITE_FRAME_HEAD_MAX_CHARS). It hands those bounded
+ * pieces to the SDK functions so the rewriting rules stay in one place. It
+ * reads the page in large pieces in one stage, because per-piece overhead,
+ * not the rewrite itself, is what costs a Worker CPU time.
+ *
+ * Differences from the whole-string functions, only for documents browsers
+ * already treat as broken: an unterminated `<script>` or `<!--` leaves the rest
+ * of the page untouched (a browser reads that rest as script text or comment),
+ * and a doctype preceded by more than SITE_FRAME_HEAD_MAX_CHARS of leading
+ * comments may get the bootstrap at the very start instead (where exactly
+ * depends on how the page arrived, within one SITE_FRAME_REWRITE_CHARS slice).
+ */
+import { injectSiteBridgeBootstrap } from "@opengeni/sdk/site-bridge-host";
+import { resolveSiteClientScript } from "@opengeni/sdk/site-document";
+
+/** Largest Site page the gateway serves (bytes from the API). Bounds the work per request. */
+export const SITE_FRAME_MAX_BYTES = 256 * 1024 * 1024;
+/** Most characters held to decide where the bootstrap goes (leading whitespace, comments, doctype). */
+export const SITE_FRAME_HEAD_MAX_CHARS = 256 * 1024;
+/**
+ * Most characters held for a `<script>` element that may be the client tag
+ * (its open tag plus a whitespace-only body). The real tag is about 60.
+ */
+export const SITE_CLIENT_TAG_MAX_CHARS = 4096;
+/**
+ * Bytes the rewrite reads from the page at once. Every chunk costs the Worker
+ * a fixed amount of CPU, and workerd hands a fetched body to JavaScript in
+ * 4 KB pieces by default: a 65 MB page read that way spent 4 to 9 seconds of
+ * the 10 second CPU limit. Large reads keep it to a few hundred chunks.
+ */
+export const SITE_FRAME_READ_BYTES = 256 * 1024;
+/**
+ * Once the first piece of the document has left (until then reads return as
+ * soon as anything arrives, so the page starts promptly), each read waits for
+ * at least this many bytes (or the end of the page) where the runtime can
+ * (workerd's `readAtLeast`).
+ */
+export const SITE_FRAME_MIN_READ_BYTES = 64 * 1024;
+/**
+ * Characters of decoded page text the rewriter takes at once. Resolving a
+ * client tag inserts the Site runtime (hundreds of kilobytes), so this bounds
+ * what one step can produce from a page full of client tags: about 70 tags,
+ * some 24 MB, as much as one 4 KB piece produced before reads grew.
+ */
+export const SITE_FRAME_REWRITE_CHARS = 4096;
+/** Characters of frame document after which a piece is handed on, the rest of the read kept for the next pull. */
+export const SITE_FRAME_PIECE_CHARS = 1024 * 1024;
+
+/** Thrown into the stream when the page grows past SITE_FRAME_MAX_BYTES. */
+export class SiteFrameTooLargeError extends Error {
+  constructor() {
+    super("Site page exceeds the gateway's size limit");
+    this.name = "SiteFrameTooLargeError";
+  }
+}
+
+type Emit = (text: string) => void;
+
+// No `u` flag: the SDK's patterns are not Unicode-mode, and case folding must match theirs.
+/** `<!--` or `<script` followed by a non-word character (the SDK's `<script\b`). */
+const TOKEN = /<!--|<script(?![A-Za-z0-9_])/gi;
+const SCRIPT_CLOSE = /<\/script\s*>/gi;
+const SCRIPT_CLOSE_AT = /<\/script\s*>/iy;
+const SCRIPT_CLOSE_PARTIAL = /<\/script\s*$/i;
+const NON_SPACE = /\S/g;
+
+/** Start of a trailing partial match of any of `tokens` (lowercase), or `buffer.length`. */
+function partialTail(buffer: string, from: number, tokens: readonly string[]): number {
+  const longest = Math.max(...tokens.map((token) => token.length));
+  for (let start = Math.max(from, buffer.length - longest + 1); start < buffer.length; start += 1) {
+    const tail = buffer.slice(start).toLowerCase();
+    if (tokens.some((token) => token.length > tail.length && token.startsWith(tail))) return start;
+  }
+  return buffer.length;
+}
+
+/**
+ * Streaming `resolveSiteClientScript`: comments and script elements pass
+ * through as they arrive; only a `<script>` whose open tag is short and whose
+ * body is whitespace so far is held, and resolved by the SDK once it closes.
+ */
+export class SiteClientScriptResolver {
+  private mode: "text" | "comment" | "open" | "open-pass" | "candidate" | "body" = "text";
+  private carry = "";
+  /** The held candidate element (`open`/`candidate`). */
+  private element = "";
+
+  push(chunk: string, emit: Emit): void {
+    const buffer = this.carry + chunk;
+    this.carry = "";
+    let index = 0;
+    while (index < buffer.length) {
+      switch (this.mode) {
+        case "text": {
+          TOKEN.lastIndex = index;
+          const match = TOKEN.exec(buffer);
+          if (!match) {
+            const hold = partialTail(buffer, index, ["<!--", "<script"]);
+            if (hold > index) emit(buffer.slice(index, hold));
+            this.carry = buffer.slice(hold);
+            return;
+          }
+          const comment = match[0] === "<!--";
+          // `<script` at the very end: the next character decides `\b`.
+          if (!comment && match.index + match[0].length === buffer.length) {
+            if (match.index > index) emit(buffer.slice(index, match.index));
+            this.carry = buffer.slice(match.index);
+            return;
+          }
+          if (match.index > index) emit(buffer.slice(index, match.index));
+          index = match.index + match[0].length;
+          if (comment) {
+            emit(match[0]);
+            this.mode = "comment";
+          } else {
+            this.element = match[0];
+            this.mode = "open";
+          }
+          break;
+        }
+        case "comment": {
+          const end = buffer.indexOf("-->", index);
+          if (end < 0) {
+            const hold = buffer.endsWith("--")
+              ? buffer.length - 2
+              : buffer.endsWith("-")
+                ? buffer.length - 1
+                : buffer.length;
+            const keep = Math.max(hold, index);
+            if (keep > index) emit(buffer.slice(index, keep));
+            this.carry = buffer.slice(keep);
+            return;
+          }
+          emit(buffer.slice(index, end + 3));
+          index = end + 3;
+          this.mode = "text";
+          break;
+        }
+        case "open": {
+          const end = buffer.indexOf(">", index);
+          this.element += buffer.slice(index, end < 0 ? buffer.length : end + 1);
+          index = end < 0 ? buffer.length : end + 1;
+          if (this.element.length > SITE_CLIENT_TAG_MAX_CHARS) {
+            emit(this.element);
+            this.element = "";
+            this.mode = end < 0 ? "open-pass" : "body";
+          } else if (end >= 0) this.mode = "candidate";
+          break;
+        }
+        case "open-pass": {
+          const end = buffer.indexOf(">", index);
+          const stop = end < 0 ? buffer.length : end + 1;
+          emit(buffer.slice(index, stop));
+          index = stop;
+          if (end >= 0) this.mode = "body";
+          break;
+        }
+        case "candidate": {
+          NON_SPACE.lastIndex = index;
+          const found = NON_SPACE.exec(buffer);
+          const stop = found ? found.index : buffer.length;
+          this.element += buffer.slice(index, stop);
+          index = stop;
+          if (this.element.length > SITE_CLIENT_TAG_MAX_CHARS) {
+            emit(this.element);
+            this.element = "";
+            this.mode = "body";
+            break;
+          }
+          if (!found) return;
+          SCRIPT_CLOSE_AT.lastIndex = index;
+          const close = SCRIPT_CLOSE_AT.exec(buffer);
+          if (close) {
+            emit(resolveSiteClientScript(this.element + close[0]));
+            this.element = "";
+            index += close[0].length;
+            this.mode = "text";
+            break;
+          }
+          // `</script` (and whitespace) may complete in the next chunk.
+          const rest = buffer.slice(index);
+          if (
+            rest.length <= SITE_CLIENT_TAG_MAX_CHARS &&
+            (SCRIPT_CLOSE_PARTIAL.exec(rest)?.index === 0 ||
+              "</script".startsWith(rest.toLowerCase()))
+          ) {
+            this.carry = rest;
+            return;
+          }
+          // Not the client tag: an ordinary script element from here on.
+          emit(this.element);
+          this.element = "";
+          this.mode = "body";
+          break;
+        }
+        case "body": {
+          SCRIPT_CLOSE.lastIndex = index;
+          const close = SCRIPT_CLOSE.exec(buffer);
+          if (close) {
+            const stop = close.index + close[0].length;
+            emit(buffer.slice(index, stop));
+            index = stop;
+            this.mode = "text";
+            break;
+          }
+          const hold = this.partialClose(buffer, index);
+          if (hold > index) emit(buffer.slice(index, hold));
+          this.carry = buffer.slice(hold);
+          return;
+        }
+      }
+    }
+  }
+
+  /** Start of a trailing `</script` (plus whitespace) that may close in the next chunk. */
+  private partialClose(buffer: string, from: number): number {
+    const windowStart = Math.max(from, buffer.length - SITE_CLIENT_TAG_MAX_CHARS);
+    const open = SCRIPT_CLOSE_PARTIAL.exec(buffer.slice(windowStart));
+    if (open) return windowStart + open.index;
+    return partialTail(buffer, from, ["</script"]);
+  }
+
+  finish(emit: Emit): void {
+    const rest = this.element + this.carry;
+    this.element = "";
+    this.carry = "";
+    if (rest) emit(rest);
+  }
+}
+
+/**
+ * Whether the bootstrap's place is known from `head` alone: it mirrors the
+ * SDK's leading-doctype scan (optional BOM, whitespace, comments, then
+ * `<!doctype ...>`) and says "not yet" wherever that scan would read past the
+ * end of `head`.
+ */
+export function bootstrapPlaceKnown(head: string): boolean {
+  let cursor = head.charCodeAt(0) === 0xfeff ? 1 : 0;
+  for (;;) {
+    while (cursor < head.length && /\s/.test(head[cursor]!)) cursor += 1;
+    if (cursor >= head.length) return false;
+    const rest = head.slice(cursor, cursor + 4);
+    if (rest.length < 4 && "<!--".startsWith(rest)) return false;
+    if (rest !== "<!--") break;
+    const end = head.indexOf("-->", cursor + 4);
+    if (end < 0) return false;
+    cursor = end + 3;
+  }
+  const doctype = head.slice(cursor, cursor + 9).toLowerCase();
+  if (doctype.length < 9) return !"<!doctype".startsWith(doctype);
+  if (doctype !== "<!doctype") return true;
+  return head.indexOf(">", cursor + 9) >= 0;
+}
+
+/** Streaming `injectSiteBridgeBootstrap`: holds only the leading head until the bootstrap's place is known. */
+export class SiteBootstrapInjector {
+  private head = "";
+  private done = false;
+
+  push(text: string, emit: Emit): void {
+    if (this.done) {
+      if (text) emit(text);
+      return;
+    }
+    this.head += text;
+    if (bootstrapPlaceKnown(this.head) || this.head.length > SITE_FRAME_HEAD_MAX_CHARS)
+      this.flush(emit);
+  }
+
+  finish(emit: Emit): void {
+    if (!this.done) this.flush(emit);
+  }
+
+  private flush(emit: Emit): void {
+    emit(injectSiteBridgeBootstrap(this.head));
+    this.head = "";
+    this.done = true;
+  }
+}
+
+/** Text in, frame document text out (client tag resolved, then the bootstrap inserted). */
+export class SiteFrameRewriter {
+  private readonly resolver = new SiteClientScriptResolver();
+  private readonly injector = new SiteBootstrapInjector();
+
+  /** The frame document text that `text` completes (possibly empty while a tag or the head is held). */
+  push(text: string): string {
+    const out: string[] = [];
+    this.resolver.push(text, (piece) => this.injector.push(piece, (done) => out.push(done)));
+    return out.join("");
+  }
+
+  /** The rest of the document once the page has ended. */
+  finish(): string {
+    const out: string[] = [];
+    this.resolver.finish((piece) => this.injector.push(piece, (done) => out.push(done)));
+    this.injector.finish((done) => out.push(done));
+    return out.join("");
+  }
+}
+
+type ChunkReader = {
+  /**
+   * The next bytes of the page, or null at its end. `eager` returns as soon
+   * as anything arrives; otherwise a byte stream waits for at least
+   * SITE_FRAME_MIN_READ_BYTES (or the end). The bytes stay valid only until
+   * the next read, which reuses their buffer.
+   */
+  read(eager: boolean): Promise<Uint8Array | null>;
+  cancel(reason?: unknown): Promise<void>;
+};
+
+type ReadAtLeast = (
+  minBytes: number,
+  view: Uint8Array,
+) => Promise<ReadableStreamReadResult<Uint8Array>>;
+
+/**
+ * Reads `body` in large chunks where it is a byte stream (a fetched body in
+ * workerd), else chunk by chunk as its source produced them.
+ */
+function largeChunkReader(body: ReadableStream<Uint8Array>): ChunkReader {
+  let byob: ReadableStreamBYOBReader | null = null;
+  try {
+    byob = body.getReader({ mode: "byob" });
+  } catch {
+    // Not a byte stream: its own chunking is all there is.
+  }
+  if (!byob) {
+    const reader = body.getReader();
+    return {
+      async read() {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return null;
+          if (value.byteLength) return value;
+        }
+      },
+      cancel: (reason) => reader.cancel(reason),
+    };
+  }
+  const reader = byob;
+  const readAtLeast = (reader as { readAtLeast?: ReadAtLeast }).readAtLeast;
+  // A BYOB read hands its buffer back with the bytes; the caller is done
+  // with them by the next read, so that buffer is reused.
+  let spare: ArrayBuffer | null = null;
+  return {
+    async read(eager) {
+      for (;;) {
+        const view = new Uint8Array(spare ?? new ArrayBuffer(SITE_FRAME_READ_BYTES));
+        spare = null;
+        const { done, value } =
+          !eager && typeof readAtLeast === "function"
+            ? await readAtLeast.call(reader, SITE_FRAME_MIN_READ_BYTES, view)
+            : await reader.read(view);
+        if (value) spare = value.buffer as ArrayBuffer;
+        if (value?.byteLength) return value;
+        if (done) return null;
+      }
+    },
+    cancel: (reason) => reader.cancel(reason),
+  };
+}
+
+/** End of a slice of `text` from `start`: about `size` characters, never inside a surrogate pair. */
+function sliceEnd(text: string, start: number, size: number): number {
+  const end = Math.min(text.length, start + size);
+  if (end < text.length) {
+    const last = text.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) return end + 1;
+  }
+  return end;
+}
+
+/**
+ * The frame document for a Site page body, as UTF-8 bytes, without holding
+ * the page in memory. Invalid UTF-8 decodes to U+FFFD, as `Response.text()`.
+ *
+ * One pull-driven stage reads, decodes, rewrites and encodes, so each large
+ * read costs one pass rather than a hop through several streams, and nothing
+ * is read before the viewer (or the cache fill) asks for more. The decoded
+ * text goes to the rewriter in SITE_FRAME_REWRITE_CHARS slices, and a piece
+ * is handed on once it passes SITE_FRAME_PIECE_CHARS, because resolving a
+ * client tag inserts the whole Site runtime: a read full of client tags must
+ * not become one enormous string. Until the first piece has left, reads
+ * return as soon as anything arrives, so the page starts promptly. More than
+ * `limit` bytes error the stream with SiteFrameTooLargeError.
+ */
+export function siteFrameStream(
+  body: ReadableStream<Uint8Array>,
+  limit = SITE_FRAME_MAX_BYTES,
+): ReadableStream<Uint8Array> {
+  const reader = largeChunkReader(body);
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  const rewriter = new SiteFrameRewriter();
+  let total = 0;
+  let started = false;
+  let cancelled = false;
+  let ended = false;
+  /** Decoded text not yet given to the rewriter, from `offset`. */
+  let pending = "";
+  let offset = 0;
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          for (;;) {
+            if (offset < pending.length) {
+              const out: string[] = [];
+              let size = 0;
+              while (offset < pending.length && size < SITE_FRAME_PIECE_CHARS) {
+                const end = sliceEnd(pending, offset, SITE_FRAME_REWRITE_CHARS);
+                const text = rewriter.push(pending.slice(offset, end));
+                offset = end;
+                if (text) {
+                  out.push(text);
+                  size += text.length;
+                }
+              }
+              if (offset >= pending.length) {
+                pending = "";
+                offset = 0;
+              }
+              // The decoder never splits a character, slices never split a
+              // surrogate pair, and the rewriter only holds back from ASCII
+              // positions, so each piece encodes on its own.
+              if (size) {
+                controller.enqueue(encoder.encode(out.join("")));
+                started = true;
+                return;
+              }
+              continue;
+            }
+            if (ended) {
+              const text = rewriter.finish();
+              if (text) controller.enqueue(encoder.encode(text));
+              controller.close();
+              return;
+            }
+            const chunk = await reader.read(!started);
+            if (cancelled) return;
+            if (chunk === null) {
+              ended = true;
+              pending = decoder.decode();
+              offset = 0;
+              continue;
+            }
+            total += chunk.byteLength;
+            if (total > limit) {
+              const error = new SiteFrameTooLargeError();
+              controller.error(error);
+              reader.cancel(error).catch(() => undefined);
+              return;
+            }
+            pending = decoder.decode(chunk, { stream: true });
+            offset = 0;
+          }
+        } catch (error) {
+          // Something unexpected (the rewrite threw): stop the page too.
+          reader.cancel(error).catch(() => undefined);
+          throw error;
+        }
+      },
+      cancel(reason) {
+        cancelled = true;
+        return reader.cancel(reason);
+      },
+    },
+    { highWaterMark: 0 },
+  );
+}
+
+/**
+ * Two readers of one stream that advance together: the next chunk is read
+ * only once both branches have room, so a slow reader holds back the other
+ * instead of the Worker buffering what one has read and the other has not
+ * (which `ReadableStream.tee()` does). If the first (primary) branch is
+ * cancelled or fails, both stop; if the second fails, the first carries on.
+ * `done` settles when the source is finished or abandoned.
+ */
+export function lockstepTee(source: ReadableStream<Uint8Array>): {
+  primary: ReadableStream<Uint8Array>;
+  secondary: ReadableStream<Uint8Array>;
+  done: Promise<void>;
+  /** Stop feeding the secondary (its consumer finished or gave up); the primary carries on. */
+  releaseSecondary: () => void;
+} {
+  const primary = new TransformStream<Uint8Array, Uint8Array>();
+  const secondary = new TransformStream<Uint8Array, Uint8Array>();
+  const primaryWriter = primary.writable.getWriter();
+  const secondaryWriter = secondary.writable.getWriter();
+  const reader = source.getReader();
+  let secondaryOpen = true;
+  const dropSecondary = (reason?: unknown) => {
+    if (!secondaryOpen) return;
+    secondaryOpen = false;
+    secondaryWriter.abort(reason).catch(() => undefined);
+  };
+  const done = (async () => {
+    try {
+      for (;;) {
+        await primaryWriter.ready;
+        if (secondaryOpen) await secondaryWriter.ready.catch(dropSecondary);
+        const { done: finished, value } = await reader.read();
+        if (finished) break;
+        if (secondaryOpen) secondaryWriter.write(value).catch(dropSecondary);
+        primaryWriter.write(value).catch(() => undefined);
+      }
+      if (secondaryOpen) await secondaryWriter.close().catch(() => undefined);
+      await primaryWriter.close();
+    } catch (error) {
+      dropSecondary(error);
+      primaryWriter.abort(error).catch(() => undefined);
+      await reader.cancel(error).catch(() => undefined);
+    }
+  })();
+  return {
+    primary: primary.readable,
+    secondary: secondary.readable,
+    done,
+    releaseSecondary: () => dropSecondary(new Error("secondary released")),
+  };
+}

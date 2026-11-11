@@ -15,14 +15,22 @@
 //!     ai.opengeni.agent.plist`, `RunAtLoad`+`KeepAlive`). LaunchAgent NOT
 //!     LaunchDaemon deliberately: desktop/computer-use needs the user's GUI Aqua
 //!     session + TCC. Structured + compiling; the plist generation is pure + tested.
-//!   * **Windows** — a true Windows Service (`OpengeniAgent`) via the SCM, with
-//!     restart-on-failure recovery + Automatic-(Delayed) start. Structured +
-//!     compiling; the registration command is generated + tested.
+//!     When the agent runs from its app bundle, the plist names that bundle in
+//!     `AssociatedBundleIdentifiers` so Login Items and the "Background Items
+//!     Added" notification show the app instead of the signing developer's name.
+//!   * **Windows** — a per-user Task Scheduler task (`Opengeni Agent`) that starts
+//!     at logon in the user's own desktop session, NOT a Windows Service:
+//!     services run in session 0, where screenshots, input and the user's browser
+//!     are out of reach, and registering one needs elevation. The task runs the
+//!     agent inside a headless console host (no window), a one-minute repetition
+//!     restarts it if it ever exits, and pausing disables the task. Registering
+//!     it needs no elevation. The task XML is generated + tested.
 //!
 //! The coarse outer restart loop (the service manager) sits ABOVE the in-process
 //! full-jitter backoff (the fine loop) — two independent layers of resiliency.
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use crate::error::{PlatformError, PlatformResult};
 
@@ -34,8 +42,8 @@ pub enum ServiceBackend {
     Systemd,
     /// launchd (macOS).
     Launchd,
-    /// the Windows Service Control Manager.
-    WindowsScm,
+    /// a per-user logon task in the Windows Task Scheduler.
+    WindowsTask,
     /// no supported service manager on this target.
     Unsupported,
 }
@@ -93,7 +101,7 @@ impl ServiceSpec {
         }
         #[cfg(target_os = "windows")]
         {
-            ServiceBackend::WindowsScm
+            ServiceBackend::WindowsTask
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
@@ -108,30 +116,18 @@ pub mod ids {
     pub const SYSTEMD_UNIT: &str = "opengeni-agent.service";
     /// The launchd label (macOS) + the plist file stem.
     pub const LAUNCHD_LABEL: &str = "ai.opengeni.agent";
-    /// The Windows Service name (Windows).
-    pub const WINDOWS_SERVICE: &str = "OpengeniAgent";
-}
-
-/// Renders the systemd unit-file body for `spec`. PURE (no IO) so it is fully
-/// unit-tested; `service install` writes this to the unit path and the `--print`
-/// mode dumps it.
-#[must_use]
-pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
-    render_systemd_unit_with_browser_shutdown(spec, true)
-}
-
-/// Exact v2 generated unit, retained solely for ownership-checked migration.
-#[doc(hidden)]
-#[must_use]
-pub fn render_legacy_systemd_unit_before_browser_shutdown(spec: &ServiceSpec) -> String {
-    render_systemd_unit_with_browser_shutdown(spec, false)
+    /// The macOS app bundle the installer and release place the agent in
+    /// (`CFBundleIdentifier` of `OpenGeni Agent.app`).
+    pub const MACOS_APP_BUNDLE_ID: &str = "ai.opengeni.agent";
+    /// The per-user Task Scheduler task (Windows).
+    pub const WINDOWS_TASK: &str = "Opengeni Agent";
 }
 
 /// Shutdown-safe definition for managers predating DelegateSubgroup.
 #[must_use]
 pub fn render_systemd_unit_without_supervisor_subgroup(spec: &ServiceSpec) -> String {
-    let legacy = render_legacy_systemd_unit_before_supervisor_subgroup(spec);
-    format!("# X-OpenGeni-Managed-Service=v3-compatible\n{}", legacy.replace(
+    let body = render_systemd_unit_body_without_supervisor_subgroup(spec);
+    format!("# X-OpenGeni-Managed-Service=v4-compatible\n{}", body.replace(
         "# A clean stop sends SIGTERM so the agent emits its going-offline message.\nKillSignal=SIGTERM\nTimeoutStopSec=15\n",
         COORDINATED_BROWSER_SHUTDOWN,
     ))
@@ -139,17 +135,72 @@ pub fn render_systemd_unit_without_supervisor_subgroup(spec: &ServiceSpec) -> St
 
 const COORDINATED_BROWSER_SHUTDOWN: &str = "# Signal only the supervisor; it cooperatively closes its browser sidecars.\nKillMode=mixed\nKillSignal=SIGTERM\nTimeoutStopSec=90\n";
 
+/// `[Unit]` start-rate policy. The agent may be stopped any number of times (a
+/// command that kills it, a model retrying one), so systemd must never give up
+/// restarting it: a start limit leaves it stopped until someone restarts it by
+/// hand. The restart delay below is the only throttle.
+const START_RATE_POLICY: &str = "# Never stop restarting: a start limit would leave the agent stopped until\n# someone restarts it by hand. The restart delay is the only throttle.\nStartLimitIntervalSec=0\n";
+
+/// `[Service]` restart delay for systemd 254 and newer: 2 s after the first
+/// stop, growing to 30 s over five more restarts. The counter only resets when
+/// the service is started by hand (or the machine boots), so 30 s is also the
+/// longest the agent can stay down between two restarts.
+const RESTART_BACKOFF: &str = "Restart=always\n# Back off from 2 s to at most 30 s between restarts (systemd 254+).\nRestartSec=2\nRestartSteps=5\nRestartMaxDelaySec=30\n";
+
+/// `[Service]` restart delay for managers predating `RestartSteps` (systemd
+/// 253 and older): a fixed delay, since they cannot back off.
+const RESTART_FIXED_DELAY: &str = "Restart=always\nRestartSec=5\n";
+
+/// The restart policy units generated before v4 carried: at most five starts a
+/// minute, after which systemd stopped restarting the agent for good.
+const PREVIOUS_START_RATE_POLICY: &str = "# Don't hammer on a crash-loop; the in-process backoff is the fine loop.\nStartLimitIntervalSec=60\nStartLimitBurst=5\n";
+
+/// The exact v3 unit an earlier release generated for `spec` on systemd 254 or
+/// newer. Only an unchanged generated unit is migrated to the current one; any
+/// other content, including operator edits, is left alone.
+#[must_use]
+pub fn render_previous_systemd_unit(spec: &ServiceSpec) -> String {
+    previous_generation(
+        &render_systemd_unit(spec),
+        "# X-OpenGeni-Managed-Service=v4\n",
+        "# X-OpenGeni-Managed-Service=v3\n",
+        RESTART_BACKOFF,
+    )
+}
+
+/// The exact v3-compatible unit an earlier release generated for `spec` on a
+/// manager predating `DelegateSubgroup`.
+#[must_use]
+pub fn render_previous_systemd_unit_without_supervisor_subgroup(spec: &ServiceSpec) -> String {
+    previous_generation(
+        &render_systemd_unit_without_supervisor_subgroup(spec),
+        "# X-OpenGeni-Managed-Service=v4-compatible\n",
+        "# X-OpenGeni-Managed-Service=v3-compatible\n",
+        RESTART_FIXED_DELAY,
+    )
+}
+
+fn previous_generation(
+    current: &str,
+    marker: &str,
+    previous_marker: &str,
+    restart: &str,
+) -> String {
+    current
+        .replacen(marker, previous_marker, 1)
+        .replacen(START_RATE_POLICY, PREVIOUS_START_RATE_POLICY, 1)
+        .replacen(restart, "Restart=always\nRestartSec=5\n", 1)
+}
+
 /// Browserd owns a 30-second graceful close followed by exact daemon/browser
 /// termination. Scopes drain concurrently within this process-wide budget.
 pub const BROWSER_SIDECAR_SHUTDOWN_TIMEOUT_SECS: u64 = 60;
 
-fn render_systemd_unit_with_browser_shutdown(spec: &ServiceSpec, coordinated: bool) -> String {
-    let version = if coordinated { "v3" } else { "v2" };
-    let shutdown = if coordinated {
-        COORDINATED_BROWSER_SHUTDOWN
-    } else {
-        "# A clean stop sends SIGTERM so the agent emits its going-offline message.\nKillSignal=SIGTERM\nTimeoutStopSec=15\n"
-    };
+/// Renders the systemd unit-file body for `spec`. PURE (no IO) so it is fully
+/// unit-tested; `service install` writes this to the unit path and the `--print`
+/// mode dumps it.
+#[must_use]
+pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
     let exec = exec_line(&spec.binary_path, &spec.args);
     let path = spec
         .environment_path
@@ -161,23 +212,20 @@ fn render_systemd_unit_with_browser_shutdown(spec: &ServiceSpec, coordinated: bo
         ServiceScope::System => "multi-user.target",
     };
     format!(
-        "# X-OpenGeni-Managed-Service={version}\n\
+        "# X-OpenGeni-Managed-Service=v4\n\
          # Generated by opengeni-agent; use a drop-in for operator policy.\n\
          [Unit]\n\
-         Description=OpenGeni self-hosted agent\n\
+         Description=Opengeni self-hosted agent\n\
          Documentation=https://get.opengeni.ai\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
-         # Don't hammer on a crash-loop; the in-process backoff is the fine loop.\n\
-         StartLimitIntervalSec=60\n\
-         StartLimitBurst=5\n\
+         {START_RATE_POLICY}\
          \n\
          [Service]\n\
          Type=simple\n\
          {path}\
          ExecStart={exec}\n\
-         Restart=always\n\
-         RestartSec=5\n\
+         {RESTART_BACKOFF}\
          # Keep the tiny control supervisor behind ordinary host work in the\n\
          # kernel's global OOM victim order. An unprivileged user manager may\n\
          # clamp this to its own inherited floor; startup reports the effective\n\
@@ -186,7 +234,7 @@ fn render_systemd_unit_with_browser_shutdown(spec: &ServiceSpec, coordinated: bo
          # An OOM-killed command child must not make systemd stop the surviving\n\
          # supervisor. If the main process is killed, Restart=always recovers it.\n\
          OOMPolicy=continue\n\
-         {shutdown}\
+         {COORDINATED_BROWSER_SHUTDOWN}\
          # OOM containment (issue #345). Delegate a cgroup subtree so the agent can\n\
          # place each host exec in its own resource-accounting sub-cgroup (see\n\
          # cgroup.rs). This separates accounting/systemd-oomd domains; global kernel\n\
@@ -218,13 +266,10 @@ fn render_systemd_unit_with_browser_shutdown(spec: &ServiceSpec, coordinated: bo
     )
 }
 
-/// Renders the exact manager-owned Linux unit emitted immediately before the
-/// stable `DelegateSubgroup=supervisor` topology existed. It is retained only as
-/// a byte-for-byte ownership proof for the one-time self-update migration; new
-/// installs must use [`render_systemd_unit`].
-#[doc(hidden)]
-#[must_use]
-pub fn render_legacy_systemd_unit_before_supervisor_subgroup(spec: &ServiceSpec) -> String {
+/// The unit body for systemd managers that predate `DelegateSubgroup`, before
+/// [`render_systemd_unit_without_supervisor_subgroup`] adds its marker and the
+/// coordinated shutdown policy.
+fn render_systemd_unit_body_without_supervisor_subgroup(spec: &ServiceSpec) -> String {
     let exec = exec_line(&spec.binary_path, &spec.args);
     let path = spec
         .environment_path
@@ -237,20 +282,17 @@ pub fn render_legacy_systemd_unit_before_supervisor_subgroup(spec: &ServiceSpec)
     };
     format!(
         "[Unit]\n\
-         Description=OpenGeni self-hosted agent\n\
+         Description=Opengeni self-hosted agent\n\
          Documentation=https://get.opengeni.ai\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
-         # Don't hammer on a crash-loop; the in-process backoff is the fine loop.\n\
-         StartLimitIntervalSec=60\n\
-         StartLimitBurst=5\n\
+         {START_RATE_POLICY}\
          \n\
          [Service]\n\
          Type=simple\n\
          {path}\
          ExecStart={exec}\n\
-         Restart=always\n\
-         RestartSec=5\n\
+         {RESTART_FIXED_DELAY}\
          # Keep the tiny control supervisor behind ordinary host work in the\n\
          # kernel's global OOM victim order. An unprivileged user manager may\n\
          # clamp this to its own inherited floor; startup reports the effective\n\
@@ -286,9 +328,107 @@ pub fn render_legacy_systemd_unit_before_supervisor_subgroup(spec: &ServiceSpec)
     )
 }
 
-/// Renders the macOS LaunchAgent plist body for `spec`. PURE + tested.
+/// Resolve the home used by service installation and dry-run rendering.
+///
+/// # Errors
+///
+/// Returns an OS error when neither HOME nor USERPROFILE is configured.
+pub fn service_user_home() -> PlatformResult<PathBuf> {
+    service_user_home_from_environment(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+}
+
+fn service_user_home_from_environment(
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+) -> PlatformResult<PathBuf> {
+    home.or(userprofile)
+        .map(PathBuf::from)
+        .ok_or_else(|| PlatformError::os("could not resolve a home directory ($HOME/$USERPROFILE)"))
+}
+
+/// Environment switch for a service manager that captures the agent's stderr
+/// itself: `off` keeps `tracing` output only in the agent's own bounded log.
+pub const AGENT_STDERR_LOG_ENV: &str = "OPENGENI_AGENT_STDERR_LOG";
+
+/// The file launchd appends the agent's stdout and stderr to. It sits in the
+/// agent's default config directory (`~/.config/opengeni/agent`, which is what a
+/// LaunchAgent without `$XDG_CONFIG_HOME` resolves) beside the agent's own log,
+/// which also bounds its size at startup. Without it launchd discards a crashed
+/// agent's last words.
 #[must_use]
-pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
+pub fn launchd_stderr_log_path(user_home: &Path) -> PathBuf {
+    user_home
+        .join(".config")
+        .join("opengeni")
+        .join("agent")
+        .join("logs")
+        .join("agent.stderr.log")
+}
+
+/// Whether `binary` is the executable of an app bundle
+/// (`<name>.app/Contents/MacOS/<executable>`). Evaluated as a POSIX path on every
+/// build host, like the rest of the LaunchAgent rendering.
+fn is_macos_app_bundle_executable(binary: &Path) -> bool {
+    let path = binary.to_string_lossy();
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    matches!(
+        parts.as_slice(),
+        [.., bundle, "Contents", "MacOS", _executable]
+            if Path::new(bundle)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+    )
+}
+
+/// Renders the macOS LaunchAgent plist body for `spec`. PURE + tested.
+/// The user home is explicit: launchd otherwise starts in `/`, which is read-only
+/// on macOS and cannot hold session attachments. Never inherit the installer's
+/// cwd (it can itself be an older launchd process during an update).
+///
+/// Background Task Management lists a legacy LaunchAgent under its responsible
+/// app only when the plist names that app's bundle; otherwise it falls back to
+/// the developer name in the signing certificate. When the agent runs from its
+/// app bundle, `AssociatedBundleIdentifiers` names that bundle (see
+/// `man launchd.plist`).
+///
+/// # Errors
+///
+/// Returns an OS error if the supplied home is not an absolute non-root path,
+/// or contains characters unsuitable for XML or launchctl line-oriented output.
+pub fn render_launchd_plist(spec: &ServiceSpec, user_home: &Path) -> PlatformResult<String> {
+    render_launchd_plist_with_environment(spec, user_home, &std::collections::BTreeMap::new())
+}
+
+/// Renders a LaunchAgent while preserving its previously configured environment.
+/// Existing values take precedence over the invoking shell's defaults.
+///
+/// # Errors
+/// Returns the same home-validation errors as [`render_launchd_plist`].
+pub fn render_launchd_plist_with_environment(
+    spec: &ServiceSpec,
+    user_home: &Path,
+    existing: &std::collections::BTreeMap<String, String>,
+) -> PlatformResult<String> {
+    use std::fmt::Write as _;
+
+    // This pure renderer is also tested on Windows; validate macOS/POSIX syntax
+    // rather than the build host's interpretation of an absolute path.
+    let user_home = user_home
+        .to_str()
+        .ok_or_else(|| PlatformError::os("LaunchAgent user home must be a UTF-8 path"))?;
+    if !user_home.starts_with('/')
+        || user_home
+            .split('/')
+            .all(|part| part.is_empty() || part == ".")
+        || user_home.split('/').any(|part| part == "..")
+        || user_home
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '\u{fffe}' | '\u{ffff}'))
+    {
+        return Err(PlatformError::os(
+            "LaunchAgent working directory requires an absolute non-root user home without control or XML-invalid characters",
+        ));
+    }
     let mut args = vec![spec.binary_path.to_string_lossy().into_owned()];
     args.extend(spec.args.iter().cloned());
     let program_args = args
@@ -296,63 +436,231 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
         .map(|a| format!("    <string>{}</string>", xml_escape(a)))
         .collect::<Vec<_>>()
         .join("\n");
-    let environment = spec
-        .environment_path
-        .as_deref()
-        .map(|value| {
-            format!(
-                "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{}</string>\n  </dict>\n",
-                xml_escape(value)
-            )
-        })
-        .unwrap_or_default();
-    format!(
+    let mut values = std::collections::BTreeMap::new();
+    if let Some(path) = &spec.environment_path {
+        values.insert("PATH".to_string(), path.clone());
+    }
+    // The agent writes its own bounded log; launchd's capture keeps only output
+    // that bypasses it (panics during abort, allocator failures, raw prints).
+    values.insert(AGENT_STDERR_LOG_ENV.to_string(), "off".to_string());
+    values.extend(existing.clone());
+    let mut entries = String::new();
+    for (key, value) in &values {
+        let _ = write!(
+            entries,
+            "    <key>{}</key>\n    <string>{}</string>\n",
+            xml_escape(key),
+            xml_escape(value)
+        );
+    }
+    let environment = format!("  <key>EnvironmentVariables</key>\n  <dict>\n{entries}  </dict>\n");
+    // Joined as a POSIX path on every build host, like the home it extends.
+    let stderr_log = xml_escape(&format!(
+        "{}/.config/opengeni/agent/logs/agent.stderr.log",
+        user_home.trim_end_matches('/')
+    ));
+    let associated_bundles = if is_macos_app_bundle_executable(&spec.binary_path) {
+        format!(
+            "  <key>AssociatedBundleIdentifiers</key>\n  <array>\n    <string>{}</string>\n  </array>\n",
+            ids::MACOS_APP_BUNDLE_ID
+        )
+    } else {
+        String::new()
+    };
+    Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\">\n\
          <dict>\n\
          \x20 <key>Label</key>\n\
          \x20 <string>{label}</string>\n\
+         {associated_bundles}\
          \x20 <key>ProgramArguments</key>\n\
          \x20 <array>\n\
          {program_args}\n\
          \x20 </array>\n\
          {environment}\
+         \x20 <key>WorkingDirectory</key>\n\
+         \x20 <string>{working_directory}</string>\n\
          \x20 <key>RunAtLoad</key>\n\
          \x20 <true/>\n\
          \x20 <key>KeepAlive</key>\n\
          \x20 <true/>\n\
          \x20 <key>ThrottleInterval</key>\n\
          \x20 <integer>5</integer>\n\
+         \x20 <key>StandardOutPath</key>\n\
+         \x20 <string>{stderr_log}</string>\n\
+         \x20 <key>StandardErrorPath</key>\n\
+         \x20 <string>{stderr_log}</string>\n\
          </dict>\n\
          </plist>\n",
         label = ids::LAUNCHD_LABEL,
         program_args = program_args,
-    )
+        working_directory = xml_escape(user_home),
+    ))
 }
 
-/// Renders the `sc.exe create` command line registering the Windows Service. The
-/// recovery action (`sc failure … restart`) is a separate command, returned by
-/// [`windows_recovery_command`]. PURE + tested.
-#[must_use]
-pub fn windows_create_command(spec: &ServiceSpec) -> String {
-    let bin = spec.binary_path.to_string_lossy();
-    let args = spec.args.join(" ");
-    // binPath embeds the binary + its run args; Automatic-Delayed start; the
-    // service hosts itself via the windows-service crate's service_dispatcher.
-    format!(
-        "sc.exe create {name} binPath= \"\\\"{bin}\\\" {args}\" start= delayed-auto DisplayName= \"OpenGeni Agent\"",
-        name = ids::WINDOWS_SERVICE,
-    )
+/// The account and folders a Windows logon task is rendered for.
+#[derive(Debug, Clone)]
+pub struct WindowsTaskHost {
+    /// The security identifier of the user the task runs as (`S-1-5-21-…`). A SID
+    /// rather than `DOMAIN\name`, which is ambiguous outside a desktop logon.
+    pub user_sid: String,
+    /// The user's profile folder, the agent's working directory.
+    pub user_home: PathBuf,
+    /// `%SystemRoot%`, where the console host lives.
+    pub system_root: PathBuf,
 }
 
-/// The `sc.exe failure` recovery command (restart on failure with a 5s delay).
-#[must_use]
-pub fn windows_recovery_command() -> String {
-    format!(
-        "sc.exe failure {name} reset= 0 actions= restart/5000/restart/5000/restart/5000",
-        name = ids::WINDOWS_SERVICE,
-    )
+/// Checks the SID and paths a task definition embeds, returning the trimmed SID.
+fn validate_windows_task_inputs<'a>(
+    spec: &ServiceSpec,
+    host: &'a WindowsTaskHost,
+) -> PlatformResult<&'a str> {
+    let sid = host.user_sid.trim();
+    let well_formed_sid = sid.starts_with("S-1-")
+        && sid.len() > 4
+        && sid[4..]
+            .split('-')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    if !well_formed_sid {
+        return Err(PlatformError::os(format!(
+            "not a Windows user SID: {sid:?}"
+        )));
+    }
+    let windows_absolute = |path: &Path| {
+        let text = path.to_string_lossy();
+        let bytes = text.as_bytes();
+        (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/'))
+            || text.starts_with("\\\\")
+    };
+    for (label, path) in [
+        ("agent binary", spec.binary_path.as_path()),
+        ("user home", host.user_home.as_path()),
+        ("system root", host.system_root.as_path()),
+    ] {
+        if !windows_absolute(path) {
+            return Err(PlatformError::os(format!(
+                "the {label} must be an absolute Windows path: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(sid)
+}
+
+/// Renders the Task Scheduler definition for the per-user Windows agent. PURE +
+/// tested; `service install --print` shows it.
+///
+/// * It runs as the user with their interactive token, in their desktop session,
+///   so computer use and the user's browser work, and needs no elevation.
+/// * `conhost.exe --headless` gives the agent and every command it runs one
+///   hidden console, so nothing flashes on screen.
+/// * A logon trigger starts it at sign-in; a one-minute repetition starts it
+///   again if it ever exits (a running instance makes the repetition a no-op).
+///   Task Scheduler's own restart-on-failure only covers launch failures, not a
+///   process that exits, so the repetition is the restart loop.
+/// * No execution time limit (the default stops a task after three days), normal
+///   priority (the default is below normal), and battery power never stops it.
+///
+/// # Errors
+///
+/// Returns an OS error for a malformed SID or a relative path.
+pub fn render_windows_task_xml(
+    spec: &ServiceSpec,
+    host: &WindowsTaskHost,
+) -> PlatformResult<String> {
+    let sid = validate_windows_task_inputs(spec, host)?;
+    let console_host = format!(
+        "{}\\System32\\conhost.exe",
+        host.system_root
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+    );
+    let mut arguments = format!(
+        "--headless \"{}\"",
+        without_verbatim_prefix(&spec.binary_path.to_string_lossy())
+    );
+    for arg in &spec.args {
+        arguments.push(' ');
+        arguments.push_str(arg);
+    }
+    Ok(format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
+         <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
+         \x20 <RegistrationInfo>\n\
+         \x20   <Author>Opengeni</Author>\n\
+         \x20   <Description>Keeps the Opengeni agent running while you are signed in, so agents you allow can use this computer. Pause or remove it with opengeni-agent stop or opengeni-agent uninstall.</Description>\n\
+         \x20 </RegistrationInfo>\n\
+         \x20 <Triggers>\n\
+         \x20   <LogonTrigger>\n\
+         \x20     <Enabled>true</Enabled>\n\
+         \x20     <UserId>{sid}</UserId>\n\
+         \x20   </LogonTrigger>\n\
+         \x20   <TimeTrigger>\n\
+         \x20     <Enabled>true</Enabled>\n\
+         \x20     <StartBoundary>2000-01-01T00:00:00</StartBoundary>\n\
+         \x20     <Repetition>\n\
+         \x20       <Interval>PT1M</Interval>\n\
+         \x20       <StopAtDurationEnd>false</StopAtDurationEnd>\n\
+         \x20     </Repetition>\n\
+         \x20   </TimeTrigger>\n\
+         \x20 </Triggers>\n\
+         \x20 <Principals>\n\
+         \x20   <Principal id=\"Author\">\n\
+         \x20     <UserId>{sid}</UserId>\n\
+         \x20     <LogonType>InteractiveToken</LogonType>\n\
+         \x20     <RunLevel>LeastPrivilege</RunLevel>\n\
+         \x20   </Principal>\n\
+         \x20 </Principals>\n\
+         \x20 <Settings>\n\
+         \x20   <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n\
+         \x20   <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n\
+         \x20   <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n\
+         \x20   <AllowHardTerminate>true</AllowHardTerminate>\n\
+         \x20   <StartWhenAvailable>false</StartWhenAvailable>\n\
+         \x20   <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>\n\
+         \x20   <IdleSettings>\n\
+         \x20     <StopOnIdleEnd>false</StopOnIdleEnd>\n\
+         \x20     <RestartOnIdle>false</RestartOnIdle>\n\
+         \x20   </IdleSettings>\n\
+         \x20   <AllowStartOnDemand>true</AllowStartOnDemand>\n\
+         \x20   <Enabled>true</Enabled>\n\
+         \x20   <Hidden>false</Hidden>\n\
+         \x20   <RunOnlyIfIdle>false</RunOnlyIfIdle>\n\
+         \x20   <WakeToRun>false</WakeToRun>\n\
+         \x20   <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n\
+         \x20   <Priority>5</Priority>\n\
+         \x20 </Settings>\n\
+         \x20 <Actions Context=\"Author\">\n\
+         \x20   <Exec>\n\
+         \x20     <Command>{command}</Command>\n\
+         \x20     <Arguments>{arguments}</Arguments>\n\
+         \x20     <WorkingDirectory>{working_directory}</WorkingDirectory>\n\
+         \x20   </Exec>\n\
+         \x20 </Actions>\n\
+         </Task>\n",
+        command = xml_escape(&console_host),
+        arguments = xml_escape(&arguments),
+        working_directory = xml_escape(&without_verbatim_prefix(
+            &host.user_home.to_string_lossy()
+        )),
+    ))
+}
+
+/// `canonicalize` on Windows returns `\\?\C:\…` paths; the plain form is what a
+/// user sees in Task Scheduler and what every program accepts as argv[0].
+fn without_verbatim_prefix(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        _ => path.to_string(),
+    }
 }
 
 /// The systemd unit path for a scope.
@@ -416,18 +724,60 @@ pub fn unsupported_backend() -> PlatformError {
 ///
 /// # Errors
 ///
-/// [`PlatformError::Unsupported`] when the host has no supported service manager.
+/// [`PlatformError::Unsupported`] when the host has no supported service manager,
+/// or an OS error when the LaunchAgent user home cannot be resolved.
 pub fn render_for_host(spec: &ServiceSpec) -> PlatformResult<String> {
     match ServiceSpec::backend() {
         ServiceBackend::Systemd => Ok(render_systemd_unit(spec)),
-        ServiceBackend::Launchd => Ok(render_launchd_plist(spec)),
-        ServiceBackend::WindowsScm => Ok(format!(
-            "{}\n{}",
-            windows_create_command(spec),
-            windows_recovery_command()
-        )),
+        ServiceBackend::Launchd => {
+            let user_home = service_user_home()?;
+            render_launchd_plist(spec, &user_home)
+        }
+        ServiceBackend::WindowsTask => render_windows_task_xml(spec, &current_windows_task_host()?),
         ServiceBackend::Unsupported => Err(unsupported_backend()),
     }
+}
+
+/// The signed-in user's SID, profile folder and `%SystemRoot%`, for
+/// [`render_windows_task_xml`]. The SID comes from `whoami`, which reports the
+/// process token on every Windows edition without elevation.
+///
+/// # Errors
+///
+/// Returns an OS error when `whoami` cannot run or reports no SID, or when the
+/// profile folder cannot be resolved.
+pub fn current_windows_task_host() -> PlatformResult<WindowsTaskHost> {
+    let output = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .map_err(|error| PlatformError::os(format!("could not run whoami: {error}")))?;
+    if !output.status.success() {
+        return Err(PlatformError::os(format!(
+            "whoami /user exited with {}",
+            output.status
+        )));
+    }
+    let user_sid = parse_whoami_user_sid(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| PlatformError::os("whoami /user reported no SID"))?;
+    let system_root = std::env::var_os("SystemRoot")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from);
+    Ok(WindowsTaskHost {
+        user_sid,
+        user_home: service_user_home()?,
+        system_root,
+    })
+}
+
+/// The SID in `whoami /user /fo csv /nh` output: `"host\user","S-1-5-21-…"`.
+#[must_use]
+pub fn parse_whoami_user_sid(output: &str) -> Option<String> {
+    output
+        .lines()
+        .filter_map(|line| line.trim().rsplit(',').next())
+        .map(|field| field.trim().trim_matches('"'))
+        .find(|sid| sid.starts_with("S-1-"))
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -454,9 +804,6 @@ mod tests {
         assert!(unit.contains("WantedBy=default.target"));
         assert!(unit.contains("KillMode=mixed\n"));
         assert!(unit.contains("TimeoutStopSec=90\n"));
-        let legacy = render_legacy_systemd_unit_before_browser_shutdown(&spec());
-        assert!(legacy.contains("TimeoutStopSec=15\n"));
-        assert!(!legacy.contains("KillMode="));
         assert!(
             unit.contains("KillSignal=SIGTERM"),
             "clean stop must SIGTERM for going-offline"
@@ -465,23 +812,182 @@ mod tests {
 
     #[test]
     fn launchd_plist_preserves_the_installer_command_path() {
-        let plist = render_launchd_plist(&spec());
+        let plist = render_launchd_plist(&spec(), Path::new("/Users/runner")).unwrap();
         assert!(plist.contains("<key>EnvironmentVariables</key>"));
         assert!(plist.contains("<key>PATH</key>"));
         assert!(plist.contains("/home/u/.local/bin:/usr/bin:/bin"));
     }
 
     #[test]
-    fn systemd_start_limit_keys_are_in_unit_section() {
-        let unit = render_systemd_unit(&spec());
-        let service_start = unit.find("[Service]").expect("service section");
-        let unit_section = &unit[..service_start];
-        let service_section = &unit[service_start..];
+    fn systemd_never_stops_restarting_a_repeatedly_killed_agent() {
+        // A start limit (the old StartLimitBurst=5 per 60 s) left the agent
+        // stopped for good after five quick kills. Both renders disable it in
+        // [Unit], where systemd reads it, and keep Restart=always.
+        for unit in [
+            render_systemd_unit(&spec()),
+            render_systemd_unit_without_supervisor_subgroup(&spec()),
+        ] {
+            let service_start = unit.find("[Service]").expect("service section");
+            let unit_section = &unit[..service_start];
+            let service_section = &unit[service_start..];
 
-        assert!(unit_section.contains("StartLimitIntervalSec=60"));
-        assert!(unit_section.contains("StartLimitBurst=5"));
-        assert!(!service_section.contains("StartLimitIntervalSec=60"));
-        assert!(!service_section.contains("StartLimitBurst=5"));
+            assert!(
+                unit_section.contains("\nStartLimitIntervalSec=0\n"),
+                "start rate limiting must be off; got:\n{unit}"
+            );
+            assert!(!unit.contains("StartLimitBurst="), "got:\n{unit}");
+            assert!(!service_section.contains("StartLimitIntervalSec="));
+            assert!(service_section.contains("\nRestart=always\n"));
+        }
+    }
+
+    #[test]
+    fn systemd_restarts_back_off_where_the_manager_supports_it() {
+        // systemd 254+ (the DelegateSubgroup render) backs off 2 s -> 30 s.
+        let current = render_systemd_unit(&spec());
+        let service = &current[current.find("[Service]").expect("service section")..];
+        for directive in [
+            "\nRestartSec=2\n",
+            "\nRestartSteps=5\n",
+            "\nRestartMaxDelaySec=30\n",
+        ] {
+            assert!(service.contains(directive), "missing {directive:?}");
+        }
+        // Older managers do not know RestartSteps; they keep a fixed delay
+        // instead of logging unknown-key warnings on every reload.
+        let compatible = render_systemd_unit_without_supervisor_subgroup(&spec());
+        assert!(compatible.contains("\nRestartSec=5\n"));
+        assert!(!compatible.contains("RestartSteps="));
+        assert!(!compatible.contains("RestartMaxDelaySec="));
+    }
+
+    /// `render_systemd_unit` for [`spec`] as released up to agent 0.1.150.
+    const V3_UNIT: &str = r#"# X-OpenGeni-Managed-Service=v3
+# Generated by opengeni-agent; use a drop-in for operator policy.
+[Unit]
+Description=Opengeni self-hosted agent
+Documentation=https://get.opengeni.ai
+After=network-online.target
+Wants=network-online.target
+# Don't hammer on a crash-loop; the in-process backoff is the fine loop.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment="PATH=/home/u/.local/bin:/usr/bin:/bin"
+ExecStart=/home/u/.local/bin/opengeni-agent run
+Restart=always
+RestartSec=5
+# Keep the tiny control supervisor behind ordinary host work in the
+# kernel's global OOM victim order. An unprivileged user manager may
+# clamp this to its own inherited floor; startup reports the effective
+# /proc value instead of assuming the request took effect.
+OOMScoreAdjust=-100
+# An OOM-killed command child must not make systemd stop the surviving
+# supervisor. If the main process is killed, Restart=always recovers it.
+OOMPolicy=continue
+# Signal only the supervisor; it cooperatively closes its browser sidecars.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=90
+# OOM containment (issue #345). Delegate a cgroup subtree so the agent can
+# place each host exec in its own resource-accounting sub-cgroup (see
+# cgroup.rs). This separates accounting/systemd-oomd domains; global kernel
+# OOM selection is
+# governed separately by the supervisor/child OOMScoreAdjust values above.
+# ManagedOOMPreference=avoid biases systemd-oomd away from selecting this unit.
+# Delegate exactly CPU and memory. I/O and PID are intentionally omitted
+# until an explicit policy needs them, because enabling hierarchical
+# control can change host behavior even without a numeric limit. Commands retain the
+# machine's full available memory unless an operator explicitly configures
+# a per-operation limit. Linux-only directives;
+# they are inert on the macOS/Windows service backends.
+Delegate=cpu memory
+# Keep the service root empty even across a supervisor crash. cgroup v2
+# cannot start a replacement process in a root whose controllers are
+# enabled for operation children; systemd must place every generation
+# directly in the stable supervisor leaf.
+DelegateSubgroup=supervisor
+ManagedOOMPreference=avoid
+MemoryAccounting=yes
+# The service aggregate is intentionally unrestricted. Optional machine
+# policy is applied to command leaves, never to the control supervisor.
+MemoryHigh=infinity
+MemoryMax=infinity
+TasksMax=infinity
+
+[Install]
+WantedBy=default.target
+"#;
+
+    /// `render_systemd_unit_without_supervisor_subgroup` for [`spec`] as
+    /// released up to agent 0.1.150.
+    const V3_COMPATIBLE_UNIT: &str = r#"# X-OpenGeni-Managed-Service=v3-compatible
+[Unit]
+Description=Opengeni self-hosted agent
+Documentation=https://get.opengeni.ai
+After=network-online.target
+Wants=network-online.target
+# Don't hammer on a crash-loop; the in-process backoff is the fine loop.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Environment="PATH=/home/u/.local/bin:/usr/bin:/bin"
+ExecStart=/home/u/.local/bin/opengeni-agent run
+Restart=always
+RestartSec=5
+# Keep the tiny control supervisor behind ordinary host work in the
+# kernel's global OOM victim order. An unprivileged user manager may
+# clamp this to its own inherited floor; startup reports the effective
+# /proc value instead of assuming the request took effect.
+OOMScoreAdjust=-100
+# An OOM-killed command child must not make systemd stop the surviving
+# supervisor. If the main process is killed, Restart=always recovers it.
+OOMPolicy=continue
+# Signal only the supervisor; it cooperatively closes its browser sidecars.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=90
+# OOM containment (issue #345). Delegate a cgroup subtree so the agent can
+# place each host exec in its own memory sub-cgroup (see cgroup.rs). This
+# separates accounting/systemd-oomd domains; global kernel OOM selection is
+# governed separately by the supervisor/child OOMScoreAdjust values above.
+# ManagedOOMPreference=avoid biases systemd-oomd away from selecting this unit
+# for a whole-unit kill. MemoryAccounting enables the delegated memory
+# controller without imposing a unit-wide throttle: commands retain the
+# machine's full available memory unless an operator explicitly configures
+# a per-operation limit. Linux-only directives;
+# they are inert on the macOS/Windows service backends.
+Delegate=yes
+ManagedOOMPreference=avoid
+MemoryAccounting=yes
+# The service aggregate is intentionally unrestricted. Optional machine
+# policy is applied to command leaves, never to the control supervisor.
+MemoryHigh=infinity
+MemoryMax=infinity
+TasksMax=infinity
+
+[Install]
+WantedBy=default.target
+"#;
+
+    #[test]
+    fn previous_systemd_units_are_reproduced_byte_for_byte() {
+        // Upgrades replace only these exact previously generated units, so the
+        // reconstruction must match what earlier releases wrote.
+        assert_eq!(render_previous_systemd_unit(&spec()), V3_UNIT);
+        assert_eq!(
+            render_previous_systemd_unit_without_supervisor_subgroup(&spec()),
+            V3_COMPATIBLE_UNIT
+        );
+        assert_ne!(render_systemd_unit(&spec()), V3_UNIT);
+        assert_ne!(
+            render_systemd_unit_without_supervisor_subgroup(&spec()),
+            V3_COMPATIBLE_UNIT
+        );
     }
 
     #[test]
@@ -518,7 +1024,7 @@ mod tests {
             }
             assert!(!service_section.contains("IOAccounting="));
             assert!(!service_section.contains("CPUAccounting="));
-            assert!(unit.starts_with("# X-OpenGeni-Managed-Service=v3\n"));
+            assert!(unit.starts_with("# X-OpenGeni-Managed-Service=v4\n"));
             for directive in [
                 "MemoryHigh=infinity",
                 "MemoryMax=infinity",
@@ -533,12 +1039,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_unit_is_an_exact_unmarked_ownership_shape() {
-        let legacy = render_legacy_systemd_unit_before_supervisor_subgroup(&spec());
-        assert!(legacy.starts_with("[Unit]\n"));
-        assert!(legacy.contains("Delegate=yes"));
-        assert!(!legacy.contains("DelegateSubgroup="));
-        assert!(!legacy.contains("X-OpenGeni-Managed-Service"));
+    fn compatible_unit_omits_the_supervisor_subgroup() {
+        let unit = render_systemd_unit_without_supervisor_subgroup(&spec());
+        assert!(unit.starts_with("# X-OpenGeni-Managed-Service=v4-compatible\n[Unit]\n"));
+        assert!(unit.contains("Delegate=yes"));
+        assert!(!unit.contains("DelegateSubgroup="));
+        assert!(unit.contains("KillMode=mixed\n"));
+        assert!(unit.contains("TimeoutStopSec=90\n"));
     }
 
     #[test]
@@ -559,13 +1066,117 @@ mod tests {
     }
 
     #[test]
+    fn launchd_plist_keeps_crash_output_in_the_agent_log_directory() {
+        let plist = render_launchd_plist(&spec(), Path::new("/Users/Runner & Co")).unwrap();
+        let log =
+            "<string>/Users/Runner &amp; Co/.config/opengeni/agent/logs/agent.stderr.log</string>";
+        assert!(plist.contains(&format!("<key>StandardOutPath</key>\n  {log}")));
+        assert!(plist.contains(&format!("<key>StandardErrorPath</key>\n  {log}")));
+        assert!(
+            plist.contains("    <key>OPENGENI_AGENT_STDERR_LOG</key>\n    <string>off</string>")
+        );
+        let mut without_path = spec();
+        without_path.environment_path = None;
+        let plist = render_launchd_plist(&without_path, Path::new("/Users/runner")).unwrap();
+        assert!(!plist.contains("<key>PATH</key>"));
+        assert!(plist.contains(
+            "<key>EnvironmentVariables</key>\n  <dict>\n    <key>OPENGENI_AGENT_STDERR_LOG</key>"
+        ));
+    }
+
+    #[test]
     fn launchd_plist_is_a_keepalive_runatload_agent() {
-        let plist = render_launchd_plist(&spec());
+        let plist = render_launchd_plist(&spec(), Path::new("/Users/runner")).unwrap();
         assert!(plist.contains("<string>ai.opengeni.agent</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(plist.contains("<string>/home/u/.local/bin/opengeni-agent</string>"));
         assert!(plist.contains("<string>run</string>"));
+    }
+
+    #[test]
+    fn launchd_plist_associates_the_agent_with_its_app_bundle() {
+        // Without the association, Login Items and the "Background Items Added"
+        // notification name the signing certificate's developer instead of the app.
+        let bundled = ServiceSpec {
+            binary_path: PathBuf::from(
+                "/Users/runner/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent",
+            ),
+            ..spec()
+        };
+        let plist = render_launchd_plist(&bundled, Path::new("/Users/runner")).unwrap();
+        assert!(plist.contains(
+            "  <key>Label</key>\n  <string>ai.opengeni.agent</string>\n  <key>AssociatedBundleIdentifiers</key>\n  <array>\n    <string>ai.opengeni.agent</string>\n  </array>\n  <key>ProgramArguments</key>\n"
+        ));
+    }
+
+    #[test]
+    fn launchd_plist_names_no_bundle_for_a_bare_binary() {
+        let plist = render_launchd_plist(&spec(), Path::new("/Users/runner")).unwrap();
+        assert!(!plist.contains("AssociatedBundleIdentifiers"));
+    }
+
+    #[test]
+    fn app_bundle_executable_detection_requires_the_bundle_layout() {
+        for path in [
+            "/Users/u/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent",
+            "/Applications/X.app/Contents/MacOS/opengeni-agent",
+        ] {
+            assert!(is_macos_app_bundle_executable(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/Users/u/.local/bin/opengeni-agent",
+            "/Users/u/Applications/OpenGeni Agent.app/Contents/Helpers/opengeni-browserd",
+            "/Users/u/Applications/OpenGeni Agent.app/Contents/MacOS/sub/opengeni-agent",
+            "/Users/u/.app/Contents/MacOS/opengeni-agent",
+            "/Users/u/build/Contents/MacOS/opengeni-agent",
+        ] {
+            assert!(!is_macos_app_bundle_executable(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn launchd_starts_in_the_explicit_user_home() {
+        // The launch root becomes the default cwd for commands and attachments.
+        // It must come from the home passed by the installer, not its ambient cwd
+        // or the binary's bundle directory.
+        let home = Path::new("/Users/Runner & Co");
+        let plist = render_launchd_plist(&spec(), home).unwrap();
+        assert!(plist
+            .contains("<key>WorkingDirectory</key>\n  <string>/Users/Runner &amp; Co</string>"));
+    }
+
+    #[test]
+    fn service_home_resolution_is_shared_with_print_mode() {
+        let home = OsString::from("/Users/user");
+        let profile = OsString::from("/Users/me");
+        assert_eq!(
+            service_user_home_from_environment(Some(home), Some(profile.clone())).unwrap(),
+            PathBuf::from("/Users/user")
+        );
+        assert_eq!(
+            service_user_home_from_environment(None, Some(profile)).unwrap(),
+            PathBuf::from("/Users/me")
+        );
+        assert!(service_user_home_from_environment(None, None).is_err());
+    }
+
+    #[test]
+    fn launchd_refuses_home_characters_that_break_xml_or_loaded_path_observation() {
+        for ch in [
+            '\0', '\u{1}', '\u{b}', '\n', '\r', '\t', '\u{7f}', '\u{fffe}', '\u{ffff}',
+        ] {
+            let home = format!("/Users/Runner{ch}");
+            assert!(render_launchd_plist(&spec(), Path::new(&home)).is_err());
+        }
+        assert!(render_launchd_plist(&spec(), Path::new("/Users/Åsa 🐈")).is_ok());
+    }
+
+    #[test]
+    fn launchd_refuses_an_unusable_home_instead_of_defaulting_to_root() {
+        for home in ["", "/", "/.", "////", "/Users/..", "Users/runner", "~"] {
+            assert!(render_launchd_plist(&spec(), Path::new(home)).is_err());
+        }
     }
 
     #[test]
@@ -577,22 +1188,129 @@ mod tests {
         );
     }
 
+    fn windows_spec() -> ServiceSpec {
+        ServiceSpec {
+            binary_path: PathBuf::from(
+                "C:\\Users\\Åsa & Co\\AppData\\Local\\Opengeni\\bin\\opengeni-agent.exe",
+            ),
+            args: vec!["run".to_string()],
+            scope: ServiceScope::User,
+            environment_path: None,
+        }
+    }
+
+    fn windows_host() -> WindowsTaskHost {
+        WindowsTaskHost {
+            user_sid: "S-1-5-21-1945257197-2579421453-2829175806-1001".to_string(),
+            user_home: PathBuf::from("C:\\Users\\Åsa & Co"),
+            system_root: PathBuf::from("C:\\WINDOWS\\"),
+        }
+    }
+
     #[test]
-    fn windows_commands_register_and_set_recovery() {
-        let create = windows_create_command(&spec());
-        assert!(create.contains("sc.exe create OpengeniAgent"));
-        assert!(create.contains("start= delayed-auto"));
-        assert!(create.contains("opengeni-agent"));
-        let recovery = windows_recovery_command();
-        assert!(recovery.contains("sc.exe failure OpengeniAgent"));
-        assert!(recovery.contains("restart/5000"));
+    fn windows_task_runs_in_the_users_desktop_session_without_a_window() {
+        let xml = render_windows_task_xml(&windows_spec(), &windows_host()).unwrap();
+        // The signed-in user's own token, so computer use reaches their desktop.
+        assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
+        assert!(xml.contains("<RunLevel>LeastPrivilege</RunLevel>"));
+        assert_eq!(
+            xml.matches("<UserId>S-1-5-21-1945257197-2579421453-2829175806-1001</UserId>")
+                .count(),
+            2,
+            "both the logon trigger and the principal name the user by SID"
+        );
+        // One hidden console for the agent and every command it runs.
+        assert!(xml.contains("<Command>C:\\WINDOWS\\System32\\conhost.exe</Command>"));
+        assert!(xml.contains(
+            "<Arguments>--headless \"C:\\Users\\Åsa &amp; Co\\AppData\\Local\\Opengeni\\bin\\opengeni-agent.exe\" run</Arguments>"
+        ));
+        assert!(xml.contains("<WorkingDirectory>C:\\Users\\Åsa &amp; Co</WorkingDirectory>"));
+    }
+
+    #[test]
+    fn windows_task_keeps_the_agent_running() {
+        let xml = render_windows_task_xml(&windows_spec(), &windows_host()).unwrap();
+        assert!(xml.contains("<LogonTrigger>"));
+        assert!(
+            xml.contains("<Interval>PT1M</Interval>"),
+            "restarts an exited agent"
+        );
+        assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+        assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+        assert!(xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"));
+        assert!(xml.contains("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"));
+        assert!(xml.contains("<Priority>5</Priority>"));
+        assert!(!xml.contains("<Duration>"), "the repetition never ends");
+    }
+
+    #[test]
+    fn windows_task_refuses_a_bad_sid_or_relative_paths() {
+        let mut host = windows_host();
+        host.user_sid = "WORKGROUP\\asa".to_string();
+        assert!(render_windows_task_xml(&windows_spec(), &host).is_err());
+        host.user_sid = "S-1-5-21-x".to_string();
+        assert!(render_windows_task_xml(&windows_spec(), &host).is_err());
+        assert!(render_windows_task_xml(&spec(), &windows_host()).is_err());
+        let mut host = windows_host();
+        host.user_home = PathBuf::from("Users\\asa");
+        assert!(render_windows_task_xml(&windows_spec(), &host).is_err());
+    }
+
+    #[test]
+    fn windows_task_names_the_binary_without_the_verbatim_prefix() {
+        let mut spec = windows_spec();
+        spec.binary_path =
+            PathBuf::from(r"\\?\C:\Users\asa\AppData\Local\Opengeni\bin\opengeni-agent.exe");
+        let xml = render_windows_task_xml(&spec, &windows_host()).unwrap();
+        assert!(xml.contains(
+            "<Arguments>--headless \"C:\\Users\\asa\\AppData\\Local\\Opengeni\\bin\\opengeni-agent.exe\" run</Arguments>"
+        ));
+        assert_eq!(
+            without_verbatim_prefix(r"\\?\UNC\srv\share\a.exe"),
+            r"\\srv\share\a.exe"
+        );
+        assert_eq!(without_verbatim_prefix(r"C:\a.exe"), r"C:\a.exe");
+    }
+
+    #[test]
+    fn whoami_sid_is_parsed_from_csv() {
+        assert_eq!(
+            parse_whoami_user_sid(
+                "\"win-b0koha156e9\\ogstd\",\"S-1-5-21-1945-2579-2829-1001\"\r\n"
+            )
+            .as_deref(),
+            Some("S-1-5-21-1945-2579-2829-1001")
+        );
+        assert_eq!(
+            parse_whoami_user_sid("\r\n\"a\\b\",\"S-1-5-18\"\r\n").as_deref(),
+            Some("S-1-5-18")
+        );
+        assert_eq!(parse_whoami_user_sid("ERROR: something"), None);
+    }
+
+    #[test]
+    fn launchd_restart_preserves_configured_path_and_custom_environment() {
+        let existing = std::collections::BTreeMap::from([
+            (
+                "PATH".to_string(),
+                "/opt/tools & sdk/bin:/usr/bin".to_string(),
+            ),
+            ("LANG".to_string(), "en_US.UTF-8".to_string()),
+        ]);
+        let plist =
+            render_launchd_plist_with_environment(&spec(), Path::new("/Users/runner"), &existing)
+                .unwrap();
+        assert!(plist.contains("/opt/tools &amp; sdk/bin:/usr/bin"));
+        assert!(!plist.contains("/home/u/.local/bin:/usr/bin:/bin"));
+        assert!(plist.contains("<key>LANG</key>\n    <string>en_US.UTF-8</string>"));
+        assert!(plist.contains(&format!("<key>{AGENT_STDERR_LOG_ENV}</key>")));
     }
 
     #[test]
     fn plist_escapes_xml_metacharacters() {
         let mut s = spec();
         s.args = vec!["run".to_string(), "--name".to_string(), "a<b&c".to_string()];
-        let plist = render_launchd_plist(&s);
+        let plist = render_launchd_plist(&s, Path::new("/Users/runner")).unwrap();
         assert!(plist.contains("a&lt;b&amp;c"));
         assert!(!plist.contains("a<b&c"));
     }
@@ -600,7 +1318,12 @@ mod tests {
     #[test]
     fn render_for_host_matches_the_compiled_backend() {
         // On the build host this returns the host's definition without error.
-        let out = render_for_host(&spec());
+        let spec = if ServiceSpec::backend() == ServiceBackend::WindowsTask {
+            windows_spec()
+        } else {
+            spec()
+        };
+        let out = render_for_host(&spec);
         match ServiceSpec::backend() {
             ServiceBackend::Unsupported => assert!(out.is_err()),
             _ => assert!(out.is_ok()),

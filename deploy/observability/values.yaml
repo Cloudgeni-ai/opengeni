@@ -1,4 +1,4 @@
-# Portable defaults for a durable, single-node OpenGeni observability stack.
+# Portable defaults for a durable, single-node Opengeni observability stack.
 # Managed and larger installations should layer values.production.example.yaml
 # plus their private ingress, authentication, and Alertmanager configuration.
 
@@ -13,7 +13,7 @@ opengeni:
     labelKey: grafana_dashboard
     labelValue: "1"
     folderAnnotation: grafana_folder
-    folder: /tmp/dashboards/OpenGeni
+    folder: /tmp/dashboards/Opengeni
     extraLabels: {}
     extraAnnotations: {}
 
@@ -213,7 +213,7 @@ kube-prometheus-stack:
         resource: configmap
 
   kube-state-metrics:
-    # Exact inputs consumed by the pinned Kubernetes mixin plus OpenGeni's own
+    # Exact inputs consumed by the pinned Kubernetes mixin plus Opengeni's own
     # rules. This rejects secret/configmap metadata and unused pod-state fanout
     # at the exporter boundary instead of paying for it in Prometheus.
     rbac:
@@ -276,6 +276,7 @@ kube-prometheus-stack:
       - kube_deployment_spec_replicas
       - kube_deployment_status_condition
       - kube_deployment_status_observed_generation
+      - kube_deployment_status_replicas
       - kube_deployment_status_replicas_available
       - kube_deployment_status_replicas_updated
       - kube_horizontalpodautoscaler_labels
@@ -304,6 +305,7 @@ kube-prometheus-stack:
       - kube_pod_container_resource_requests
       - kube_pod_container_status_restarts_total
       - kube_pod_container_status_waiting_reason
+      - kube_pod_deletion_timestamp
       - kube_pod_info
       - kube_pod_labels
       - kube_pod_owner

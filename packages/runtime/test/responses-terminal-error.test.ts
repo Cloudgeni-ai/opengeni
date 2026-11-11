@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Agent, Runner, tool } from "@openai/agents";
 import OpenAI from "openai";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenAIClientFromSettings,
   OpenGeniResponsesModel,

@@ -1,4 +1,4 @@
-import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
+import { LogoTile, type LogoTileSize } from "@opengeni/react/ui/logo-tile";
 
 import linearLogo from "../../../../../../../data/catalog/logos/linear-app-4b4a9f349c60.png";
 import sentryLogo from "../../../../../../../data/catalog/logos/sentry-io-2bcd2164011c.svg";

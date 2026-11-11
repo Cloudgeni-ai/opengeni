@@ -1,0 +1,141 @@
+import { describe, expect, test } from "bun:test";
+import { ACTION_CATALOG } from "@opengeni/contracts/app-actions";
+import { actionDescription, DESCRIBED_ACTION_PATH } from "../src/mcp/action-descriptions";
+import { describeAction, searchActions } from "../src/organization-mcp";
+
+describe("action descriptions", () => {
+  test("session discovery and describe explain the existing compact page query", () => {
+    const entry = ACTION_CATALOG.find((candidate) => candidate.id === "listSessionPage")!;
+    const description = describeAction(entry).description!;
+    expect(description).toContain('{"view":"page","projection":"summary","limit":50}');
+    expect(description).toContain("nextCursor as query.cursor");
+    expect(description).toContain("getSession");
+    expect(description).toContain("omit projection");
+    const found = searchActions({ query: "list chats", limit: 50, offset: 0 }).actions;
+    expect(found.find((action) => action.id === entry.id)?.description).toBe(description);
+    expect(actionDescription({ method: "POST", path: entry.path })).toBeUndefined();
+    expect(actionDescription({ method: "GET", path: `${entry.path}/:sessionId` })).toBeUndefined();
+  });
+
+  test("every subscription, model and vault connection action has a description", () => {
+    const missing = ACTION_CATALOG.filter(
+      (entry) => DESCRIBED_ACTION_PATH.test(entry.path) && !actionDescription(entry),
+    ).map((entry) => `${entry.method} ${entry.path}`);
+    expect(missing).toEqual([]);
+  });
+
+  test("buying credits and reading the balance are found in the words people use", () => {
+    const found = (query: string) =>
+      searchActions({ query, limit: 20, offset: 0 }).actions.map((action) => action.id);
+    for (const query of ["buy credits", "add credits", "credits", "add money"]) {
+      expect([query, found(query)]).toEqual([
+        query,
+        expect.arrayContaining(["createBillingCheckout"]),
+      ]);
+    }
+    expect(found("balance")).toContain("getBilling");
+    expect(found("payment")).toContain("getBillingCheckout");
+    // Giving a workspace allowance credits is told apart from buying them.
+    const grant = ACTION_CATALOG.find((entry) => entry.id === "grantWorkspaceCredits")!;
+    expect(actionDescription(grant)).toContain("to buy credits use createBillingCheckout");
+  });
+
+  test("descriptions name the provider and the scope", () => {
+    expect(
+      actionDescription({
+        method: "GET",
+        path: "/v1/organizations/:organizationId/codex/accounts",
+      }),
+    ).toContain("Codex (ChatGPT) subscription accounts connected for the organization");
+    expect(
+      actionDescription({
+        method: "PATCH",
+        path: "/v1/workspaces/:workspaceId/supergrok/accounts/:accountId/allocator",
+      }),
+    ).toContain('"Enable account"');
+  });
+
+  test("search matches the words people use and returns the description", () => {
+    const found = searchActions({ query: "pause codex account", limit: 5, offset: 0 }).actions;
+    const allocator = found.find((action) =>
+      action.path.endsWith("/codex/accounts/:accountId/allocator"),
+    );
+    expect(allocator?.description).toContain("Enable account");
+    const entry = ACTION_CATALOG.find(
+      (candidate) =>
+        candidate.method === "PUT" &&
+        candidate.path ===
+          "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
+    )!;
+    expect(describeAction(entry).description).toContain("which models");
+  });
+
+  // A tool set to Ask blocks a Site; the agent finds the change by the words
+  // the person uses and makes it in the chat instead of naming the settings page.
+  test("tool approvals are found by the words people use", () => {
+    for (const query of ["tool approval", "send email permission", "integration tool permission"]) {
+      const found = searchActions({ query, limit: 5, offset: 0 }).actions;
+      const change = found.find((action) => action.id === "updateConnectorToolPermissions");
+      expect(change?.description).toContain("(Allow)");
+    }
+    const entry = ACTION_CATALOG.find(
+      (candidate) => candidate.id === "updateConnectorToolPermissions",
+    )!;
+    expect(describeAction(entry).description).toContain("on a published Site address it can't ask");
+    expect(describeAction(entry).input.some((input) => input.schema !== undefined)).toBe(true);
+  });
+
+  // Actions that change something but take no body: the path says it all.
+  const BODYLESS =
+    /\/(activate|usage\/refresh|refresh|verify|connect\/start|reset-credits\/(prepare|redeem))$|\/organizations\/:organizationId\/(codex|supergrok)\/connect\/start$/;
+
+  test("every subscription, model and vault connection change shows the body to send", () => {
+    const missing = ACTION_CATALOG.filter(
+      (entry) =>
+        DESCRIBED_ACTION_PATH.test(entry.path) &&
+        (entry.method === "POST" || entry.method === "PUT" || entry.method === "PATCH") &&
+        !BODYLESS.test(entry.path) &&
+        !describeAction(entry).input.some((input) => input.schema),
+    ).map((entry) => `${entry.method} ${entry.path}`);
+    expect(missing).toEqual([]);
+  });
+
+  test("password-manager actions are discoverable and describe their credential inputs", () => {
+    const path = "/v1/workspaces/:workspaceId/vault-providers/connections";
+    const found = searchActions({ query: "Keeper vault", limit: 20, offset: 0 }).actions;
+    expect(found.some((entry) => entry.method === "POST" && entry.path === path)).toBe(true);
+    for (const [method, suffix, schemaName] of [
+      ["POST", "", "InstallVaultProviderRequest"],
+      ["PUT", "/:connectionId/credentials", "ReplaceVaultProviderCredentialsRequest"],
+    ]) {
+      const entry = ACTION_CATALOG.find(
+        (candidate) => candidate.method === method && candidate.path === path + suffix,
+      )!;
+      expect(entry.browserOnly).toBeUndefined();
+      expect(entry.request).toContain(schemaName);
+      expect(describeAction(entry).input.some((input) => input.in === "body" && input.schema)).toBe(
+        true,
+      );
+    }
+  });
+
+  test("describe gives the model access body its fields", () => {
+    const entry = ACTION_CATALOG.find(
+      (candidate) =>
+        candidate.method === "PUT" &&
+        candidate.path ===
+          "/v1/organizations/:scopeId/model-connections/:kind/:connectionId/access",
+    )!;
+    const input = describeAction(entry).input[0]!;
+    expect(input.in).toBe("body");
+    expect(Object.keys((input.schema as { properties: object }).properties).sort()).toEqual([
+      "allowPersonalWorkspaces",
+      "allowedModels",
+      "allowedPeople",
+      "allowedWorkspaces",
+      "moveToOrganization",
+      "sharePersonal",
+      "version",
+    ]);
+  });
+});

@@ -1,4 +1,5 @@
 import type { OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   getMyUsage,
   type UsageAllowancePeriod,
@@ -16,8 +17,8 @@ import { usePolledValue } from "./internal";
  * `requestJson` (for example the narrower browser client).
  */
 export type UsageClientLike =
-  | Pick<OpenGeniClient, "getMyUsage">
-  | Pick<OpenGeniClient, "requestJson">;
+  | Pick<ChatClient<OpenGeniClient>, "getMyUsage">
+  | Pick<ChatClient<OpenGeniClient>, "requestJson">;
 
 export type UseUsageOptions = {
   /** Defaults to the `<OpenGeniProvider>` client. */
@@ -66,7 +67,7 @@ function readOwnUsage(
 
 /**
  * The signed-in member's own usage in one workspace, read through `/usage/me`
- * (the session proxy serves exactly this route). Never reads another member.
+ * (also through a session proxy). Never reads another member.
  */
 export function useUsage(options: UseUsageOptions = {}): UseUsageResult {
   const context = useContext(OpenGeniContext);

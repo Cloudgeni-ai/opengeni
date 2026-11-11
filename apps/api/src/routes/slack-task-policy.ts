@@ -6,7 +6,7 @@ import {
 } from "@opengeni/contracts";
 import {
   requireAccessGrant,
-  requireAccessGrantAuthorization,
+  requireWorkspaceSettingsAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -20,6 +20,7 @@ import {
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { parseRequestBody } from "../http/request-body";
 
 function requireDirectWorkspaceAdmin(access: AccessGrantAuthorization): void {
   const { grant } = access;
@@ -80,31 +81,27 @@ export function registerSlackTaskPolicyRoutes(app: Hono, deps: ApiRouteDeps): vo
 
   app.put(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const access = await requireAccessGrantAuthorization(
-      context,
-      deps,
-      workspaceId,
-      "workspace:admin",
-    );
+    // Workspace admins, and the owner of a Personal workspace.
+    const access = await requireWorkspaceSettingsAuthorization(context, deps, workspaceId);
     requireDirectWorkspaceAdmin(access);
-    const parsed = UpdateSlackTaskPolicyRequest.safeParse(
+    const parsed = parseRequestBody(
+      UpdateSlackTaskPolicyRequest,
       await context.req.json().catch(() => null),
+      { status: 422, message: "Invalid Slack task-policy request" },
     );
-    if (!parsed.success)
-      throw new HTTPException(422, { message: "Invalid Slack task-policy request" });
     try {
       return context.json(
         SlackTaskPolicyMutationResponse.parse(
           await updateSlackTaskPolicy(deps.db, {
-            operationId: parsed.data.operationId ?? randomUUID(),
+            operationId: parsed.operationId ?? randomUUID(),
             accountId: access.grant.accountId,
             workspaceId,
-            policy: parsed.data.policy,
-            expectedCurrentRevisionId: parsed.data.expectedCurrentRevisionId,
-            expectedActivationVersion: parsed.data.expectedActivationVersion,
+            policy: parsed.policy,
+            expectedCurrentRevisionId: parsed.expectedCurrentRevisionId,
+            expectedActivationVersion: parsed.expectedActivationVersion,
             actorSubjectId: access.grant.subjectId,
             principalKind: "human_session",
-            reason: parsed.data.reason,
+            reason: parsed.reason,
           }),
         ),
       );

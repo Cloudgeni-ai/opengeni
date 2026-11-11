@@ -1,7 +1,15 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import type { SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { acquireSearchTestDatabase } from "./session-message-search-fixture";
-import { bootstrapWorkspace, createDb, createSession, listSessionEventPage } from "../src";
+import {
+  bootstrapWorkspace,
+  createDb,
+  createSession,
+  listSessionEventPage,
+  withWorkspaceRls,
+} from "../src";
+import type postgres from "postgres";
+import { sql } from "drizzle-orm";
 import { listSessionEventSlices } from "../src/session-event-slices";
 import { LOSSLESS_JSON_STRING_PREFIX, toPostgresLosslessJson } from "../src/lossless-json";
 import {
@@ -70,6 +78,258 @@ const read = async (options: Parameters<typeof listSessionEventSlices>[3]) => {
   expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(512 * 1024);
   return page;
 };
+
+test("tool filters return scoped calls and exact results, including codec identities", async () => {
+  for (const callId of [
+    "ordinary",
+    "nul\u0000identity",
+    "\ud800identity",
+    `${LOSSLESS_JSON_STRING_PREFIX}literal`,
+  ]) {
+    const sequence =
+      callId === "ordinary"
+        ? 1
+        : 3 +
+          ["nul\u0000identity", "\ud800identity", `${LOSSLESS_JSON_STRING_PREFIX}literal`].indexOf(
+            callId,
+          ) *
+            2;
+    await insert(
+      sequence,
+      "agent.toolCall.created",
+      toPostgresLosslessJson({
+        callId,
+        name: "scheduled_tasks_create",
+        arguments: { prompt: "Review" },
+      }),
+      1,
+    );
+    await insert(
+      sequence + 1,
+      "agent.toolCall.output",
+      toPostgresLosslessJson({ callId, output: "Created" }),
+      1,
+    );
+    const result = await readSessionEventView(
+      { sessionId, view: "tools", callId, includeOutput: true },
+      read,
+    );
+    expect(result.events).toHaveLength(2);
+    expect(result.events.find((item) => item.kind === "result")?.text).toBe("Created");
+  }
+  const calls = await readSessionEventView(
+    { sessionId, view: "tools", toolName: "scheduled_tasks_create", limit: 2 },
+    read,
+  );
+  expect(calls.events).toHaveLength(2);
+  expect(calls.events.every((item) => item.kind === "call")).toBe(true);
+  const rest = await readSessionEventView({ sessionId, cursor: calls.nextCursor! }, read);
+  expect(rest.effectiveLimit).toBe(2);
+  expect(rest.events).toHaveLength(2);
+  expect(rest.hasMore).toBe(false);
+}, 60_000);
+
+test("call identity projection preserves aliases, legacy rows and rewritten event kinds", async () => {
+  for (const [index, payload] of [
+    { callId: "target", call_id: "wrong", id: "wrong" },
+    { callId: null, call_id: "target", id: "wrong" },
+    { call_id: null, id: "target" },
+  ].entries()) {
+    await insert(index + 1, "agent.toolCall.output", { ...payload, output: "ok" });
+  }
+  await shared.admin`update session_events set tool_call_id = null where session_id = ${sessionId} and sequence = 1`;
+  await insert(4, "agent.toolCall.output", { callId: "old", output: "ok" });
+  await shared.admin`update session_events set payload = '{"callId":"target","output":"ok"}'::jsonb
+    where session_id = ${sessionId} and sequence = 4`;
+  await insert(5, "custom.event", { callId: "target", output: "ok" });
+  await insert(6, "agent.toolCall.created", { callId: "old", name: "old" });
+  await shared.admin`update session_events set type = 'custom.event' where session_id = ${sessionId} and sequence = 6`;
+  const cleared = await shared.admin`select tool_call_id, tool_name from session_events
+    where session_id = ${sessionId} and sequence = 6`;
+  expect(cleared[0]).toMatchObject({ tool_call_id: null, tool_name: null });
+  const page = await read({ callId: "target", limit: 8 });
+  expect(page.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5]);
+  await shared.admin`update session_events set type = 'agent.toolCall.created'
+    where session_id = ${sessionId} and sequence = 6`;
+  const restored = await shared.admin`select tool_call_id, tool_name from session_events
+    where session_id = ${sessionId} and sequence = 6`;
+  expect(restored[0]).toMatchObject({ tool_call_id: "old", tool_name: "old" });
+  await insert(7, "agent.toolCall.output", { callId: "", call_id: "target" });
+  await insert(8, "agent.toolCall.output", { callId: 42 });
+  expect(
+    (await read({ callId: "target", limit: 8 })).events.map((event) => event.sequence),
+  ).toEqual([1, 2, 3, 4, 5]);
+  expect((await read({ callId: "42" })).events.map((event) => event.sequence)).toEqual([8]);
+  const other = await listSessionEventSlices(client.db, workspaceId, otherSessionId, {
+    callId: "target",
+    view: "tools",
+  });
+  expect(other.events).toEqual([]);
+}, 60_000);
+
+test("call identity reads do not detoast excluded tool outputs", async () => {
+  await insert(1, "agent.toolCall.output", { callId: "target", output: "ok" });
+  await shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+    select ${accountId}, ${workspaceId}, ${sessionId}, g + 1, 'agent.toolCall.output',
+      jsonb_build_object('callId', 'excluded-' || g, 'output',
+        (select string_agg(md5(g::text || ':' || k::text), '') from generate_series(1, 1024) k))
+    from generate_series(1, 256) g`;
+  await shared.admin`analyze session_events`;
+  const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+  const originalDebug = driver.options.debug;
+  let captured: { text: string; params: unknown[] } | undefined;
+  try {
+    driver.options.debug = (_connection, query, params) => {
+      if (query.startsWith('select "id", "sequence", case'))
+        captured = { text: query, params: [...params] };
+    };
+    const page = await read({ view: "tools", callId: "target", direction: "before", limit: 1 });
+    expect(page.events.map((event) => event.sequence)).toEqual([1]);
+    expect(page.hasMore).toBe(false);
+  } finally {
+    driver.options.debug = originalDebug;
+  }
+  if (!captured) throw new Error("Identity query not captured");
+  const query = captured;
+  const oldText = query.text.replace('coalesce("session_events"."tool_call_id", ', "coalesce(");
+  expect(oldText).not.toBe(query.text);
+  const explain = (text: string) =>
+    withWorkspaceRls(client.db, workspaceId, async (tx) => {
+      const fragments = text
+        .split(/\$(\d+)/g)
+        .map((part, index) =>
+          index % 2 === 0 ? sql.raw(part) : sql`${sql.param(query.params[Number(part) - 1])}`,
+        );
+      const rows = await tx.execute(
+        sql`explain (analyze, buffers, format json) ${sql.join(fragments, sql``)}`,
+      );
+      const plan = (
+        rows[0]?.["QUERY PLAN"] as
+          | Array<{
+              Plan: { "Shared Hit Blocks": number; "Shared Read Blocks": number };
+              "Execution Time": number;
+            }>
+          | undefined
+      )?.[0];
+      if (!plan) throw new Error("Missing plan");
+      return plan;
+    });
+  const before = await explain(oldText);
+  const after = await explain(query.text);
+  const buffers = (plan: typeof before) =>
+    plan.Plan["Shared Hit Blocks"] + plan.Plan["Shared Read Blocks"];
+  if (process.env.OPENGENI_BENCH_TOOL_NAME === "1")
+    console.log(
+      JSON.stringify({
+        callIdentityFilter: {
+          beforeMs: before["Execution Time"],
+          afterMs: after["Execution Time"],
+          beforeBuffers: buffers(before),
+          afterBuffers: buffers(after),
+        },
+      }),
+    );
+  expect(buffers(after)).toBeLessThan(buffers(before) / 2);
+}, 60_000);
+
+test("named tool filters preserve legacy names, rewritten payloads and codec identities", async () => {
+  await insert(1, "agent.toolCall.created", { callId: "legacy", name: "wanted", arguments: {} });
+  await shared.admin`update session_events set tool_name = null where session_id = ${sessionId} and sequence = 1`;
+  await insert(2, "agent.toolCall.created", { callId: "updated", name: "old", arguments: {} });
+  await shared.admin`update session_events set payload = ${shared.admin.json({ callId: "updated", name: "wanted", arguments: {} })}
+    where session_id = ${sessionId} and sequence = 2`;
+  const unrelated = await makeSession();
+  await shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+    values (${accountId}, ${workspaceId}, ${unrelated.id}, 1, 'agent.toolCall.created', '{"name":"wanted","callId":"other"}')`;
+  const page = await read({ view: "tools", toolName: "wanted", direction: "before" });
+  expect(page.events.map((event) => event.sequence)).toEqual([1, 2]);
+  for (const [index, name] of [
+    "nul\u0000name",
+    "\ud800name",
+    `${LOSSLESS_JSON_STRING_PREFIX}literal`,
+  ].entries()) {
+    await insert(
+      3 + index,
+      "agent.toolCall.created",
+      toPostgresLosslessJson({ callId: `encoded-${index}`, name, arguments: {} }),
+      1,
+    );
+    const result = await readSessionEventView({ sessionId, view: "tools", toolName: name }, read);
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0]?.sequence).toBe(3 + index);
+  }
+}, 60_000);
+
+test("named tool identity reads do not detoast excluded arguments", async () => {
+  await insert(1, "agent.toolCall.created", { callId: "target", name: "wanted", arguments: {} });
+  // Incompressible argument bodies exercise TOAST, not just an inline JSON key.
+  await shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+    select ${accountId}, ${workspaceId}, ${sessionId}, g + 1, 'agent.toolCall.created',
+      jsonb_build_object('callId', 'excluded-' || g, 'name', 'other', 'arguments',
+        (select string_agg(md5(g::text || ':' || k::text), '') from generate_series(1, 1024) k))
+    from generate_series(1, 256) g`;
+  await shared.admin`analyze session_events`;
+  const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+  const originalDebug = driver.options.debug;
+  let captured: { text: string; params: unknown[] } | undefined;
+  try {
+    driver.options.debug = (_connection, query, params) => {
+      if (query.startsWith("select") && query.includes('"tool_name_pages"'))
+        captured = { text: query, params: [...params] };
+    };
+    const page = await read({ view: "tools", toolName: "wanted", direction: "before", limit: 1 });
+    expect(page.events.map((event) => event.sequence)).toEqual([1]);
+    expect(page.hasMore).toBe(false);
+  } finally {
+    driver.options.debug = originalDebug;
+  }
+  if (!captured) throw new Error("Identity query not captured");
+  const query = captured;
+  // Retain the pre-projection scan as the detoasting control. Replacing only
+  // the fallback predicate in the new UNION would leave the indexed branch
+  // intact and would no longer exercise the old all-arguments read.
+  const legacy = `select id,sequence,type,turn_id,turn_association,duplicate_of_event_id
+    from session_events where workspace_id=$1 and session_id=$2 and sequence>0
+    and type='agent.toolCall.created' and payload->>'name'=$3 order by sequence desc limit 2`;
+  const explain = (text: string, params = query.params) =>
+    withWorkspaceRls(client.db, workspaceId, async (tx) => {
+      const fragments = text
+        .split(/\$(\d+)/g)
+        .map((part, index) =>
+          index % 2 === 0 ? sql.raw(part) : sql`${sql.param(params[Number(part) - 1])}`,
+        );
+      const rows = await tx.execute(
+        sql`explain (analyze, buffers, format json) ${sql.join(fragments, sql``)}`,
+      );
+      const plans = rows[0]?.["QUERY PLAN"] as
+        | Array<{
+            Plan: { "Shared Hit Blocks": number; "Shared Read Blocks": number };
+            "Execution Time": number;
+          }>
+        | undefined;
+      if (!plans?.[0]) throw new Error("Identity query plan not returned");
+      return plans[0];
+    });
+  const before = await explain(legacy, [workspaceId, sessionId, "wanted"]);
+  const after = await explain(query.text);
+  const buffers = (plan: typeof before) =>
+    plan.Plan["Shared Hit Blocks"] + plan.Plan["Shared Read Blocks"];
+  if (process.env.OPENGENI_BENCH_TOOL_NAME === "1")
+    console.log(
+      JSON.stringify({
+        toolNameFilter: {
+          beforeMs: before["Execution Time"],
+          afterMs: after["Execution Time"],
+          beforeBuffers: buffers(before),
+          afterBuffers: buffers(after),
+        },
+      }),
+    );
+  expect(query.text).toContain(
+    'coalesce("session_events"."tool_name", "session_events"."payload"->>\'name\')',
+  );
+  expect(buffers(after)).toBeLessThan(buffers(before) / 2);
+}, 60_000);
 
 for (const direction of ["after", "before"] as const) {
   test(`real PostgreSQL reconstructs >1MiB legacy and canonical scalar text (${direction})`, async () => {

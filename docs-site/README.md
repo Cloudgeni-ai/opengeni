@@ -1,4 +1,4 @@
-# OpenGeni public docs
+# Opengeni public docs
 
 Source for [docs.opengeni.ai](https://docs.opengeni.ai), built and hosted by
 [Mintlify](https://mintlify.com). Mintlify deploys this directory from `main`

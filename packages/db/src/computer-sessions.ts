@@ -16,7 +16,7 @@ import {
   type InteractionLifecycleOperationReceipt as InteractionLifecycleOperationReceiptValue,
   type InteractionPlacement,
 } from "@opengeni/contracts";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import { attachedDeviceGenerationMatches } from "./attached-browser-devices";
 import { type Database, withRlsContext } from "./database";
 import {
@@ -55,6 +55,9 @@ export type PrepareComputerSessionCreateInput = {
   actorSubjectId: string;
   name: string;
   placement: InteractionPlacement;
+  /** Workspace storing an attached-device placement's Chrome profile, where
+   *  its machine is enrolled. Defaults to this workspace. */
+  attachedDeviceWorkspaceId?: string | null;
 };
 
 export type PrepareComputerSessionEndInput = {
@@ -71,6 +74,9 @@ export type ComputerSessionControlRecord = {
   session: ComputerSession;
   tokenGeneration: number;
   sourceSessionId: string;
+  /** Workspace storing an attached-device placement's Chrome profile, which
+   *  can be another workspace than the session's; null otherwise. */
+  deviceWorkspaceId: string | null;
   createOperationId: string;
   operation: null | {
     operationId: string;
@@ -291,7 +297,14 @@ async function replayedMutation(
 
 export async function listComputerSessions(
   db: Database,
-  input: { accountId: string; workspaceId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    /** Only sessions with any association to this agent session. */
+    associatedSessionId?: string;
+    /** Defaults to true (complete history). */
+    includeTerminal?: boolean;
+  },
 ): Promise<ComputerSessionListResponseValue> {
   return await withRlsContext(
     db,
@@ -300,7 +313,22 @@ export async function listComputerSessions(
       const rows = await scopedDb
         .select()
         .from(schema.computerSessions)
-        .where(eq(schema.computerSessions.workspaceId, input.workspaceId))
+        .where(
+          and(
+            eq(schema.computerSessions.workspaceId, input.workspaceId),
+            input.includeTerminal === false
+              ? notInArray(schema.computerSessions.lifecycle, ["ended", "failed"])
+              : undefined,
+            input.associatedSessionId
+              ? sql`exists (
+                  select 1 from ${schema.computerSessionAssociations}
+                  where ${schema.computerSessionAssociations.workspaceId} = ${input.workspaceId}
+                    and ${schema.computerSessionAssociations.computerSessionId} = ${schema.computerSessions.id}
+                    and ${schema.computerSessionAssociations.sessionId} = ${input.associatedSessionId}
+                )`
+              : undefined,
+          ),
+        )
         .orderBy(desc(schema.computerSessions.lastUsedAt), desc(schema.computerSessions.id));
       const associations = await loadAssociations(
         scopedDb,
@@ -359,6 +387,7 @@ async function controlRecordFromRows(
     session: computerSessionFromRows(row, associations),
     tokenGeneration: row.tokenGeneration,
     sourceSessionId: created[0]!.sessionId,
+    deviceWorkspaceId: row.deviceId ? (row.deviceWorkspaceId ?? row.workspaceId) : null,
     createOperationId: row.createOperationId,
     operation: operation
       ? {
@@ -440,11 +469,16 @@ export async function findComputerSessionControlRecordByOperation(
   );
 }
 
-function placementToColumns(placement: InteractionPlacement): {
+function placementToColumns(
+  placement: InteractionPlacement,
+  workspaceId: string,
+  attachedDeviceWorkspaceId: string | null | undefined,
+): {
   placementKind: ComputerSessionRow["placementKind"];
   sandboxGroupId: string | null;
   connectedSandboxId: string | null;
   deviceId: string | null;
+  deviceWorkspaceId: string | null;
   externalProviderId: string | null;
   externalPlacementId: string | null;
 } {
@@ -453,6 +487,8 @@ function placementToColumns(placement: InteractionPlacement): {
     sandboxGroupId: placement.kind === "sandbox_group" ? placement.sandboxGroupId : null,
     connectedSandboxId: placement.kind === "connected_machine" ? placement.sandboxId : null,
     deviceId: placement.kind === "attached_device" ? placement.deviceId : null,
+    deviceWorkspaceId:
+      placement.kind === "attached_device" ? (attachedDeviceWorkspaceId ?? workspaceId) : null,
     externalProviderId: placement.kind === "external_provider" ? placement.providerId : null,
     externalPlacementId: placement.kind === "external_provider" ? placement.placementId : null,
   };
@@ -531,7 +567,11 @@ export async function prepareComputerSessionCreate(
           workspaceId: input.workspaceId,
           name: input.name,
           lifecycle: "starting",
-          ...placementToColumns(input.placement),
+          ...placementToColumns(
+            input.placement,
+            input.workspaceId,
+            input.attachedDeviceWorkspaceId,
+          ),
           createOperationId: input.operationId,
           createdBySubjectId: input.actorSubjectId,
         })
@@ -758,6 +798,7 @@ export async function failComputerSessionOperation(
     operationId: string;
     computerSessionId: string;
     state?: "failed" | "outcome_unknown";
+    onlyIfPreparedCreate?: boolean;
     error: InteractionErrorValue;
   },
 ): Promise<ComputerSessionMutationResponseValue> {
@@ -768,7 +809,13 @@ export async function failComputerSessionOperation(
       await lockOperation(tx, input.workspaceId, input.operationId);
       const operation = await loadOperation(tx, input.workspaceId, input.operationId);
       assertOperationResource(operation, input.computerSessionId);
-      if (["completed", "failed", "outcome_unknown"].includes(operation.state)) {
+      if (
+        ["completed", "failed", "outcome_unknown"].includes(operation.state) ||
+        (input.onlyIfPreparedCreate &&
+          (operation.kind !== "create" ||
+            operation.state !== "prepared" ||
+            operation.controllerGeneration !== null))
+      ) {
         return await replayedMutation(tx, input.workspaceId, operation, {
           kind: operation.kind,
           digest: operation.requestDigest,
@@ -1044,7 +1091,9 @@ export async function touchComputerSessionController(
       if (observed.placementKind === "attached_device") {
         if (!observed.deviceId || !observed.placementInstanceId) return false;
         const current = await attachedDeviceGenerationMatches(tx, {
+          accountId: input.accountId,
           workspaceId: input.workspaceId,
+          deviceWorkspaceId: observed.deviceWorkspaceId ?? input.workspaceId,
           deviceId: observed.deviceId,
           placementInstanceId: observed.placementInstanceId,
         });

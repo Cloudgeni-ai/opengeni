@@ -8,10 +8,12 @@ import { cn } from "../lib/cn";
 import { annotationNoteNeedsDisclosure } from "./timeline-annotation-layout";
 import { useTimelineAnnotationSourceRoot } from "./timeline-annotation-reveal-context";
 import {
+  annotationQuoteText,
   annotationSourceLabel,
   revealLoadedAnnotationSource,
   truncateAnnotationQuote,
 } from "./timeline-annotation-shared";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type TimelineAnnotationLike = DraftTimelineAnnotation | TimelineAnnotation;
 
@@ -43,14 +45,19 @@ export function AnnotationQuoteSourceButton({
   onRevealSource?: ((source: TimelineAnnotationSource) => boolean) | undefined;
   onUnavailable: (id: string | null) => void;
 }) {
-  const preview = quotePreview(annotation.quote);
-  const sourceLabel = annotationSourceLabel(annotation.source);
+  const t = useOpenGeniText();
+  const quoteText = annotationQuoteText(annotation);
+  const preview = quotePreview(quoteText);
+  const sourceLabel = annotationSourceLabel(t, annotation.source);
   const sourceRoot = useTimelineAnnotationSourceRoot();
   return (
     <button
       type="button"
-      title={annotation.quote}
-      aria-label={`View ${sourceLabel} source: ${truncateAnnotationQuote(annotation.quote, 88)}`}
+      title={quoteText}
+      aria-label={t("timelineAnnotationChrome.viewSourcelabelSourceTruncateannotationquote", {
+        sourceLabel,
+        truncateAnnotationQuote: truncateAnnotationQuote(quoteText, 88),
+      })}
       className="block w-full min-w-0 rounded-sm border-0 bg-transparent text-left text-og-sm leading-5 text-og-fg-muted outline-hidden transition-colors hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
       onClick={() => {
         const revealed =
@@ -70,7 +77,7 @@ export function AnnotationQuoteSourceButton({
       >
         {preview.text}
       </span>
-      <span className="sr-only"> view source</span>
+      <span className="sr-only"> {t("timelineAnnotationChrome.viewSource")}</span>
     </button>
   );
 }
@@ -101,6 +108,7 @@ export function AnnotationNotePreview({
   ordinal: number;
   className?: string | undefined;
 }) {
+  const t = useOpenGeniText();
   const [expanded, setExpanded] = useState(false);
   if (!note) return null;
   const collapsible = annotationNoteNeedsDisclosure(note);
@@ -125,11 +133,15 @@ export function AnnotationNotePreview({
           aria-expanded={expanded}
           aria-controls={contentId}
           aria-label={
-            expanded ? `Show less annotation ${ordinal}` : `Show more annotation ${ordinal}`
+            expanded
+              ? t("timelineAnnotationChrome.showLessAnnotationOrdinal", { ordinal })
+              : t("timelineAnnotationChrome.showMoreAnnotationOrdinal", { ordinal })
           }
           onClick={() => setExpanded((current) => !current)}
         >
-          {expanded ? "Show less" : "Show more"}
+          {expanded
+            ? t("timelineAnnotationChrome.showLess")
+            : t("timelineAnnotationChrome.showMore")}
         </button>
       ) : null}
     </div>
@@ -147,15 +159,29 @@ export function AnnotationNoteField({
   onUpdate: (id: string, note: string) => void;
   onCommit?: (() => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const localRef = useRef<HTMLTextAreaElement | null>(null);
   const setRef = (node: HTMLTextAreaElement | null) => {
     localRef.current = node;
     inputRef?.(node);
-    autosizeNote(node);
   };
 
   useLayoutEffect(() => {
-    autosizeNote(localRef.current);
+    const textarea = localRef.current;
+    if (!textarea) return;
+    // Ref callbacks can reattach on every scroll-driven parent render. Reflowing
+    // unchanged notes there interrupts native scrolling, particularly in WebKit.
+    autosizeNote(textarea);
+    if (typeof ResizeObserver === "undefined") return;
+    let width = textarea.getBoundingClientRect().width;
+    const observer = new ResizeObserver(() => {
+      const nextWidth = textarea.getBoundingClientRect().width;
+      if (nextWidth === width) return;
+      width = nextWidth;
+      autosizeNote(textarea);
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
   }, [annotation.note]);
 
   return (
@@ -164,8 +190,8 @@ export function AnnotationNoteField({
       value={annotation.note}
       rows={1}
       maxLength={2048}
-      placeholder="Add a note…"
-      aria-label="Note"
+      placeholder={t("timelineAnnotationChrome.addANote")}
+      aria-label={t("timelineAnnotationChrome.note")}
       className="mt-0.5 max-h-40 min-h-8 w-full resize-none overflow-y-auto break-words border-0 bg-transparent px-0 py-1 text-og-sm leading-5 text-og-fg outline-hidden placeholder:text-og-fg-subtle focus-visible:ring-0"
       onInput={(event) => {
         autosizeNote(event.currentTarget);

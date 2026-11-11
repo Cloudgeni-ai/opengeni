@@ -1,0 +1,135 @@
+import { archiveActionLabel, requestSessionArchive } from "../archive-session";
+/**
+ * The chat operations every surface shares: the command menu, chords, the
+ * chat header and the sidebar's row menus all copy links, pin, archive and
+ * mark chats through these, so they behave identically everywhere.
+ */
+import { useCallback, useMemo, useRef } from "react";
+import { sessionDisplayTitle, type SessionListRow } from "../../../session-list-model";
+import { useAppContext } from "../../app-context";
+import { usePage } from "../navigation";
+import { applySessionArchiveProjection } from "../session-pagination";
+import { notifySessionListChanged } from "../session-list-invalidation";
+import { toast } from "../toast";
+import { copyLink as copyLinkWithToast } from "../copy-link";
+import { userErrorText } from "../../../ui/api-error";
+
+export type ChatOperations = {
+  /** "Archive" where this person can archive the chat, otherwise null. */
+  archiveLabel?: (chat: SessionListRow) => string | null;
+  /** The chat's shareable address. */
+  linkTo(chat: Pick<SessionListRow, "id" | "workspaceId">): string;
+  copyLink(chat: Pick<SessionListRow, "id" | "workspaceId">): Promise<void>;
+  setPinned(chat: SessionListRow, pinned: boolean): Promise<void>;
+  setArchived(chat: SessionListRow, archived: boolean): Promise<void>;
+  setUnread(chat: SessionListRow, unread: boolean): Promise<void>;
+};
+
+export function chatPath(chat: Pick<SessionListRow, "id" | "workspaceId">): string {
+  return `/workspaces/${encodeURIComponent(chat.workspaceId)}/sessions/${encodeURIComponent(chat.id)}`;
+}
+
+export function useChatOperations(): ChatOperations {
+  const context = useAppContext();
+  const page = usePage();
+  const archiving = useRef(new Set<string>());
+  const linkTo = useCallback(
+    (chat: Pick<SessionListRow, "id" | "workspaceId">) => `${page.origin()}${chatPath(chat)}`,
+    [page],
+  );
+  const copyLink = useCallback(
+    (chat: Pick<SessionListRow, "id" | "workspaceId">) => copyLinkWithToast(linkTo(chat)),
+    [linkTo],
+  );
+  const setPinned = useCallback(
+    async (chat: SessionListRow, pinned: boolean) => {
+      const updated = await context.updateSessionPin(
+        chat.workspaceId,
+        chat.id,
+        pinned,
+        chat.pinVersion ?? 0,
+      );
+      if (updated) toast.success(pinned ? "Chat pinned" : "Chat unpinned");
+      else toast.error(pinned ? "Couldn't pin the chat." : "Couldn't unpin the chat.");
+    },
+    [context],
+  );
+  const setArchivedRef = useRef<ChatOperations["setArchived"] | null>(null);
+  const setArchived = useCallback(
+    async (chat: SessionListRow, archived: boolean) => {
+      if (archiving.current.has(chat.id)) return;
+      const accepted = context.captureWorkspaceInvocation(chat.workspaceId);
+      if (!accepted) return;
+      archiving.current.add(chat.id);
+      try {
+        const updated = await requestSessionArchive(
+          context,
+          chat,
+          archived,
+          sessionDisplayTitle(chat),
+          (next) => void setArchivedRef.current?.({ ...chat, archived: !next }, next),
+        );
+        if (!updated) return;
+        if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
+        context.setSession((current) =>
+          current?.id === updated.id && current.workspaceId === updated.workspaceId
+            ? applySessionArchiveProjection(current, updated)
+            : current,
+        );
+        notifySessionListChanged({
+          workspaceId: chat.workspaceId,
+          sessionId: chat.id,
+          archived: updated.archived,
+        });
+      } catch (error) {
+        if (!context.ownsWorkspaceInvocation(chat.workspaceId, accepted)) return;
+        toast.error(archived ? "Couldn't archive the chat." : "Couldn't undo the archive.", {
+          description: userErrorText(error),
+        });
+      } finally {
+        archiving.current.delete(chat.id);
+      }
+    },
+    [context],
+  );
+  setArchivedRef.current = setArchived;
+  const setUnread = useCallback(
+    async (chat: SessionListRow, unread: boolean) => {
+      try {
+        const updated = await context.client.updateSessionAttention(chat.workspaceId, chat.id, {
+          unread,
+          expectedVersion: chat.attentionVersion ?? 0,
+        });
+        context.setSession((current) =>
+          current?.id === updated.id
+            ? {
+                ...current,
+                ...(updated.unread !== undefined ? { unread: updated.unread } : {}),
+                ...(updated.attentionVersion !== undefined
+                  ? { attentionVersion: updated.attentionVersion }
+                  : {}),
+              }
+            : current,
+        );
+        notifySessionListChanged({ workspaceId: chat.workspaceId, sessionId: chat.id });
+        toast.success(unread ? "Marked as unread" : "Marked as read");
+      } catch (error) {
+        toast.error("Couldn't update the chat.", {
+          description: userErrorText(error),
+        });
+      }
+    },
+    [context],
+  );
+  return useMemo(
+    () => ({
+      linkTo,
+      copyLink,
+      setPinned,
+      setArchived,
+      setUnread,
+      archiveLabel: (chat: SessionListRow) => archiveActionLabel(context, chat),
+    }),
+    [linkTo, copyLink, setPinned, setArchived, setUnread, context],
+  );
+}

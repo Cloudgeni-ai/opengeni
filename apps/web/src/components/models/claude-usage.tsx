@@ -1,13 +1,27 @@
 import type { ClaudeSubscriptionUsage, ClaudeUsageWindow } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { RelativeTime, formatAbsoluteTime, useMinuteNow } from "@/components/ui/relative-time";
+import { useCallback, useEffect, useId, useRef } from "react";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { RelativeTime, useMinuteNow } from "@opengeni/react/ui/relative-time";
+import { UsageMeterGroup, type UsageWindowReading } from "@opengeni/react/ui/usage-meter";
 import {
-  UsageMeterGroup,
-  UsageReadout,
-  type UsageWindowReading,
-} from "@/components/ui/usage-meter";
+  SubscriptionUsageCell,
+  subscriptionUsageReadings,
+} from "@opengeni/react/app/components/models/subscription-usage";
+import {
+  subscriptionListWindows,
+  subscriptionPlanWindows,
+  subscriptionWindows,
+  type SubscriptionWindow,
+  type SubscriptionWindowInput,
+} from "@opengeni/react/app/lib/subscription-accounts";
+import {
+  MODEL_SETTINGS_STALE_TIME_MS,
+  useSharedQuery,
+  type SharedQueryKey,
+} from "@opengeni/react/app/lib/shared-query";
 
 export type ClaudeUsageState = {
   value: ClaudeSubscriptionUsage | null;
@@ -18,6 +32,32 @@ export type ClaudeUsageState = {
   refresh(): Promise<void>;
 };
 
+// The last successful reading per exact scope + reading kind + credential +
+// version, retained per client so a revisit within five minutes needs no read.
+// Only a reading whose credential id and version are both known is
+// retained: without them (people who can't manage the connection) a replaced
+// credential could not be told apart, so those readers always start cold.
+function claudeUsageQueryKey(input: {
+  scope: "workspace" | "organization";
+  scopeId: string;
+  accountPool: boolean;
+  credentialId?: string | null | undefined;
+  credentialVersion?: number | null | undefined;
+  canManage: boolean;
+}): SharedQueryKey | null {
+  if (!input.credentialId || input.credentialVersion === undefined) return null;
+  if (input.credentialVersion === null) return null;
+  return [
+    "model-settings",
+    "claude-usage",
+    input.scope,
+    input.scopeId,
+    input.accountPool ? "pool-account" : "connection",
+    input.credentialId,
+    input.credentialVersion,
+    input.canManage ? "live" : "stored",
+  ];
+}
 export function useClaudeUsage({
   client,
   scope,
@@ -28,8 +68,9 @@ export function useClaudeUsage({
   credentialVersion,
   canManage,
   onCredentialChanged,
+  accountPool = false,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   scope: "workspace" | "organization";
   scopeId: string;
   enabled: boolean;
@@ -37,133 +78,158 @@ export function useClaudeUsage({
   credentialId?: string | null;
   credentialVersion?: number | null;
   canManage: boolean;
+  accountPool?: boolean;
   onCredentialChanged?: () => Promise<unknown>;
 }): ClaudeUsageState {
-  const key = `${scope}:${scopeId}:${credentialId ?? "unknown"}:${credentialVersion ?? "unknown"}:${enabled}:${connected}`;
-  const currentKey = useRef(key);
-  currentKey.current = key;
+  const readerId = useId();
+  const retainedKey = claudeUsageQueryKey({
+    scope,
+    scopeId,
+    accountPool,
+    credentialId,
+    credentialVersion,
+    canManage,
+  });
+  // Unknown credentials still use the shared read machinery, but never reuse
+  // another mount's reading: a replacement cannot be identified reliably.
+  const queryKey = retainedKey ?? [
+    "model-settings",
+    "claude-usage",
+    scope,
+    scopeId,
+    accountPool ? "pool-account" : "connection",
+    credentialId ?? null,
+    credentialVersion ?? null,
+    canManage ? "live" : "stored",
+    "reader",
+    readerId,
+  ];
+  const key = JSON.stringify(queryKey);
+  const readable = enabled && connected;
+  const epochRef = useRef({ client, key, readable, active: true });
+  if (
+    epochRef.current.client !== client ||
+    epochRef.current.key !== key ||
+    epochRef.current.readable !== readable
+  ) {
+    epochRef.current.active = false;
+    epochRef.current = { client, key, readable, active: true };
+  }
+  const epoch = epochRef.current;
   const credentialChanged = useRef(onCredentialChanged);
   credentialChanged.current = onCredentialChanged;
-  const generation = useRef(0);
-  const refreshingKey = useRef<{ key: string; request: number } | null>(null);
-  const [state, setState] = useState<{
-    key: string;
-    value: ClaudeSubscriptionUsage | null;
-    error: boolean;
-    loading: boolean;
-    refreshing: boolean;
-  }>({ key, value: null, error: false, loading: enabled && connected, refreshing: false });
   const load = useCallback(
-    async (refresh: boolean) => {
-      if (!enabled || !connected || (refresh && !canManage)) return;
-      if (refreshingKey.current?.key === key) return;
-      const request = ++generation.current;
-      if (refresh) {
-        refreshingKey.current = { key, request };
-        setState((previous) => ({ ...previous, key, refreshing: true }));
-      }
-      try {
-        const result =
-          scope === "workspace"
-            ? await (refresh
-                ? client.refreshWorkspaceClaudeSubscriptionUsage(scopeId)
-                : client.getWorkspaceClaudeSubscriptionUsage(scopeId))
-            : await (refresh
-                ? client.refreshOrganizationClaudeSubscriptionUsage(scopeId)
-                : client.getOrganizationClaudeSubscriptionUsage(scopeId));
-        if (currentKey.current !== key || generation.current !== request) return;
-        if (
-          !result.connected ||
-          (credentialVersion !== undefined &&
-            credentialVersion !== null &&
-            result.credentialVersion !== credentialVersion)
-        ) {
-          setState({ key, value: null, error: true, loading: false, refreshing: false });
-          await credentialChanged.current?.();
-          return;
-        }
-        setState({ key, value: result, error: false, loading: false, refreshing: false });
-      } catch {
-        if (currentKey.current !== key || generation.current !== request) return;
-        setState((previous) => ({
-          key,
-          value: previous.key === key ? previous.value : null,
-          error: true,
-          loading: false,
-          refreshing: false,
-        }));
-      } finally {
-        if (refresh && refreshingKey.current?.request === request) refreshingKey.current = null;
-      }
-    },
-    [client, scope, scopeId, key, enabled, connected, canManage, credentialVersion],
+    async (refresh: boolean) =>
+      accountPool && credentialId
+        ? scope === "workspace"
+          ? await (refresh
+              ? client.refreshClaudeSubscriptionAccountUsage(scopeId, credentialId)
+              : client.getClaudeSubscriptionAccountUsage(scopeId, credentialId))
+          : await (refresh
+              ? client.refreshOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId)
+              : client.getOrganizationClaudeSubscriptionAccountUsage(scopeId, credentialId))
+        : scope === "workspace"
+          ? await (refresh
+              ? client.refreshWorkspaceClaudeSubscriptionUsage(scopeId)
+              : client.getWorkspaceClaudeSubscriptionUsage(scopeId))
+          : await (refresh
+              ? client.refreshOrganizationClaudeSubscriptionUsage(scopeId)
+              : client.getOrganizationClaudeSubscriptionUsage(scopeId)),
+    [client, scope, scopeId, credentialId, accountPool],
   );
+  // GET only projects saved quota. Manageable accounts use the live POST for
+  // cold/stale reads and invalidation (including the global Models Refresh).
+  // All paths share the cache's in-flight and generation fencing; a fresh
+  // remount does not contact Claude again. Read-only viewers keep using GET.
+  const query = useSharedQuery(client, queryKey, () => load(canManage), {
+    enabled: readable,
+    staleTimeMs: MODEL_SETTINGS_STALE_TIME_MS,
+    pollIntervalMs: MODEL_SETTINGS_STALE_TIME_MS,
+    ...(retainedKey ? {} : { retainMs: 0 }),
+  });
   useEffect(() => {
-    setState({ key, value: null, error: false, loading: enabled && connected, refreshing: false });
-    void load(false);
-    const poll = () => {
-      if (document.visibilityState !== "hidden") void load(false);
-    };
-    const timer = enabled && connected ? setInterval(poll, 30_000) : null;
-    if (enabled && connected) document.addEventListener("visibilitychange", poll);
+    epoch.active = true;
     return () => {
-      generation.current += 1;
-      if (refreshingKey.current?.key === key) refreshingKey.current = null;
-      if (timer) clearInterval(timer);
-      document.removeEventListener("visibilitychange", poll);
+      epoch.active = false;
     };
-  }, [key, load, enabled, connected]);
+  }, [epoch]);
+  const mismatch = Boolean(
+    query.data &&
+    (!query.data.connected ||
+      (credentialVersion != null && query.data.credentialVersion !== credentialVersion)),
+  );
+  const needsMetadata = mismatch || query.data?.refreshStatus === "reconnect";
+  useEffect(() => {
+    if (epoch.active && needsMetadata) void credentialChanged.current?.();
+  }, [epoch, needsMetadata]);
+  const { refresh: refreshQuery } = query;
+  const refresh = useCallback(async () => {
+    if (!epoch.active || !readable || !canManage) return;
+    await refreshQuery();
+  }, [epoch, readable, canManage, refreshQuery]);
   return {
-    value: state.key === key ? state.value : null,
-    error: state.key === key && state.error,
-    loading: state.key !== key ? enabled && connected : state.loading,
-    refreshing: state.key === key && state.refreshing,
-    canRefresh: canManage && enabled && connected,
-    refresh: () => load(true),
+    value: mismatch ? null : query.data,
+    error: Boolean(query.error || mismatch),
+    loading: query.loading,
+    refreshing: query.fetching && !query.loading,
+    canRefresh: canManage && readable,
+    refresh,
   };
 }
 
-const labels: Record<ClaudeUsageWindow["id"], string> = {
-  five_hour: "5-hour",
-  seven_day: "Weekly",
-  seven_day_opus: "Weekly · Opus",
-  seven_day_sonnet: "Weekly · Sonnet",
-  seven_day_overage_included: "Weekly · included extra usage",
-  overage: "Extra usage",
-};
+/**
+ * The windows Claude reported for this account, labelled the shared way.
+ * Only reported windows, and on Ultra (sold without a 5-hour limit) the 5h
+ * only while it holds the account back.
+ */
+export function claudeUsageWindows(
+  value: ClaudeSubscriptionUsage | null,
+  now: number,
+  plan?: string | null,
+): SubscriptionWindow[] {
+  return subscriptionPlanWindows(
+    "claude",
+    plan,
+    subscriptionWindows("claude", claudeWindowInputs(value?.windows ?? []), now),
+  );
+}
+
+/** An account row's windows: the week, and the 5h only while it holds the account back. */
+export function claudeUsageListWindows(
+  value: ClaudeSubscriptionUsage | null,
+  now: number,
+  plan?: string | null,
+): SubscriptionWindow[] {
+  return subscriptionListWindows(
+    "claude",
+    plan,
+    subscriptionWindows("claude", claudeWindowInputs(value?.windows ?? []), now),
+  );
+}
+
+/** Claude's per-window statuses in the shared shape. */
+export function claudeWindowInputs(
+  windows: readonly ClaudeUsageWindow[],
+): SubscriptionWindowInput[] {
+  return windows.map((window) => ({
+    id: window.id,
+    usedPercent: window.usedPercent,
+    resetsAt: window.resetsAt,
+    status:
+      window.status === "rejected"
+        ? "exhausted"
+        : window.status === "allowed_warning"
+          ? "warning"
+          : null,
+  }));
+}
 
 export function claudeUsageReadings(
   value: ClaudeSubscriptionUsage | null,
   now: number,
+  plan?: string | null,
 ): UsageWindowReading[] {
-  const windows = new Map(value?.windows.map((window) => [window.id, window]));
-  const ids: ClaudeUsageWindow["id"][] = [
-    "seven_day",
-    "five_hour",
-    ...[...windows.keys()].filter((id) => id !== "seven_day" && id !== "five_hour"),
-  ];
-  return ids.map((id) => {
-    const window = windows.get(id);
-    const reset = window?.resetsAt ? Date.parse(window.resetsAt) : null;
-    const expired = reset !== null && reset <= now;
-    return {
-      label: labels[id],
-      percent:
-        !expired && window?.usedPercent != null
-          ? Math.min(100, Math.max(0, 100 - window.usedPercent))
-          : null,
-      ...(!expired && window?.status === "rejected" && id !== "overage"
-        ? { limitReached: true }
-        : {}),
-      ...(!expired &&
-      window?.status === "rejected" &&
-      id === "overage" &&
-      window.usedPercent === null
-        ? { valueLabel: "Unavailable" }
-        : {}),
-      ...(reset !== null && !expired ? { resetsLabel: formatAbsoluteTime(reset, { now }) } : {}),
-    };
-  });
+  return subscriptionUsageReadings(claudeUsageWindows(value, now, plan), now);
 }
 
 /** Omitted windows retain their own observation time, not the latest response's. */
@@ -183,31 +249,51 @@ export function claudeUsageReportedAt(
   );
 }
 
-export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
+/** The usage cell of an account row: the week, and the 5h only while it holds the account back. */
+export function ClaudeUsageReadout({
+  state,
+  plan,
+}: {
+  state: ClaudeUsageState;
+  plan?: string | null | undefined;
+}) {
   const now = useMinuteNow();
-  const readings = claudeUsageReadings(state.value, now);
-  const planReadings = readings.filter(
-    (item) => item.label !== labels.overage && item.label !== labels.seven_day_overage_included,
-  );
-  const reading =
-    planReadings.find((item) => item.limitReached || item.percent === 0) ??
-    planReadings.find((item) => item.percent !== null) ??
-    readings[0]!;
+  const unavailable =
+    state.error ||
+    state.value?.refreshStatus === "unavailable" ||
+    state.value?.refreshStatus === "reconnect";
+  const windows = claudeUsageListWindows(unavailable ? null : state.value, now, plan);
+  // A reading whose windows are all kept off the list is not "no usage".
+  const reported = !unavailable && (state.value?.windows?.length ?? 0) > 0;
+  // A failed live check is not evidence of no usage (or a fresh old reading).
   return (
-    <UsageReadout
-      window={reading.label.replace(/^Weekly/, "this week").replace(/^5-hour$/, "this period")}
-      percent={reading.percent}
-      limitReached={reading.limitReached}
-      resetsLabel={reading.resetsLabel}
+    <SubscriptionUsageCell
+      windows={windows}
       loading={state.loading}
+      fallback={
+        unavailable || state.value?.refreshStatus === "scope_required"
+          ? "Usage unavailable"
+          : reported
+            ? null
+            : "No usage yet"
+      }
     />
   );
 }
 
-export function ClaudeUsage({ state }: { state: ClaudeUsageState }) {
+export function ClaudeUsage({
+  state,
+  plan,
+  onReconnect,
+}: {
+  state: ClaudeUsageState;
+  /** The account's plan: Ultra's 5h shows only while it holds the account back. */
+  plan?: string | null | undefined;
+  onReconnect?: (() => void) | undefined;
+}) {
   const now = useMinuteNow();
   const value = state.value;
-  const readings = claudeUsageReadings(value, now);
+  const readings = claudeUsageReadings(value, now, plan);
   const reportedAt = claudeUsageReportedAt(value, now);
   const stale = Boolean(reportedAt && now - Date.parse(reportedAt) > 5 * 60_000);
   const disabled =
@@ -227,7 +313,7 @@ export function ClaudeUsage({ state }: { state: ClaudeUsageState }) {
   return (
     <DetailSection
       title="Usage"
-      description="Limits apply to the connected Claude plan, including usage outside OpenGeni."
+      description="Limits apply to the connected Claude plan, including usage outside Opengeni."
     >
       <UsageMeterGroup
         windows={readings}
@@ -252,6 +338,11 @@ export function ClaudeUsage({ state }: { state: ClaudeUsageState }) {
           This setup token allows model calls. Usage readings update after Claude is used. Sign in
           again to check current usage and reset times.
         </p>
+      ) : null}
+      {value?.refreshStatus === "scope_required" && onReconnect ? (
+        <Button type="button" variant="outline" size="sm" className="mt-3" onClick={onReconnect}>
+          Sign in again
+        </Button>
       ) : null}
     </DetailSection>
   );

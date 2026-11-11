@@ -1,11 +1,12 @@
 import { ChatComposer, ComposerTranscriptionControl } from "@opengeni/react";
 import { createRoot } from "react-dom/client";
-import { useState, type ReactNode } from "react";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { lazy, Suspense, useState, type ReactNode } from "react";
 import { NewSessionRealtimeControl } from "@opengeni/react/realtime";
-import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
-import { NewSessionDraftSyncNotice } from "../src/components/new-session-draft-sync-notice";
-import { ModelPicker } from "../src/components/pickers";
-import { TooltipProvider } from "../src/components/ui/tooltip";
+import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
+import { NewSessionDraftSyncNotice } from "@opengeni/react/app/components/new-session-draft-sync-notice";
+import { ModelPicker } from "@opengeni/react/app/components/pickers";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import {
   emptyAttachments,
   galleryFirstPartyTools,
@@ -19,6 +20,11 @@ import "../src/styles.css";
 const newSession = new URLSearchParams(location.search).has("new-session");
 const sendingPreview = new URLSearchParams(location.search).has("sending");
 const attachmentPreview = new URLSearchParams(location.search).has("attachment");
+const AgentLearningSettingsEditor = lazy(() =>
+  import("@opengeni/react/app/components/knowledge/agent-learning-settings").then((module) => ({
+    default: module.AgentLearningSettingsEditor,
+  })),
+);
 
 function PickerFixture({ leading, label }: { leading?: ReactNode; label: string }) {
   return (
@@ -54,6 +60,7 @@ function Fixture() {
     newSession ? "Can you help me integrate an AI chat in the analytics dashboard?" : "",
   );
   const [sent, setSent] = useState(false);
+  const [agentTabOpen, setAgentTabOpen] = useState(false);
   return (
     <TooltipProvider>
       <main
@@ -113,6 +120,7 @@ function Fixture() {
                         sessionId: "session-fixture",
                         scope: "workspace",
                         canEdit: true,
+                        onOpen: () => setAgentTabOpen(true),
                       }
                     : undefined
                 }
@@ -122,7 +130,7 @@ function Fixture() {
                 selection={galleryToolSelection}
                 onToolSelectionChange={() => {}}
                 repositories={{ selectedCount: 2, panel: <PickerFixture label="Repository" /> }}
-                variableSets={{ selectedCount: 2, panel: <PickerFixture label="Variable set" /> }}
+                secrets={{ summary: "All", panel: <PickerFixture label="Vault" /> }}
               />
             </>
           }
@@ -160,8 +168,44 @@ function Fixture() {
           <NewSessionDraftSyncNotice />
         ) : null}
         {sent ? <p role="status">Preview only: Send was pressed.</p> : null}
+        {agentTabOpen ? (
+          // Only navigation is supplied by the fixture; settings stay the
+          // production editor, now reached through the existing chat's Agent tab.
+          <section aria-label="Agent tab">
+            <Suspense fallback={<p role="status">Loading chat settings</p>}>
+              <AgentLearningSettingsEditor
+                workspaceId="composer-fixture"
+                scope="workspace"
+                source={{ kind: "chat", id: "session-fixture" }}
+                canEdit
+              />
+            </Suspense>
+          </section>
+        ) : null}
       </main>
     </TooltipProvider>
   );
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+// Keep the production settings editor, but supply deterministic context at the
+// fixture boundary instead of bootstrapping a live authenticated app.
+let agentLearningSettings: Record<string, string> = {};
+const fixtureAppContext = {
+  client: {
+    getAgentLearningSettings: async () => ({ version: 1, settings: agentLearningSettings }),
+    saveAgentLearningSettings: async (
+      _workspaceId: string,
+      input: { settings: Record<string, string> },
+    ) => {
+      agentLearningSettings = { ...agentLearningSettings, ...input.settings };
+      return { version: 2, settings: agentLearningSettings };
+    },
+  },
+  captureWorkspaceInvocation: () => ({}),
+  ownsWorkspaceInvocation: () => true,
+} as unknown as AppContextValue;
+
+createRoot(document.getElementById("root")!).render(
+  <AppContext.Provider value={fixtureAppContext}>
+    <Fixture />
+  </AppContext.Provider>,
+);

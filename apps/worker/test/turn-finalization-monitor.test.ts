@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { createObservability } from "@opengeni/observability";
+import { createObservability, turnExecutionTelemetryKey } from "@opengeni/observability";
 import type { TurnHeartbeatDetails } from "../src/op-journal";
 import { startTurnFinalizationMonitor } from "../src/activities/agent-turn/finalization-monitor";
 
@@ -37,13 +37,13 @@ describe("turn finalization diagnostics", () => {
       observability: obs,
       details,
       heartbeat: (x) => heartbeats.push(structuredClone(x)),
-      terminateWorker() {},
+      requestWorkerDrain() {},
     });
     const second = startTurnFinalizationMonitor({
       observability: obs,
       details: { opAcks: {} },
       heartbeat() {},
-      terminateWorker() {},
+      requestWorkerDrain() {},
     });
     try {
       first.enter("tool_writers");
@@ -84,35 +84,129 @@ describe("turn finalization diagnostics", () => {
 
   test("retains a readable bounded cause through the real public telemetry filter", async () => {
     const logs: string[] = [];
+    const execution = {
+      workspaceId: "private-workspace",
+      sessionId: "private-session",
+      attemptId: "private-attempt",
+    };
+    const correlationId = turnExecutionTelemetryKey(
+      execution.workspaceId,
+      execution.sessionId,
+      execution.attemptId,
+    );
     const output = spyOn(console, "error").mockImplementation((...args) =>
       logs.push(args.join(" ")),
     );
-    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    const warnings: string[] = [];
+    const warning = spyOn(console, "warn").mockImplementation((...args) =>
+      warnings.push(args.join(" ")),
+    );
     const obs = observability();
-    let exits = 0;
+    let drains = 0;
     const monitor = startTurnFinalizationMonitor({
       observability: obs,
       details: { opAcks: {} },
       heartbeat() {},
       timeoutMs: 10,
       slowAfterMs: 1,
-      terminateWorker() {
-        exits++;
+      execution,
+      outstandingWriters: () => [{ kind: "shell_session", count: 1 }],
+      requestWorkerDrain() {
+        drains++;
       },
     });
     try {
-      monitor.enter("credential_cleanup");
+      monitor.enter("tool_writers");
       await Bun.sleep(15);
-      expect(exits).toBe(1);
-      expect(logs.join("\n")).toContain('"reason":"credential_cleanup"');
+      expect(drains).toBe(1);
+      expect(logs.join("\n")).toContain('"reason":"tool_writers"');
+      expect(logs.join("\n")).toContain('"writerKinds":"shell_session"');
+      expect(warnings.join("\n")).toContain('"writerKinds":"shell_session"');
+      expect(logs.join("\n")).toContain('"registered":1');
       expect(logs.join("\n")).toContain('"surface":"turn_finalization"');
+      expect(logs.join("\n")).toContain(`"correlationId":"${correlationId}"`);
+      expect(warnings.join("\n")).toContain(`"correlationId":"${correlationId}"`);
+      for (const identity of Object.values(execution)) {
+        expect(logs.join("\n")).not.toContain(identity);
+        expect(warnings.join("\n")).not.toContain(identity);
+        expect(await obs.prometheusMetrics()).not.toContain(identity);
+      }
+      expect(await obs.prometheusMetrics()).not.toContain(correlationId);
       expect(
         sample(
           await obs.prometheusMetrics(),
           "opengeni_turn_finalization_slow_total",
-          "credential_cleanup",
+          "tool_writers",
         ),
       ).toBe(1);
+    } finally {
+      monitor.stop();
+      output.mockRestore();
+      warning.mockRestore();
+    }
+  });
+
+  test("correlation diagnostics cannot disable physical containment", async () => {
+    const output = spyOn(console, "error").mockImplementation(() => {});
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    let drains = 0;
+    const monitor = startTurnFinalizationMonitor({
+      observability: observability(),
+      details: { opAcks: {} },
+      heartbeat() {},
+      execution: {
+        get workspaceId(): string {
+          throw new Error("diagnostic identity unavailable");
+        },
+        sessionId: "private-session",
+        attemptId: "private-attempt",
+      },
+      timeoutMs: 10,
+      slowAfterMs: 1,
+      requestWorkerDrain() {
+        drains++;
+      },
+    });
+    try {
+      monitor.enter("tool_writers");
+      await Bun.sleep(15);
+      expect(drains).toBe(1);
+    } finally {
+      monitor.stop();
+      output.mockRestore();
+      warning.mockRestore();
+    }
+  });
+
+  test("a contained stage holds the host containment until the finalizer moves on", async () => {
+    const output = spyOn(console, "error").mockImplementation(() => {});
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    let held = 0;
+    const monitor = startTurnFinalizationMonitor({
+      observability: observability(),
+      details: { opAcks: {} },
+      heartbeat() {},
+      timeoutMs: 10,
+      slowAfterMs: 1,
+      requestWorkerDrain() {
+        held++;
+        return () => {
+          held--;
+        };
+      },
+    });
+    try {
+      monitor.enter("tool_writers");
+      await Bun.sleep(20);
+      expect(held).toBe(1);
+      // The stalled stage recovered: its hold is released, and the next stage
+      // only holds again if it stalls in turn.
+      monitor.enter("workspace_snapshot");
+      expect(held).toBe(0);
+      await Bun.sleep(20);
+      expect(held).toBe(1);
+      monitor.stop();
+      expect(held).toBe(0);
     } finally {
       monitor.stop();
       output.mockRestore();

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   OpenGeniApiError,
   applyUrlRotation,
@@ -9,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { terminalCanAcquirePty } from "../lib/terminal-capability";
+import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
 
 // "on-demand" is the boxless-benign resting state: the lease is not currently
@@ -28,7 +30,7 @@ export type SessionCapabilitiesState =
   | "on-demand"
   | "error";
 
-export type UseSessionCapabilitiesOptions = ClientOverride & {
+export type UseSessionCapabilitiesOptions = ClientOverride<ChatClient> & {
   /**
    * Live event log to fold `stream.url.rotated` from (usually
    * `useSessionEvents().events`). When present the desktop socket stays fresh on
@@ -289,7 +291,7 @@ export function useSessionCapabilities(
                 return;
               }
               setState("error");
-              setError(cause instanceof Error ? cause : new Error(String(cause)));
+              setError(normalizeError(cause));
             }
           });
       }, warmingPollMs);
@@ -469,7 +471,7 @@ export function useSessionCapabilities(
           return;
         }
         setState("error");
-        setError(cause instanceof Error ? cause : new Error(String(cause)));
+        setError(normalizeError(cause));
       }
     })();
 

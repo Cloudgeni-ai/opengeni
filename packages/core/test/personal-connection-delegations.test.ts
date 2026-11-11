@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase, testSettings } from "@opengeni/testing";
+import { acquireBlankTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import type { ConnectionMetadata, McpPersonalConnectionDelegation } from "@opengeni/contracts";
 import {
@@ -18,20 +19,22 @@ import {
   ensureManagedAccessForUser,
   getPersonalGitHubRepositorySelectionState,
   getSessionTurnPersonalConnectionDelegations,
+  issueSelfUserResourceGrant,
   persistProviderOAuthConnection,
   replacePersonalGitHubRepositorySelections,
+  revokeSelfUserResourceGrant,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import {
   freezePersonalConnectionDelegations,
-  googleDrivePublicationDelegationFromVisibleConnections,
-  personalAtlassianDelegationsFromVisibleConnections,
+  listOwnConnectionAccountsForGrant,
   personalConnectionDelegationSourceForGrant,
   personalConnectionDelegationsFromParent,
   personalConnectionDelegationsFromVisibleConnections,
   selectedPersonalConnectionServers,
+  turnOnOwnLoginHere,
   withFrozenPersonalConnectionDelegations,
 } from "../src/domain/personal-connection-delegations";
 import { validatedScheduledTaskUpdate } from "../src/domain/scheduled-tasks";
@@ -173,6 +176,65 @@ describe("personal MCP connection delegation", () => {
     expect(membershipChecks).toBe(0);
   });
 
+  test("resolves Your GitHub REST tools through the exact frozen GitHub connection", async () => {
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    const otherConnectionId = "22222222-2222-4222-8222-222222222222";
+    const delegation: McpPersonalConnectionDelegation = {
+      serverId: "github:personal",
+      connectionId,
+      ownerSubjectId: "user:owner",
+      providerDomain: "github.com",
+      kind: "oauth2",
+      connectionType: "github_personal",
+    };
+    const received: ResolveConnectionCredentialInput[] = [];
+    const resolver = withFrozenPersonalConnectionDelegations({
+      // Your GitHub is never an MCP server in settings.
+      settings: { mcpServers: [] },
+      personalConnectionDelegations: [delegation],
+      ownerHasWorkspaceMembership: async () => true,
+      resolveCredential: async (request) => {
+        received.push(request);
+        return {
+          status: "ok",
+          headers: { authorization: "Bearer personal" },
+          connectionId: request.connectionRef.connectionId!,
+        } as unknown as Awaited<
+          ReturnType<
+            Parameters<typeof withFrozenPersonalConnectionDelegations>[0]["resolveCredential"]
+          >
+        >;
+      },
+    });
+    const request = (id: string): ResolveConnectionCredentialInput => ({
+      workspaceId: "workspace-1",
+      subjectId: "user:owner",
+      serverId: "github:personal",
+      destinationUrl: "https://api.github.com/repos/octo/repo/pulls",
+      credentialTarget: "http_api",
+      connectionRef: {
+        connectionId: id,
+        provider: "github",
+        providerDomain: "github.com",
+        kind: "oauth2",
+        scopes: ["repo"],
+        subjectScope: "subject",
+      },
+    });
+
+    await expect(resolver(request(connectionId))).resolves.toMatchObject({ status: "ok" });
+    expect(received).toHaveLength(1);
+    expect(received[0]!.subjectId).toBe("user:owner");
+    expect(received[0]!.connectionRef.connectionId).toBe(connectionId);
+
+    // Another GitHub connection than the one frozen on the turn stays refused.
+    await expect(resolver(request(otherConnectionId))).resolves.toMatchObject({
+      status: "auth_needed",
+      reason: "personal_authority_unavailable",
+    });
+    expect(received).toHaveLength(1);
+  });
+
   test("admits an exact same-organization portable selection and membershipless personal owner", async () => {
     const blank = await acquireBlankTestDatabase("core-portable-connection-authority");
     if (!blank) return;
@@ -220,12 +282,67 @@ describe("personal MCP connection delegation", () => {
         return row!;
       });
       const selection = { serverId: "linear", connectionId: connection.id };
-      const frozen = await freezePersonalConnectionDelegations({
+      const inactive = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${origin!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [row] = await tx<{ id: string }[]>`
+          insert into connections (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted, status)
+          values (${account!.id}, ${origin!.id}, ${subjectId}, 'slack.example.test', 'oauth2', 'ciphertext', 'needs_reauth') returning id
+        `;
+        return row!;
+      });
+      const inventoryGrant = {
+        accountId: account!.id,
+        workspaceId: target!.id,
+        subjectId,
+      } as Parameters<typeof listOwnConnectionAccountsForGrant>[1];
+      expect(
+        (await listOwnConnectionAccountsForGrant(client.db, inventoryGrant)).map((row) => row.id),
+      ).toEqual([connection.id]);
+      const settingsInventory = await listOwnConnectionAccountsForGrant(client.db, inventoryGrant, {
+        includeInactive: true,
+      });
+      expect(settingsInventory.map((row) => row.id).sort()).toEqual(
+        [connection.id, inactive.id].sort(),
+      );
+      expect(settingsInventory.find((row) => row.id === inactive.id)?.status).toBe("needs_reauth");
+      expect(settingsInventory.every((row) => row.workspaceId === origin!.id)).toBe(true);
+      // Added in the owner's Personal workspace, so it is listed in the shared
+      // workspace for reuse but not turned on there yet (D-54).
+      expect(settingsInventory.find((row) => row.id === connection.id)?.turnedOnHere).toBe(false);
+      expect(
+        await listOwnConnectionAccountsForGrant(
+          client.db,
+          { ...inventoryGrant, principalKind: "service" },
+          { includeInactive: true },
+        ),
+      ).toEqual([]);
+      const sharedFreeze = {
         db: client.db,
         workspaceId: target!.id,
         settings: { mcpServers: [personalServer] },
-        tools: [{ kind: "mcp", id: "linear" }],
-        source: { kind: "subject", subjectId, accountId: account!.id },
+        tools: [{ kind: "mcp" as const, id: "linear" }],
+        source: { kind: "subject" as const, subjectId, accountId: account!.id },
+      };
+      // Off here: an explicit pick fails closed and the default binds nothing.
+      await expect(
+        freezePersonalConnectionDelegations({ ...sharedFreeze, authoritySelections: [selection] }),
+      ).rejects.toMatchObject({ diagnostic: { reason: "selected_account_unavailable" } });
+      expect(await freezePersonalConnectionDelegations(sharedFreeze)).toEqual([]);
+      await turnOnOwnLoginHere(client.db, {
+        accountId: account!.id,
+        workspaceId: target!.id,
+        subjectId,
+        authorityId: connection.authorityId,
+      });
+      const turnedOn = await listOwnConnectionAccountsForGrant(client.db, inventoryGrant);
+      expect(turnedOn.find((row) => row.id === connection.id)).toMatchObject({
+        turnedOnHere: true,
+        turnedOnHereGrantId: expect.any(String),
+      });
+      const frozen = await freezePersonalConnectionDelegations({
+        ...sharedFreeze,
         authoritySelections: [selection],
       });
       expect(frozen).toEqual([
@@ -238,6 +355,78 @@ describe("personal MCP connection delegation", () => {
           kind: "oauth2",
         },
       ]);
+      // Turning a login on is a standing choice for the workspace, never a
+      // per-chat approval.
+      await expect(
+        issueSelfUserResourceGrant(client.db, {
+          accountId: account!.id,
+          workspaceId: target!.id,
+          subjectId,
+          authorityId: connection.authorityId,
+          resourceKind: "connection",
+          mode: "session",
+          context: "workspace_shared",
+          workspaceSharedAcknowledged: true,
+        }),
+      ).rejects.toBeTruthy();
+      // A login added from a shared workspace starts on there.
+      const addedHere = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [row] = await tx<{ id: string }[]>`
+          insert into connections (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+          values (${account!.id}, ${target!.id}, ${subjectId}, 'notion.example.test', 'oauth2', 'ciphertext')
+          returning id
+        `;
+        return row!;
+      });
+      const addedHereListed = (
+        await listOwnConnectionAccountsForGrant(client.db, inventoryGrant)
+      ).find((row) => row.id === addedHere.id);
+      expect(addedHereListed?.turnedOnHere).toBe(true);
+      // Stopping it here revokes that standing grant; it is off here again.
+      await revokeSelfUserResourceGrant(client.db, {
+        accountId: account!.id,
+        workspaceId: target!.id,
+        subjectId,
+        grantId: addedHereListed!.turnedOnHereGrantId!,
+      });
+      expect(
+        (await listOwnConnectionAccountsForGrant(client.db, inventoryGrant)).find(
+          (row) => row.id === addedHere.id,
+        )?.turnedOnHere,
+      ).toBe(false);
+      // Every own login works in its owner's Personal workspace.
+      expect(
+        (
+          await listOwnConnectionAccountsForGrant(client.db, {
+            ...inventoryGrant,
+            workspaceId: origin!.id,
+          })
+        ).find((row) => row.id === addedHere.id)?.turnedOnHere,
+      ).toBe(true);
+      // It stays off in another shared workspace until its owner turns it on.
+      const [other] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name) values (${account!.id}, 'other shared')
+        returning id
+      `;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${other!.id}, ${account!.id})
+      `;
+      await sql`
+        insert into workspace_memberships (account_id, workspace_id, subject_id)
+        values (${account!.id}, ${other!.id}, ${subjectId})
+      `;
+      expect(
+        (
+          await listOwnConnectionAccountsForGrant(client.db, {
+            ...inventoryGrant,
+            workspaceId: other!.id,
+          })
+        ).find((row) => row.id === addedHere.id)?.turnedOnHere,
+      ).toBe(false);
 
       const personalFrozen = await freezePersonalConnectionDelegations({
         db: client.db,
@@ -800,13 +989,13 @@ describe("personal MCP connection delegation", () => {
           principalKind: "human_session",
         },
         existing: task,
-        payload: { connectionAccounts: [] },
+        payload: { pinnedAccounts: [] },
       });
-      // Clearing an override re-resolves the still-selected repository, then
-      // stores its exact account for later occurrences; it is not an empty
-      // frozen snapshot and must not discard the repository's write boundary.
-      expect(resetSelectionTask.agentConfig.connectionAccounts).toEqual([authoritySelection]);
-      expect(resetSelectionTask.agentConfig.connectionAccountsFrozen).toBe(true);
+      // Unpinning stores no account at all: later occurrences resolve the
+      // still-selected repository's account live, and the repository's write
+      // boundary is kept.
+      expect(resetSelectionTask.agentConfig).not.toHaveProperty("pinnedAccounts");
+      expect(resetSelectionTask.agentConfig).not.toHaveProperty("connectionAccounts");
       expect(resetSelectionTask.agentConfig.resources).toEqual([resource]);
       const freezeResetSchedule = () =>
         freezePersonalConnectionDelegations({
@@ -816,8 +1005,7 @@ describe("personal MCP connection delegation", () => {
           tools: resetSelectionTask.agentConfig.tools,
           resources: resetSelectionTask.agentConfig.resources,
           source: { kind: "subject", subjectId, accountId: originGrant.accountId },
-          authoritySelections: resetSelectionTask.agentConfig.connectionAccounts,
-          authoritySelectionsFrozen: resetSelectionTask.agentConfig.connectionAccountsFrozen,
+          authoritySelections: resetSelectionTask.agentConfig.pinnedAccounts ?? [],
         });
       expect(await freezeResetSchedule()).toEqual(frozen);
 
@@ -835,6 +1023,116 @@ describe("personal MCP connection delegation", () => {
         "personal GitHub repository resource is outside the selected authority",
       );
       await expect(freezeResetSchedule()).rejects.toThrow(
+        "personal GitHub repository resource is outside the selected authority",
+      );
+
+      // All my repositories (read): every chat of the person gets Your
+      // GitHub, any repository can be attached for reading, and the saved
+      // per-repository list comes back when the mode is turned off.
+      const emptied = await getPersonalGitHubRepositorySelectionState(client.db, {
+        accountId: originGrant.accountId,
+        originWorkspaceId: originGrant.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+      });
+      const allOn = await replacePersonalGitHubRepositorySelections(client.db, {
+        accountId: originGrant.accountId,
+        originWorkspaceId: originGrant.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+        expectedConnectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+        expectedSelectionGeneration: emptied!.selectionGeneration,
+        idempotencyKey: crypto.randomUUID(),
+        repositories: [repository],
+        allRepositoriesAccess: "read",
+      });
+      expect(allOn.allRepositoriesAccess).toBe("read");
+      expect(allOn.repositories.map((entry) => entry.repositoryId)).toEqual([
+        repository.repositoryId,
+      ]);
+      const freezeWith = (
+        resources: (typeof resource)[],
+        selections = [authoritySelection],
+        allRepositoriesEnabled = true,
+      ) =>
+        freezePersonalConnectionDelegations({
+          db: client.db,
+          workspaceId: target!.id,
+          settings: {
+            mcpServers: [],
+            githubPersonalOauthEnabled: true,
+            githubPersonalAllRepositoriesEnabled: allRepositoriesEnabled,
+          },
+          tools: [],
+          resources,
+          source: { kind: "subject" as const, subjectId, accountId: originGrant.accountId },
+          authoritySelections: selections,
+        });
+      const allSnapshot = {
+        credentialBindingId,
+        connectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+        selectionGeneration: allOn.selectionGeneration,
+        allRepositoriesAccess: "read",
+      };
+      expect(await freezeWith([], [])).toEqual([
+        expect.objectContaining({
+          connectionId: connection.id,
+          connectionType: "github_personal",
+          personalGitHubRepositorySelection: { ...allSnapshot, repositories: [] },
+        }),
+      ]);
+      const unlisted = {
+        ...resource,
+        uri: "https://github.com/someone/else",
+        repositoryId: "123",
+        access: "read" as const,
+      };
+      expect((await freezeWith([unlisted]))[0]?.personalGitHubRepositorySelection).toEqual({
+        ...allSnapshot,
+        repositories: [
+          {
+            repositoryId: "123",
+            fullName: "someone/else",
+            canonicalUrl: "https://github.com/someone/else",
+            ref: "main",
+            access: "read",
+            selectionGeneration: allOn.selectionGeneration,
+          },
+        ],
+      });
+      await expect(freezeWith([{ ...unlisted, access: "write" }])).rejects.toThrow(
+        "personal GitHub repository resource is outside the selected authority",
+      );
+      // Until the deployment allows the mode, a stored mode is ignored.
+      expect(await freezeWith([], [], false)).toEqual([]);
+      await expect(freezeWith([unlisted], [authoritySelection], false)).rejects.toThrow(
+        "personal GitHub repository resource is outside the selected authority",
+      );
+      // Children keep All my repositories without attached repositories.
+      expect(
+        personalConnectionDelegationsFromParent({
+          servers: [],
+          parentDelegations: await freezeWith([], []),
+          personalGitHubResources: [],
+        })[0]?.personalGitHubRepositorySelection?.allRepositoriesAccess,
+      ).toBe("read");
+      // Turning it off keeps the saved list and leaves other chats without Your GitHub.
+      const allOff = await replacePersonalGitHubRepositorySelections(client.db, {
+        accountId: originGrant.accountId,
+        originWorkspaceId: originGrant.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+        expectedConnectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+        expectedSelectionGeneration: allOn.selectionGeneration,
+        idempotencyKey: crypto.randomUUID(),
+        repositories: [repository],
+        allRepositoriesAccess: null,
+      });
+      expect(allOff.allRepositoriesAccess).toBeNull();
+      expect(allOff.selectionGeneration).toBeGreaterThan(allOn.selectionGeneration);
+      expect(allOff.repositories).toHaveLength(1);
+      expect(await freezeWith([], [])).toEqual([]);
+      await expect(freezeWith([unlisted])).rejects.toThrow(
         "personal GitHub repository resource is outside the selected authority",
       );
 
@@ -962,6 +1260,50 @@ describe("personal MCP connection delegation", () => {
         },
       },
     ]);
+    // A parent listing the repository for reading, under All my repositories
+    // at write, still lets a child write there.
+    const allParent: McpPersonalConnectionDelegation = {
+      ...parent,
+      personalGitHubRepositorySelection: {
+        ...parent.personalGitHubRepositorySelection!,
+        allRepositoriesAccess: "write",
+        repositories: [
+          { ...parent.personalGitHubRepositorySelection!.repositories[0]!, access: "read" },
+        ],
+      },
+    };
+    const writeRequest = {
+      kind: "repository" as const,
+      uri: "https://github.com/octocat/private-repository",
+      ref: "main",
+      provider: "github" as const,
+      connectionType: "github_personal" as const,
+      credentialBindingId,
+      repositoryId: "9007199254740993123",
+      access: "write" as const,
+    };
+    expect(
+      personalConnectionDelegationsFromParent({
+        servers: [],
+        parentDelegations: [allParent],
+        personalGitHubResources: [writeRequest],
+      })[0]?.personalGitHubRepositorySelection?.repositories,
+    ).toEqual([expect.objectContaining({ repositoryId: "9007199254740993123", access: "write" })]);
+    expect(() =>
+      personalConnectionDelegationsFromParent({
+        servers: [],
+        parentDelegations: [
+          {
+            ...allParent,
+            personalGitHubRepositorySelection: {
+              ...allParent.personalGitHubRepositorySelection!,
+              allRepositoriesAccess: "read",
+            },
+          },
+        ],
+        personalGitHubResources: [writeRequest],
+      }),
+    ).toThrow("exceeds parent authority");
   });
 
   test("fails closed instead of dropping personal GitHub authority without a causal human", async () => {
@@ -1103,133 +1445,66 @@ describe("personal MCP connection delegation", () => {
     ).toEqual([social]);
   });
 
-  test("captures canonical Atlassian accounts and excludes legacy account rows", () => {
-    const authorityId = crypto.randomUUID();
-    const atlassian = googleDriveConnection({
-      id: crypto.randomUUID(),
-      providerDomain: "api.atlassian.com",
-      grantedScopes: [],
-      metadata: {},
-      authorityId,
-    });
-    expect(
-      personalAtlassianDelegationsFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [atlassian],
-      }),
-    ).toEqual([
-      expect.objectContaining({
-        connectionId: atlassian.id,
-        originWorkspaceId: atlassian.workspaceId,
-        ownerSubjectId: "user:owner",
-        connectionType: "atlassian",
-      }),
-    ]);
-    expect(
-      personalAtlassianDelegationsFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [{ ...atlassian, authorityId: null }],
-      }),
-    ).toEqual([]);
-  });
-
-  test("freezes, inherits, and composes one exact Google Drive publication connection", async () => {
-    const drive = googleDriveConnection();
-    const delegation = googleDrivePublicationDelegationFromVisibleConnections({
-      subjectId: "user:owner",
-      connections: [drive],
-    });
-    expect(delegation).toEqual({
-      serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-      connectionId: drive.id,
-      originWorkspaceId: drive.workspaceId,
+  test("children drop native Atlassian authority while retaining the hosted MCP binding", () => {
+    const hosted = {
+      ...personalServer,
+      id: "atlassian",
+      url: "https://mcp.atlassian.com/v1/mcp",
+      connectionRef: { ...personalServer.connectionRef, providerDomain: "mcp.atlassian.com" },
+    };
+    const native = {
+      ...hosted,
+      id: "old-native",
+      connectionRef: { ...hosted.connectionRef, providerDomain: "api.atlassian.com" },
+    };
+    const hostedGrant: McpPersonalConnectionDelegation = {
+      serverId: hosted.id,
+      connectionId: crypto.randomUUID(),
       ownerSubjectId: "user:owner",
-      providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+      providerDomain: "mcp.atlassian.com",
       kind: "oauth2",
-      // The exact destination frozen at acceptance: a later
-      // connection-settings change can never redirect an already-accepted
-      // turn's publication.
-      outputDestination: {
-        folderId: "folder-1",
-        folderName: "Published",
-        driveId: null,
-        location: "my_drive",
-        selectedAt: "2026-08-14T00:00:00.000Z",
-      },
-    });
-    const inherited = personalConnectionDelegationsFromParent({
-      servers: [],
-      parentDelegations: [delegation!],
-    });
-    expect(inherited).toEqual([delegation]);
-    const received: ResolveConnectionCredentialInput[] = [];
-    const resolver = withFrozenPersonalConnectionDelegations({
-      settings: { mcpServers: [] },
-      personalConnectionDelegations: inherited,
-      ownerHasWorkspaceMembership: async (subjectId) => subjectId === "user:owner",
-      resolveCredential: async (input) => {
-        received.push(input);
-        return {
-          status: "ok",
-          headers: { authorization: "Bearer exact-frozen-drive" },
-          connectionId: input.connectionRef.connectionId!,
-        };
-      },
-    });
-    await resolver({
-      workspaceId: drive.workspaceId,
-      subjectId: "worker:first-party-mcp",
-      serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-      toolName: "google_drive_publish_file",
-      destinationUrl: "https://www.googleapis.com/upload/drive/v3/files",
-      connectionRef: {
-        providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
-        kind: "oauth2",
-        subjectScope: "subject",
-        scopes: [GOOGLE_DRIVE_FILE_SCOPE],
-      },
-    });
-    expect(received).toHaveLength(1);
-    expect(received[0]).toMatchObject({
-      subjectId: "user:owner",
-      connectionRef: { connectionId: drive.id },
-    });
+    };
+    const nativeGrant: McpPersonalConnectionDelegation = {
+      ...hostedGrant,
+      serverId: native.id,
+      providerDomain: "api.atlassian.com",
+      connectionType: "atlassian",
+    };
+    expect(
+      personalConnectionDelegationsFromParent({
+        servers: [hosted, native],
+        parentDelegations: [hostedGrant, nativeGrant],
+      }),
+    ).toEqual([hostedGrant]);
   });
 
-  test("fails closed when Google Drive publication authority is missing or ambiguous", () => {
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [
-          googleDriveConnection({ grantedScopes: [] }),
-          googleDriveConnection({ subjectId: "user:other" }),
+  test("an explicit retired publication selection is rejected before reading credentials", async () => {
+    await expect(
+      freezePersonalConnectionDelegations({
+        db: {} as Parameters<typeof freezePersonalConnectionDelegations>[0]["db"],
+        workspaceId: "workspace-1",
+        settings: { mcpServers: [] },
+        tools: [],
+        source: { kind: "subject", subjectId: "user:owner", accountId: "account-1" },
+        authoritySelections: [
+          {
+            serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+            connectionId: "11111111-1111-4111-8111-111111111111",
+          },
         ],
       }),
-    ).toBeNull();
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [googleDriveConnection(), googleDriveConnection()],
-      }),
-    ).toBeNull();
-    const selected = googleDriveConnection();
-    const other = googleDriveConnection();
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [selected],
-      }),
-    ).toMatchObject({ connectionId: selected.id, originWorkspaceId: selected.workspaceId });
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [other, selected],
-        authoritySelection: {
-          serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-          connectionId: selected.id,
-        },
-      }),
-    ).toMatchObject({ connectionId: selected.id });
+    ).rejects.toMatchObject({
+      diagnostic: {
+        reason: "selected_account_unavailable",
+        accounts: [
+          {
+            serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+            connectionId: "11111111-1111-4111-8111-111111111111",
+            reason: "connector_unavailable",
+          },
+        ],
+      },
+    });
   });
 
   test("pins every caller surface to the same exact owner, UUID, provider, and kind", async () => {

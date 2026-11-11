@@ -59,7 +59,6 @@ describe("asService", () => {
       apiKey: "synthetic-key",
       apiContract: "strict",
       sessionCommandTimeoutMs: 4321,
-      onDeprecation: false,
       headers: () => ({ "X-Product-Request": String(++headerReads) }),
       fetch: async (url, init) => {
         calls.push({ url: String(url), init });

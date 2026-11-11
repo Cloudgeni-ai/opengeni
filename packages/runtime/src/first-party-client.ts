@@ -25,6 +25,7 @@ export function createFirstPartyAttemptClient(input: {
   };
   selectedTools: readonly FirstPartyMcpToolName[];
   permissions?: readonly Permission[];
+  credentialRestriction?: "developer_setup";
   fetch?: typeof fetch;
   signal?: AbortSignal;
 }) {
@@ -53,6 +54,9 @@ export function createFirstPartyAttemptClient(input: {
         principalKind: "agent_attempt",
         permissions: [...(input.permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)],
         firstPartyMcpTools: [...input.selectedTools],
+        ...(input.credentialRestriction
+          ? { credentialRestriction: input.credentialRestriction }
+          : {}),
         exp: Math.floor(Date.now() / 1_000) + 60 * 60,
       });
       const headers = new Headers(init?.headers);

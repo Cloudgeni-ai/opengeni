@@ -2,11 +2,11 @@
 # context. The API serves baked release binaries from here (apps/api/src/routes/
 # install.ts).
 #
-# In a deployed-env image build the agent-bake CI step
-# (scripts/bake-agent.sh, wired into the per-SHA API image build) writes the SIGNED
+# In a deployed-env image build the agent-bake CI steps
+# (scripts/bake-agent.sh build, then sign, wired into the per-SHA API image build) write the SIGNED
 # Linux musl binaries + their `.sha256`/`.minisig` siblings here BEFORE `docker
 # build`, so they ride into the image via the existing `COPY . .`. The minisign
-# signing key (OPENGENI_AGENT_MINISIGN_KEY) is used ONLY in that pre-build CI step
+# signing key (OPENGENI_AGENT_MINISIGN_KEY) is used ONLY in the pre-build signing step
 # and never enters the Docker build.
 #
 # When this dir holds ONLY this placeholder (a plain `docker build`, CI image

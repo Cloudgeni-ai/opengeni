@@ -1,0 +1,812 @@
+//! The service's store: hosts and their leases, sandboxes and their owners,
+//! API keys, and the E2B lifecycle of sandboxes created through the E2B API
+//! ([ADR 18](../../../docs/adr/0018-the-control-service-leases-and-fences.md)).
+//!
+//! Every write is conditional: a renewal on the registration it renews, a
+//! host given up on on the renewal count the leader watched, and a sandbox
+//! on the version its writer read. So a stale writer, in this replica or
+//! another, changes nothing, and replicas keep no state of their own.
+//!
+//! [`MemoryStore`] keeps everything in memory, for tests and a single
+//! host; [`PostgresStore`] is the store a fleet runs on. Both decide with
+//! the same rules ([`admits`] and [`rule`]).
+
+mod lost;
+mod memory;
+mod pointers;
+mod postgres;
+mod templates;
+
+use std::collections::BTreeMap;
+use std::future::Future;
+
+use compute_fleet::{
+    Change, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends, Stamp, Verdict,
+};
+use compute_protocol::fleet::Verdict as Wire;
+use compute_protocol::fleet::{Boot, Capacity, Held, HostInfo, Register, Renew, Report, Ruling};
+use compute_protocol::host::{Id, ImageId, SandboxConfig};
+use serde::{Deserialize, Serialize};
+
+use crate::e2b::lifecycle::Record;
+
+pub use lost::{Forsaken, Gone, LostCopy, notice, rfc3339};
+pub use memory::{Called, MemoryStore};
+pub use pointers::{Found, Import, Imported, PointerRow};
+pub use postgres::{PostgresLead, PostgresStore};
+pub use templates::{Collector, Inserted, TEMPLATE_PREFIX, TemplateRow, valid_template_name};
+
+/// What can go wrong reading or writing the store.
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    /// The database refused or could not be reached.
+    #[error("the store: {0}")]
+    Database(String),
+    /// A stored row does not read back as what was written.
+    #[error("a stored row is malformed: {0}")]
+    Corrupt(String),
+}
+
+/// A result of the store.
+pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// A host's renewal count, which the leader watches, read with the boot of
+/// its machine its registration named: both from the same row at once, so
+/// the boot is the one of the registration the count was reached under.
+/// Every registration and renewal raises the count, so once the host is
+/// given up on at this count ([`Store::give_up`]), it is this registration
+/// that is given up on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Counted {
+    pub host: HostId,
+    pub renewals: u64,
+    /// `None` if the registration named none, or one that cannot be read:
+    /// either proves nothing of a restart.
+    pub boot: Option<Boot>,
+}
+
+/// A host as the store holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostRow {
+    pub id: HostId,
+    /// What it is, as it registered or last told it since
+    /// ([`Capacity::info`]).
+    pub info: HostInfo,
+    /// Its current registration.
+    pub epoch: HostEpoch,
+    pub state: HostState,
+    /// Registrations and renewals accepted, which the leader watches.
+    pub renewals: u64,
+    /// The highest renewal number accepted under the registration, which
+    /// stamps requests to the host.
+    pub seq: u64,
+    /// What it last said it can take on.
+    pub capacity: Capacity,
+    /// When the row last changed, by the store's change counter: replicas
+    /// read the rows changed since they last looked.
+    pub changed: u64,
+}
+
+impl HostRow {
+    /// Takes in what the host says it can take on, with what it is now if
+    /// it says ([`Capacity::split`]).
+    pub fn told(&mut self, capacity: &Capacity) {
+        let (capacity, info) = capacity.split();
+        if let Some(info) = info {
+            self.info = info.told_again(&self.info);
+        }
+        self.capacity = capacity;
+    }
+}
+
+/// What a sandbox was created as.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Spec {
+    /// The image it starts from, by the name the fleet gives it.
+    pub image: String,
+    /// Its shape and sleep ladder.
+    pub config: SandboxConfig,
+    /// The Opengeni agent it runs, which its host links to the team's
+    /// gateway ([ADR 21](../../../docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentRef>,
+}
+
+/// Which Opengeni agent a sandbox runs: its enrollment's workspace and
+/// agent ids, which name its subjects.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRef {
+    pub workspace: String,
+    pub agent: String,
+}
+
+impl AgentRef {
+    /// Refuses ids that are not one subject token each: 1 to 64 of
+    /// `[A-Za-z0-9_-]`.
+    ///
+    /// # Errors
+    ///
+    /// Why one is refused.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        for (what, id) in [("workspace", &self.workspace), ("agent", &self.agent)] {
+            let valid = (1..=64).contains(&id.len())
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+            if !valid {
+                return Err(format!(
+                    "the agent's {what} id must be 1 to 64 of [A-Za-z0-9_-]"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A sandbox that runs Opengeni's agent, as [`Store::agents`] finds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Linked {
+    pub id: Id,
+    pub team: String,
+    pub agent: AgentRef,
+}
+
+/// A create its caller named with a request id, which makes retrying it
+/// safe: the same id answers the sandbox it made, and, once that sandbox
+/// was deleted, that it is gone, never a new one. It is how "made and then
+/// deleted" is told from "never made": deleting a sandbox retires its
+/// requests in the same write ([`Store::delete_retiring`]), and a sandbox
+/// is inserted for a request only while the request is not retired
+/// ([`Store::insert_requested`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestRow {
+    pub team: String,
+    pub request_id: String,
+    /// The sandbox it makes.
+    pub id: Id,
+    /// The digest of what it asked for, to refuse the same id for
+    /// something else.
+    pub digest: String,
+    pub created_ms: u64,
+    /// When the sandbox it made was deleted, if it was.
+    pub gone_ms: Option<u64>,
+}
+
+impl RequestRow {
+    /// Whether the sandbox it made was deleted.
+    #[must_use]
+    pub fn gone(&self) -> bool {
+        self.gone_ms.is_some()
+    }
+}
+
+/// A sandbox as the store holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SandboxRow {
+    pub id: Id,
+    /// Whose it is: the team of the API key that created it.
+    pub team: String,
+    pub spec: Spec,
+    /// Labels its creator gave it, to list it by.
+    pub metadata: BTreeMap<String, String>,
+    pub ownership: Ownership,
+    /// The creates and adopts sent for it, to judge late answers by.
+    pub sends: Sends,
+    /// The class of the host it was last given to (memory profile and CPU
+    /// template), where its memory image restores.
+    pub class: Option<String>,
+    /// When it was created, in milliseconds since the Unix epoch.
+    pub created_ms: u64,
+    /// Its copy on a host given up for gone, if it went on from an older
+    /// stored copy since ([`LostCopy`]). Only the store writes it, as it
+    /// declares a host gone or rules on what a returning host lists;
+    /// every other write keeps it as it is.
+    pub lost: Option<LostCopy>,
+    /// Raised by every write; each write is conditional on the version its
+    /// writer read.
+    pub version: u64,
+}
+
+/// The answer to a registration attempt.
+/// A sandbox's E2B lifecycle as the store holds it (see
+/// [`crate::e2b::lifecycle`]), beside its fleet row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LifecycleRow {
+    pub id: Id,
+    /// Whose it is, as in its fleet row.
+    pub team: String,
+    pub record: Record,
+    /// Raised by every write; each write is conditional on the version its
+    /// writer read.
+    pub version: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Admission {
+    /// Registered under `epoch`, with a ruling on each sandbox it listed.
+    Registered {
+        host: HostId,
+        epoch: HostEpoch,
+        rulings: Vec<Ruling>,
+    },
+    /// Its previous registration may still be running VMs.
+    StillLive,
+    /// It keeps its pointers in the object store itself, and the service
+    /// holds the fleet's (ADR 25): what it wrote would never be seen.
+    Outdated,
+}
+
+/// What a registration attempt meets in the host's row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Admits {
+    /// A new registration: the host is new, or was given up on.
+    Fresh,
+    /// Another copy of the attempt the stored answer answered.
+    Again,
+    /// Another attempt while the last registration is live.
+    StillLive,
+}
+
+/// What an attempt numbered `attempt` meets, given the host's row, if it
+/// has one, as its state and the attempt it last answered.
+pub(crate) fn admits(row: Option<(HostState, u64)>, attempt: u64) -> Admits {
+    match row {
+        None | Some((HostState::Lost, _)) => Admits::Fresh,
+        Some((_, answered)) if answered == attempt => Admits::Again,
+        Some(_) => Admits::StillLive,
+    }
+}
+
+/// The ruling on a sandbox `host` lists, given the sandbox's row and the
+/// loss it notes, if any, and the change to the row it needs: a reclaim,
+/// which the store applies in the same transaction as the registration
+/// (and which ends the loss: nobody took it since). A host that cannot
+/// set a copy aside (`sets_aside` false, from an earlier release) is told
+/// to drop it instead, loudly.
+pub(crate) fn rule(
+    host: HostId,
+    held: Held,
+    row: Option<(Ownership, Option<&LostCopy>)>,
+    sets_aside: bool,
+) -> (Ruling, Option<Change>) {
+    let declared = row
+        .and_then(|(_, lost)| lost)
+        .map(|lost| OwnerEpoch(lost.epoch));
+    let row = row.map(|(ownership, _)| ownership);
+    let listed = OwnerEpoch(held.owner_epoch);
+    let (verdict, change) = match compute_fleet::reconcile(host, listed, row, declared) {
+        Verdict::Keep { epoch } => (
+            Wire::Keep {
+                owner_epoch: epoch.0,
+            },
+            None,
+        ),
+        Verdict::Reclaim { change } => (
+            Wire::Keep {
+                owner_epoch: change.set.epoch.0,
+            },
+            Some(change),
+        ),
+        Verdict::Refetch { epoch, from_files } => (
+            Wire::Refetch {
+                owner_epoch: epoch.0,
+                whole: !from_files,
+            },
+            None,
+        ),
+        Verdict::Drop => (Wire::Drop, None),
+        Verdict::SetAside if sets_aside => (Wire::SetAside, None),
+        Verdict::SetAside => {
+            tracing::error!(
+                host = host.0,
+                sandbox = %held.id,
+                "a host declared gone came back with a copy that may be newer than the one \
+                 its sandbox went on from, and cannot set it aside: it drops it"
+            );
+            (Wire::Drop, None)
+        }
+    };
+    (
+        Ruling {
+            id: held.id,
+            verdict,
+            link: None,
+        },
+        change,
+    )
+}
+
+/// Hosts, sandboxes and API keys, with conditional writes.
+///
+/// Implementations are cheap to share: the service holds one for all its
+/// tasks.
+pub trait Store: Send + Sync + 'static {
+    /// Held while this replica leads.
+    type Lead: Send;
+
+    /// Registers a host, in one transaction: answers another copy of the
+    /// attempt it last answered with the same answer, refuses while the
+    /// last registration is live, refuses a host that keeps its pointers in
+    /// the object store once the store holds the fleet's
+    /// ([`Admission::Outdated`]), and otherwise gives a new host epoch,
+    /// rules on every sandbox listed (applying reclaims) and stores the
+    /// answer.
+    fn register(&self, register: &Register) -> impl Future<Output = Result<Admission>> + Send;
+
+    /// Accepts a renewal while it renews the host's current registration
+    /// and the host is not given up on, and records its capacity. Only a
+    /// host named one of `names` may renew, and, once the store holds the
+    /// fleet's pointers, only with a capacity that says it keeps its
+    /// pointers in the service, if it gives one.
+    fn renew(&self, renew: &Renew, names: &[String]) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Records a host's capacity, under the same conditions as a renewal,
+    /// without counting as one.
+    fn report(
+        &self,
+        report: &Report,
+        names: &[String],
+    ) -> impl Future<Output = Result<bool>> + Send;
+
+    /// The host rows changed after `after`, oldest change first.
+    fn hosts_changed(&self, after: u64) -> impl Future<Output = Result<Vec<HostRow>>> + Send;
+
+    /// The renewal count of every host not given up on, with the boot its
+    /// registration named.
+    fn renewals(&self) -> impl Future<Output = Result<Vec<Counted>>> + Send;
+
+    /// Gives up on `host` if its renewal count is still `renewals`, noting
+    /// `at_ms` as when, for [`Store::prune_hosts`]. Its sandboxes stay its
+    /// own: they wait for it, since it may come back with copies newer
+    /// than the store's, until it registers again or is declared gone
+    /// ([`Store::declare_gone`]). Returns how many it owns, or `None` when
+    /// a renewal came meanwhile or another replica gave up on it first.
+    fn give_up(
+        &self,
+        host: HostId,
+        renewals: u64,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<Option<usize>>> + Send;
+
+    /// Gives up for gone the copies of `host`, a host given up on: in one
+    /// transaction, each sandbox it still owns is left without an owner
+    /// under a raised epoch, to go on from its newest stored copy, and
+    /// notes the loss ([`LostCopy`], `why` at `at_ms`). Returns those
+    /// sandboxes, or `None` if the host is not given up on (or unknown).
+    fn declare_gone(
+        &self,
+        host: HostId,
+        why: Gone,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<Option<Vec<Forsaken>>>> + Send;
+
+    /// Forgets the hosts given up on before `before_ms` that no sandbox
+    /// still waits for, so hosts replaced over time are not kept forever.
+    /// Answers how many. Nothing is lost: a write naming a host the store
+    /// does not have is refused as one naming a host given up on
+    /// ([`Write::OwnerLost`]), and a host registering again under a
+    /// forgotten name is a new host.
+    fn prune_hosts(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send;
+
+    /// Moves a host from `from` to `to` (live and draining), if it is in
+    /// `from`. A drained host stays drained until moved back to live: given
+    /// up on, it registers again draining, so a drain an operator asked for
+    /// outlasts the host's going away and coming back. Moved from draining
+    /// to live while given up on, it stays given up on and registers again
+    /// live. A host already in `to` whose mark says otherwise (a build from
+    /// before the mark drained or undrained it, or registered it again
+    /// live, during a rollout) has its mark set as for `to`, so repeating
+    /// a drain or undrain repairs it.
+    fn set_state(
+        &self,
+        host: HostId,
+        from: HostState,
+        to: HostState,
+    ) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Becomes the leader if no other replica is, without waiting.
+    fn try_lead(&self) -> impl Future<Output = Result<Option<Self::Lead>>> + Send;
+
+    /// Whether `lead` still holds the leadership.
+    fn leads(&self, lead: &mut Self::Lead) -> impl Future<Output = bool> + Send;
+
+    /// Inserts a new sandbox, at the version it carries. False if one with
+    /// its id exists. Refused if it names an owner the service has given
+    /// up on; see [`Write::OwnerLost`]. One created from a team's template
+    /// (its spec's image [`TEMPLATE_PREFIX`] then the template's id) is
+    /// inserted only while the template is there, ordered with its delete,
+    /// so the image it starts from is never forgotten under it; see
+    /// [`Write::TemplateGone`].
+    fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send;
+
+    /// As [`Store::insert`], for `row.team`'s create request `request_id`,
+    /// and only while that request is not retired, ordered with
+    /// [`Store::delete_retiring`]: `None` when it is, as its sandbox was
+    /// made and deleted.
+    fn insert_requested(
+        &self,
+        row: &SandboxRow,
+        request_id: &str,
+    ) -> impl Future<Output = Result<Option<Write>>> + Send;
+
+    /// One sandbox.
+    fn sandbox(&self, id: Id) -> impl Future<Output = Result<Option<SandboxRow>>> + Send;
+
+    /// The team and the agent of each sandbox of `ids` that runs
+    /// Opengeni's agent, in no particular order.
+    fn agents(&self, ids: &[Id]) -> impl Future<Output = Result<Vec<Linked>>> + Send;
+
+    /// Replaces a sandbox's row with `row`, raising its version by one, on
+    /// condition that it is still at `row.version` and does not name an
+    /// owner the service has given up on.
+    fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send;
+
+    /// Writes `row`'s spec and ownership over a sandbox's row, raising its
+    /// version by one, on condition that it is still at `row.version` and
+    /// that neither it nor `row` names an owner: a sandbox's spec changes
+    /// only while no host holds it. False if it was not written.
+    fn respec(&self, row: &SandboxRow) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Deletes a sandbox's row on condition that it is at `version`.
+    fn delete(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send;
+
+    /// As [`Store::delete`], and in the same write retires the create
+    /// requests of its team that made it, as deleted at `at_ms`. For a
+    /// sandbox deleted for good; a create that left nothing uses
+    /// [`Store::delete`], so retrying its request creates it again.
+    fn delete_retiring(
+        &self,
+        id: Id,
+        version: u64,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<bool>> + Send;
+
+    /// A team's sandboxes whose metadata holds every pair in `metadata`.
+    fn list(
+        &self,
+        team: &str,
+        metadata: &BTreeMap<String, String>,
+    ) -> impl Future<Output = Result<Vec<SandboxRow>>> + Send;
+
+    /// The sandboxes `host` owns.
+    fn owned_by(&self, host: HostId) -> impl Future<Output = Result<Vec<SandboxRow>>> + Send;
+
+    /// The team an API key belongs to, by the key's digest.
+    fn team_of(&self, digest: &str) -> impl Future<Output = Result<Option<String>>> + Send;
+
+    /// Adds an API key, by its digest, for `team`.
+    fn add_key(&self, digest: &str, team: &str) -> impl Future<Output = Result<()>> + Send;
+
+    /// Records `row` unless its team already used its request id, and
+    /// answers the request as stored: `row` itself, or the one before it.
+    fn claim_request(&self, row: &RequestRow) -> impl Future<Output = Result<RequestRow>> + Send;
+
+    /// The create `team` named `request_id`.
+    fn request(
+        &self,
+        team: &str,
+        request_id: &str,
+    ) -> impl Future<Output = Result<Option<RequestRow>>> + Send;
+
+    /// Forgets the requests whose sandbox was deleted before `before_ms`.
+    /// Answers how many.
+    fn prune_requests(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send;
+
+    /// Inserts a sandbox's E2B lifecycle at the version it carries. False
+    /// if one with its id exists.
+    fn insert_lifecycle(&self, row: &LifecycleRow) -> impl Future<Output = Result<bool>> + Send;
+
+    /// One sandbox's E2B lifecycle.
+    fn lifecycle(&self, id: Id) -> impl Future<Output = Result<Option<LifecycleRow>>> + Send;
+
+    /// Replaces a sandbox's E2B lifecycle with `row`, raising its version by
+    /// one, on condition that it is still at `row.version`.
+    fn replace_lifecycle(&self, row: &LifecycleRow) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Deletes a sandbox's E2B lifecycle on condition that it is at
+    /// `version`.
+    fn delete_lifecycle(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send;
+
+    /// A team's E2B lifecycles.
+    fn lifecycles(&self, team: &str) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send;
+
+    /// At most `limit` E2B lifecycles due by `now_ms` (see
+    /// [`Record::due_ms`]), in order of due time then id, from just after
+    /// `after`: the due time and id of the last one a previous read gave.
+    fn lifecycles_due(
+        &self,
+        now_ms: u64,
+        after: Option<(u64, Id)>,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send;
+
+    /// At most `limit` E2B lifecycles that are never due (the paused
+    /// ones), in order of id, from just after `after`: the id of the last
+    /// one a previous read gave.
+    fn lifecycles_paused(
+        &self,
+        after: Option<Id>,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send;
+
+    /// The stored image recorded as built from `source`, if one was: an
+    /// OCI image (a reference pinned by digest), with the guest programs
+    /// it names if it names any ([`crate::images::built_key`]).
+    fn image_built(&self, source: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
+
+    /// Records `image` as built from `source` at `at_ms`, unless an image
+    /// was recorded for `source` already, and that the fleet's name `name`
+    /// now uses `source`. Answers the image recorded for `source`, which
+    /// creates of `name` use: builds are not byte for byte the same, so the
+    /// first recorded wins. Every name that uses a source is recorded, so
+    /// two names sharing one each keep it as their latest.
+    ///
+    /// A build is a captured image's bytes only once it is recorded: each
+    /// build is a new file system with a random UUID (compute-image's
+    /// `ext4::make`), so no disk can be captured with its bytes before a
+    /// sandbox starts from it, which it does only once recorded. A
+    /// recorded build is a use, which keeps a captured image of the same
+    /// bytes (see [`Store::collect_image`]).
+    fn record_built(
+        &self,
+        source: &str,
+        name: &str,
+        image: ImageId,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<ImageId>> + Send;
+
+    /// The image of the source the name `name` was last recorded as using.
+    fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
+
+    /// Inserts template `row`, recording its image as captured and in
+    /// use, unless its team has a template of its name or the image is
+    /// being collected. Ordered with [`Store::collect_image`] by the
+    /// image's record, so an image is never collected under a template.
+    fn insert_template(&self, row: &TemplateRow) -> impl Future<Output = Result<Inserted>> + Send;
+
+    /// A team's template with the id `key`, or else the name `key`.
+    fn template(
+        &self,
+        team: &str,
+        key: &str,
+    ) -> impl Future<Output = Result<Option<TemplateRow>>> + Send;
+
+    /// A team's templates, oldest first.
+    fn templates(&self, team: &str) -> impl Future<Output = Result<Vec<TemplateRow>>> + Send;
+
+    /// Deletes a team's template `id`; whether it was there. Its image
+    /// stays until it has been unused for a while.
+    fn delete_template(&self, team: &str, id: &str) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Notes at `now_ms` which captured images are unused (no template,
+    /// sandbox or built image names them) and which are used again, and
+    /// answers those to collect: being collected, or unused since before
+    /// `before_ms`.
+    fn unused_images(
+        &self,
+        now_ms: u64,
+        before_ms: u64,
+    ) -> impl Future<Output = Result<Vec<ImageId>>> + Send;
+
+    /// Claims captured image `image` for `collector` to forget, if it is
+    /// still unused and has been since before `before_ms`, or another
+    /// collector's claim on it lapsed; whether `collector` holds the claim
+    /// now (as it does when it claimed it before). Ordered by the image's
+    /// record with every use recorded of it (a template, a sandbox created
+    /// from one, an image built), so none is recorded from then on, and a
+    /// claim sees every use recorded before it.
+    fn collect_image(
+        &self,
+        image: ImageId,
+        before_ms: u64,
+        collector: &Collector,
+    ) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Whether the collector `collector` (its id) still holds its claim
+    /// on captured image `image`.
+    fn collecting(
+        &self,
+        image: ImageId,
+        collector: &str,
+    ) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Deletes the record of captured image `image` once object storage
+    /// has forgotten it, if the collector `collector` (its id) still holds
+    /// its claim on it.
+    fn collected(&self, image: ImageId, collector: &str)
+    -> impl Future<Output = Result<()>> + Send;
+
+    /// Whether a host holds the registration of host epoch `epoch` (no two
+    /// registrations share one), is not given up on and is named one of
+    /// `names`: a host whose pointer requests the service answers.
+    fn registered(&self, epoch: u64, names: &[String])
+    -> impl Future<Output = Result<bool>> + Send;
+
+    /// Pointer `name`, or `None` when there is none.
+    fn pointer(&self, name: &str) -> impl Future<Output = Result<Option<PointerRow>>> + Send;
+
+    /// Keeps `pointer` under `owner` as `name` only if it is still version
+    /// `on` (with `None`, only if there is none): the version it is kept
+    /// as, or `None` when it changed or appeared meanwhile.
+    fn write_pointer(
+        &self,
+        name: &str,
+        owner: Stamp,
+        pointer: &[u8],
+        on: Option<i64>,
+    ) -> impl Future<Output = Result<Option<i64>>> + Send;
+
+    /// The name of every pointer kept.
+    fn pointer_names(&self) -> impl Future<Output = Result<Vec<String>>> + Send;
+
+    /// When the fleet's pointers were moved into the store, if they were.
+    fn pointers_imported(&self) -> impl Future<Output = Result<Option<Imported>>> + Send;
+
+    /// Keeps each of `found`, pointers the object store still holds from
+    /// before the import, that the store has none of: answers how many it
+    /// kept. A pointer the store keeps always wins, as in the import.
+    fn adopt_pointers(&self, found: &[Found]) -> impl Future<Output = Result<usize>> + Send;
+
+    /// The fleet's clock: the time, in milliseconds since 1970, as the
+    /// store reads it (its database's clock), which every host names the
+    /// day of what it stores by and every sweep starts by.
+    fn clock_ms(&self) -> impl Future<Output = Result<u64>> + Send;
+
+    /// Moves `found`, the pointers read from the object store `from`, into
+    /// the store and records them imported at `at_ms`, in one transaction,
+    /// a pointer already kept winning over one found: only while no live
+    /// or draining host keeps its pointers in the object store itself, and
+    /// ordered with every registration and renewal of such a host, so none
+    /// writes there after. Nor while such a host changed after `seen`, a
+    /// [`HostRow::changed`] read before `found` was: one that registered,
+    /// renewed or was given up on since may have written a pointer `found`
+    /// lacks. Answers the earlier import if there was one.
+    fn import_pointers(
+        &self,
+        found: &[Found],
+        from: &str,
+        at_ms: u64,
+        seen: u64,
+    ) -> impl Future<Output = Result<Import>> + Send;
+}
+
+/// How a conditional write of a sandbox's row went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Write {
+    Done,
+    /// Someone wrote it since it was read, or, for an insert, it exists.
+    Conflict,
+    /// It names as owner a host the service has given up on, or one it
+    /// does not have, such as a host given up on and since forgotten. A
+    /// sandbox a host owned as it was given up on stays its own, waiting
+    /// for it, but nothing may give it one while it is given up on.
+    OwnerLost,
+    /// For an insert of a sandbox created from a team's template: the
+    /// template was deleted since the create found it. Never for a
+    /// replace.
+    TemplateGone,
+}
+
+impl Write {
+    /// Whether it was written.
+    #[must_use]
+    pub fn done(self) -> bool {
+        self == Self::Done
+    }
+}
+
+/// Writes `row` with its version raised, if no one wrote it since it was
+/// read and its owner, if any, is not given up on; when written, `row`
+/// holds the version written.
+pub async fn replace<S: Store>(store: &S, row: &mut SandboxRow) -> Result<Write> {
+    let written = store.replace(row).await?;
+    if written.done() {
+        row.version += 1;
+    }
+    Ok(written)
+}
+
+/// Writes `row` with its version raised, if no one wrote it since it was
+/// read; when written, `row` holds the version written.
+pub async fn replace_lifecycle<S: Store>(store: &S, row: &mut LifecycleRow) -> Result<bool> {
+    let written = store.replace_lifecycle(row).await?;
+    if written {
+        row.version += 1;
+    }
+    Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    use compute_protocol::fleet::Verdict as Wire;
+
+    use super::*;
+
+    #[test]
+    fn an_attempt_is_answered_again_refused_while_live_and_fresh_once_lost() {
+        assert_eq!(admits(None, 7), Admits::Fresh);
+        assert_eq!(admits(Some((HostState::Lost, 7)), 7), Admits::Fresh);
+        assert_eq!(admits(Some((HostState::Live, 7)), 7), Admits::Again);
+        assert_eq!(admits(Some((HostState::Draining, 7)), 7), Admits::Again);
+        assert_eq!(admits(Some((HostState::Live, 6)), 7), Admits::StillLive);
+        assert_eq!(admits(Some((HostState::Draining, 6)), 7), Admits::StillLive);
+    }
+
+    #[test]
+    fn a_listed_sandbox_nobody_took_since_is_reclaimed_under_a_raised_epoch() {
+        let host = HostId(4);
+        let id = Id(compute_fleet::SandboxId(9));
+        let held = Held { id, owner_epoch: 2 };
+        let cleared = Ownership {
+            owner: None,
+            epoch: OwnerEpoch(3),
+            taken: OwnerEpoch(2),
+            whole: Some(OwnerEpoch(3)),
+        };
+        let (ruling, change) = rule(host, held, Some((cleared, None)), true);
+        let change = change.expect("a reclaim");
+        assert_eq!(change.expect, cleared);
+        assert_eq!(change.set.owner, Some(host));
+        assert_eq!(
+            ruling.verdict,
+            Wire::Keep {
+                owner_epoch: change.set.epoch.0
+            }
+        );
+        let (gone, none) = rule(host, held, None, true);
+        assert_eq!((gone.verdict, none), (Wire::Drop, None));
+        let taken_since = Ownership {
+            owner: Some(HostId(5)),
+            epoch: OwnerEpoch(4),
+            taken: OwnerEpoch(4),
+            whole: Some(OwnerEpoch(4)),
+        };
+        assert_eq!(
+            rule(host, held, Some((taken_since, None)), true).0.verdict,
+            Wire::Drop
+        );
+        // Its own again since, but from a copy nothing vouched for since it
+        // was lost: it starts from that copy's files.
+        let lost_since = Ownership {
+            owner: Some(host),
+            epoch: OwnerEpoch(6),
+            taken: OwnerEpoch(5),
+            whole: Some(OwnerEpoch(4)),
+        };
+        assert_eq!(
+            rule(host, held, Some((lost_since, None)), true).0.verdict,
+            Wire::Refetch {
+                owner_epoch: 6,
+                whole: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_copy_from_before_its_host_was_declared_gone_is_set_aside() {
+        let host = HostId(4);
+        let id = Id(compute_fleet::SandboxId(9));
+        let held = Held { id, owner_epoch: 2 };
+        let lost = LostCopy {
+            host: "host-4".into(),
+            why: Gone::Declared,
+            at_ms: 1,
+            epoch: 3,
+            saved_ms: None,
+            set_aside_ms: None,
+        };
+        // Declared gone under 3, adopted elsewhere under 4.
+        let adopted = Ownership {
+            owner: Some(HostId(5)),
+            epoch: OwnerEpoch(4),
+            taken: OwnerEpoch(4),
+            whole: None,
+        };
+        let row = Some((adopted, Some(&lost)));
+        assert_eq!(rule(host, held, row, true).0.verdict, Wire::SetAside);
+        // A host of an earlier release cannot: it drops it, loudly.
+        assert_eq!(rule(host, held, row, false).0.verdict, Wire::Drop);
+    }
+}

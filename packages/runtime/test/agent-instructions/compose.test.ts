@@ -10,12 +10,14 @@ import {
   type ResolvedAgentCapabilities,
   type ResolvedAgentConfig,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
+  AGENT_INSTRUCTIONS_PREAMBLE,
   AGENT_PROMPT_MODULES,
   CODE_SEARCH_DIRECTIVE,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
   DEFAULT_AGENT_IDENTITY,
+  NEUTRAL_AGENT_IDENTITY,
   INSTRUCTION_PRECEDENCE,
   SESSION_INSTRUCTIONS_PREAMBLE,
   agentPromptResourcesFor,
@@ -28,12 +30,19 @@ import {
 } from "../../src/index";
 import { ALL_RESOURCES } from "./prompt-sentences";
 
+/**
+ * Module ids kept in contracts so stored model-context snapshots still parse,
+ * but no longer rendered: secrets are used by reference, nothing is exported
+ * (`workspace_environment`), and per-turn attachment guidance travels with the
+ * turn's attachment notice so it never changes the cached prefix (`attachments`).
+ */
+const RETIRED_MODULE_IDS: readonly string[] = ["workspace_environment", "attachments"];
+
 const NO_RESOURCES: AgentPromptResources = {
   managedSandbox: false,
   connectedMachine: false,
   repositories: false,
   gitCredentials: false,
-  attachments: false,
 };
 
 function config(
@@ -77,15 +86,14 @@ const MARKERS: Record<string, RegExp> = {
     /goal_(?:set|complete|update|pause|resume)|goal pause|active goal|goal is active|goal tools|goal\.completed|completing a goal/u,
   knowledge: /knowledge_|instruction_policy|task_note|Knowledge|durable storage/u,
   subagents: /session_(?:events|wait|get|send_message)|child worker|Session coordination|a child,/u,
-  artifacts:
-    /opengeni-documents|opengeni-visualize|opengeni-sites|document Artifact|\bSites?\b|artifact:<|Visuals in chat/u,
+  artifacts: /documents|visualize|sites|document Artifact|\bSites?\b|artifact:<|Visuals in chat/u,
   repositories: /repos\/<host>|pull request|git reset|dirty worktree|gh, glab/u,
-  attachments: /\.opengeni\/files|Attached files/u,
   machines: /Connected Machine|\/home\/u\/proj|C:\/repo/u,
-  admin:
-    /variable_set_list|capability_catalog_search|custom_mcp_setup_request|rig_propose_change|rig_get|Variable Set/u,
+  admin: /capability_catalog_search|custom_mcp_setup_request|rig_propose_change|rig_get/u,
   skills: /# Using skills|Skill index/u,
+  media: /# Images and video|generate_image|generate_video|image_generation/u,
   sandbox: /apply_patch|exec_command|rg --files|mktemp|sandbox:\/workspace/u,
+  secrets: /# Secrets|\{\{secret:/u,
 };
 
 describe("modular composer: module selection (AC12)", () => {
@@ -105,9 +113,15 @@ describe("modular composer: module selection (AC12)", () => {
   });
 
   test("all + every resource includes every module", () => {
-    const result = compose(allAgentCapabilities(), ALL_RESOURCES);
+    const result = compose(allAgentCapabilities(), {
+      ...ALL_RESOURCES,
+      secretReferences: true,
+      unattended: true,
+    });
     expect(moduleIds(result)).toEqual(
-      AGENT_PROMPT_MODULE_IDS.filter((id) => id !== "renderer_markdown"),
+      AGENT_PROMPT_MODULE_IDS.filter(
+        (id) => id !== "renderer_markdown" && !RETIRED_MODULE_IDS.includes(id),
+      ),
     );
     for (const marker of Object.values(MARKERS)) expect(result.composed).toMatch(marker);
   });
@@ -117,9 +131,12 @@ describe("modular composer: module selection (AC12)", () => {
     const disabled = compose({ ...allAgentCapabilities(), goals: false }, NO_RESOURCES).composed;
     for (const sentence of [
       "Goal completion records short ledger proof, not the user-facing deliverable.",
-      "After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link.",
+      "Put the requested answer, or a concise summary and retained artifact link, in goal_complete's reply: it is shown exactly as written and ends the turn, so call goal_complete on its own once you have seen your last results.",
+      "Without a reply, finish the same turn with that answer after goal_complete succeeds.",
       "Never use evidence as the final reply.",
       "A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.",
+      "A task that seems infeasible, missing data or a result you cannot verify is not by itself a reason to pause: try the plausible in-scope alternatives, and if you still pause, name the ones you tried in the rationale.",
+      "A definitive missing permission or required human decision can justify an immediate goal pause with evidence and the change needed to resume.",
     ]) {
       expect(enabled).toContain(sentence);
       expect(disabled).not.toContain(sentence);
@@ -131,6 +148,7 @@ describe("modular composer: module selection (AC12)", () => {
     ["knowledge", "knowledge"],
     ["subagents", "subagents"],
     ["artifacts", "artifacts"],
+    ["media", "media"],
     ["workspaceAdmin", "admin"],
   ];
   for (const [capability, marker] of capabilityCases) {
@@ -148,6 +166,21 @@ describe("modular composer: module selection (AC12)", () => {
     });
   }
 
+  test("secrets needs the capability and runtime reference resolution", () => {
+    const wired = { ...NO_RESOURCES, secretReferences: true };
+    const on = { ...noneAgentCapabilities(), skills: false as const, secrets: true };
+    expect(moduleIds(compose(on, wired))).toEqual([
+      "base_behavior",
+      "runtime_mechanics",
+      "secrets",
+    ]);
+    expect(compose(on, NO_RESOURCES).composed).not.toMatch(MARKERS.secrets!);
+    const off = { ...allAgentCapabilities(), secrets: false };
+    expect(compose(off, { ...ALL_RESOURCES, secretReferences: true }).composed).not.toMatch(
+      MARKERS.secrets!,
+    );
+  });
+
   test("skills: read and manage include the skills module; false removes it", () => {
     for (const skills of ["read", "manage"] as const) {
       expect(moduleIds(compose({ ...allAgentCapabilities(), skills }, NO_RESOURCES))).toContain(
@@ -160,7 +193,6 @@ describe("modular composer: module selection (AC12)", () => {
 
   const resourceCases: Array<[keyof AgentPromptResources, keyof typeof MARKERS]> = [
     ["repositories", "repositories"],
-    ["attachments", "attachments"],
     ["connectedMachine", "machines"],
     ["managedSandbox", "sandbox"],
   ];
@@ -181,6 +213,61 @@ describe("modular composer: module selection (AC12)", () => {
     });
   }
 
+  test("attachment guidance never enters the instructions; it travels with the turn", () => {
+    const composed = compose(allAgentCapabilities(), ALL_RESOURCES).composed;
+    expect(composed).not.toContain("# Attached files");
+    expect(composed).not.toContain(".opengeni/files");
+  });
+
+  test("background-command guidance needs a sandbox or Connected Machine", () => {
+    for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
+      const detached = compose(capabilities, NO_RESOURCES).composed;
+      expect(detached).not.toContain("## Background commands");
+      expect(detached).not.toContain("command_wait");
+      expect(detached).not.toContain("command_read");
+      expect(detached).not.toContain("a command");
+      expect(detached).toContain("`wait_for_input`");
+      for (const resources of [
+        { ...NO_RESOURCES, managedSandbox: true },
+        { ...NO_RESOURCES, connectedMachine: true },
+      ]) {
+        const attached = compose(capabilities, resources).composed;
+        expect(attached).toContain("## Background commands");
+        expect(attached).toContain("`command_read`");
+        expect(attached).toContain("`command_wait`");
+      }
+    }
+  });
+
+  test("the do-not-poll sentence renders only when finished commands are delivered", () => {
+    const sentence = "reports its exit status and output on its own";
+    const withoutDelivery = { ...NO_RESOURCES, managedSandbox: true };
+    const withDelivery = { ...withoutDelivery, commandCompletionDelivery: true };
+    for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
+      expect(compose(capabilities, withoutDelivery).composed).not.toContain(sentence);
+      const delivered = compose(capabilities, withDelivery).composed;
+      expect(delivered).toContain(sentence);
+      // Follows the terminal-read sentence in the same paragraph.
+      expect(delivered).toContain(
+        "a running read does not. A command that finishes while you work reports",
+      );
+    }
+    expect(
+      compose(allAgentCapabilities(), { ...NO_RESOURCES, commandCompletionDelivery: true })
+        .composed,
+    ).not.toContain(sentence);
+    expect(
+      agentPromptResourcesFor(testSettings({ sandboxBackend: "docker" }), [], {}),
+    ).toHaveProperty("commandCompletionDelivery", true);
+    expect(
+      agentPromptResourcesFor(
+        testSettings({ sandboxBackend: "docker", experimentCutPolling: false }),
+        [],
+        {},
+      ),
+    ).not.toHaveProperty("commandCompletionDelivery");
+  });
+
   test("sandbox guidance appears for a Connected Machine alone", () => {
     const result = compose(allAgentCapabilities(), { ...NO_RESOURCES, connectedMachine: true });
     expect(moduleIds(result)).toEqual(expect.arrayContaining(["sandbox", "connected_machine"]));
@@ -189,9 +276,12 @@ describe("modular composer: module selection (AC12)", () => {
     expect(result.composed).not.toContain("Repository resources are mounted");
   });
 
-  test("the workspace environment and rig blocks follow their resources", () => {
+  test("the rig block follows its resource; a workspace environment never renders", () => {
     const withBoth = compose(allAgentCapabilities(), ALL_RESOURCES).composed;
-    expect(withBoth).toContain('A workspace environment named "prod" is attached');
+    expect(withBoth).not.toContain("workspace environment named");
+    expect(withBoth).not.toContain("exported in the sandbox shell environment");
+    expect(withBoth).not.toContain("DEPLOY_KEY");
+    expect(withBoth).not.toContain("# Workspace environment");
     expect(withBoth).toContain("rig_propose_change");
     const noAdmin = compose(
       { ...allAgentCapabilities(), workspaceAdmin: false },
@@ -209,7 +299,138 @@ describe("modular composer: module selection (AC12)", () => {
       "base_behavior",
       "runtime_mechanics",
       ...AGENT_PROMPT_MODULES.map((m) => m.id),
-    ]).toEqual([...AGENT_PROMPT_MODULE_IDS]);
+    ]).toEqual(AGENT_PROMPT_MODULE_IDS.filter((id) => !RETIRED_MODULE_IDS.includes(id)));
+  });
+});
+
+describe("modular composer: secrets module (AG-2)", () => {
+  const WIRED: AgentPromptResources = { ...NO_RESOURCES, secretReferences: true };
+  const SECRETS_ONLY = {
+    ...noneAgentCapabilities(),
+    skills: "read" as const,
+    humanInput: true,
+    secrets: true,
+  };
+
+  function secretsSection(
+    capabilities: ResolvedAgentCapabilities,
+    unavailable: readonly string[] = [],
+  ): string | undefined {
+    const composed = composeModularAgentInstructions({
+      capabilities,
+      renderer: "opengeni",
+      identity: DEFAULT_AGENT_IDENTITY,
+      resources: WIRED,
+      toolAvailability: { unavailable: unavailable as never },
+    }).composed;
+    const start = composed.indexOf("# Secrets\n");
+    if (start === -1) return undefined;
+    const end = composed.indexOf("\n\n# ", start + 1);
+    return composed.slice(start, end === -1 ? undefined : end);
+  }
+
+  test("renders the exact text: a heading and at most six lines", () => {
+    const section = secretsSection(SECRETS_ONLY)!;
+    expect(section).toBe(
+      [
+        "# Secrets",
+        "",
+        "- Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`). A reference is replaced by its value where something runs: shell commands, files, browser typing and connector tool calls. Built-in workspace tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something. In a shell command or script, including `ogtool call`, write `\\{{secret:Item}}` to pass one on. Find saved items and their ready references with `secret_search`.",
+        "- Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.",
+        '- Never ask for passwords, keys or codes in chat or in a plain text question. Ask only for what only the user has, with a `kind: "secret"` question in `request_human_input`; a tool error about a missing secret already contains that call, so make it, adjusting only `saveTo` or `prompt`, and continue with the returned reference.',
+        "- Hand the browser to the user with `interaction_request_human` only for push approvals or hardware keys.",
+        "- For playbooks, read the `secrets` Skill.",
+      ].join("\n"),
+    );
+    const lines = section.split("\n").filter((line) => line.trim().length > 0);
+    expect(lines[0]).toBe("# Secrets");
+    expect(lines.length - 1).toBeLessThanOrEqual(6);
+  });
+
+  test("stays within six lines for every capability and tool combination", () => {
+    for (const humanInput of [false, true])
+      for (const skills of [false, "read"] as const)
+        for (const unavailable of [[], ["secret_search", "secret_save"]]) {
+          const section = secretsSection({ ...SECRETS_ONLY, humanInput, skills }, unavailable)!;
+          const lines = section.split("\n").filter((line) => line.trim().length > 0);
+          expect(lines.length - 1).toBeLessThanOrEqual(6);
+          expect(section).toContain("Never ask for passwords, keys or codes in chat");
+          // The CAPTCHA rule lives with the browser and computer entry tools.
+          expect(section).not.toContain("CAPTCHA");
+        }
+  });
+
+  test("is absent without the capability or without runtime reference resolution", () => {
+    expect(secretsSection({ ...SECRETS_ONLY, secrets: false })).toBeUndefined();
+    const unwired = compose(SECRETS_ONLY, NO_RESOURCES).composed;
+    expect(unwired).not.toContain("# Secrets");
+    expect(unwired).not.toContain("{{secret:");
+    const off = compose({ ...allAgentCapabilities(), secrets: false }, ALL_RESOURCES).composed;
+    expect(off).not.toMatch(MARKERS.secrets!);
+    expect(off).not.toContain('`kind: "secret"`');
+  });
+
+  test("each tool-naming clause follows its tool", () => {
+    const noSearch = secretsSection(SECRETS_ONLY, ["secret_search"])!;
+    expect(noSearch).not.toContain("secret_search");
+    expect(noSearch).not.toContain("secrets");
+    expect(noSearch).toContain("{{secret:Item}}");
+
+    const noSave = secretsSection(SECRETS_ONLY, ["secret_save"])!;
+    expect(noSave).not.toContain("secret_save");
+    expect(noSave).not.toContain("create the account");
+    expect(noSave).not.toContain("enroll your own 2FA");
+    expect(noSave).toContain(
+      "Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; get email or SMS codes through connected tools.",
+    );
+
+    const noHandoff = secretsSection(SECRETS_ONLY, ["interaction_request_human"])!;
+    expect(noHandoff).not.toContain("interaction_request_human");
+    expect(noHandoff).not.toContain("Hand the browser");
+
+    const noHumanInput = secretsSection({ ...SECRETS_ONLY, humanInput: false })!;
+    expect(noHumanInput).not.toContain("request_human_input");
+    expect(noHumanInput).toContain(
+      "Never ask for passwords, keys or codes in chat or in a plain text question.",
+    );
+
+    const noSkills = secretsSection({ ...SECRETS_ONLY, skills: false })!;
+    expect(noSkills).not.toContain("secrets");
+  });
+
+  test("integration setup points to the secret question only with secrets and human input", () => {
+    const sentence =
+      'For a password, key or code only the user has, use a `kind: "secret"` question in `request_human_input`; you get a saved reference back, never the value.';
+    const admin = { ...noneAgentCapabilities(), skills: false as const, workspaceAdmin: true };
+    const both = compose({ ...admin, secrets: true, humanInput: true }, NO_RESOURCES).composed;
+    expect(both).toContain(`Never invent URLs or request credentials in chat. ${sentence}`);
+    expect(
+      compose({ ...admin, secrets: true, humanInput: false }, NO_RESOURCES).composed,
+    ).not.toContain(sentence);
+    expect(
+      compose({ ...admin, secrets: false, humanInput: true }, NO_RESOURCES).composed,
+    ).not.toContain(sentence);
+  });
+
+  test("the secrets section is session-stable and changes nothing else", () => {
+    const settings = testSettings();
+    const options = {
+      agentConfig: config(allAgentCapabilities()),
+      codemodeAvailable: true,
+      agentPromptResources: ALL_RESOURCES,
+    };
+    const first = inspectPersistentAgentInstructions(settings, options).composed;
+    expect(inspectPersistentAgentInstructions(settings, options).composed).toBe(first);
+    expect(first).toContain("# Secrets");
+    const unwired = inspectPersistentAgentInstructions(settings, {
+      ...options,
+      agentPromptResources: { ...options.agentPromptResources, secretReferences: false },
+    }).composed;
+    const section = first.slice(
+      first.indexOf("# Secrets"),
+      first.indexOf("\n\n# ", first.indexOf("# Secrets")) + 2,
+    );
+    expect(unwired).toBe(first.replace(section, ""));
   });
 });
 
@@ -242,6 +463,139 @@ describe("modular composer: renderer (AC15)", () => {
   });
 });
 
+describe("modular composer: text that needs attached compute", () => {
+  const SANDBOX: AgentPromptResources = { ...NO_RESOURCES, managedSandbox: true };
+  const MACHINE: AgentPromptResources = { ...NO_RESOURCES, connectedMachine: true };
+  // Sandbox files, publishing new files, workspace file links, sandbox paths,
+  // background commands and CLI lists exist only with a sandbox or machine.
+  // Sites are created from inline HTML by the Site tools, so they stay.
+  const COMPUTE_ONLY = [
+    "edited in the sandbox with ordinary tools",
+    "do not write a sandbox Markdown report first",
+    "A sandbox path, a raw file ID",
+    "fall back to a sandbox link",
+    "source-code navigation",
+    "Publish files you deliberately deliver",
+    "Source-code navigation may still use workspace file links.",
+    "or a sandbox path for a published artifact reference",
+    "For a sandbox image, publish the file first",
+    "Audit reads do not acknowledge command completion.",
+    "holding the inference and sandbox",
+    "sandbox CLI lists",
+  ];
+  // Said only without compute, where the sandbox file-format sentence is gone.
+  const NO_COMPUTE_ONLY = [
+    "export the native document if the artifact export tool lists that format",
+  ];
+  const KEPT = [
+    "# Documents, files, and visuals",
+    "Create a document Artifact only when",
+    "## Visuals in chat",
+    "Never substitute a storage URL",
+    "Inline HTML stays in chat unless explicitly saved as a Site.",
+    "read the sites Skill",
+    "Sites and native documents keep their tool-returned canonical links.",
+    "documents, Sites, and visuals",
+    "a Site reaches the model and workspace tools",
+    "# Session coordination",
+    "Decide the design before building it.",
+    "# Images and video",
+  ];
+
+  test("renders with a sandbox or a Connected Machine and is left out without one", () => {
+    const without = compose(allAgentCapabilities(), NO_RESOURCES).composed;
+    for (const resources of [SANDBOX, MACHINE]) {
+      const withCompute = compose(allAgentCapabilities(), resources).composed;
+      for (const text of COMPUTE_ONLY) expect(withCompute).toContain(text);
+      for (const text of NO_COMPUTE_ONLY) expect(withCompute).not.toContain(text);
+      for (const text of KEPT) expect(withCompute).toContain(text);
+    }
+    for (const text of COMPUTE_ONLY) expect(without).not.toContain(text);
+    for (const text of NO_COMPUTE_ONLY) expect(without).toContain(text);
+    for (const text of KEPT) expect(without).toContain(text);
+    expect(without).toContain("Do not invent an artifact reference or claim success.");
+    expect(without).toContain(
+      "Ordinary in-chat answers, brief progress updates, and internal worker findings do not become report deliverables merely because they contain Markdown.",
+    );
+    expect(without).toContain("integration catalogs do not enumerate it.");
+    expect(without).toContain("rather than looping while holding the inference.");
+  });
+
+  test("a smaller configuration without compute drops the same text", () => {
+    const features = {
+      ...noneAgentCapabilities(),
+      artifacts: true,
+      media: true,
+      subagents: true,
+      goals: true,
+    };
+    const without = compose(features, NO_RESOURCES).composed;
+    const withCompute = compose(features, SANDBOX).composed;
+    for (const text of COMPUTE_ONLY) expect(without).not.toContain(text);
+    for (const text of NO_COMPUTE_ONLY) expect(without).toContain(text);
+    expect(withCompute).toContain("edited in the sandbox with ordinary tools");
+    expect(withCompute).toContain("For a sandbox image, publish the file first");
+  });
+
+  test("the markdown renderer without compute keeps only renderer-neutral delivery rules", () => {
+    const markdown = compose(allAgentCapabilities(), NO_RESOURCES, "markdown").composed;
+    for (const text of COMPUTE_ONLY) expect(markdown).not.toContain(text);
+    expect(markdown).toContain(
+      "Sites and native documents keep their tool-returned canonical links.",
+    );
+    expect(markdown).not.toContain("Inline HTML stays in chat");
+  });
+
+  test("the image paragraph names no sandbox path without compute, with or without file publishing", () => {
+    for (const unavailable of [[], ["sandbox_file_publish"]] as const) {
+      const render = (resources: AgentPromptResources) =>
+        composeModularAgentInstructions({
+          capabilities: allAgentCapabilities(),
+          renderer: "opengeni",
+          identity: DEFAULT_AGENT_IDENTITY,
+          resources,
+          toolAvailability: { unavailable: [...unavailable] },
+        }).composed;
+      const without = render(NO_RESOURCES);
+      expect(without).toContain(
+        "Display images with ![descriptive alt text](artifact:<artifactId>).",
+      );
+      expect(without).not.toContain("A sandbox path is not an inline image source.");
+      expect(without).not.toContain("a sandbox path is not an inline image source.");
+      expect(render(SANDBOX)).toMatch(/[Aa] sandbox path is not an inline image source\./u);
+    }
+  });
+
+  test("the verification rule names goals and Skills only when the session has them", () => {
+    const rule = (capabilities: ResolvedAgentCapabilities) =>
+      compose(capabilities, NO_RESOURCES)
+        .composed.split("\n")
+        .find((line) => line.startsWith("- Match verification"))!;
+    expect(rule(allAgentCapabilities())).toContain(
+      "requested by the goal, user, or applicable Skill are substantive work",
+    );
+    expect(rule(allAgentCapabilities())).toContain(
+      "without dropping the full completion audit or required evidence.",
+    );
+    const noGoals = rule({ ...allAgentCapabilities(), goals: false });
+    expect(noGoals).toContain("requested by the user or applicable Skill are substantive work");
+    expect(noGoals).toContain("without dropping required evidence.");
+    const none = rule({ ...noneAgentCapabilities(), skills: false });
+    expect(none).toContain("requested by the user are substantive work");
+    expect(none).not.toMatch(/goal|Skill|completion audit/u);
+    // Compute does not change the rule: a sandbox session without goals gets
+    // the same goal-free wording.
+    const sandboxNoGoals = compose({ ...allAgentCapabilities(), goals: false }, SANDBOX)
+      .composed.split("\n")
+      .find((line) => line.startsWith("- Match verification"))!;
+    expect(sandboxNoGoals).toBe(noGoals);
+    const sandboxGoals = compose(allAgentCapabilities(), SANDBOX)
+      .composed.split("\n")
+      .find((line) => line.startsWith("- Match verification"))!;
+    expect(sandboxGoals).toBe(rule(allAgentCapabilities()));
+  });
+});
+
 describe("modular composer: identity and precedence (AC12, AC14)", () => {
   test("identity tiers replace each other in order", () => {
     const deploymentTemplate = "You are Deploy Bot. {{core}}";
@@ -270,7 +624,7 @@ describe("modular composer: identity and precedence (AC12, AC14)", () => {
       agentConfig: { ...base, identity: "You are Acme Assistant." },
     });
     expect(custom.layers[0]).toMatchObject({ id: "identity", content: "You are Acme Assistant." });
-    expect(custom.composed).not.toContain("OpenGeni workspace agent");
+    expect(custom.composed).not.toContain("Opengeni workspace agent");
     expect(custom.layers.slice(1)).toEqual(standard.layers.slice(1));
   });
 
@@ -332,7 +686,7 @@ describe("modular composer: prompt-cache stability", () => {
     const options = {
       agentConfig: config(allAgentCapabilities()),
       codemodeAvailable: true,
-      agentPromptResources: { ...ALL_RESOURCES, attachments: false },
+      agentPromptResources: ALL_RESOURCES,
     };
     const first = inspectPersistentAgentInstructions(settings, options);
     const second = inspectPersistentAgentInstructions(settings, options);
@@ -362,7 +716,7 @@ describe("modular composer: prompt-cache stability", () => {
       connectedMachine: false,
       repositories: true,
       gitCredentials: true,
-      attachments: true,
+      commandCompletionDelivery: true,
     });
     expect(
       agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {
@@ -373,8 +727,20 @@ describe("modular composer: prompt-cache stability", () => {
       connectedMachine: true,
       repositories: false,
       gitCredentials: false,
-      attachments: false,
+      commandCompletionDelivery: true,
     });
+    expect(
+      agentPromptResourcesFor(settings, [{ kind: "repository", uri: "x" }] as never, {}),
+    ).toEqual(
+      agentPromptResourcesFor(
+        settings,
+        [
+          { kind: "repository", uri: "x" },
+          { kind: "file", fileId: "11111111-1111-4111-8111-111111111111" },
+        ] as never,
+        {},
+      ),
+    );
     expect(agentPromptResourcesFor(testSettings({ sandboxBackend: "none" }), [], {})).toEqual(
       NO_RESOURCES,
     );
@@ -387,11 +753,158 @@ describe("modular composer: prompt-cache stability", () => {
       agentConfig: config(noneAgentCapabilities(), { from: "none", renderer: "markdown" }),
     });
     expect(String(legacy.instructions)).toStartWith("You are an agent for the current workspace.");
-    expect(String(modular.instructions)).toStartWith(DEFAULT_AGENT_IDENTITY);
+    // "none" shares no workspace, so the default identity is the neutral one.
+    expect(String(modular.instructions)).toStartWith(NEUTRAL_AGENT_IDENTITY);
     expect(String(modular.instructions)).toContain("# Links and rendering");
     expect(String(modular.instructions)).not.toMatch(MARKERS.knowledge!);
+    // A capability-free modular prompt is a little over half the legacy one
+    // (17.1k vs 34.2k chars). The bound was "< half" until the secrets overhaul
+    // trimmed 329 chars of retired Variable Set text from the legacy prompt
+    // alone; the modular prompt did not grow.
     expect(String(modular.instructions).length).toBeLessThan(
-      String(legacy.instructions).length / 2,
+      String(legacy.instructions).length * 0.55,
     );
+  });
+});
+
+describe("deployment environment instructions", () => {
+  test("survive workspace and child identity overrides, governance and legacy rendering", () => {
+    const settings = testSettings({
+      deploymentAgentInstructions: "Read /operator/AGENTS.md before host work.",
+    });
+    for (const identity of [null, "Research specialist", "Child critic"]) {
+      const result = inspectPersistentAgentInstructions(settings, {
+        agentConfig: { ...config(allAgentCapabilities()), identity },
+        workspaceAgentIdentity: "Project workspace",
+        workspaceGovernance: "Project charter",
+        sessionInstructions: "Investigate the dataset",
+      });
+      expect(result.composed).toContain(
+        "# Deployment environment\n\nRead /operator/AGENTS.md before host work.",
+      );
+      expect(result.composed).toContain(identity ?? "Project workspace");
+      expect(result.composed).toContain("Project charter");
+      expect(result.composed.match(/Read \/operator\/AGENTS.md/g)).toHaveLength(1);
+    }
+    expect(
+      inspectPersistentAgentInstructions(settings, {
+        instructionsTemplate: "Custom legacy persona",
+      }).composed,
+    ).toContain("Read /operator/AGENTS.md before host work.");
+  });
+
+  test("blank deployment instructions preserve the existing prompt bytes", () => {
+    const options = { agentConfig: config(allAgentCapabilities()) };
+    expect(
+      inspectPersistentAgentInstructions(
+        testSettings({ deploymentAgentInstructions: "  " }),
+        options,
+      ),
+    ).toEqual(inspectPersistentAgentInstructions(testSettings(), options));
+  });
+});
+
+describe("agent instructions layer", () => {
+  const AGENT = "Answer every question as a pirate.";
+  const bindings = [
+    { credentialBindingId: "a", provider: "github" as const, token: "x" },
+    { credentialBindingId: "b", provider: "github" as const, token: "y" },
+  ];
+
+  test("modular: after the directives and before Git bindings, governance, memory and session", () => {
+    const inspection = inspectPersistentAgentInstructions(testSettings(), {
+      agentConfig: config(allAgentCapabilities()),
+      codemodeAvailable: true,
+      codeSearchAvailable: true,
+      gitCredentialBindings: bindings,
+      agentInstructions: `  ${AGENT}\n`,
+      workspaceGovernance: "GOVERNANCE",
+      workspaceMemory: "MEMORY",
+      sessionInstructions: "SESSION",
+    });
+    expect(inspection.layers.map((layer) => layer.id)).toEqual([
+      "identity",
+      "operational_contract",
+      "codemode",
+      "code_search",
+      "agent_instructions",
+      "git_bindings",
+      "workspace_governance",
+      "workspace_memory",
+      "session_instructions",
+    ]);
+    const layer = inspection.layers.find((candidate) => candidate.id === "agent_instructions")!;
+    expect(layer.content).toBe(`${AGENT_INSTRUCTIONS_PREAMBLE}${AGENT}`);
+    expect(layer.content).toContain("grant no additional authority");
+    expect(inspection.composed).toBe(joinPersistentAgentInstructionLayers(inspection.layers));
+  });
+
+  test("absent or blank instructions add nothing and keep the exact bytes", () => {
+    for (const agentConfig of [config(allAgentCapabilities()), undefined]) {
+      const options = {
+        ...(agentConfig ? { agentConfig } : {}),
+        codemodeAvailable: true,
+        codeSearchAvailable: true,
+        workspaceMemory: "MEMORY",
+        sessionInstructions: "SESSION",
+      };
+      const plain = inspectPersistentAgentInstructions(testSettings(), options);
+      expect(
+        inspectPersistentAgentInstructions(testSettings(), {
+          ...options,
+          agentInstructions: " \n",
+        }),
+      ).toEqual(plain);
+      expect(plain.layers.map((layer) => layer.id)).not.toContain("agent_instructions");
+    }
+  });
+
+  test("legacy: after the directives without governance, right after the persona with it", () => {
+    const settings = testSettings({ sandboxBackend: "docker" });
+    const base = {
+      codemodeAvailable: true,
+      codeSearchAvailable: true,
+      gitCredentialBindings: bindings,
+      workspaceMemory: "MEMORY",
+      sessionInstructions: "SESSION",
+      agentInstructions: AGENT,
+    };
+    const ungoverned = inspectPersistentAgentInstructions(settings, base);
+    expect(ungoverned.layers.map((layer) => layer.id)).toEqual([
+      "operational_contract",
+      "persona_and_core",
+      "codemode",
+      "code_search",
+      "agent_instructions",
+      "git_bindings",
+      "workspace_memory",
+      "session_instructions",
+    ]);
+    // A Markdown section of its own: a paragraph break before and after it.
+    expect(ungoverned.composed).toContain(
+      `${CODE_SEARCH_DIRECTIVE}\n\n${AGENT_INSTRUCTIONS_PREAMBLE}${AGENT}\n\n`,
+    );
+    const governed = inspectPersistentAgentInstructions(settings, {
+      ...base,
+      workspaceGovernance: "GOVERNANCE",
+    });
+    expect(governed.layers.map((layer) => layer.id).slice(0, 4)).toEqual([
+      "operational_contract",
+      "persona_and_core",
+      "agent_instructions",
+      "workspace_governance",
+    ]);
+    // Removing the layer gives back the historical legacy bytes.
+    const { agentInstructions: _omitted, ...legacy } = base;
+    expect(inspectPersistentAgentInstructions(settings, legacy).composed.includes(AGENT)).toBe(
+      false,
+    );
+    expect(
+      joinPersistentAgentInstructionLayers(
+        ungoverned.layers
+          .filter((layer) => layer.id !== "agent_instructions")
+          .map(({ joinBefore: _join, ...layer }) => layer),
+      ),
+    ).toBe(inspectPersistentAgentInstructions(settings, legacy).composed);
   });
 });

@@ -1,0 +1,74 @@
+diff --git a/build/src/main.js b/build/src/main.js
+index 49126371862af9759929f40feef6c40462968209..4f793447005fabf9d49869fc8373250116673fcd 100644
+--- a/build/src/main.js
++++ b/build/src/main.js
+@@ -504,12 +504,14 @@ function makeDeepPartial(options, longs) {
+     const Builtin = (0, ts_poet_1.conditionalOutput)("Builtin", (0, ts_poet_1.code) `type Builtin = Date | Function | Uint8Array | string | number | boolean ${optionalBuiltins.length ? `| ${optionalBuiltins.join(" | ")} ` : ""}| undefined;`);
+     // Based on https://github.com/sindresorhus/type-fest/pull/259
+     const maybeExcludeType = (0, options_1.addTypeToMessages)(options) ? `| '$type'` : "";
+-    const Exact = (0, ts_poet_1.conditionalOutput)("Exact", (0, ts_poet_1.code) `
++    const Exact = (0, ts_poet_1.conditionalOutput)("ExactInput", (0, ts_poet_1.code) `
+       type KeysOfUnion<T> = T extends T ? keyof T : never;
+-      ${maybeExport} type Exact<P, I extends P> = P extends ${Builtin}
++      type ExactInput<P, I> = I extends P ? Exact<P, I> : never;
++      ${maybeExport} type Exact<P, I extends P> = ExactFields<P, I>;
++      type ExactFields<P, I> = P extends ${Builtin}
+         ? P
+-        : P &
+-        { [K in keyof P]: Exact<P[K], I[K]> } & { [K in Exclude<keyof I, KeysOfUnion<P> ${maybeExcludeType}>]: never };
++        : I extends P ? P &
++        { [K in keyof P]: ExactFields<P[K], I[K & keyof I]> } & { [K in Exclude<keyof I, KeysOfUnion<P> ${maybeExcludeType}>]: never } : never;
+     `);
+     // Based on the type from ts-essentials
+     const keys = (0, options_1.addTypeToMessages)(options) ? (0, ts_poet_1.code) `Exclude<keyof T, '$type'>` : (0, ts_poet_1.code) `keyof T`;
+@@ -584,8 +586,8 @@ function makeMessageFns(options, deepPartial, extension) {
+     }
+     if (options.outputPartialMethods) {
+         if (options.useExactTypes) {
+-            commonStaticMembers.push((0, ts_poet_1.code) `create<I extends ${Exact}<${DeepPartial}<T>, I>>(base?: I): T;`);
+-            commonStaticMembers.push((0, ts_poet_1.code) `fromPartial<I extends ${Exact}<${DeepPartial}<T>, I>>(object: I): T;`);
++            commonStaticMembers.push((0, ts_poet_1.code) `create<I>(base?: I & NoInfer<${Exact}<${DeepPartial}<T>, I>>): T;`);
++            commonStaticMembers.push((0, ts_poet_1.code) `fromPartial<I>(object: I & NoInfer<${Exact}<${DeepPartial}<T>, I>>): T;`);
+         }
+         else {
+             commonStaticMembers.push((0, ts_poet_1.code) `create(base?: DeepPartial<T>): T;`);
+@@ -2399,8 +2401,8 @@ function generateFromPartial(ctx, fullName, messageDesc) {
+     // create the create function definition
+     if (ctx.options.useExactTypes) {
+         chunks.push((0, ts_poet_1.code) `
+-      create<I extends ${utils.Exact}<${utils.DeepPartial}<${fullName}>, I>>(base?: I): ${fullName} {
+-        return ${fullName}.fromPartial(base ?? ({} as any));
++      create(base?: ${utils.DeepPartial}<${fullName}>): ${fullName} {
++        return ${fullName}.fromPartial<${utils.DeepPartial}<${fullName}>>(base ?? ({} as any));
+       },
+     `);
+     }
+@@ -2415,7 +2417,7 @@ function generateFromPartial(ctx, fullName, messageDesc) {
+     const paramName = messageDesc.field.length > 0 ? "object" : "_";
+     if (ctx.options.useExactTypes) {
+         chunks.push((0, ts_poet_1.code) `
+-      fromPartial<I extends ${utils.Exact}<${utils.DeepPartial}<${fullName}>, I>>(${paramName}: I): ${fullName} {
++      fromPartial(${paramName}: ${utils.DeepPartial}<${fullName}>): ${fullName} {
+     `);
+     }
+     else {
+@@ -2501,7 +2503,8 @@ function generateFromPartial(ctx, fullName, messageDesc) {
+                     }
+                     else {
+                         const type = (0, types_1.basicTypeName)(ctx, valueField);
+-                        return (0, ts_poet_1.code) `${type}.fromPartial(${from})`;
++                        const typeArguments = options.useExactTypes ? (0, ts_poet_1.code) `<${utils.DeepPartial}<${type}>>` : (0, ts_poet_1.code) ``;
++                        return (0, ts_poet_1.code) `${type}.fromPartial${typeArguments}(${from})`;
+                     }
+                 }
+                 else if ((0, types_1.isAnyValueType)(field)) {
+@@ -2509,7 +2512,8 @@ function generateFromPartial(ctx, fullName, messageDesc) {
+                 }
+                 else {
+                     const type = (0, types_1.basicTypeName)(ctx, field);
+-                    return (0, ts_poet_1.code) `${type}.fromPartial(${from})`;
++                    const typeArguments = options.useExactTypes ? (0, ts_poet_1.code) `<${utils.DeepPartial}<${type}>>` : (0, ts_poet_1.code) ``;
++                    return (0, ts_poet_1.code) `${type}.fromPartial${typeArguments}(${from})`;
+                 }
+             }
+             else {

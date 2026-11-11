@@ -11,8 +11,8 @@ Canonical implementation:
 - contracts: `packages/contracts/src/scoped-knowledge.ts`
 - Drizzle declarations: `packages/db/src/scoped-knowledge-schema.ts`
 - repository/domain API: `packages/db/src/scoped-knowledge.ts`
-- migration and PostgreSQL invariants:
-  `packages/db/drizzle/0154_scoped_knowledge_foundation.sql`
+- PostgreSQL invariants: the `opengeni_private.scoped_knowledge_scope_*`
+  functions in the migration baseline
 
 ## Authority boundaries
 
@@ -63,9 +63,10 @@ history: before any document write, the worker resolves the stored immutable
 authority tuple through an exact account/workspace RLS capability. Any supplied
 authority tuple must be complete and exactly match that stored tuple; partial or
 mismatched tuples reject before parsing, embedding, or chunk writes. Publishing
-an organization-authority document requires an exact `account:admin` account
-grant; workspace-admin permission expansion is not account-wide publication
-authority.
+an organization-authority document requires organization administration: an
+exact `account:admin` account grant, or an active organization owner or admin
+proven by the canonical human session; workspace-admin permission expansion is
+not account-wide publication authority.
 
 ## Source and lifecycle ledgers
 
@@ -80,6 +81,10 @@ The source side records:
 - `knowledge_document_versions`: immutable content/version observations;
 - `knowledge_lifecycle_events`: append-only delete, revoke, restore, ACL, sync,
   and version-pointer evidence.
+
+Integration Knowledge sync was removed (see [Knowledge](knowledge.md)), so no
+provider writes new source or sync rows. The ledgers stay so imported
+documents keep their provenance, ACL evidence and lifecycle history.
 
 Mutable heads are not directly updateable by `opengeni_app`. Target-schema
 security-definer functions lock the exact row, recheck live GUC authority,
@@ -199,7 +204,8 @@ supply a UUID operation id and the exact current four-field authority tuple;
 PostgreSQL locks that operation, rejects stale expected state, and writes one
 immutable before/after receipt in the same transaction that changes the
 Document and every chunk. Moving to or from organization authority requires an
-opaque capability minted from the canonical exact `account:admin` grant; it is
+opaque capability minted from organization administration (the exact
+`account:admin` grant or a canonical owner/admin human session); it is
 bound to the command's account and actor but does not require the principal to
 also have a managed `organization_memberships` row, so managed,
 local/configured, and signed delegated account administrators retain the same
@@ -229,7 +235,7 @@ account. Opaque cursors are bound to the account, evidence kind, and run where
 applicable. The database uses a target-schema-local exact-token capability with
 SELECT-only policies, so a read cannot reuse the destructive migration
 capability, cannot write an evidence table, and cannot collide with another
-OpenGeni schema in the same database. Expected scope, cursor, limit, and missing
+Opengeni schema in the same database. Expected scope, cursor, limit, and missing
 run failures are mapped to typed HTTP errors.
 
 One run writes a receipt for **every** workspace in the account, so those

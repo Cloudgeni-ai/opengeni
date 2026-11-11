@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { SECTION_TITLE_CLASS } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SelectMenu, type SelectOption } from "@/components/ui/select-menu";
+import { SECTION_TITLE_CLASS } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SelectMenu, type SelectOption } from "@opengeni/react/ui/select-menu";
 import {
   SettingDangerRow,
   SettingNavRow,
@@ -12,8 +12,8 @@ import {
   SettingRowSkeleton,
   useSettingRowField,
   type SettingRowVariant,
-} from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
+} from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
 import { connectedCapabilities, currentWorkspace, sessionDefaults } from "../fixtures";
 import { Alternative, Fork, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
 import { usePick } from "../picks";

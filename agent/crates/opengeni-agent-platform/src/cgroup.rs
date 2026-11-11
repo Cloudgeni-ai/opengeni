@@ -35,9 +35,9 @@
 //!    established, failure to create, configure, pre-open, migrate, or verify an
 //!    operation leaf aborts that operation; user code never runs ambient after a
 //!    partial admission. Optional per-op limits contain work in that leaf.
-//!    Without a limit, the child score bias below makes global kernel OOM prefer
-//!    host work when a higher score is representable; a supervisor already at the
-//!    ABI ceiling remains equal to its children.
+//!    Without a limit, the child score bias below makes kernel OOM prefer host
+//!    work over the supervisor; a supervisor already at the ABI ceiling remains
+//!    equal to its children.
 //! 3. **Teardown** ([`OpCgroupHandle`]). The op leaf is `rmdir`'d after the op's
 //!    complete cgroup-owned process tree is killed and reaped. This includes a
 //!    descendant that changed its process group after admission, but excludes an
@@ -495,6 +495,8 @@ impl OpCgroups {
         let handle = OpCgroupHandle {
             dir: Some(dir.clone()),
             cpu_lease,
+            reservation: crate::current_work_reservation(),
+            applied: applied_config,
         };
 
         self.configure_op_cgroup(&dir, applied_config)?;
@@ -509,6 +511,44 @@ impl OpCgroups {
         }
 
         Ok(Some(PreparedOpCgroup { handle }))
+    }
+
+    /// Takes over a leaf a predecessor process image handed over, re-applying
+    /// its exact policy. Startup returns CPU scheduling to ambient before any
+    /// adoption, so a CPU-limited leaf re-acquires the controller and has its
+    /// quota written again.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn adopt_op(
+        &self,
+        handover: &crate::exec_handover::OpCgroupHandover,
+    ) -> std::io::Result<OpCgroupHandle> {
+        let dir = &handover.dir;
+        let owned = dir.parent() == Some(self.service_dir.as_path())
+            && dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("op-"))
+                .is_some_and(|id| id.parse::<u64>().is_ok());
+        if !owned || !dir.is_dir() {
+            return Err(std::io::Error::other(format!(
+                "handed-over operation cgroup {} is not a live leaf of this runner",
+                dir.display()
+            )));
+        }
+        let applied = OpCgroupConfig {
+            memory_max: handover.memory_max,
+            memory_high: handover.memory_high,
+            cpu_max_millicores: handover.cpu_max_millicores,
+        };
+        let cpu_lease = self.acquire_cpu_lease(applied.cpu_max_millicores)?;
+        let handle = OpCgroupHandle {
+            dir: Some(dir.clone()),
+            cpu_lease,
+            reservation: crate::current_work_reservation(),
+            applied,
+        };
+        self.configure_op_cgroup(dir, applied)?;
+        Ok(handle)
     }
 
     #[cfg(target_os = "linux")]
@@ -746,6 +786,19 @@ impl OpCgroups {
         Ok(None)
     }
 
+    /// Non-Linux stub: no leaf can have been handed over off Linux.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[allow(clippy::unused_self)]
+    pub(crate) fn adopt_op(
+        &self,
+        handover: &crate::exec_handover::OpCgroupHandover,
+    ) -> std::io::Result<OpCgroupHandle> {
+        Err(std::io::Error::other(format!(
+            "operation cgroup {} cannot be adopted on this OS",
+            handover.dir.display()
+        )))
+    }
+
     /// Logs an operation admission fault exactly once; a persistent host failure
     /// must not spam a line per exec.
     #[cfg(target_os = "linux")]
@@ -786,10 +839,58 @@ pub(crate) struct OpCgroupHandle {
     /// killed, unpopulated, and removed.
     #[cfg(target_os = "linux")]
     cpu_lease: Option<CpuControllerLease>,
+    #[cfg(target_os = "linux")]
+    reservation: Option<crate::WorkReservation>,
+    /// The policy applied to this leaf, carried if the operation is handed to
+    /// a successor process image.
+    #[cfg(target_os = "linux")]
+    applied: OpCgroupConfig,
 }
 
 #[cfg(target_os = "linux")]
 impl OpCgroupHandle {
+    /// cgroup.procs omits zombies and includes session-detached descendants.
+    /// Descendant cgroups are part of the same recursive kill boundary.
+    pub(crate) fn has_live_children(&self, anchor_pid: i32) -> std::io::Result<bool> {
+        let Some(dir) = &self.dir else {
+            return Ok(false);
+        };
+        let mut pending = vec![dir.clone()];
+        while let Some(dir) = pending.pop() {
+            let processes = std::fs::read_to_string(dir.join("cgroup.procs"))?;
+            if processes
+                .lines()
+                .filter_map(|pid| pid.parse::<i32>().ok())
+                .any(|pid| pid != anchor_pid)
+            {
+                return Ok(true);
+            }
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    pending.push(entry.path());
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Gives the leaf to a successor process image without killing or removing
+    /// it. A CPU lease is deliberately leaked: the quota must stay enforced
+    /// until the successor re-acquires it, and `exec` ends this image's count.
+    pub(crate) fn into_handover(mut self) -> Option<crate::exec_handover::OpCgroupHandover> {
+        let dir = self.dir.take()?;
+        if let Some(lease) = self.cpu_lease.take() {
+            std::mem::forget(lease);
+        }
+        Some(crate::exec_handover::OpCgroupHandover {
+            dir,
+            memory_max: self.applied.memory_max,
+            memory_high: self.applied.memory_high,
+            cpu_max_millicores: self.applied.cpu_max_millicores,
+        })
+    }
+
     /// Kills every process still owned by this operation cgroup. Unlike a POSIX
     /// process-group signal, the kernel cgroup boundary also covers a descendant
     /// that called `setsid`; a service manager that deliberately moved a durable
@@ -825,7 +926,7 @@ impl OpCgroupHandle {
                 tracing::warn!(
                     dir = %dir.display(),
                     %error,
-                    "failed to remove a runner-owned operation cgroup; scheduling one cancellation-safe retry"
+                    "failed to remove a runner-owned operation cgroup; retaining cancellation-safe cleanup"
                 );
                 // Keep ownership in `self`: Drop hands it to a runtime task so a
                 // transient post-reap kernel race does not permanently leak the
@@ -852,6 +953,11 @@ impl Drop for OpCgroupHandle {
             );
         }
         let cpu_lease = self.cpu_lease.take();
+        let reservation = self.reservation.take();
+        let witness = crate::work_scope::CleanupWitness::new(
+            reservation.clone(),
+            format!("operation cgroup {}", dir.display()),
+        );
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             tracing::warn!(
                 dir = %dir.display(),
@@ -864,20 +970,25 @@ impl Drop for OpCgroupHandle {
             }
             return;
         };
-        runtime.spawn(async move {
-            if let Err(error) = remove_op_cgroup(&dir).await {
-                tracing::warn!(
-                    dir = %dir.display(),
-                    %error,
-                    "failed to remove a runner-owned operation cgroup after task cancellation"
-                );
-                if let Some(lease) = cpu_lease {
-                    std::mem::forget(lease);
+        runtime.spawn(crate::with_work_reservation(
+            reservation.clone(),
+            async move {
+                let mut witness = witness;
+                loop {
+                    match remove_op_cgroup(&dir).await {
+                        Ok(()) => {
+                            witness.settle();
+                            break;
+                        }
+                        Err(error) => witness.failed(&error),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
-            }
-            // On success, dropping `cpu_lease` after removal may disable +cpu
-            // when this was the final limited operation.
-        });
+                // On success, dropping `cpu_lease` after removal may disable +cpu
+                // when this was the final limited operation.
+                drop(cpu_lease);
+            },
+        ));
     }
 }
 
@@ -943,19 +1054,35 @@ impl OpCgroupHandle {
     #[allow(dead_code)]
     #[allow(clippy::unused_async)]
     pub(crate) async fn teardown(self) {}
+
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    #[allow(clippy::unused_self)]
+    pub(crate) fn into_handover(self) -> Option<crate::exec_handover::OpCgroupHandover> {
+        None
+    }
 }
 
 /// Verifies the manager-owned startup topology and returns active [`OpCgroups`], or `None` (with a
 /// once-logged reason) when isolation is unavailable — the agent then serves with
-/// today's behavior. Call this ONCE at startup, before any host exec or
-/// agent-infrastructure child (for example Xvfb) is spawned, so only host work
-/// lands in per-op leaves.
+/// today's behavior. Call this ONCE per process image at startup, before new
+/// host execs are spawned. Infrastructure children (for example Xvfb) may
+/// already inhabit the supervisor leaf after an in-place exec handover.
+///
+/// `handed_over` lists operation leaves whose commands a predecessor process
+/// image handed to this one; they are kept for adoption instead of reclaimed.
 #[cfg(target_os = "linux")]
 #[must_use]
-pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>> {
+pub fn establish_oom_isolation(
+    config: OpCgroupConfig,
+    handed_over: &[PathBuf],
+) -> Option<Arc<OpCgroups>> {
     report_supervisor_oom_score_adj();
 
-    let startup = discover_delegated_service()?;
+    let mut startup = discover_delegated_service()?;
+    startup
+        .stale_op_cgroups
+        .retain(|dir| !handed_over.contains(dir));
     let (enabled_controllers, unavailable_controllers, cpu_delegated) =
         establish_delegated_subtree(&startup)?;
     tracing::info!(
@@ -967,6 +1094,7 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
         cpu_max_millicores = ?config.cpu_max_millicores,
         cpu_quota_supported = cpu_delegated,
         stale_operations_cleanup_scheduled = startup.stale_op_cgroups.len(),
+        handed_over_operations = handed_over.len(),
         "established per-op cgroups: host execs have separate resource accounting and systemd-oomd fate; no controller limit was added implicitly and kernel OOM selection remains score-based"
     );
     let service_dir = startup.service_dir;
@@ -1049,25 +1177,10 @@ fn discover_delegated_service() -> Option<CgroupStartup> {
         );
         return None;
     }
-    let current_pid = std::process::id();
-    let sole_supervisor_member = std::fs::read_to_string(supervisor_dir.join("cgroup.procs"))
-        .ok()
-        .and_then(|contents| {
-            let members = contents
-                .split_whitespace()
-                .map(str::parse::<u32>)
-                .collect::<Result<Vec<_>, _>>()
-                .ok()?;
-            (members == [current_pid]).then_some(())
-        })
-        .is_some();
-    if !sole_supervisor_member {
-        tracing::warn!(
-            dir = %supervisor_dir.display(),
-            "OOM cgroup isolation unavailable: the supervisor subgroup is not owned solely by this runner process"
-        );
-        return None;
-    }
+    // /proc/self/cgroup already identifies our supervisor leaf. An exec update
+    // preserves its infrastructure children, so exclusive process membership is
+    // neither required nor stable. Only the delegated root must remain empty:
+    // enabling its controllers must not move or disrupt any supervisor process.
     let service_root_empty = std::fs::read_to_string(service_dir.join("cgroup.procs"))
         .is_ok_and(|contents| contents.split_whitespace().next().is_none());
     if !service_root_empty {
@@ -1181,7 +1294,10 @@ fn establish_delegated_subtree(
 /// `None` so the agent runs unchanged on macOS/Windows.
 #[cfg(not(target_os = "linux"))]
 #[must_use]
-pub fn establish_oom_isolation(_config: OpCgroupConfig) -> Option<Arc<OpCgroups>> {
+pub fn establish_oom_isolation(
+    _config: OpCgroupConfig,
+    _handed_over: &[PathBuf],
+) -> Option<Arc<OpCgroups>> {
     tracing::debug!("per-op OOM cgroup isolation is Linux-only; running without it on this OS");
     None
 }
@@ -1544,30 +1660,46 @@ fn disable_subtree_controller(service_dir: &Path, controller: &str) -> std::io::
 
 // --- oom_score_adj: bias the kernel OOM killer toward host work ----------------
 
-/// Derives the minimal child OOM bias above the supervisor when the kernel ABI can
-/// represent one. A manager-protected negative supervisor needs only neutral
-/// children. If the manager clamps the supervisor to neutral or positive, one
-/// point is the smallest legal preference. At the ABI ceiling (1000) no stronger
-/// relative preference is representable, so the child remains equal.
+/// The kernel ABI's largest `oom_score_adj`: a process at this value is chosen
+/// before every process with a lower value, whatever their sizes.
 #[cfg(any(target_os = "linux", test))]
-pub(crate) fn minimal_exec_oom_score_adj(supervisor: i32) -> u16 {
+const OOM_SCORE_ADJ_MAX: u16 = 1000;
+
+/// Derives the OOM bias of a command the supervisor starts.
+///
+/// The kernel ranks OOM victims by memory footprint plus `oom_score_adj`
+/// thousandths of the memory being exhausted (the cgroup limit for a cgroup OOM,
+/// RAM and swap otherwise). A small difference in `oom_score_adj` is therefore no
+/// preference at all: one point in an 8 GiB container is worth 8 MiB, while the
+/// supervisor's resident binary alone is far larger than many of the processes a
+/// build or test run leaves behind once the biggest one is killed.
+///
+/// * A manager-protected (negative) supervisor keeps neutral children, which
+///   compete with the host's other processes as usual.
+/// * A supervisor no manager could protect (zero or positive, for example in an
+///   unprivileged container, which may raise but never lower its own value)
+///   gives its commands the ABI maximum. Raising needs no privilege, and it is
+///   the only value that ranks every command, however small, ahead of the
+///   supervisor, whatever the size of the supervisor or of the memory. A
+///   supervisor already at the maximum stays equal to its commands.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn exec_oom_score_adj_for_supervisor(supervisor: i32) -> u16 {
     if supervisor < 0 {
         0
     } else {
-        u16::try_from(supervisor.saturating_add(1).min(1000))
-            .expect("a parsed nonnegative OOM adjustment fits u16")
+        OOM_SCORE_ADJ_MAX
     }
 }
 
 /// Reads the current supervisor's authoritative kernel value and derives the
-/// minimal child bias. `None` leaves the host policy untouched when `/proc` cannot
-/// be read or contains an invalid ABI value.
+/// child bias. `None` leaves the host policy untouched when `/proc` cannot be
+/// read or contains an invalid ABI value.
 #[cfg(target_os = "linux")]
-fn exec_oom_score_adj() -> Option<u16> {
+pub(crate) fn exec_oom_score_adj() -> Option<u16> {
     std::fs::read_to_string("/proc/self/oom_score_adj")
         .ok()
         .and_then(|value| parse_oom_score_adj(&value))
-        .map(minimal_exec_oom_score_adj)
+        .map(exec_oom_score_adj_for_supervisor)
 }
 
 /// Reports the effective supervisor victim bias. Service managers are allowed to
@@ -1581,18 +1713,18 @@ fn report_supervisor_oom_score_adj() {
     {
         Some(score) if score < 0 => tracing::info!(
             oom_score_adj = score,
-            "control supervisor has negative kernel OOM victim bias"
+            child_oom_score_adj = exec_oom_score_adj_for_supervisor(score),
+            "control supervisor has negative kernel OOM victim bias; commands stay neutral"
         ),
-        Some(0) => tracing::info!(
-            oom_score_adj = 0,
-            child_oom_score_adj = minimal_exec_oom_score_adj(0),
-            "control supervisor has neutral kernel OOM victim bias; children receive the smallest available relative preference"
+        Some(score) if score < i32::from(OOM_SCORE_ADJ_MAX) => tracing::info!(
+            oom_score_adj = score,
+            child_oom_score_adj = exec_oom_score_adj_for_supervisor(score),
+            "control supervisor could not be protected from the kernel OOM killer; commands are made its preferred victims so a command that exhausts memory is killed before the supervisor"
         ),
         Some(score) => tracing::warn!(
             oom_score_adj = score,
-            child_oom_score_adj = minimal_exec_oom_score_adj(score),
-            relative_preference_representable = score < 1000,
-            "control supervisor has nonnegative kernel OOM victim bias; children receive the smallest higher bias when representable, otherwise the equal ABI ceiling, and delegated cgroups do not protect against host-wide kernel OOM"
+            child_oom_score_adj = exec_oom_score_adj_for_supervisor(score),
+            "control supervisor already has the largest kernel OOM victim bias, so its commands cannot be preferred over it"
         ),
         None => tracing::warn!(
             "could not read the control supervisor's effective kernel OOM victim bias"
@@ -1724,12 +1856,47 @@ mod tests {
     }
 
     #[test]
-    fn child_oom_bias_is_the_minimal_representable_target() {
-        assert_eq!(minimal_exec_oom_score_adj(-100), 0);
-        assert_eq!(minimal_exec_oom_score_adj(-1), 0);
-        assert_eq!(minimal_exec_oom_score_adj(0), 1);
-        assert_eq!(minimal_exec_oom_score_adj(999), 1000);
-        assert_eq!(minimal_exec_oom_score_adj(1000), 1000);
+    fn unprotected_supervisors_give_commands_the_largest_oom_bias() {
+        assert_eq!(exec_oom_score_adj_for_supervisor(-1000), 0);
+        assert_eq!(exec_oom_score_adj_for_supervisor(-100), 0);
+        assert_eq!(exec_oom_score_adj_for_supervisor(-1), 0);
+        assert_eq!(exec_oom_score_adj_for_supervisor(0), 1000);
+        assert_eq!(exec_oom_score_adj_for_supervisor(1), 1000);
+        assert_eq!(exec_oom_score_adj_for_supervisor(200), 1000);
+        assert_eq!(exec_oom_score_adj_for_supervisor(1000), 1000);
+    }
+
+    /// The kernel's victim ranking (`oom_badness`): resident pages plus
+    /// `oom_score_adj` thousandths of the pages being exhausted.
+    fn kernel_badness(resident_pages: i64, oom_score_adj: i64, total_pages: i64) -> i64 {
+        resident_pages + oom_score_adj * (total_pages / 1000)
+    }
+
+    /// An unprotected supervisor with a few hundred MiB of resident binary must
+    /// never outrank even the smallest command it runs, in a small container or
+    /// a large host. One point of preference (the earlier `supervisor + 1`) lost
+    /// to the supervisor's footprint in exactly this case.
+    #[test]
+    fn every_command_outranks_an_unprotected_supervisor_as_an_oom_victim() {
+        const MIB: i64 = 256; // 4 KiB pages
+        let supervisor_resident = 240 * MIB;
+        let command_resident = MIB;
+        for total in [512 * MIB, 8 * 1024 * MIB, 256 * 1024 * MIB] {
+            for supervisor in [0, 100, 500] {
+                let command = i64::from(exec_oom_score_adj_for_supervisor(supervisor));
+                assert!(
+                    kernel_badness(command_resident, command, total)
+                        > kernel_badness(supervisor_resident, i64::from(supervisor), total),
+                    "supervisor {supervisor} in {total} pages"
+                );
+            }
+        }
+        // The one-point preference does not survive the supervisor's footprint.
+        let eight_gib = 8 * 1024 * MIB;
+        assert!(
+            kernel_badness(command_resident, 1, eight_gib)
+                < kernel_badness(supervisor_resident, 0, eight_gib)
+        );
     }
 
     #[test]

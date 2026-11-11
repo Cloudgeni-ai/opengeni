@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { OpenGeniClient } from "../../../../../packages/sdk/src/artifact-client";
 import { OPENGENI_API_CONTRACT_REVISION, type RetainedArtifactReference } from "@opengeni/sdk";
-import { decodeRetainedText } from "./retained-text-preview-policy";
+import { decodeRetainedText } from "@opengeni/react/app/components/artifacts/retained-text-preview-policy";
 
 test("text preview SDK transport authenticates ranges and rejects corrupt or cross-workspace receipts", async () => {
   const workspaceId = "11111111-1111-4111-8111-111111111111";

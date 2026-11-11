@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
-import type { ScheduledTaskAccessAttention } from "@/types";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import type { ScheduledTaskAccessAttention } from "@opengeni/react/app/types";
 
 const ATTENTION_UPDATED = "opengeni:scheduled-task-attention-updated";
 const ATTENTION_SEEN = "opengeni:scheduled-task-attention-seen";
@@ -50,7 +50,7 @@ function seenFor(workspaceId: string): Set<string> {
 }
 
 /**
- * Record that the owner has seen these notices (the Schedules page rendered
+ * Record that the owner has seen these notices (the Automations page rendered
  * them). Only the navigation dot uses this per-browser marker; each card keeps
  * its notice until a later run succeeds.
  */
@@ -74,7 +74,7 @@ export function markScheduledTaskAttentionSeen(
 }
 
 /**
- * The Schedules navigation dot: a schedule this person can act on has a run
+ * The Automations navigation dot: an automation this person can act on has a run
  * that failed closed on connector access, or cannot start because a chosen
  * account is gone, and they have not looked at it yet.
  */

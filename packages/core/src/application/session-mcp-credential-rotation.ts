@@ -1,7 +1,8 @@
+import { assertMcpCredentialContentFlowAllowed } from "../domain/mcp-credential-content-flow";
 import { createHmac } from "node:crypto";
 import { RotateSessionMcpCredentialsRequest, type AccessGrant } from "@opengeni/contracts";
 import {
-  encryptVariableSetValue,
+  encryptEnvironmentValue,
   getWorkspaceGrant,
   subjectHasLiveWorkspaceAuthorityInScope,
   type Database,
@@ -14,6 +15,7 @@ import { HTTPException } from "hono/http-exception";
 import type { Settings } from "@opengeni/config";
 import {
   requirePermission,
+  hasVerifiedOwningUserAuthorization,
   requireResolvedAccessGrantAuthorization,
   type AccessGrantAuthorization,
 } from "../access";
@@ -24,7 +26,7 @@ import {
   SessionAuthorizationUnavailableError,
   type SessionAuthorizationDependencies,
 } from "../session-authorization";
-import { requireVariableSetEncryption } from "../domain/environments";
+import { requireEnvironmentEncryption } from "../domain/encryption-key";
 import { normalizedSessionMcpCredentialHeaders } from "../domain/sessions";
 import { externalContinuationCommitAuthorizer } from "./external-continuation";
 import {
@@ -75,7 +77,7 @@ export async function rotateSessionMcpCredentialsForRequest(
   const parsed = RotateSessionMcpCredentialsRequest.safeParse(raw);
   if (!parsed.success)
     throw new HTTPException(422, { message: "invalid credential rotation request" });
-  const encryptionKey = requireVariableSetEncryption(deps.settings);
+  const encryptionKey = requireEnvironmentEncryption(deps.settings);
   let request: RotateSessionMcpCredentialsRequest;
   try {
     request = {
@@ -108,6 +110,16 @@ export async function rotateSessionMcpCredentialsForRequest(
     // Header names and validation paths are caller-controlled secret channels.
     throw new HTTPException(422, { message: "invalid credential rotation headers or server IDs" });
   }
+  // An Opengeni API key reads its organization: EU-only content stays in
+  // EU-only workspaces.
+  for (const update of request.updates) {
+    if ("headers" in update)
+      await assertMcpCredentialContentFlowAllowed(deps.db, {
+        target: { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        url: update.expectedServerUrl,
+        headers: update.headers,
+      });
+  }
   const scope = {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -132,7 +144,7 @@ export async function rotateSessionMcpCredentialsForRequest(
               headersEncrypted: Object.fromEntries(
                 Object.entries(update.headers).map(([name, value]) => [
                   name,
-                  encryptVariableSetValue(encryptionKey, value),
+                  encryptEnvironmentValue(encryptionKey, value),
                 ]),
               ),
             },
@@ -172,7 +184,7 @@ export async function rotateSessionMcpCredentialsForRequest(
           const live = await getWorkspaceGrant(tx, fresh.subjectId, fresh.workspaceId);
           if (live) {
             requireRotationGrant(live);
-          } else if (!authorization.canonicalManagedHumanSession) {
+          } else if (!hasVerifiedOwningUserAuthorization(authorization)) {
             throw new HTTPException(403, { message: "credential rotation authority changed" });
           }
           if (!(await subjectHasLiveWorkspaceAuthorityInScope(tx, scope))) {

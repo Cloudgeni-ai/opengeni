@@ -75,7 +75,7 @@ use crate::{
 
 pub(crate) use ax::MacAxControllerImpl;
 use input_monitor::{input_activity_monitor, InputActivityMonitor};
-pub(crate) use stream::CaptureStream;
+pub(crate) use stream::{capture_cleanup_is_settled, CaptureStream};
 
 const MAX_CAPTURE_PIXELS: usize = 64 * 1024 * 1024;
 
@@ -103,6 +103,24 @@ extern "C" {
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGSessionCopyCurrentDictionary() -> CFDictionaryRef;
+}
+
+// `io_registry_entry_t` is a `mach_port_t` (`unsigned int`); the default main
+// port is `MACH_PORT_NULL`.
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    fn IORegistryGetRootEntry(main_port: u32) -> u32;
+    fn IORegistryEntryCreateCFProperty(
+        entry: u32,
+        key: core_foundation::string::CFStringRef,
+        allocator: *const c_void,
+        options: u32,
+    ) -> core_foundation::base::CFTypeRef;
+    fn IOObjectRelease(object: u32) -> i32;
+}
+
+extern "C" {
+    fn getuid() -> u32;
 }
 
 /// Screen Recording preflight (non-prompting).
@@ -135,10 +153,116 @@ pub(super) fn machine_locked() -> Result<bool, MacFfiError> {
         .is_some_and(bool::from))
 }
 
+/// The facts [`crate::console_state`] decides from: this session's
+/// CoreGraphics dictionary, the IORegistry root's `IOConsoleUsers` and
+/// `IOConsoleLocked`, and the owner of `/dev/console`.
+pub(super) fn console_facts() -> Result<crate::MacConsoleFacts, MacFfiError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let raw = unsafe { CGSessionCopyCurrentDictionary() };
+    if raw.is_null() {
+        return Err(MacFfiError::Ffi(
+            "CoreGraphics returned no current login-session state".to_string(),
+        ));
+    }
+    let session: CFDictionary<CFString, CFType> =
+        unsafe { CFDictionary::wrap_under_create_rule(raw) };
+    let flag = |key: &str| {
+        session
+            .find(CFString::new(key))
+            .and_then(|value| value.downcast::<CFBoolean>())
+            .map(bool::from)
+    };
+    let user = unsafe { getuid() };
+    Ok(crate::MacConsoleFacts {
+        session_locked: flag("CGSSessionScreenIsLocked").unwrap_or(false),
+        session_on_console: flag("kCGSSessionOnConsoleKey").unwrap_or(true),
+        console_locked: registry_console_locked(),
+        console_session: registry_console_users().map(|users| crate::console_session(&users, user)),
+        console_owner: std::fs::metadata("/dev/console")
+            .ok()
+            .map(|metadata| metadata.uid()),
+        user,
+    })
+}
+
+/// A property of the IORegistry root, or `None` when it cannot be read.
+fn registry_root_property(name: &str) -> Option<CFType> {
+    let root = unsafe { IORegistryGetRootEntry(0) };
+    if root == 0 {
+        return None;
+    }
+    let key = CFString::new(name);
+    let value = unsafe {
+        IORegistryEntryCreateCFProperty(root, key.as_concrete_TypeRef(), core::ptr::null(), 0)
+    };
+    unsafe { IOObjectRelease(root) };
+    if value.is_null() {
+        return None;
+    }
+    Some(unsafe { CFType::wrap_under_create_rule(value) })
+}
+
+/// The IORegistry root's `IOConsoleUsers`: every logged-in GUI session, with
+/// the one on the console marked. `None` when it cannot be read, or when an
+/// entry has no user id (then which session is on screen is not proven).
+fn registry_console_users() -> Option<Vec<crate::MacConsoleUser>> {
+    use core_foundation::array::CFArray;
+    use core_foundation::number::CFNumber;
+
+    let users = registry_root_property("IOConsoleUsers")?.downcast::<CFArray>()?;
+    crate::console_state::console_users(users.get_all_values().into_iter().map(|entry| {
+        // The array holds its entries for this call; each is checked to be a
+        // dictionary before it is wrapped as one (retained again).
+        let item = unsafe { CFType::wrap_under_get_rule(entry) };
+        if !item.instance_of::<CFDictionary>() {
+            return None;
+        }
+        let entry: CFDictionary<CFString, CFType> =
+            unsafe { CFDictionary::wrap_under_get_rule(entry as CFDictionaryRef) };
+        let value = |key: &str| entry.find(CFString::new(key));
+        let flag = |key: &str| {
+            value(key)
+                .and_then(|value| value.downcast::<CFBoolean>())
+                .is_some_and(bool::from)
+        };
+        Some(crate::console_state::MacConsoleUserEntry {
+            user: value("kCGSSessionUserIDKey")
+                .and_then(|value| value.downcast::<CFNumber>())
+                .and_then(|number| number.to_i64()),
+            on_console: flag("kCGSSessionOnConsoleKey"),
+            screen_locked: flag("CGSSessionScreenIsLocked"),
+        })
+    }))
+}
+
+/// The IORegistry root's `IOConsoleLocked`; false when it cannot be read.
+fn registry_console_locked() -> bool {
+    registry_root_property("IOConsoleLocked")
+        .and_then(|value| value.downcast::<CFBoolean>())
+        .is_some_and(bool::from)
+}
+
 /// Fires the Screen Recording + Accessibility system prompts once.
 pub(super) fn request_grants() {
+    request_screen_capture();
+    request_input_monitoring();
+    request_accessibility();
+}
+
+/// Asks for Screen Recording. macOS shows its prompt only the first time.
+pub(super) fn request_screen_capture() {
     let _ = CGRequestScreenCaptureAccess();
+}
+
+/// Asks for Input Monitoring. macOS shows its prompt only the first time.
+pub(super) fn request_input_monitoring() {
     let _ = CGRequestListenEventAccess();
+}
+
+/// Asks for Accessibility: macOS lists the app in Privacy & Security and offers
+/// to open it there.
+pub(super) fn request_accessibility() {
     // AXIsProcessTrustedWithOptions({ kAXTrustedCheckOptionPrompt: true }). The
     // key's documented value is the literal CFString "AXTrustedCheckOptionPrompt";
     // an NSDictionary is toll-free bridged to CFDictionaryRef, so we build one and
@@ -353,6 +477,18 @@ pub(super) fn focus_target(target: &MacTargetInfo) -> Result<(), MacFfiError> {
 
 pub(super) fn launch_application(application_id: &str) -> Result<(), MacFfiError> {
     ax::launch_application(application_id)
+}
+
+pub(super) fn window_presence(
+    query: &crate::MacWindowQuery,
+) -> Result<crate::MacWindowPresence, MacFfiError> {
+    ax::window_presence(query)
+}
+
+pub(super) fn restore_window_behind(
+    query: &crate::MacWindowQuery,
+) -> Result<crate::MacWindowPresence, MacFfiError> {
+    ax::restore_window_behind(query)
 }
 
 pub(super) fn run_background_application(
@@ -720,7 +856,9 @@ fn cgimage_to_rgba(image: &CGImage) -> Result<RgbaFrame, String> {
 
 const MAX_INPUT_BATCH: usize = 16;
 const MAX_TEXT_UTF16_UNITS: usize = 16 * 1024;
-const MAX_PREPARED_EVENTS: usize = 128;
+// A text insertion posts a down/up pair per Unicode scalar. Keep the existing
+// text limit usable while bounding the entire prepared operation.
+const MAX_PREPARED_EVENTS: usize = 2 * MAX_TEXT_UTF16_UNITS;
 const INPUT_CONFIRM_POLL: Duration = Duration::from_millis(1);
 
 static INPUT_SEAT: Mutex<()> = Mutex::new(());
@@ -1048,6 +1186,10 @@ fn prepare_pointer(
             prepared.push(prepare_mouse(src, down_type, point, cg_button, 1)?);
             prepared.push(prepare_mouse(src, up_type, point, cg_button, 1)?);
         }
+        PointerAction::ClickContinuation => {
+            prepared.push(prepare_mouse(src, down_type, point, cg_button, 2)?);
+            prepared.push(prepare_mouse(src, up_type, point, cg_button, 2)?);
+        }
         PointerAction::DoubleClick => {
             prepared.push(prepare_mouse(src, down_type, point, cg_button, 1)?);
             prepared.push(prepare_mouse(src, up_type, point, cg_button, 1)?);
@@ -1130,8 +1272,20 @@ fn prepare_text(
         KeyAction::Down => prepared.push(prepare_unicode_event(src, &utf16, true)?),
         KeyAction::Up => prepared.push(prepare_unicode_event(src, &utf16, false)?),
         KeyAction::Press => {
-            prepared.push(prepare_unicode_event(src, &utf16, true)?);
-            prepared.push(prepare_unicode_event(src, &utf16, false)?);
+            if prepared.len() + 2 * text.chars().count() > MAX_PREPARED_EVENTS {
+                return Err(MacFfiError::Invalid(format!(
+                    "input operation expands beyond {MAX_PREPARED_EVENTS} native events"
+                )));
+            }
+            // Key-driven apps consume one character from each key-down, rather
+            // than treating its Unicode payload as a whole text insertion.
+            // Keep surrogate pairs intact and preserve the original order.
+            for character in text.chars() {
+                let mut units = [0_u16; 2];
+                let character = character.encode_utf16(&mut units);
+                prepared.push(prepare_unicode_event(src, character, true)?);
+                prepared.push(prepare_unicode_event(src, character, false)?);
+            }
         }
     }
     Ok(())
@@ -1416,6 +1570,105 @@ fn post_prepared(prepared: &PreparedInput) -> Result<(), MacFfiError> {
 #[cfg(test)]
 mod input_tests {
     use super::*;
+
+    #[test]
+    fn click_continuation_prepares_exactly_one_second_pair_without_posting() {
+        let point = CGPoint::new(40.0, 60.0);
+        let mut prepared = Vec::new();
+        for action in [PointerAction::Click, PointerAction::ClickContinuation] {
+            prepare_pointer(None, point, PointerButton::Left, action, &mut prepared).unwrap();
+        }
+        let pairs: Vec<_> = prepared
+            .iter()
+            .filter_map(|event| {
+                let kind = CGEvent::r#type(Some(event));
+                (kind != CGEventType::MouseMoved).then(|| {
+                    (
+                        kind,
+                        CGEvent::integer_value_field(
+                            Some(event),
+                            CGEventField::MouseEventClickState,
+                        ),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                (CGEventType::LeftMouseDown, 1),
+                (CGEventType::LeftMouseUp, 1),
+                (CGEventType::LeftMouseDown, 2),
+                (CGEventType::LeftMouseUp, 2),
+            ]
+        );
+        let mut explicit_double = Vec::new();
+        prepare_pointer(
+            None,
+            point,
+            PointerButton::Left,
+            PointerAction::DoubleClick,
+            &mut explicit_double,
+        )
+        .unwrap();
+        assert_eq!(
+            explicit_double
+                .iter()
+                .filter(|event| CGEvent::r#type(Some(event)) != CGEventType::MouseMoved)
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn typed_text_posts_each_character_in_order_for_key_driven_apps() {
+        let mut prepared = Vec::new();
+        let text = "8*9=😀";
+        prepare_text(None, text, KeyAction::Press, &mut prepared).expect("prepare text");
+        assert_eq!(prepared.len(), 2 * text.chars().count());
+        for (character, pair) in text.chars().zip(prepared.chunks_exact(2)) {
+            for (event, event_type) in pair.iter().zip([CGEventType::KeyDown, CGEventType::KeyUp]) {
+                assert_eq!(CGEvent::r#type(Some(event)), event_type);
+                let mut buffer = [0_u16; 2];
+                let mut length: c_ulong = 0;
+                // SAFETY: CoreGraphics writes at most the two units provided.
+                unsafe {
+                    CGEvent::keyboard_get_unicode_string(
+                        Some(event),
+                        2,
+                        &raw mut length,
+                        buffer.as_mut_ptr(),
+                    );
+                }
+                assert_eq!(
+                    String::from_utf16(&buffer[..length as usize]).unwrap(),
+                    character.to_string()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_operation_retains_its_limit_and_refuses_overflow_before_posting() {
+        let mut prepared = Vec::new();
+        prepare_text(
+            None,
+            &"a".repeat(MAX_TEXT_UTF16_UNITS),
+            KeyAction::Press,
+            &mut prepared,
+        )
+        .expect("maximum text remains supported");
+        assert_eq!(prepared.len(), MAX_PREPARED_EVENTS);
+        assert!(prepare_text(None, "b", KeyAction::Press, &mut prepared).is_err());
+        assert_eq!(prepared.len(), MAX_PREPARED_EVENTS);
+        assert!(prepare_text(
+            None,
+            &"a".repeat(MAX_TEXT_UTF16_UNITS + 1),
+            KeyAction::Press,
+            &mut Vec::new()
+        )
+        .is_err());
+    }
 
     #[test]
     fn parses_command_chord_with_accumulated_flags() {

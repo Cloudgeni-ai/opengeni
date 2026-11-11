@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { ErrorEnvelope } from "@opengeni/contracts";
 import { requireLimit } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 
 const ACCOUNT = "00000000-0000-4000-8000-000000000001";

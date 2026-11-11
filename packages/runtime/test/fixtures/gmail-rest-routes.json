@@ -1,0 +1,246 @@
+{
+  "discoveryUrl": "https://gmail.googleapis.com/$discovery/rest?version=v1",
+  "revision": "20260928",
+  "methods": [
+    {
+      "id": "gmail.users.drafts.create",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/drafts"
+    },
+    {
+      "id": "gmail.users.drafts.delete",
+      "httpMethod": "DELETE",
+      "path": "gmail/v1/users/{userId}/drafts/{id}"
+    },
+    {
+      "id": "gmail.users.drafts.get",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/drafts/{id}"
+    },
+    {
+      "id": "gmail.users.drafts.list",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/drafts"
+    },
+    {
+      "id": "gmail.users.drafts.send",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/drafts/send"
+    },
+    {
+      "id": "gmail.users.drafts.update",
+      "httpMethod": "PUT",
+      "path": "gmail/v1/users/{userId}/drafts/{id}"
+    },
+    {
+      "id": "gmail.users.getProfile",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/profile"
+    },
+    {
+      "id": "gmail.users.history.list",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/history"
+    },
+    {
+      "id": "gmail.users.labels.create",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/labels"
+    },
+    {
+      "id": "gmail.users.labels.delete",
+      "httpMethod": "DELETE",
+      "path": "gmail/v1/users/{userId}/labels/{id}"
+    },
+    {
+      "id": "gmail.users.labels.get",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/labels/{id}"
+    },
+    {
+      "id": "gmail.users.labels.list",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/labels"
+    },
+    {
+      "id": "gmail.users.labels.patch",
+      "httpMethod": "PATCH",
+      "path": "gmail/v1/users/{userId}/labels/{id}"
+    },
+    {
+      "id": "gmail.users.labels.update",
+      "httpMethod": "PUT",
+      "path": "gmail/v1/users/{userId}/labels/{id}"
+    },
+    {
+      "id": "gmail.users.messages.attachments.get",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/messages/{messageId}/attachments/{id}"
+    },
+    {
+      "id": "gmail.users.messages.batchModify",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/messages/batchModify"
+    },
+    {
+      "id": "gmail.users.messages.get",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/messages/{id}"
+    },
+    {
+      "id": "gmail.users.messages.import",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/messages/import"
+    },
+    {
+      "id": "gmail.users.messages.insert",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/messages"
+    },
+    {
+      "id": "gmail.users.messages.list",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/messages"
+    },
+    {
+      "id": "gmail.users.messages.modify",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/messages/{id}/modify"
+    },
+    {
+      "id": "gmail.users.messages.send",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/messages/send"
+    },
+    {
+      "id": "gmail.users.messages.trash",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/messages/{id}/trash"
+    },
+    {
+      "id": "gmail.users.messages.untrash",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/messages/{id}/untrash"
+    },
+    {
+      "id": "gmail.users.settings.cse.identities.get",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/cse/identities/{cseEmailAddress}"
+    },
+    {
+      "id": "gmail.users.settings.cse.identities.list",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/cse/identities"
+    },
+    {
+      "id": "gmail.users.settings.cse.keypairs.get",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/cse/keypairs/{keyPairId}"
+    },
+    {
+      "id": "gmail.users.settings.cse.keypairs.list",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/cse/keypairs"
+    },
+    {
+      "id": "gmail.users.settings.filters.get",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/filters/{id}"
+    },
+    {
+      "id": "gmail.users.settings.filters.list",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/filters"
+    },
+    {
+      "id": "gmail.users.settings.forwardingAddresses.get",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/forwardingAddresses/{forwardingEmail}"
+    },
+    {
+      "id": "gmail.users.settings.forwardingAddresses.list",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/forwardingAddresses"
+    },
+    {
+      "id": "gmail.users.settings.getAutoForwarding",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/autoForwarding"
+    },
+    {
+      "id": "gmail.users.settings.getImap",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/imap"
+    },
+    {
+      "id": "gmail.users.settings.getLanguage",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/language"
+    },
+    {
+      "id": "gmail.users.settings.getPop",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/pop"
+    },
+    {
+      "id": "gmail.users.settings.getVacation",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/vacation"
+    },
+    {
+      "id": "gmail.users.settings.sendAs.get",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}"
+    },
+    {
+      "id": "gmail.users.settings.sendAs.list",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/sendAs"
+    },
+    {
+      "id": "gmail.users.settings.sendAs.smimeInfo.get",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo/{id}"
+    },
+    {
+      "id": "gmail.users.settings.sendAs.smimeInfo.list",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/settings/sendAs/{sendAsEmail}/smimeInfo"
+    },
+    {
+      "id": "gmail.users.stop",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/stop"
+    },
+    {
+      "id": "gmail.users.threads.get",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/threads/{id}"
+    },
+    {
+      "id": "gmail.users.threads.list",
+      "httpMethod": "GET",
+      "path": "gmail/v1/users/{userId}/threads"
+    },
+    {
+      "id": "gmail.users.threads.modify",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/threads/{id}/modify"
+    },
+    {
+      "id": "gmail.users.threads.trash",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/threads/{id}/trash"
+    },
+    {
+      "id": "gmail.users.threads.untrash",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/threads/{id}/untrash"
+    },
+    {
+      "id": "gmail.users.watch",
+      "httpMethod": "POST",
+      "path": "gmail/v1/users/{userId}/watch"
+    }
+  ]
+}

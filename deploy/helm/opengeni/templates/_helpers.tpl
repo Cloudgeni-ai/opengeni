@@ -286,6 +286,51 @@ not exist only as a canary post-renderer mutation. */}}
 {{- end }}
 {{- end -}}
 
+{{/*
+The live web Deployment as JSON: "{}" on a fresh install and in offline renders
+(`helm template`, client dry runs), where lookup returns nothing. This is the
+only lookup of the previous-asset chain, so chart tests can substitute it.
+*/}}
+{{- define "opengeni.webLiveDeployment" -}}
+{{- lookup "apps/v1" "Deployment" .Release.Namespace (printf "%s-web" (include "opengeni.fullname" .)) | toJson -}}
+{{- end -}}
+
+{{/*
+Previous web images whose hashed assets new web pods keep serving, newest
+first, as a JSON list. Explicit web.previousAssets.images win; otherwise the
+live web Deployment's image followed by the images it already carried (its
+opengeni.ai/previous-web-images annotation). The list is de-duplicated, never
+contains the image being deployed, and holds at most web.previousAssets.maxImages.
+*/}}
+{{- define "opengeni.webPreviousAssetImages" -}}
+{{- $settings := .Values.web.previousAssets | default dict -}}
+{{- $max := int ($settings.maxImages | default 0) -}}
+{{- $current := include "opengeni.image" (dict "root" . "image" .Values.web.image) -}}
+{{- $candidates := list -}}
+{{- if and $settings.enabled (gt $max 0) -}}
+{{- if $settings.images -}}
+{{- $candidates = $settings.images -}}
+{{- else -}}
+{{- $live := include "opengeni.webLiveDeployment" . | fromJson -}}
+{{- range (dig "spec" "template" "spec" "containers" (list) $live) -}}
+{{- if eq (toString .name) "web" -}}
+{{- $candidates = append $candidates (toString .image) -}}
+{{- end -}}
+{{- end -}}
+{{- $carried := dig "metadata" "annotations" "opengeni.ai/previous-web-images" "" $live -}}
+{{- $candidates = concat $candidates (splitList "," (toString $carried)) -}}
+{{- end -}}
+{{- end -}}
+{{- $images := list -}}
+{{- range $candidates -}}
+{{- $image := trim (toString .) -}}
+{{- if and $image (ne $image $current) (not (has $image $images)) (lt (len $images) $max) -}}
+{{- $images = append $images $image -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $images -}}
+{{- end -}}
+
 {{- define "opengeni.generatedRuntimeEnv" -}}
 {{- $root := . -}}
 {{- $objectStorageEndpoint := "" -}}
@@ -377,4 +422,23 @@ initialDelaySeconds: {{ $probe.initialDelaySeconds | default 0 }}
 periodSeconds: {{ $probe.periodSeconds | default 10 }}
 timeoutSeconds: {{ $probe.timeoutSeconds | default 1 }}
 failureThreshold: {{ $probe.failureThreshold | default 3 }}
+{{- end -}}
+
+{{/*
+Deployment replica count. When an HPA owns the Deployment, rendering a fixed
+`replicas` would make every `helm upgrade` (including config-only upgrades)
+scale the live Deployment back to `replicaCount` until the HPA reacts, killing
+the pods (and in-flight turns) above that count. So with autoscaling enabled,
+keep the live replica count during upgrades and omit the field otherwise
+(fresh install or `helm template`), leaving the HPA in charge.
+*/}}
+{{- define "opengeni.replicas" -}}
+{{- if (.autoscaling | default dict).enabled -}}
+{{- $live := lookup "apps/v1" "Deployment" .root.Release.Namespace .name -}}
+{{- if and $live $live.spec $live.spec.replicas }}
+replicas: {{ $live.spec.replicas }}
+{{- end -}}
+{{- else }}
+replicas: {{ .replicaCount }}
+{{- end -}}
 {{- end -}}

@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { useOpenGeniText } from "./messages/runtime";
 export type ConnectionType = "mcp" | "openapi" | "graphql";
 export function ConnectionTypePicker({
   value,
@@ -9,13 +10,14 @@ export function ConnectionTypePicker({
   onChange: (value: ConnectionType) => void;
   disabled?: boolean;
 }) {
+  const t = useOpenGeniText();
   const name = useId();
   return (
     <fieldset className="og-connection-type-picker" disabled={disabled}>
-      <legend>Connection type</legend>
+      <legend>{t("connectionTypePicker.connectionType")}</legend>
       {(
         [
-          ["mcp", "MCP server"],
+          ["mcp", t("connectionTypePicker.mcpServer")],
           ["openapi", "OpenAPI"],
           ["graphql", "GraphQL"],
         ] as const

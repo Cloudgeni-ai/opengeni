@@ -12,6 +12,10 @@ use opengeni_agent_platform::PlatformError;
 /// An error from the relay stream plane.
 #[derive(Debug, Error)]
 pub enum StreamError {
+    /// The authenticated relay edge could not reach the recorded owner. The
+    /// producer may register a replacement owner; viewers refresh their grant.
+    #[error("relay owner unavailable")]
+    OwnerUnavailable,
     /// The relay could not be dialed or the connection dropped. **Retryable** — the
     /// channel backs off and re-registers (§10.6).
     #[error("relay transport error: {0}")]
@@ -38,7 +42,7 @@ impl StreamError {
     /// not help.
     #[must_use]
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::Transport(_))
+        matches!(self, Self::Transport(_) | Self::OwnerUnavailable)
     }
 }
 

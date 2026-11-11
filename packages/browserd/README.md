@@ -1,21 +1,62 @@
 # `@opengeni/browserd`
 
-Placement-resident browser controller. It hides the pinned native driver, owns
-target generations and operation receipts, and exposes only OpenGeni interaction
-contracts. Raw driver sockets and CDP endpoints are not product APIs.
+Placement-resident browser controller. It launches and owns the managed
+browser, target generations and operation receipts, and exposes only Opengeni
+interaction contracts. CDP endpoints are not product APIs.
 
-The pinned `agent-browser` binary owns Chromium/profile lifecycle only. Browserd
-connects to its placement-local endpoint without an Origin header, attaches each
+Observations and DOM reads leave out the values of fields that standard
+markup marks private: password inputs, the `current-password`,
+`new-password`, `one-time-code` and `cc-*` autocomplete tokens, hidden inputs
+and explicit private markers (`data-private`, `data-sensitive`,
+`data-opengeni-private`). The field stays present, labelled and fillable.
+Nothing is guessed from names, ids, placeholders or labels, and nothing is
+remembered: there is no memory of page-found or typed values. A read-only
+renderer snapshot finds these fields in frames and author shadow roots,
+including closed roots; a frame whose snapshot fails is read without it, so a
+read is never withheld. Screenshots, live-view images, recordings and
+clipboard copies are never refused. A fill accepts formatting-only digit
+grouping (a card widget inserting spaces) in any field.
+
+Attached Chrome extensions still advertise the DOMSnapshot privacy
+capability, but the agent no longer requires it: with an older extension the
+snapshot fails and the read continues.
+
+Browserd starts Chrome or Chromium itself with a private profile and a
+loopback-only DevTools port, and is the browser's only CDP client. It connects
+without an Origin header, attaches each
 page target independently, and owns semantic observation, action dispatch,
 screenshots, and live frames. Mutations serialize per target; different targets
 remain concurrent. Live-frame subscribers share one target screencast, receive a
 latest-frame-wins stream, and every upstream frame is acknowledged immediately.
+
+Page-inspection and input CDP command deadlines report `tab_not_responding` with
+close-and-reopen (or manual reload) guidance, not browser loss or a generic network failure. This is a
+definite diagnosis that the tab did not answer in time; it does not prove why
+(a hung renderer and an excessively slow page can both cause it). Reads and
+pre-input failures are non-retryable until explicit recovery. Browserd does not
+reload, close, replace the browser, or replay input automatically. Healthy peer
+tabs remain available. If input was already sent, the receipt retains
+`outcome_unknown` with the same `tab_not_responding` diagnosis and warns not to
+repeat the action. Actual socket loss remains a separate transport failure.
+
+A tab whose renderer has crashed (including a restored tab that crashed before
+anything attached to it) reports `tab_crashed` with open-a-new-tab guidance as
+soon as an operation touches it. It is definite and non-retryable; browserd
+does not close or replace the tab.
 
 Managed Chromium launches request a 64 MiB HTTP disk-cache budget instead of
 Chromium's host-disk-derived default. This bounds disposable response caching,
 not cookies, IndexedDB, service-worker storage, downloads, or total profile size.
 Chromium manages eviction; this is not a hard filesystem quota and does not
 retroactively clean running profiles. Attached human browsers are unchanged.
+
+On Linux, managed Chrome stderr drains through a FIFO and retains its final
+65,536 diagnostic bytes. Browserd prefers `gnutail` on PATH when installed,
+then uses `tail` on PATH or the existing `/usr/bin/tail` / `/bin/tail`
+fallbacks. The selected implementation must correctly bound pipe/FIFO input:
+uutils coreutils 0.8.0 can exceed that cap; hosts using it need a working GNU
+`gnutail` on PATH (or a corrected `tail`). Browserd does not install tools or
+probe their versions at launch.
 
 One `BrowserSupervisor` hosts many independently fenced `BrowserSession`s on a
 placement. Each session has its own browser/profile/socket directories, driver,
@@ -26,6 +67,39 @@ retained for restore unless its lifecycle owner explicitly ends and removes it.
 Recovery scans receipts with bounded keyset reads inside one atomic transaction,
 avoiding simultaneous raw-row and duplicate observation collections. Corruption
 in a later receipt rolls back earlier recovery changes.
+
+An explicit recovery request can reuse an eligible managed Chromium working
+directory after controller restart. Its internal launch journal binds the exact
+session/controller, current tokens and placement, directory identity, launch
+settings, and owned process birth/executable/CDP endpoint. Recovery attaches to a
+proven live process, or launches only after complete proof that the old process
+and other profile writers are absent. Unsettled launch receipts prevent another
+launch. Attached browsers, ephemeral contexts, and unattested directories do not
+enter this path. Accepted interaction commands remain replay-only receipts.
+Graceful controller shutdown suspends an eligible runtime by detaching only its
+own CDP transport: the browser keeps running with its tabs and unsaved page
+state, and the next controller (a restart, or a later release of the agent)
+adopts that same process. Live reattachment works for headed and headless
+browsers. Besides the receipt's process proof, the profile lock must still
+name the browser. If its launcher daemon is still running, it must be the
+browser's direct parent and the only live record in the exact private socket
+namespace; it is recorded by its own running executable, so a launcher from an
+earlier release is adopted too. A launcher that was killed (for example with
+the rest of a stopped service) leaves the proven browser adoptable on its own;
+a stale record whose PID now names an unrelated process is refused. Initial
+headless macOS attestation cross-checks the profile lock and CDP browser PID
+with that lineage, process birth and executable. Retirement closes the proven
+processes; uncertain predecessor cleanup retains the directory and holder for
+retry, including after a proved browser stop.
+Explicit close records retirement before process cleanup. If retirement
+settlement fails, other stores close while the exact directory and cleanup
+holder remain available for retry; removal requires completed retirement and
+closed journals.
+
+The API's existing missing-active-controller path sends this recovery intent for
+managed Chromium private profiles after rechecking source access and exact
+controller, token, placement, route, and holder authority. Refused or uncertain
+recovery never falls back to a fresh create or saved-profile restore.
 
 Each Browser/Computer journal authority retains at most 10,000 operations and
 256 MiB of serialized receipts (64 MiB per receipt). Inserts and settlements
@@ -119,9 +193,15 @@ authority additionally opens/selects/closes targets and submits the same fenced
 lists, and ends sessions. Browser origins are deny-by-default and explicitly
 allowlisted; non-browser placement clients omit `Origin`.
 
-Both canonical sandbox images compile the service from this package, copy the
-exact `agent-browser` 0.33.2 native binary for the target architecture, verify its
-hard-coded SHA-256 digest, and install an exact Chromium/Chrome package version.
+Control clients can explicitly open a tab through
+`POST /v1/browser-sessions/:id/targets/open-with-inventory`. It returns the owned
+tab inventory with session/controller and target/document generations after
+navigation, without collecting an accessibility tree. The ordinary tab-open
+route still returns its page observation. An unsupported controller refuses the
+inventory route; a failed or uncertain open is never replayed on another route.
+
+Both canonical sandbox images compile the service from this package and install
+an exact Chromium/Chrome package version.
 The runtime starts the service idempotently under a placement lock, authenticates
 readiness using the file-only admin credential, refuses a foreign listener, and
 stops only the exact recorded executable/PID.

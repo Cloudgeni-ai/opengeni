@@ -69,10 +69,13 @@ export function assertDescriptorRegistryInvariants(): void {
       throw new Error(`"${backend}" persistable but snapshot.kind=none`);
     }
 
-    // A nativeBucketMount backend must be desktop/headless-tier real (modal):
+    // A native bucket-mount backend must be desktop/headless-tier real (modal):
     // a dev/none tier cannot own a provider bucket mount.
-    if (descriptor.nativeBucketMount && (descriptor.tier === "dev" || descriptor.tier === "none")) {
-      throw new Error(`"${backend}" claims nativeBucketMount on tier=${descriptor.tier}`);
+    if (
+      descriptor.bucketMount === "native" &&
+      (descriptor.tier === "dev" || descriptor.tier === "none")
+    ) {
+      throw new Error(`"${backend}" claims a native bucket mount on tier=${descriptor.tier}`);
     }
   }
 }

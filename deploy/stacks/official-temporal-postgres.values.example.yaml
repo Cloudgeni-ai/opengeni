@@ -1,5 +1,5 @@
-# Example values for the upstream Temporal Helm chart used by the OpenGeni
-# stack wrapper. This file is intentionally not part of the OpenGeni
+# Example values for the upstream Temporal Helm chart used by the Opengeni
+# stack wrapper. This file is intentionally not part of the Opengeni
 # application chart and contains no real secrets.
 #
 # Source chart: https://go.temporal.io/helm-charts
@@ -83,15 +83,41 @@ server:
     history.eventsCacheTTL:
       - value: 10m
         constraints: {}
+  frontend:
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
   history:
     resources:
       requests:
+        cpu: 250m
         memory: 768Mi
       limits:
+        cpu: "1"
         memory: 1280Mi
     additionalEnv:
       - name: GOMEMLIMIT
         value: 768MiB
+  matching:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  worker:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
   metrics:
     annotations:
       enabled: true

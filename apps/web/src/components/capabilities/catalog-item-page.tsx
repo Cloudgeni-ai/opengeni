@@ -1,10 +1,12 @@
 import {
   Loader2Icon,
+  PlugIcon,
+  PowerIcon,
+  PowerOffIcon,
   PuzzleIcon,
   RefreshCwIcon,
   SparklesIcon,
   TrashIcon,
-  UnplugIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
@@ -17,11 +19,12 @@ import {
   OWNERSHIP_HELP,
   personalOnlyCapability,
 } from "@/components/capabilities/capability-copy";
+import { personalExtensionOrigin } from "@/components/capabilities/catalog-presentation";
 import {
   CredentialForm,
   FikenConnectorControls,
   type ConnectAction,
-} from "@/components/capabilities/capability-detail-sheet";
+} from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
 import {
   CapabilityAside,
   CapabilityMark,
@@ -29,18 +32,34 @@ import {
   OutcomeList,
   TechnicalDetails,
 } from "@/components/capabilities/capability-page";
-import { ConnectorToolPermissions } from "@/components/capabilities/connector-tool-permissions";
+import {
+  ConnectorToolPermissions,
+  hasConnectorToolPermissionTarget,
+} from "@opengeni/react/app/components/capabilities/connector-tool-permissions";
 import {
   capabilityPresentation,
   presentationPermissions,
-} from "@/components/capabilities/integration-experience";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { Button } from "@/components/ui/button";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
+} from "@opengeni/react/app/components/capabilities/integration-experience";
+import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
+import { McpAuthDiscoveryNotice } from "@opengeni/react/app/components/capabilities/mcp-auth-discovery-notice";
+import { OnePasswordCatalogLink } from "@opengeni/react/app/components/capabilities/onepassword-catalog-link";
+import {
+  ExcelAddinCatalogLink,
+  ExcelAddinSetupSteps,
+} from "@opengeni/react/app/components/capabilities/excel-addin-catalog-link";
+import {
+  CatalogConnectedAccounts,
+  type CatalogConnectedAccountsManagement,
+  type CatalogConnectedAccountsProps,
+} from "./catalog-connected-accounts";
+import type { AccountOriginWorkspace } from "@opengeni/react/app/components/capabilities/connection-account-rows";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { Button } from "@opengeni/react/ui/button";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   capabilityCategoryLabel,
   capabilityConnectPlan,
@@ -50,10 +69,15 @@ import {
   curatedSkillProvenance,
   defaultCapabilityConnectionOwnership,
   GENERIC_API_KEY_FIELD,
+  organizationConnectorTurnedOff,
   socialConnectionsForOwnership,
   type ConnectionHealth,
-} from "@/lib/capabilities";
-import type { CapabilityCatalogItem, ConnectionOwnership, SocialConnection } from "@/types";
+} from "@opengeni/react/app/lib/capabilities";
+import type {
+  CapabilityCatalogItem,
+  ConnectionOwnership,
+  SocialConnection,
+} from "@opengeni/react/app/types";
 
 /* ----------------------------------------------------------------------------
    The page for a catalog entry: a connection from the catalog or the public
@@ -74,10 +98,19 @@ export function CatalogItemPage({
   socialConnections,
   canManageSocial,
   canManageSkills,
+  canTurnOnOrOff,
   onAction,
   onConnectAccount,
+  onRetryAuthInspection,
   onBack,
   backLabel,
+  setupUnavailable,
+  fikenSetup,
+  socialSetupAvailable = true,
+  connectionAccounts,
+  accountManagement,
+  personalOnly: onlyMine = false,
+  workspaces,
 }: {
   workspaceId: string;
   item: CapabilityCatalogItem;
@@ -88,14 +121,40 @@ export function CatalogItemPage({
   socialConnections: SocialConnection[];
   canManageSocial: boolean;
   canManageSkills: boolean;
+  /**
+   * Turning an integration off for everyone in this workspace, or an
+   * organization connector back on, is integration admin work (capabilities:manage).
+   */
+  canTurnOnOrOff: boolean;
   onAction: (action: ConnectAction) => void;
   /** Sign-in connections run their short connect step (a popup flow) in a dialog. */
   onConnectAccount?: (() => void) | undefined;
+  onRetryAuthInspection?: (() => void) | undefined;
   onBack: () => void;
   backLabel?: string;
+  /** A native readiness check blocks only fresh setup, never existing management. */
+  setupUnavailable?: IntegrationViewModel["notice"];
+  fikenSetup?: { oauthAvailable: boolean; tokenAvailable: boolean };
+  /** Existing social rows stay manageable; any new OAuth attempt still needs provider readiness. */
+  socialSetupAvailable?: boolean;
+  connectionAccounts?: Omit<CatalogConnectedAccountsProps, "item" | "management">;
+  /** Per-account Reconnect / Remove / Add. Omit to show the accounts read-only. */
+  accountManagement?: Pick<
+    CatalogConnectedAccountsManagement,
+    "viewerSubjectId" | "canWrite" | "canRemoveOwnIn" | "canReconnectOwnIn" | "onRemove"
+  >;
+  /** Only the person's own account can be connected here (a Personal
+   * workspace, or no permission to connect a shared one): no ownership choice. */
+  personalOnly?: boolean;
+  /** The workspaces the person can see, to name where an account was added. */
+  workspaces?: readonly AccountOriginWorkspace[];
 }) {
+  const setupBlocked = !item.enabled && setupUnavailable !== undefined;
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
-  const personalOnly = personalOnlyCapability(item);
+  const organizationTurnedOff = organizationConnectorTurnedOff(item);
+  const personalOnly = onlyMine || personalOnlyCapability(item);
+  const personalWorkspace =
+    workspaces?.find((workspace) => workspace.id === workspaceId)?.kind === "personal";
   const defaultOwnership = personalOnly ? "personal" : defaultCapabilityConnectionOwnership(item);
   const [ownership, setOwnership] = useState<ConnectionOwnership>(defaultOwnership);
   useEffect(() => setOwnership(defaultOwnership), [item.id, defaultOwnership]);
@@ -104,6 +163,7 @@ export function CatalogItemPage({
 
   const title = capabilityTitle(item);
   const description = capabilityDescription(item);
+  const carriedFrom = personalExtensionOrigin(item);
   const publisher = capabilityPublisher(item);
   const community = isCommunityCapability(item);
   const category = capabilityCategoryLabel(item.category);
@@ -115,41 +175,50 @@ export function CatalogItemPage({
     ),
   ].slice(0, 4);
   const reconnect = capabilityReconnectPlan(item, health);
-  const canDisconnect = item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
+  const missingPersonalAccount =
+    item.enabled &&
+    health.state === "attention" &&
+    health.connection === null &&
+    (personalOnly || item.connectionRef?.subjectScope === "subject");
+  const canDisconnect =
+    canTurnOnOrOff && item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
+  const addAccountOwnership = catalogAddAccountOwnership(item, personalOnly);
   const isSkill = item.kind === "skill";
   const signInFlow =
     item.kind === "mcp" && item.authKind === "oauth2" && !item.enabled && onConnectAccount;
   const keyPageUrl = item.installUrl ?? item.homepageUrl;
   const chip = capabilityStateChip(item, health);
-  const status = isSkill
-    ? item.enabled
-      ? item.metadata.updateAvailable === true
-        ? "Update available"
-        : "Installed"
-      : undefined
-    : item.surfaceType === "codex_apps"
-      ? item.runtime.available
-        ? "Connected"
-        : "Unavailable"
-      : plan.mode === "social_oauth"
-        ? socialConnections.some(
-            (connection) =>
-              connection.provider === plan.provider && connection.status === "needs_reauth",
-          )
-          ? "Needs attention"
-          : socialConnections.some(
-                (connection) =>
-                  connection.provider === plan.provider && connection.status === "connected",
-              )
-            ? "Connected"
-            : undefined
-        : plan.mode === "fiken_api_token"
-          ? health.state === "connected"
-            ? "Connected"
-            : health.state === "attention"
-              ? "Needs attention"
+  const status = missingPersonalAccount
+    ? "Not connected"
+    : isSkill
+      ? item.enabled
+        ? item.metadata.updateAvailable === true
+          ? "Update available"
+          : "Installed"
+        : undefined
+      : item.surfaceType === "codex_apps"
+        ? item.runtime.available
+          ? "Connected"
+          : "Unavailable"
+        : plan.mode === "social_oauth"
+          ? socialConnections.some(
+              (connection) =>
+                connection.provider === plan.provider && connection.status === "needs_reauth",
+            )
+            ? "Needs attention"
+            : socialConnections.some(
+                  (connection) =>
+                    connection.provider === plan.provider && connection.status === "connected",
+                )
+              ? "Connected"
               : undefined
-          : chip.label;
+          : plan.mode === "fiken_api_token"
+            ? health.state === "connected"
+              ? "Connected"
+              : health.state === "attention"
+                ? "Needs attention"
+                : undefined
+            : chip.label;
   const spinner = <Loader2Icon className="animate-spin" aria-hidden="true" />;
   const socialAccounts =
     plan.mode === "social_oauth"
@@ -204,8 +273,12 @@ export function CatalogItemPage({
     }
   } else if (item.surfaceType === "codex_apps") {
     primary = null;
+  } else if (item.surfaceType === "first_party_onepassword") {
+    primary = <OnePasswordCatalogLink workspaceId={workspaceId} connected={item.enabled} />;
+  } else if (item.surfaceType === "first_party_excel_addin") {
+    primary = <ExcelAddinCatalogLink item={item} />;
   } else if (plan.mode === "social_oauth") {
-    primary = (
+    primary = socialSetupAvailable ? (
       <Button
         type="button"
         size="sm"
@@ -220,7 +293,7 @@ export function CatalogItemPage({
             ? "Add another account"
             : `Connect ${title}`}
       </Button>
-    );
+    ) : null;
   } else if (item.enabled) {
     if (reconnect?.kind === "oauth") {
       primary = (
@@ -238,8 +311,14 @@ export function CatalogItemPage({
             })
           }
         >
-          {busy ? spinner : <RefreshCwIcon aria-hidden="true" />}
-          Reconnect
+          {busy ? (
+            spinner
+          ) : missingPersonalAccount ? (
+            <PlugIcon aria-hidden="true" />
+          ) : (
+            <RefreshCwIcon aria-hidden="true" />
+          )}
+          {missingPersonalAccount ? `Connect ${title}` : "Reconnect"}
         </Button>
       );
     } else if (reconnect?.kind === "api_key" && !reconnecting) {
@@ -260,15 +339,42 @@ export function CatalogItemPage({
       menu.push(
         <DropdownMenuItem
           key="disconnect"
-          variant="destructive"
           disabled={busy}
           onSelect={() => onAction({ type: "disconnect", item })}
         >
-          <UnplugIcon />
-          Disconnect
+          <PowerOffIcon />
+          Turn off for this workspace
+        </DropdownMenuItem>,
+      );
+    } else if (item.enabled && item.kind === "mcp" && item.canRemove === true) {
+      // A member removes a custom server they added; admins turn servers off.
+      menu.push(
+        <DropdownMenuItem
+          key="remove-server"
+          variant="destructive"
+          disabled={busy}
+          onSelect={() => onAction({ type: "remove_server", item })}
+        >
+          <TrashIcon />
+          Remove from this workspace
         </DropdownMenuItem>,
       );
     }
+  } else if (organizationTurnedOff) {
+    // Back on means the organization's setup again: no sign-in or key of its own.
+    primary = (
+      <Button
+        type="button"
+        size="sm"
+        className={buttonClass}
+        disabled={busy || !canTurnOnOrOff}
+        title={canTurnOnOrOff ? undefined : "Only workspace admins can turn it on."}
+        onClick={() => onAction({ type: "enable", item })}
+      >
+        {busy ? spinner : <PowerIcon aria-hidden="true" />}
+        Turn on for this workspace
+      </Button>
+    );
   } else if (signInFlow) {
     primary = (
       <Button type="button" size="sm" className={buttonClass} onClick={onConnectAccount}>
@@ -324,29 +430,52 @@ export function CatalogItemPage({
 
   let setup: ReactNode = null;
   if (!isSkill && item.surfaceType !== "codex_apps") {
-    if (plan.mode === "social_oauth") {
+    if (organizationTurnedOff) {
+      setup = (
+        <DetailSection title="Turned off in this workspace">
+          <p className="m-0 max-w-prose text-sm leading-5 text-fg-muted">
+            {`Your organization added ${title} for this workspace, and it was turned off here. Turning it back on uses your organization's setup.`}
+            {canTurnOnOrOff ? "" : " Ask a workspace admin to turn it back on."}
+          </p>
+        </DetailSection>
+      );
+    } else if (item.surfaceType === "first_party_excel_addin") {
+      setup = (
+        <DetailSection title="Set up">
+          <div className="max-w-md">
+            <ExcelAddinSetupSteps item={item} />
+          </div>
+        </DetailSection>
+      );
+    } else if (plan.mode === "social_oauth") {
       setup = (
         <DetailSection title={socialAccounts.length ? "Accounts" : `Connect ${title}`}>
           <div className="grid gap-5">
-            <ChoiceCards
-              label="Who can use it?"
-              value={ownership}
-              onValueChange={(value) => setOwnership(value as ConnectionOwnership)}
-              disabled={busy}
-            >
-              <ChoiceCard
-                value="workspace"
-                title="Everyone in this workspace"
-                description={OWNERSHIP_HELP.workspace}
-                disabled={!canManageSocial}
-                disabledReason={
-                  canManageSocial
-                    ? undefined
-                    : "Only workspace admins can connect a shared account."
-                }
-              />
-              <ChoiceCard value="personal" title="Only me" description={OWNERSHIP_HELP.personal} />
-            </ChoiceCards>
+            {personalOnly ? null : (
+              <ChoiceCards
+                label="Who can use it?"
+                value={ownership}
+                onValueChange={(value) => setOwnership(value as ConnectionOwnership)}
+                disabled={busy}
+              >
+                <ChoiceCard
+                  value="workspace"
+                  title="Everyone in this workspace"
+                  description={OWNERSHIP_HELP.workspace}
+                  disabled={!canManageSocial}
+                  disabledReason={
+                    canManageSocial
+                      ? undefined
+                      : "Only workspace admins can connect a shared account."
+                  }
+                />
+                <ChoiceCard
+                  value="personal"
+                  title="Only me"
+                  description={OWNERSHIP_HELP.personal}
+                />
+              </ChoiceCards>
+            )}
             {socialAccounts.length ? (
               <ul className="m-0 list-none divide-y divide-border p-0">
                 {socialAccounts.map((connection) => (
@@ -408,6 +537,7 @@ export function CatalogItemPage({
               keyPageUrl={keyPageUrl}
               busy={busy}
               onAction={onAction}
+              {...(!item.enabled ? fikenSetup : {})}
             />
           </div>
         </DetailSection>
@@ -443,10 +573,19 @@ export function CatalogItemPage({
           </DetailSection>
         ) : health.state === "attention" ? (
           <DetailSection>
-            <Notice tone="waiting" title={`Sign in again to keep using ${title}`}>
-              {connectedScope === "personal"
-                ? "Your connection stopped working."
-                : "The workspace connection stopped working."}
+            <Notice
+              tone={missingPersonalAccount ? "muted" : "waiting"}
+              title={
+                missingPersonalAccount
+                  ? `Connect your ${title} account`
+                  : `Sign in again to keep using ${title}`
+              }
+            >
+              {missingPersonalAccount
+                ? "This connector is enabled for the workspace. Each person connects their own account."
+                : connectedScope === "personal"
+                  ? "Your connection stopped working."
+                  : "The workspace connection stopped working."}
             </Notice>
           </DetailSection>
         ) : null;
@@ -481,11 +620,15 @@ export function CatalogItemPage({
     } else if (plan.mode === "setup_required") {
       setup = (
         <DetailSection>
-          <p role="status" className="m-0 text-sm leading-5 text-fg-muted">
-            {item.metadata.authDiscovery === "checking"
-              ? "Checking how to sign in…"
-              : "This connection needs setup the catalog can't describe yet. Follow the provider's instructions, then come back to connect it."}
-          </p>
+          <McpAuthDiscoveryNotice
+            checking={item.metadata.authDiscovery === "checking"}
+            message={
+              typeof item.metadata.authDiscoveryMessage === "string"
+                ? item.metadata.authDiscoveryMessage
+                : undefined
+            }
+            onRetry={onRetryAuthInspection}
+          />
         </DetailSection>
       );
     }
@@ -506,13 +649,13 @@ export function CatalogItemPage({
         />
       }
       title={title}
-      status={status}
+      status={setupBlocked ? undefined : status}
       chips={community ? <MetaChip variant="outline">Community</MetaChip> : undefined}
       meta={[publisher ? `By ${publisher}` : null, category, isSkill ? "Skill" : null]}
       actions={
-        primary || menu.length ? (
+        (!setupBlocked && primary) || menu.length ? (
           <>
-            {primary}
+            {setupBlocked ? null : primary}
             {menu.length ? <MoreMenu label={`More actions for ${title}`}>{menu}</MoreMenu> : null}
           </>
         ) : undefined
@@ -522,14 +665,17 @@ export function CatalogItemPage({
           name={title}
           items={[
             publisher ? { label: "Made by", value: publisher } : null,
-            !isSkill && item.kind === "mcp"
+            // Nothing to choose while setup can't start here.
+            !isSkill && item.kind === "mcp" && (connectedScope || !setupBlocked)
               ? {
                   label: "Who can use it",
                   value: connectedScope
                     ? ownershipLabel(connectedScope)
-                    : personalOnly
-                      ? "Each person connects their own account"
-                      : "You choose when you connect",
+                    : personalWorkspace
+                      ? ownershipLabel("personal")
+                      : personalOnly
+                        ? "Each person connects their own account"
+                        : "You choose when you connect",
                 }
               : null,
             community ? { label: "Source", value: "Community - not reviewed by Opengeni" } : null,
@@ -585,24 +731,97 @@ export function CatalogItemPage({
         ) : null}
         {connectedScope ? (
           <p className="mt-4 mb-0 text-xs leading-4.5 text-fg-muted">
-            {connectedScope === "personal" ? OWNERSHIP_HELP.personal : OWNERSHIP_HELP.workspace}
+            {carriedFrom
+              ? `You connected it only for yourself in ${carriedFrom}. ${OWNERSHIP_HELP.personal}`
+              : connectedScope === "personal"
+                ? OWNERSHIP_HELP.personal
+                : OWNERSHIP_HELP.workspace}
           </p>
         ) : null}
       </DetailSection>
 
-      {setup}
+      {setupBlocked ? (
+        <DetailSection>
+          <Notice
+            tone={setupUnavailable.tone}
+            title={setupUnavailable.title}
+            live="polite"
+            action={
+              setupUnavailable.action ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={setupUnavailable.action.onClick}
+                >
+                  {setupUnavailable.action.label}
+                </Button>
+              ) : undefined
+            }
+          >
+            {setupUnavailable.description}
+          </Notice>
+        </DetailSection>
+      ) : (
+        setup
+      )}
 
-      {workspaceId &&
-      item.enabled &&
-      item.kind === "mcp" &&
-      item.source !== "built_in" &&
-      item.surfaceType !== "codex_apps" ? (
+      {connectionAccounts ? (
+        <CatalogConnectedAccounts
+          item={item}
+          workspaceId={workspaceId}
+          workspaces={workspaces}
+          {...connectionAccounts}
+          {...(accountManagement
+            ? {
+                management: {
+                  ...accountManagement,
+                  busy,
+                  // Re-sign-in reuses exactly this row. Only while the connector
+                  // is on: the OAuth return would otherwise also turn it on.
+                  ...(item.enabled
+                    ? {
+                        onReconnect: (account) =>
+                          onAction({
+                            type: "reconnect_oauth",
+                            item,
+                            connectionId: account.id,
+                            ownership: account.subjectId === null ? "workspace" : "personal",
+                            ...(account.workspaceId !== workspaceId
+                              ? { connectionWorkspaceId: account.workspaceId }
+                              : {}),
+                          }),
+                      }
+                    : {}),
+                  ...(addAccountOwnership
+                    ? {
+                        addOwnership: addAccountOwnership,
+                        onAdd: () =>
+                          onAction({
+                            type: "add_oauth_account",
+                            item,
+                            ownership: addAccountOwnership,
+                          }),
+                      }
+                    : {}),
+                },
+              }
+            : {})}
+        />
+      ) : null}
+
+      {workspaceId && hasConnectorToolPermissionTarget(item, health) ? (
         <DetailSection
           title="Approvals"
-          description="Choose which actions need your OK. Applies to new messages."
+          description="Choose which actions run automatically and which need your review."
         >
           <ConnectorToolPermissions
-            key={`${workspaceId}:${item.id}`}
+            key={`${workspaceId}:${item.id}:${
+              connectionAccounts?.connections
+                ?.map((account) => `${account.id}:${account.version}:${account.status}`)
+                .sort()
+                .join(",") ?? ""
+            }`}
             workspaceId={workspaceId}
             capabilityId={item.id}
             bare
@@ -654,13 +873,23 @@ function ExternalLink({ href }: { href: string }) {
     // Not a URL: show it as written.
   }
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer noopener"
-      className="font-medium text-brand hover:underline"
-    >
+    <a href={href} target="_blank" rel="noreferrer noopener" className="font-medium og-link">
       {label}
     </a>
   );
+}
+
+/** A further account can be added only where the installation uses every
+ * eligible account (never an exact single-account pin, which a new sign-in
+ * would replace). The new account keeps the installation's ownership. */
+export function catalogAddAccountOwnership(
+  item: Pick<CapabilityCatalogItem, "enabled" | "kind" | "surfaceType" | "connectionRef">,
+  personalOnly: boolean,
+): ConnectionOwnership | null {
+  const ref = item.connectionRef;
+  if (!item.enabled || item.kind !== "mcp" || item.surfaceType === "codex_apps" || !ref)
+    return null;
+  if (ref.authoritySource === "host" || ref.connectionId || ref.kind !== "oauth2") return null;
+  if (ref.subjectScope === "subject" || personalOnly) return "personal";
+  return ref.accountSelection === "all_eligible" ? "workspace" : null;
 }

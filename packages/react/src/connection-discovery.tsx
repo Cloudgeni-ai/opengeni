@@ -1,21 +1,26 @@
 import type { ConnectAccount, ConnectController, ConnectProvider } from "@opengeni/connect";
+import type { ChatClient } from "@opengeni/sdk";
+import { deploymentCannotConnect } from "@opengeni/contracts/personal-integration-setup";
 import { ConnectChooser } from "./connect-chooser";
 import {
   capabilityConnectProviderId,
   connectionServicePresentation,
+  connectionServiceWording,
   isServiceConnectProvider,
 } from "./connection-service-presentation";
 import type { CapabilityCatalogItem, ConnectionMetadata, OpenGeniClient } from "@opengeni/sdk";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CapabilityCatalogRow } from "./capability-catalog-row";
 import { ConnectionLogo } from "./connection-logo";
 import { ConnectionSkeleton } from "./connection-skeleton";
 import { ConnectionServiceLogo } from "./connection-service-logo";
 import { McpConnectionCard } from "./components/session-mcp-capability-card";
 import { mcpConnectionDiscoveryState } from "./mcp-connection-status";
+import { useOpenGeniText } from "./messages/runtime";
+import { useNobodyToShareWith } from "./workspace-sharing";
 
 export type ConnectionDiscoveryProps = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   controller?: ConnectController | undefined;
   workspaceId: string;
   returnUrl: string;
@@ -41,11 +46,36 @@ function ScopedDiscovery({
   returnUrl,
   onConfigured,
 }: ConnectionDiscoveryProps) {
-  const [providers, setProviders] = useState<ConnectProvider[] | null>(null);
+  const t = useOpenGeniText();
+  const [loadedProviders, setProviders] = useState<ConnectProvider[] | null>(null);
+  // The host's name and description for each service, as everywhere else it is shown.
+  const providers = useMemo(
+    () =>
+      loadedProviders?.map((provider) => {
+        const own = connectionServiceWording(t, provider.id);
+        return { ...provider, label: own.name ?? provider.label, description: own.description };
+      }) ?? null,
+    [loadedProviders, t],
+  );
   const [accounts, setAccounts] = useState<ConnectAccount[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<ConnectProvider | null>(null);
   const [providerFailed, setProviderFailed] = useState(false);
-  const [items, setItems] = useState<CapabilityCatalogItem[] | null>(null);
+  const [loadedItems, setItems] = useState<CapabilityCatalogItem[] | null>(null);
+  // A reviewed connector for a known service (Gmail) takes the same host wording.
+  const items = useMemo(
+    () =>
+      loadedItems?.map((item) => {
+        const providerId = capabilityConnectProviderId(item);
+        if (!providerId) return item;
+        const own = connectionServiceWording(t, providerId);
+        return {
+          ...item,
+          name: own.name ?? item.name,
+          description: own.description ?? item.description,
+        };
+      }) ?? null,
+    [loadedItems, t],
+  );
   const [failed, setFailed] = useState(false);
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
   const [reload, setReload] = useState(0);
@@ -53,6 +83,7 @@ function ScopedDiscovery({
   const [limit, setLimit] = useState(12);
   const [selected, setSelected] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLElement | null>(null);
+  const alone = useNobodyToShareWith(client, workspaceId);
   useEffect(() => {
     const abort = new AbortController();
     // Capture each read independently: even a synchronously throwing transport
@@ -92,7 +123,10 @@ function ScopedDiscovery({
               (item) =>
                 item.kind === "mcp" &&
                 item.authKind === "oauth2" &&
-                Boolean(item.mcpUrl ?? item.endpointUrl),
+                Boolean(item.mcpUrl ?? item.endpointUrl) &&
+                // This deployment cannot start the connection (no operator
+                // OAuth client, or setup switched off): Connect cannot succeed.
+                !deploymentCannotConnect(item),
             ),
           );
         }
@@ -113,14 +147,18 @@ function ScopedDiscovery({
   const providerMatches = (providers ?? []).filter(
     (provider) =>
       !items?.some((item) => capabilityConnectProviderId(item) === provider.id) &&
-      provider.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+      `${provider.label} ${provider.description ?? ""}`
+        .toLocaleLowerCase()
+        .includes(query.trim().toLocaleLowerCase()),
   );
   const loading = (!items && !failed) || Boolean(controller && !providers && !providerFailed);
   if (selectedProvider && controller)
     return (
-      <section aria-label={`Connect ${selectedProvider.label}`}>
+      <section
+        aria-label={t("connectionDiscovery.connectLabel", { label: selectedProvider.label })}
+      >
         <button type="button" onClick={() => setSelectedProvider(null)}>
-          Back to connections
+          {t("connectionDiscovery.backToConnections")}
         </button>
         <ConnectionLogo
           name={selectedProvider.label}
@@ -132,17 +170,23 @@ function ScopedDiscovery({
           presentation="catalog"
           providerOnly
           initialProviderId={selectedProvider.id}
+          personalOnly={alone}
         />
       </section>
     );
   return (
-    <section className="og-connection-discovery" aria-label="Find a connection">
-      <h3>Add a connection</h3>
+    <section
+      className="og-connection-discovery"
+      aria-label={t("connectionDiscovery.findAConnection")}
+    >
+      <h3>{t("connectionDiscovery.addAConnection")}</h3>
       <label>
-        <span className="og-capability-catalog-sr-only">Search services</span>
+        <span className="og-capability-catalog-sr-only">
+          {t("connectionDiscovery.searchServices")}
+        </span>
         <input
           type="search"
-          placeholder="Search services…"
+          placeholder={t("connectionDiscovery.searchServices2")}
           value={query}
           onChange={(event) => {
             setQuery(event.target.value);
@@ -152,9 +196,9 @@ function ScopedDiscovery({
       </label>
       {(providerFailed || failed) && (
         <p role="alert">
-          Some services could not be loaded.{" "}
+          {t("connectionDiscovery.someServicesCouldNotBe")}{" "}
           <button type="button" onClick={() => setReload((value) => value + 1)}>
-            Retry
+            {t("connectionDiscovery.retry")}
           </button>
         </p>
       )}
@@ -167,6 +211,7 @@ function ScopedDiscovery({
             <CapabilityCatalogRow
               key={provider.id}
               name={provider.label}
+              description={provider.description}
               icon={
                 <ConnectionLogo
                   name={provider.label}
@@ -174,14 +219,16 @@ function ScopedDiscovery({
                 />
               }
               status={connected ? "added" : "available"}
-              statusLabel={connected ? "Connected" : "Connect"}
+              statusLabel={
+                connected ? t("connectionDiscovery.connected") : t("connectionDiscovery.connect")
+              }
               showStatusLabel
               onOpen={() => setSelectedProvider(provider)}
             />
           );
         })}
         {matches.slice(0, limit).map((item) => {
-          const state = mcpConnectionDiscoveryState(item, connections);
+          const state = mcpConnectionDiscoveryState(t, item, connections);
           return (
             <CapabilityCatalogRow
               key={item.id}
@@ -200,13 +247,15 @@ function ScopedDiscovery({
           );
         })}
 
-        {loading && <ConnectionSkeleton rows={3} label="Loading services" />}
+        {loading && (
+          <ConnectionSkeleton rows={3} label={t("connectionDiscovery.loadingServices")} />
+        )}
         {!loading && !failed && !providerFailed && !matches.length && !providerMatches.length && (
-          <p role="status">No services match your search.</p>
+          <p role="status">{t("connectionDiscovery.noServicesMatchYourSearch")}</p>
         )}
         {matches.length > limit && (
           <button type="button" onClick={() => setLimit((value) => value + 12)}>
-            Show more services
+            {t("connectionDiscovery.showMoreServices")}
           </button>
         )}
       </div>

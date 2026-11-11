@@ -14,8 +14,17 @@ import {
   type WorkspaceTreeFingerprint,
 } from "@opengeni/contracts";
 import { withSandboxProviderCapture } from "./provider-operation-gate";
+import {
+  escapeWorkspaceGlobPattern,
+  workspaceTarExcludeArgs,
+  workspaceTopLevelExcludeGlobs,
+} from "./workspace-tar-excludes";
 import type { VerifiedHostWorkspaceArchive } from "./archive-spool";
-import { captureHostWorkspaceArchive, fingerprintHostWorkspace } from "./host-archive-spool";
+import {
+  captureHostWorkspaceArchive,
+  fingerprintHostWorkspace,
+  type HostWorkspaceRootIdentity,
+} from "./host-archive-spool";
 
 export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
@@ -52,33 +61,41 @@ export async function captureWorkspaceArchiveForStorage(
   objectStorageAvailable: boolean,
 ): Promise<VerifiedWorkspaceArchivePayload> {
   const target = session as WorkspaceSession;
+  await target.assertWorkspaceCaptureAuthority?.();
   const root = hostBackedWorkspaceRoot(target);
   if (
     process.platform !== "linux" ||
     !root ||
     !objectStorageAvailable ||
-    options.strategy === "portable_tar"
+    options.strategy === "portable_tar" ||
+    (options.omitPaths?.length ?? 0) > 0
   ) {
     return await captureVerifiedWorkspaceArchive(session, capturedAtMs, options);
   }
-  return await withSandboxProviderCapture(session, async () => {
-    const { spool, workspace } = await captureHostWorkspaceArchive(
-      root,
-      workspaceFingerprintExcludes(target),
-    );
-    return {
-      kind: "host_spool" as const,
-      spool,
-      descriptor: {
-        version: 1 as const,
-        revision: `wa1:${String(capturedAtMs).padStart(13, "0")}:${spool.sha256}`,
-        archiveSha256: spool.sha256,
-        archiveBytes: spool.byteSize,
-        capturedAt: new Date(capturedAtMs).toISOString(),
-        workspace,
-      },
-    };
-  });
+  return await withSandboxProviderCapture(
+    session,
+    async () => {
+      const { spool, workspace } = await captureHostWorkspaceArchive(
+        root,
+        workspaceFingerprintExcludes(target),
+        target.workspaceCaptureRootIdentity,
+        options.signal,
+      );
+      return {
+        kind: "host_spool" as const,
+        spool,
+        descriptor: {
+          version: 1 as const,
+          revision: `wa1:${String(capturedAtMs).padStart(13, "0")}:${spool.sha256}`,
+          archiveSha256: spool.sha256,
+          archiveBytes: spool.byteSize,
+          capturedAt: new Date(capturedAtMs).toISOString(),
+          workspace,
+        },
+      };
+    },
+    options.signal,
+  );
 }
 
 export async function disposeWorkspaceArchive(
@@ -102,7 +119,9 @@ export type WorkspaceArchiveIntegrityCode =
   | "workspace_changed_during_capture"
   | "workspace_fingerprint_mismatch"
   | "native_snapshot_reference_invalid"
-  | "native_snapshot_fallback_unverified";
+  | "native_snapshot_fallback_unverified"
+  /** A reduced save (paths left out) did not finish within its hard bound. */
+  | "workspace_capture_timeout";
 
 export class WorkspaceArchiveIntegrityError extends Error {
   readonly name = "WorkspaceArchiveIntegrityError";
@@ -119,6 +138,9 @@ export class WorkspaceArchiveIntegrityError extends Error {
 }
 
 type WorkspaceSession = {
+  /** Present only on the reaper's restricted Docker capture attachment. */
+  assertWorkspaceCaptureAuthority?: () => Promise<void>;
+  workspaceCaptureRootIdentity?: HostWorkspaceRootIdentity;
   exec?: (args: {
     cmd: string;
     yieldTimeMs?: number;
@@ -131,13 +153,18 @@ type WorkspaceSession = {
   }) => Promise<unknown>;
   persistWorkspace?: (options?: WorkspaceArchiveCaptureOptions) => Promise<Uint8Array | undefined>;
   /** Agents Extensions remote sessions expose this protected-at-type-level
-   * primitive on the concrete JS instance. OpenGeni uses it only through an
+   * primitive on the concrete JS instance. Opengeni uses it only through an
    * explicit provider policy to bypass replacing/unledgered native capture. */
   persistWorkspaceTar?: () => Promise<Uint8Array | undefined>;
+  /** Top-level globs the session's own archive leaves out beyond the
+   * manifest's ephemeral paths (compute and OpenSandbox: their restore
+   * staging and backup folders). */
+  workspaceArchiveExcludedGlobs?: () => readonly unknown[];
   state?: {
     workspacePersistence?: unknown;
     workspaceRootPath?: unknown;
     manifest?: {
+      root?: unknown;
       ephemeralPersistencePaths?: () => Set<unknown>;
     };
   };
@@ -153,6 +180,28 @@ type SdkLocalArchiveFile = { path: string; content: Uint8Array };
 export type WorkspaceArchiveCaptureOptions = {
   requestId: string;
   strategy?: "configured" | "portable_tar";
+  /**
+   * Hard provider-side timeout for this capture, where the provider has one
+   * (Modal native snapshots). Only a zero-holder drain sets it, so its
+   * snapshot may outlive the caller's wait and publish late; every other
+   * capture keeps the provider session's configured timeout.
+   */
+  providerTimeoutMs?: number;
+  /**
+   * Workspace-relative directories to leave out of this capture: the drain's
+   * reduced save, after full snapshots kept failing. A native snapshot cannot
+   * leave paths out, so these force the session's portable tar path (with the
+   * same paths left out of the archive and of its fingerprint), and the
+   * descriptor records them as `omittedPaths`.
+   */
+  omitPaths?: readonly string[];
+  /**
+   * Abandons the capture while it still waits for the provider operation gate,
+   * and stops a host-backed spool capture mid-read. A provider-native persist
+   * call that already started is not interrupted: its own settlement remains
+   * authoritative.
+   */
+  signal?: AbortSignal;
 };
 
 function sha256(bytes: Uint8Array): string {
@@ -316,7 +365,11 @@ function stdoutFromExecResult(value: unknown): string {
 
 function execFailureDiagnostic(value: unknown): string {
   if (!value || typeof value !== "object") return "result=unstructured";
-  const result = value as { exitCode?: unknown; status?: unknown; stderr?: unknown };
+  const result = value as {
+    exitCode?: unknown;
+    status?: unknown;
+    stderr?: unknown;
+  };
   const status =
     typeof result.exitCode === "number"
       ? `exitCode=${result.exitCode}`
@@ -332,7 +385,11 @@ function execFailureDiagnostic(value: unknown): string {
 
 function isTransientRootDirectoryFingerprintRace(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
-  const result = value as { exitCode?: unknown; status?: unknown; stderr?: unknown };
+  const result = value as {
+    exitCode?: unknown;
+    status?: unknown;
+    stderr?: unknown;
+  };
   const exitCode =
     typeof result.exitCode === "number"
       ? result.exitCode
@@ -356,17 +413,48 @@ function workspaceFingerprintExcludes(session: WorkspaceSession): string[] {
     .sort((left, right) => left.localeCompare(right));
 }
 
-function workspaceFingerprintCommand(excludedPaths: readonly string[]): string {
-  const tarExcludes = excludedPaths.flatMap((path) => [
-    shellQuote(`--exclude=${path}`),
-    shellQuote(`--exclude=./${path}`),
-  ]);
-  const findExcludes = excludedPaths.flatMap((path) => [
-    `-path ${shellQuote(`./${path}`)}`,
-    `-path ${shellQuote(`./${path}/*`)}`,
-  ]);
-  const findPrefix =
-    findExcludes.length === 0 ? "" : `\\( ${findExcludes.join(" -o ")} \\) -prune -o `;
+/** Top-level globs the session's archive leaves out (see
+ * `WorkspaceSession.workspaceArchiveExcludedGlobs`). Every remote fingerprint,
+ * content manifest and size walk leaves out the same ones, checked by the
+ * same `workspaceTopLevelExcludeGlobs` as the archive: a folder the archive
+ * skips but the fingerprint counts makes a restore unverifiable. */
+function workspaceFingerprintExcludeGlobs(session: WorkspaceSession): string[] {
+  const globs = session.workspaceArchiveExcludedGlobs?.();
+  return globs === undefined ? [] : workspaceTopLevelExcludeGlobs(globs);
+}
+
+/** Workspace-relative paths a session never persists (its manifest's
+ * ephemeral paths). Archives and fingerprints leave them out. */
+export function workspaceArchiveExcludedPaths(session: unknown): string[] {
+  return workspaceFingerprintExcludes(session as WorkspaceSession);
+}
+
+/** A literal path as a glob pattern; the archive's tar exclusions escape
+ * paths the same way, so the fingerprint leaves out exactly what the archive
+ * leaves out. */
+const escapeGlobPattern = escapeWorkspaceGlobPattern;
+
+function findPruneExpression(
+  excludedPaths: readonly string[],
+  topLevelGlobs: readonly string[] = [],
+): string {
+  const findExcludes = [
+    ...excludedPaths.map((path) => `./${escapeGlobPattern(path)}`),
+    ...topLevelGlobs.map((glob) => `./${glob}`),
+  ].flatMap((pattern) => [`-path ${shellQuote(pattern)}`, `-path ${shellQuote(`${pattern}/*`)}`]);
+  return findExcludes.length === 0 ? "" : `\\( ${findExcludes.join(" -o ")} \\) -prune -o `;
+}
+
+function workspaceFingerprintCommand(
+  excludedPaths: readonly string[],
+  topLevelGlobs: readonly string[] = [],
+): string {
+  // Exactly the SDK's archive exclusions (`workspaceTarExcludeArgs`): one
+  // escaped pattern anchored at `./`. A bare `--exclude=<name>` would also
+  // match the same name deeper in the tree (`docs/target` for a top-level
+  // `target`), which the archive keeps, so a restore could never verify.
+  const tarExcludes = workspaceTarExcludeArgs(excludedPaths, topLevelGlobs);
+  const findPrefix = findPruneExpression(excludedPaths, topLevelGlobs);
   const script = String.raw`set -eu
 cd /workspace
 digest=$(LC_ALL=C tar ${tarExcludes.join(" ")} --sort=name --mtime="@0" --owner=0 --group=0 --numeric-owner --hard-dereference --format=gnu -cf - . | sha256sum | awk "{print \$1}")
@@ -378,6 +466,210 @@ printf "OPENGENI_WORKSPACE_FINGERPRINT_V1 %s %s %s %s\n" "$digest" "$entries" "$
 }
 
 const SDK_LOCAL_ARCHIVE_PROJECTION = "sdk_local_archive_v1" as const;
+
+export type WorkspaceSizeProbe = { fileCount: number; totalFileBytes: number };
+
+/** Default bound for the size probe's own `timeout`; the caller's wait adds
+ * a small margin for the provider's exec round trip. */
+export const WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS = 15;
+
+/**
+ * Count regular files and their bytes under /workspace on a live remote box,
+ * for observability only. The walk is bounded by `timeout` inside the box and
+ * by a wall-clock race here; a walk that does not finish, a session that
+ * cannot exec, or any error yields null rather than a partial count.
+ */
+export async function probeRemoteWorkspaceSize(
+  session: unknown,
+  timeoutSeconds = WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
+): Promise<WorkspaceSizeProbe | null> {
+  const target = session as WorkspaceSession | null | undefined;
+  const run = target?.exec ?? target?.execCommand;
+  if (!target || !run) return null;
+  const seconds = Math.max(1, Math.floor(timeoutSeconds));
+  // Same exclusions as the archive and its fingerprint, so a failed
+  // snapshot's size compares with a captured one. An unreadable folder makes
+  // find exit 1 with the rest counted, which still measures the workspace;
+  // only a timeout (124) or a missing tool discards the walk.
+  let prune: string;
+  try {
+    prune = findPruneExpression(
+      workspaceFingerprintExcludes(target),
+      workspaceFingerprintExcludeGlobs(target),
+    );
+  } catch {
+    return null;
+  }
+  const script = String.raw`set -u
+cd /workspace 2>/dev/null || exit 0
+out=$(timeout ${seconds} find . -xdev ${prune}-type f -printf "%s\n" 2>/dev/null | awk "{n+=1; s+=\$1} END {printf \"%d %.0f\", n, s}")
+rc=$?
+[ "$rc" -le 1 ] || exit 0
+# A find that cannot run this walk at all (BusyBox has no -printf) also
+# exits 1, with nothing counted: that is no measurement, not an empty tree.
+case "$rc $out" in "1 0 "*) exit 0 ;; esac
+printf "OPENGENI_WORKSPACE_SIZE_V1 %s\n" "$out"`;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      run.call(target, {
+        cmd: `bash -o pipefail -c ${shellQuote(script)}`,
+        yieldTimeMs: (seconds + 5) * 1_000,
+        maxOutputTokens: 1_000,
+      }),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), (seconds + 10) * 1_000);
+      }),
+    ]);
+    const match = stdoutFromExecResult(result)
+      .trim()
+      .match(/^OPENGENI_WORKSPACE_SIZE_V1 ([0-9]+) ([0-9]+)$/m);
+    if (!match) return null;
+    const fileCount = Number(match[1]);
+    const totalFileBytes = Number(match[2]);
+    return Number.isSafeInteger(fileCount) && Number.isFinite(totalFileBytes)
+      ? { fileCount, totalFileBytes }
+      : null;
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** The tree size a portable archive already measured, or null for provider
+ * snapshots, which carry no tree fingerprint. */
+export function workspaceSizeFromArchiveDescriptor(
+  descriptor: WorkspaceArchiveDescriptor | undefined,
+): WorkspaceSizeProbe | null {
+  if (!descriptor || !("workspace" in descriptor) || !descriptor.workspace) return null;
+  const { fileCount, totalFileBytes } = descriptor.workspace;
+  return Number.isFinite(fileCount) && Number.isFinite(totalFileBytes)
+    ? { fileCount, totalFileBytes }
+    : null;
+}
+
+/**
+ * Directory names a drain's reduced save leaves out: dependency installs,
+ * build caches and tool caches that a project rebuilds from files the save
+ * keeps. Deliberately conservative. Output folders such as `dist` or `build`
+ * are kept, because some projects commit or hand-edit them, and `.git` is
+ * never left out. `target` counts only next to a `Cargo.toml` (Rust build
+ * output); elsewhere it is an ordinary folder.
+ */
+export const REBUILDABLE_WORKSPACE_DIRECTORY_NAMES = [
+  "node_modules",
+  ".next",
+  ".nuxt",
+  ".svelte-kit",
+  ".turbo",
+  ".parcel-cache",
+  ".output",
+  ".cache",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".venv",
+  ".gradle",
+] as const;
+
+function isRebuildableWorkspaceFolderName(path: string): boolean {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  return (
+    name === "target" || (REBUILDABLE_WORKSPACE_DIRECTORY_NAMES as readonly string[]).includes(name)
+  );
+}
+
+/** A workspace with more rebuildable folders than this is not reduced: the
+ * walk could not size what the save keeps. */
+export const REBUILDABLE_WORKSPACE_PATHS_MAX = 2048;
+
+export type RebuildableWorkspacePaths = {
+  /** Workspace-relative folders a reduced save can leave out, sorted. */
+  paths: string[];
+  /** Regular files and their bytes that a reduced save keeps. */
+  kept: WorkspaceSizeProbe;
+};
+
+/**
+ * Find the rebuildable folders under /workspace (see
+ * `REBUILDABLE_WORKSPACE_DIRECTORY_NAMES`) and size what a save without them
+ * keeps, in one walk that never descends into a found folder and never
+ * matches inside `.git`. Bounded by `timeout` inside the box and by a
+ * wall-clock race here; a timeout, a failure or more than
+ * `REBUILDABLE_WORKSPACE_PATHS_MAX` folders yields null. An unreadable folder
+ * (find exit 1) still sizes the rest: the save could not read it either.
+ */
+export async function findRebuildableWorkspacePaths(
+  session: unknown,
+  timeoutSeconds = WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
+): Promise<RebuildableWorkspacePaths | null> {
+  const target = session as WorkspaceSession | null | undefined;
+  const run = target?.exec ?? target?.execCommand;
+  if (!target || !run) return null;
+  const seconds = Math.max(1, Math.floor(timeoutSeconds));
+  const names = REBUILDABLE_WORKSPACE_DIRECTORY_NAMES.map((name) => `-name ${shellQuote(name)}`);
+  // A name with a newline in it could forge a "D <path>" line, so any such
+  // path is reported as unparseable (X) instead and the walk is unavailable.
+  const script = String.raw`set -u
+cd /workspace 2>/dev/null || exit 0
+nl=$(printf '*\n*')
+out=$(timeout ${seconds} find . -xdev \( -path "*/.git" -o -path "*/.git/*" \) \( -type f -printf "F %s\n" -o -true \) -o -path "$nl" -prune -printf "X\n" -o -type d \( ${names.join(" -o ")} \) -printf "D %P\n" -prune -o -type d -name target -execdir test -f Cargo.toml \; -printf "D %P\n" -prune -o -type f -printf "F %s\n" 2>/dev/null | awk '/^D / {d+=1; if (d <= ${REBUILDABLE_WORKSPACE_PATHS_MAX}) dl[d]=$0; next} /^F / {n+=1; s+=$2; next} {x+=1} END {printf "OPENGENI_REBUILDABLE_V1 %d %.0f %d %d\n", n, s, d, x; for (i = 1; i <= d && i <= ${REBUILDABLE_WORKSPACE_PATHS_MAX}; i++) print dl[i]}')
+rc=$?
+[ "$rc" -le 1 ] || exit 0
+printf "%s\n" "$out"`;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      run.call(target, {
+        cmd: `bash -o pipefail -c ${shellQuote(script)}`,
+        yieldTimeMs: (seconds + 5) * 1_000,
+        maxOutputTokens: 200_000,
+      }),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), (seconds + 10) * 1_000);
+      }),
+    ]);
+    const lines = stdoutFromExecResult(result).split(/\r?\n/u);
+    const summary = lines
+      .map((line) =>
+        line.trim().match(/^OPENGENI_REBUILDABLE_V1 ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+)$/u),
+      )
+      .find((match) => match !== null);
+    if (!summary) return null;
+    const fileCount = Number(summary[1]);
+    const totalFileBytes = Number(summary[2]);
+    const folderCount = Number(summary[3]);
+    const unparseable = Number(summary[4]);
+    if (
+      !Number.isSafeInteger(fileCount) ||
+      !Number.isFinite(totalFileBytes) ||
+      !Number.isSafeInteger(folderCount) ||
+      folderCount > REBUILDABLE_WORKSPACE_PATHS_MAX ||
+      unparseable !== 0
+    ) {
+      return null;
+    }
+    const listed = lines.filter((line) => line.startsWith("D ")).map((line) => line.slice(2));
+    const paths = normalizedOmitPaths(listed);
+    // Every listed folder must be one the walk was asked for, and the list
+    // must be complete (not cut off by the exec's output limit): the kept size
+    // counts none of them, so a folder dropped here would be saved uncounted.
+    if (
+      listed.length !== folderCount ||
+      paths.length !== folderCount ||
+      !paths.every(isRebuildableWorkspaceFolderName)
+    ) {
+      return null;
+    }
+    return { paths, kept: { fileCount, totalFileBytes } };
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 const HOST_FINGERPRINT_READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
 
 function hostBackedWorkspaceRoot(session: WorkspaceSession): string | null {
@@ -664,7 +956,10 @@ async function fingerprintRemoteWorkspace(
       "sandbox session cannot execute the workspace fingerprint probe",
     );
   }
-  const cmd = workspaceFingerprintCommand(workspaceFingerprintExcludes(target));
+  const cmd = workspaceFingerprintCommand(
+    workspaceFingerprintExcludes(target),
+    workspaceFingerprintExcludeGlobs(target),
+  );
   let result: unknown;
   let match: RegExpMatchArray | null = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -704,6 +999,134 @@ async function fingerprintRemoteWorkspace(
   };
 }
 
+/**
+ * A projection-independent description of a workspace tree: every directory by
+ * path and every regular file by path and content SHA-256. It verifies an
+ * archive restored by a provider whose native fingerprint is not the archive's
+ * own (for example a host-backed archive hydrated into a remote sandbox).
+ */
+export type WorkspaceContentManifest = {
+  sha256: string;
+  directoryCount: number;
+  fileCount: number;
+  totalFileBytes: number;
+};
+
+export type WorkspaceContentEntry =
+  | { kind: "directory"; path: string }
+  | { kind: "file"; path: string; sha256: string; byteSize: number };
+
+/** Records are `d  <path>` or `<sha256>  <path>` (the `sha256sum` line shape),
+ * NUL-terminated and ordered by their bytes, so a remote shell computes the
+ * identical digest with find, sha256sum -z and `LC_ALL=C sort -z`. */
+export function workspaceContentManifest(
+  entries: Iterable<WorkspaceContentEntry>,
+): WorkspaceContentManifest {
+  const records: Buffer[] = [];
+  let directoryCount = 0;
+  let fileCount = 0;
+  let totalFileBytes = 0;
+  for (const entry of entries) {
+    if (entry.kind === "directory") {
+      directoryCount += 1;
+      records.push(Buffer.from(`d  ${entry.path}`));
+    } else {
+      fileCount += 1;
+      totalFileBytes += entry.byteSize;
+      records.push(Buffer.from(`${entry.sha256}  ${entry.path}`));
+    }
+  }
+  records.sort(Buffer.compare);
+  const hash = createHash("sha256");
+  for (const record of records) hash.update(record).update("\0");
+  return { sha256: hash.digest("hex"), directoryCount, fileCount, totalFileBytes };
+}
+
+function workspaceRoot(target: WorkspaceSession): string {
+  const root = target.state?.manifest?.root;
+  return typeof root === "string" && isAbsolute(root) ? root : "/workspace";
+}
+
+function workspaceContentManifestCommand(
+  root: string,
+  excludedPaths: readonly string[],
+  topLevelGlobs: readonly string[] = [],
+): string {
+  const prune = findPruneExpression(excludedPaths, topLevelGlobs);
+  const script = String.raw`set -eu
+cd ${shellQuote(root)}
+digest=$( { find . -xdev -mindepth 1 ${prune}-type d -printf "d  %P\0"; find . -xdev -mindepth 1 ${prune}-type f -printf "%P\0" | xargs -0 -r sha256sum -z --; } | LC_ALL=C sort -z | sha256sum | awk "{print \$1}")
+dirs=$(find . -xdev -mindepth 1 ${prune}-type d -printf x | wc -c | tr -d " ")
+files=$(find . -xdev -mindepth 1 ${prune}-type f -printf x | wc -c | tr -d " ")
+bytes=$(find . -xdev -mindepth 1 ${prune}-type f -printf "%s\n" | awk "{s+=\$1} END {printf \"%.0f\", s+0}")
+printf "OPENGENI_WORKSPACE_CONTENTS_V1 %s %s %s %s\n" "$digest" "$dirs" "$files" "$bytes"`;
+  return `bash -o pipefail -c ${shellQuote(script)}`;
+}
+
+/** Reads the content manifest of a remote session's persistent workspace,
+ * excluding its manifest-declared ephemeral paths. */
+export async function readRemoteWorkspaceContentManifest(
+  session: unknown,
+): Promise<WorkspaceContentManifest> {
+  const target = session as WorkspaceSession;
+  const run = target.exec ?? target.execCommand;
+  if (!run) {
+    throw new WorkspaceArchiveIntegrityError(
+      "workspace_fingerprint_unavailable",
+      "sandbox session cannot execute the workspace content probe",
+    );
+  }
+  const result = await run.call(target, {
+    cmd: workspaceContentManifestCommand(
+      workspaceRoot(target),
+      workspaceFingerprintExcludes(target),
+      workspaceFingerprintExcludeGlobs(target),
+    ),
+    yieldTimeMs: 300_000,
+    maxOutputTokens: 1_000,
+  });
+  const match = stdoutFromExecResult(result)
+    .trim()
+    .match(/^OPENGENI_WORKSPACE_CONTENTS_V1 ([a-f0-9]{64}) ([0-9]+) ([0-9]+) ([0-9]+)$/);
+  if (!match) {
+    throw new WorkspaceArchiveIntegrityError(
+      "workspace_fingerprint_unavailable",
+      `sandbox workspace content probe returned no valid digest (${execFailureDiagnostic(result)})`,
+      { retryable: true },
+    );
+  }
+  const directoryCount = Number(match[2]);
+  const fileCount = Number(match[3]);
+  const totalFileBytes = Number(match[4]);
+  if (![directoryCount, fileCount, totalFileBytes].every(Number.isSafeInteger)) {
+    throw new WorkspaceArchiveIntegrityError(
+      "workspace_fingerprint_unavailable",
+      "sandbox workspace content counters exceeded the supported range",
+    );
+  }
+  return { sha256: match[1]!, directoryCount, fileCount, totalFileBytes };
+}
+
+/** Verifies that a remote session's workspace holds exactly `expected`. */
+export async function verifyRestoredWorkspaceContents(
+  session: unknown,
+  expected: WorkspaceContentManifest,
+  revision: string,
+): Promise<void> {
+  const actual = await readRemoteWorkspaceContentManifest(session);
+  if (
+    actual.sha256 !== expected.sha256 ||
+    actual.directoryCount !== expected.directoryCount ||
+    actual.fileCount !== expected.fileCount ||
+    actual.totalFileBytes !== expected.totalFileBytes
+  ) {
+    throw new WorkspaceArchiveIntegrityError(
+      "workspace_fingerprint_mismatch",
+      `restored workspace does not match selected archive revision ${revision}`,
+    );
+  }
+}
+
 /** Fingerprints the provider's exact persistent projection. Local/Docker use
  * the SDK's host-backed portable archive projection; remote tar providers use a
  * deterministic GNU-tar stream. Manifest-declared ephemeral paths are excluded
@@ -712,9 +1135,16 @@ export async function fingerprintSandboxWorkspace(
   session: unknown,
 ): Promise<WorkspaceTreeFingerprint> {
   const target = session as WorkspaceSession;
+  await target.assertWorkspaceCaptureAuthority?.();
   const hostRoot = hostBackedWorkspaceRoot(target);
   return hostRoot
-    ? await fingerprintHostBackedWorkspace(hostRoot, workspaceFingerprintExcludes(target))
+    ? target.workspaceCaptureRootIdentity && process.platform === "linux"
+      ? await fingerprintHostWorkspace(
+          hostRoot,
+          workspaceFingerprintExcludes(target),
+          target.workspaceCaptureRootIdentity,
+        )
+      : await fingerprintHostBackedWorkspace(hostRoot, workspaceFingerprintExcludes(target))
     : await fingerprintRemoteWorkspace(target);
 }
 
@@ -737,9 +1167,11 @@ export async function captureVerifiedWorkspaceArchive(
   capturedAtMs = Date.now(),
   options?: WorkspaceArchiveCaptureOptions,
 ): Promise<VerifiedWorkspaceArchive> {
-  return await withSandboxProviderCapture(session, async () => {
-    return await captureVerifiedWorkspaceArchiveExclusive(session, capturedAtMs, options);
-  });
+  return await withSandboxProviderCapture(
+    session,
+    async () => await captureVerifiedWorkspaceArchiveExclusive(session, capturedAtMs, options),
+    options?.signal,
+  );
 }
 
 async function captureVerifiedWorkspaceArchiveExclusive(
@@ -747,7 +1179,119 @@ async function captureVerifiedWorkspaceArchiveExclusive(
   capturedAtMs: number,
   options?: WorkspaceArchiveCaptureOptions,
 ): Promise<VerifiedWorkspaceArchive> {
+  const omitPaths = normalizedOmitPaths(options?.omitPaths);
+  if (omitPaths.length === 0) {
+    return await captureVerifiedWorkspaceArchiveWithManifestExclusions(
+      session,
+      capturedAtMs,
+      options,
+    );
+  }
+  // The SDK and the fingerprint both read the manifest's ephemeral paths, so
+  // widening them for this one capture leaves the same paths out of the tar
+  // and of the before/after comparison. Restored right after, so the live
+  // session and its serialized state never keep the reduced exclusions.
+  const manifest = (session as WorkspaceSession).state?.manifest;
+  const configured = manifest?.ephemeralPersistencePaths;
+  if (!manifest || typeof configured !== "function") {
+    throw new WorkspaceArchiveIntegrityError(
+      "workspace_fingerprint_unavailable",
+      "sandbox session cannot leave paths out of a workspace capture",
+    );
+  }
+  const ownProperty = Object.hasOwn(manifest, "ephemeralPersistencePaths");
+  manifest.ephemeralPersistencePaths = () =>
+    new Set<unknown>([...configured.call(manifest), ...omitPaths]);
+  // The SDK's tar has no provider-side timeout of its own. Bound the reduced
+  // save by the caller's hard provider budget so it always settles: a drain
+  // that waits on one that never ends could neither retry nor stop the box.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const { omitPaths: _omitted, ...captureOptions } = options ?? { requestId: "" };
+    const capture = captureVerifiedWorkspaceArchiveWithManifestExclusions(
+      session,
+      capturedAtMs,
+      options ? captureOptions : undefined,
+    );
+    const boundMs = options?.providerTimeoutMs;
+    const archive =
+      boundMs !== undefined && Number.isFinite(boundMs) && boundMs > 0
+        ? await Promise.race([
+            capture,
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(() => {
+                const error = new WorkspaceArchiveIntegrityError(
+                  "workspace_capture_timeout",
+                  `a workspace capture that leaves paths out did not finish within ${boundMs} ms`,
+                );
+                // The bound ends only the wait: the tar keeps reading inside
+                // the box until its command returns. The caller keeps this
+                // lease's capture slot until then, so a retry never starts a
+                // second tar next to it.
+                captureStillRunning.set(
+                  error,
+                  capture.then(
+                    () => undefined,
+                    () => undefined,
+                  ),
+                );
+                reject(error);
+              }, boundMs);
+            }),
+          ])
+        : await capture;
+    if (archive.kind !== "tar" || archive.descriptor.version !== 1) {
+      throw new WorkspaceArchiveIntegrityError(
+        "native_snapshot_fallback_unverified",
+        "a workspace capture that leaves paths out returned a native snapshot",
+      );
+    }
+    return { ...archive, descriptor: { ...archive.descriptor, omittedPaths: omitPaths } };
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (ownProperty) manifest.ephemeralPersistencePaths = configured;
+    else delete manifest.ephemeralPersistencePaths;
+  }
+}
+
+const captureStillRunning = new WeakMap<object, Promise<void>>();
+
+/** For a capture rejected because its bound expired: settles once the
+ * capture's own provider command has returned. Null for any other error,
+ * whose capture has already settled. */
+export function workspaceCaptureStillRunning(error: unknown): Promise<void> | null {
+  return typeof error === "object" && error !== null
+    ? (captureStillRunning.get(error) ?? null)
+    : null;
+}
+
+/** Workspace-relative, normalized, de-duplicated and sorted. A path that
+ * could name the workspace root or leave it is dropped, never widened. */
+function normalizedOmitPaths(paths: readonly string[] | undefined): string[] {
+  const accepted = new Set<string>();
+  for (const raw of paths ?? []) {
+    if (typeof raw !== "string") continue;
+    const path = raw.replace(/^\.\/+/u, "").replace(/\/+$/u, "");
+    if (
+      !path ||
+      path.startsWith("/") ||
+      /[\u0000-\u001f\u007f]/u.test(path) ||
+      path.split("/").some((part) => part === "" || part === "." || part === "..")
+    ) {
+      continue;
+    }
+    accepted.add(path);
+  }
+  return [...accepted].sort((left, right) => left.localeCompare(right));
+}
+
+async function captureVerifiedWorkspaceArchiveWithManifestExclusions(
+  session: unknown,
+  capturedAtMs: number,
+  options?: WorkspaceArchiveCaptureOptions,
+): Promise<VerifiedWorkspaceArchive> {
   const target = session as WorkspaceSession;
+  await target.assertWorkspaceCaptureAuthority?.();
   const portableTar = options?.strategy === "portable_tar";
   const persist = portableTar ? target.persistWorkspaceTar : target.persistWorkspace;
   if (typeof persist !== "function") {

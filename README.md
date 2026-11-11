@@ -54,6 +54,10 @@ Prefer to run it yourself? Everything is open source. Jump to [Run it locally](#
 
 ## Run it locally
 
+Repository changes land through the [merge batcher](docs/merge-batcher.md): queued
+PRs are tested together on the combined tree and each lands as one squash commit.
+Main runs the full suite on a cadence and is the release gate.
+
 For development, or to evaluate Opengeni before self-hosting. You need [Bun at the exact version in `.bun-version`](.bun-version), Git, curl, Docker, [rustup](https://rustup.rs), a C compiler (Xcode Command Line Tools on macOS or `build-essential` on Debian/Ubuntu), and an OpenAI or Azure OpenAI key.
 
 ```bash
@@ -67,43 +71,64 @@ Open http://127.0.0.1:3000, describe a task, and watch the session run.
 
 `bun run dev` installs dependencies, starts Postgres, NATS, Temporal, and object storage, runs migrations, and starts the API, workers, and web app. By default the agent runs commands directly on your machine (the `local` sandbox), not in an isolated container, so the API and web app listen only on 127.0.0.1. Set `OPENGENI_SANDBOX_BACKEND=docker` to run the agent in the local sandbox image instead. See [Local development](docs/local-development.md) for manual startup, configuration, network exposure, and the native (no Docker) path.
 
+## Desktop app
+
+Opengeni for macOS, Windows and Linux: your sessions, chat and inbox in a native window, with notifications and one click to let agents use the computer you're on.
+
+```bash
+# macOS
+brew install --cask cloudgeni-ai/tap/opengeni
+
+# macOS or Linux (deb, rpm or AppImage, picked for your system)
+curl -fsSL https://<your-opengeni-server>/desktop/install.sh | sh
+```
+
+On Windows, download `Opengeni-<version>-windows.exe` from the newest [`desktop-v` release](https://github.com/Cloudgeni-ai/opengeni/releases?q=desktop-v&expanded=true). The web app's account menu has the same downloads under **Desktop app**. Every way of installing updates itself afterwards.
+
 ## Use it from your code and product
 
-The default integration embeds the full OpenGeni conversation in your product: `SessionConversation` in the browser, backed by the session SDK through `createSessionProxyHandler` on your server. Verify your installed SDK and target deployment support it, set the API URL explicitly, and follow the [product integration guide](https://docs.opengeni.ai/embed-manually) for authentication and explicit user onboarding.
+**Let your coding agent do it.** Install the Opengeni plugin, then ask your agent to add Opengeni to your product:
+
+```bash
+# Claude Code
+claude plugin marketplace add Cloudgeni-ai/opengeni
+claude plugin install opengeni@opengeni --scope user
+
+# Codex (CLI, IDE, and the Codex app)
+codex plugin marketplace add Cloudgeni-ai/opengeni
+codex plugin add opengeni@opengeni
+```
+
+In Cursor, use **Customize → From GitHub Repository** with this repository. The plugin adds the Opengeni skills and connects your agent to your organization over MCP (sign in once in the browser). See the [plugin guide](https://docs.opengeni.ai/guides/developer-plugin).
+
+**Or wire it yourself** — one server route and one component:
 
 ```ts
-// Server, mounted at /api/opengeni/*. The organization API key stays here.
-import { OpenGeniClient, createSessionProxyHandler } from "@opengeni/sdk";
+// app/api/opengeni/[...path]/route.ts  (server only; the key stays here)
+import { Opengeni } from "@opengeni/sdk/chat";
+import { createSessionProxyRoute } from "@opengeni/sdk/next";
 
-const og = new OpenGeniClient({
-  baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_API_KEY!,
-});
+const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
 
-export const handleOpenGeni = createSessionProxyHandler(og, {
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   resolve: async (request) => {
     const me = await authenticate(request); // your product's own auth
     if (!me) return new Response("Unauthorized", { status: 401 });
-    return { workspaceId: me.openGeniWorkspaceId, user: me.userId, source: "acme" };
+    return { user: me.id, tenant: me.teamId }; // workspaces and members are created on first use
   },
+  createSession: (input) => input,
 });
 ```
 
 ```tsx
 // Browser
-import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
+import { OpenGeniChat } from "@opengeni/react";
 import "@opengeni/react/compiled.css";
 
-const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
-<OpenGeniProvider client={client} workspaceId={workspaceId}>
-  <SessionConversation sessionId={sessionId} />
-</OpenGeniProvider>;
+<OpenGeniChat baseUrl="/api/opengeni" />;
 ```
 
-Your server maps tenants with `ensureWorkspace`, onboards users with `addExternalWorkspaceMember`, and creates sessions with explicit tools. If your product already has a Vercel `useChat` or OpenAI-shaped chat UI, `createChatHandler` from `@opengeni/sdk/chat` is a text-only fallback backend for it.
-
-Start with the [product integration guide](docs/product-integration.md), then the [TypeScript SDK](packages/sdk/README.md) and [React components](packages/react/README.md). The [chat quickstart](examples/chat-quickstart) is a runnable server example of the chat fallback, and [Northstar support](examples/northstar-support) is a runnable SaaS embed of the default path with a product MCP server.
+Follow [Embed manually](https://docs.opengeni.ai/embed-manually) for the details, then the [TypeScript SDK](packages/sdk/README.md) and [React components](packages/react/README.md). [Northstar support](examples/northstar-support) is a runnable SaaS embed with a product MCP server.
 
 ## How it works
 

@@ -1,5 +1,21 @@
+import {
+  isDirectModelId,
+  REASONING_EFFORT_LEVELS,
+  type ReasoningEffort,
+} from "@opengeni/contracts";
 import type { ConfiguredModel, ResolvedModelProvider, Settings } from "@opengeni/config";
-import { configuredProviders, resolveModelProvider } from "@opengeni/config";
+import {
+  builtinModelResidency,
+  configuredProviders,
+  modelRouteMeetsResidencyRequirement,
+  organizationCompatibleConnectionIdOf,
+  resolveModelProvider,
+} from "@opengeni/config";
+import {
+  InferenceRegionRestrictedError,
+  inferenceResidencyRequirement,
+  type InferenceResidencyRequirement,
+} from "./inference-residency";
 import {
   OpenAIChatCompletionsModel,
   type Model,
@@ -10,12 +26,34 @@ import {
 } from "@openai/agents";
 import OpenAI, { APIError } from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
+import { projectChatToolImages } from "./chat-tool-images";
+import {
+  chatRouteHoistsSystemMessages,
+  projectHistoryForProvider,
+  responsesRouteDeclaresAdditionalTools,
+  withArtifactOrigin,
+} from "./provider-history-adapter";
+import {
+  appendChatReasoningDetails,
+  chatReasoning,
+  chatReasoningDetails,
+  primaryChatChoice,
+  projectChatReasoning,
+  withChatReasoning,
+  type ChatReasoning,
+} from "./chat-reasoning";
 import { instrumentedModelFetch } from "./model-provider-client";
-import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
+import {
+  CODEX_MODEL_ID_PREFIX,
+  classifyEncryptedArtifactRejection,
+  opaqueProviderArtifactFingerprint,
+} from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
 import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
+import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
+import { modelUsageTokenCountOrNull } from "./usage-telemetry";
 import {
   ResponsesStreamingTerminalError,
   responsesStreamingTerminalError,
@@ -23,6 +61,7 @@ import {
 import { buildProviderClient } from "./model-provider-client";
 import {
   CodexSubscriptionUnavailableError,
+  IncompleteChatCompletionError,
   UnknownModelFinishReasonError,
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
@@ -44,45 +83,390 @@ function chatCompletionFinishReason(value: unknown): unknown {
 }
 
 /**
- * Chat-compatible providers can report `finish_reason: "unknown"` after an
- * interrupted generation. The upstream SDK otherwise converts that terminal
- * into an ordinary `response_done`, which can commit a truncated answer. Fail
- * before that boundary so the worker's fenced same-turn recovery owns the
- * continuation and no OpenGeni tool call from the ambiguous response executes.
+ * The reasoning levels a model on a workspace's or organization's own
+ * OpenAI-compatible endpoint declares. Its requests carry only one of them,
+ * and no reasoning at all when it declares none: such an endpoint may refuse
+ * a parameter its model does not take.
  */
+export type DeclaredModelReasoning = {
+  runnable: boolean;
+  efforts: readonly ReasoningEffort[];
+  defaultEffort: ReasoningEffort | null;
+};
+
+const EFFORT_RANK = new Map<string, number>(
+  REASONING_EFFORT_LEVELS.map((level, index) => [level, index]),
+);
+
+/** The declared level to send for a requested one: itself, the nearest below, or the default. */
+export function declaredReasoningEffort(
+  declared: DeclaredModelReasoning,
+  requested: ReasoningEffort,
+): ReasoningEffort | null {
+  if (!declared.runnable || declared.efforts.length === 0) return null;
+  if (declared.efforts.includes(requested)) return requested;
+  const ceiling = EFFORT_RANK.get(requested) ?? -1;
+  const below = declared.efforts.filter((effort) => (EFFORT_RANK.get(effort) ?? 0) <= ceiling);
+  return (
+    below.at(-1) ??
+    (declared.defaultEffort && declared.efforts.includes(declared.defaultEffort)
+      ? declared.defaultEffort
+      : declared.efforts[0]!)
+  );
+}
+
+/** Keep a request's reasoning to what the model declares (see {@link DeclaredModelReasoning}). */
+export function withDeclaredReasoning(
+  request: ModelRequest,
+  declared: DeclaredModelReasoning | undefined,
+): ModelRequest {
+  const reasoning = request.modelSettings?.reasoning;
+  if (!declared || !reasoning) return request;
+  const requested = reasoning.effort;
+  const effort =
+    typeof requested === "string" && EFFORT_RANK.has(requested)
+      ? declaredReasoningEffort(declared, requested as ReasoningEffort)
+      : null;
+  if (effort === null) {
+    const { reasoning: _reasoning, ...modelSettings } = request.modelSettings;
+    return { ...request, modelSettings };
+  }
+  return effort === requested
+    ? request
+    : {
+        ...request,
+        modelSettings: { ...request.modelSettings, reasoning: { ...reasoning, effort } },
+      };
+}
+
+function chatRequest(
+  request: ModelRequest,
+  modelId: string,
+  declaredReasoning?: DeclaredModelReasoning,
+): ModelRequest {
+  request = withDeclaredReasoning(request, declaredReasoning);
+  const input =
+    typeof request.input === "string"
+      ? request.input
+      : (projectHistoryForProvider(request.input, "chat", {
+          hoistsSystemMessages: chatRouteHoistsSystemMessages(modelId),
+        }) as ModelRequest["input"]);
+  return projectChatReasoning(
+    projectChatToolImages(input === request.input ? request : { ...request, input }),
+  );
+}
+
+/**
+ * Opper returns the exact USD cost of each response as `usage.opper.cost.total`
+ * (a JSON number). Convert it to the bounded decimal string the reported-cost
+ * billing path accepts; anything else is ignored.
+ */
+export function opperReportedCostUsd(usage: unknown): string | undefined {
+  if (!usage || typeof usage !== "object") return undefined;
+  const opper = (usage as { opper?: unknown }).opper;
+  const cost = opper && typeof opper === "object" ? (opper as { cost?: unknown }).cost : undefined;
+  const total = cost && typeof cost === "object" ? (cost as { total?: unknown }).total : undefined;
+  if (typeof total !== "number" || !Number.isFinite(total) || total < 0 || total >= 1_000_000) {
+    return undefined;
+  }
+  // 12 fraction digits keep sub-micro precision without float noise.
+  const fixed = total.toFixed(12).replace(/0+$/u, "").replace(/\.$/u, "");
+  return fixed === "" ? "0" : fixed;
+}
+
+function withOpperReportedCost<T extends { providerData?: Record<string, any> | undefined }>(
+  response: T,
+  costUsd: string | undefined,
+): T {
+  if (costUsd === undefined) return response;
+  const providerData = response.providerData ?? {};
+  return {
+    ...response,
+    providerData: {
+      ...providerData,
+      provider_metadata: { ...providerData.provider_metadata, opper: { costUsd } },
+    },
+  };
+}
+
+function chatInputTokenDetails(usage: unknown): Record<string, unknown> | undefined {
+  const details = (usage as { prompt_tokens_details?: unknown } | undefined)?.prompt_tokens_details;
+  // The SDK projects only cached_tokens, dropping cache writes and other input
+  // details. Keep the provider evidence separate from the SDK's numeric schema.
+  return details && typeof details === "object" && !Array.isArray(details)
+    ? (details as Record<string, unknown>)
+    : undefined;
+}
+
+function sdkChatInputTokenDetails(details: Record<string, unknown>): Record<string, number> {
+  // Runner validates response_done before our telemetry normalizer sees it.
+  // Missing/null/malformed details must not fail an otherwise successful turn.
+  return Object.fromEntries(
+    Object.entries(details).filter(
+      (entry): entry is [string, number] => modelUsageTokenCountOrNull(entry[1]) !== null,
+    ),
+  );
+}
+
+/** Reject ambiguous completion before the SDK can commit output or execute tools. */
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
+  private readonly modelId: string;
+  private readonly declaredReasoning: DeclaredModelReasoning | undefined;
+
+  constructor(
+    client: ConstructorParameters<typeof OpenAIChatCompletionsModel>[0],
+    model: ConstructorParameters<typeof OpenAIChatCompletionsModel>[1],
+    declaredReasoning?: DeclaredModelReasoning,
+  ) {
+    super(client, model);
+    this.modelId = model;
+    this.declaredReasoning = declaredReasoning;
+  }
+
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await super.getResponse(request);
+    const response = await super.getResponse(
+      chatRequest(request, this.modelId, this.declaredReasoning),
+    );
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
-    return response;
+    const inputTokensDetails = chatInputTokenDetails(response.providerData?.usage);
+    if (inputTokensDetails)
+      response.usage.inputTokensDetails = [sdkChatInputTokenDetails(inputTokensDetails)];
+    return withOpperReportedCost(
+      {
+        ...response,
+        output: withChatReasoning(
+          response.output,
+          chatReasoning(primaryChatChoice(response.providerData)?.message),
+          chatReasoningDetails(primaryChatChoice(response.providerData)?.message),
+        ),
+      },
+      opperReportedCostUsd(response.providerData?.usage),
+    );
   }
 
   override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     let finishReason: unknown;
-    for await (const event of super.getStreamedResponse(request)) {
+    let reasoning: ChatReasoning | undefined;
+    let reasoningDetails: Record<string, unknown>[] | undefined;
+    let reportedCostUsd: string | undefined;
+    let inputTokensDetails: Record<string, unknown> | undefined;
+    for await (const event of super.getStreamedResponse(
+      chatRequest(request, this.modelId, this.declaredReasoning),
+    )) {
       if (event.type === "model") {
+        const rawUsage = (event.event as { usage?: unknown } | undefined)?.usage;
+        // Mirror the SDK's last non-null usage snapshot, not a sum of chunks.
+        if (rawUsage) inputTokensDetails = chatInputTokenDetails(rawUsage);
+        reportedCostUsd =
+          opperReportedCostUsd((event.event as { usage?: unknown } | undefined)?.usage) ??
+          reportedCostUsd;
         const observed = chatCompletionFinishReason(event.event);
         if (observed !== undefined && observed !== null) {
           finishReason = observed;
         }
+        const delta = chatReasoning(primaryChatChoice(event.event)?.delta);
+        const details = chatReasoningDetails(primaryChatChoice(event.event)?.delta);
+        if (details) appendChatReasoningDetails((reasoningDetails ??= []), details);
+        if (delta)
+          reasoning = {
+            field: delta.field,
+            text: (reasoning?.text ?? "") + delta.text,
+          };
       }
-      if (event.type === "response_done" && isUnknownFinishReason(finishReason)) {
-        throw new UnknownModelFinishReasonError();
+      if (event.type === "response_done") {
+        // OpenAI may swallow AbortError and let the SDK synthesize completion.
+        // Intentional cancellation retains its caller-owned reason, not a
+        // misleading provider failure (the Runner handles AbortError itself).
+        request.signal?.throwIfAborted();
+        // The SDK emits response_done even when the iterator simply ends.
+        // Require the primary choice's terminal evidence before releasing
+        // assembled tool calls or treating partial text as a complete answer.
+        if (typeof finishReason !== "string" || !finishReason.trim()) {
+          throw new IncompleteChatCompletionError();
+        }
+        if (isUnknownFinishReason(finishReason)) throw new UnknownModelFinishReasonError();
       }
-      yield event;
+      yield event.type === "response_done"
+        ? {
+            ...event,
+            response: withOpperReportedCost<typeof event.response>(
+              {
+                ...event.response,
+                ...(inputTokensDetails
+                  ? {
+                      usage: {
+                        ...event.response.usage,
+                        inputTokensDetails: sdkChatInputTokenDetails(inputTokensDetails),
+                      },
+                      // Match non-streaming Chat's providerData.usage evidence so
+                      // telemetry retains invalid-field diagnostics and unknowns
+                      // rather than mistaking SDK sanitization for provider zero.
+                      providerData: {
+                        ...event.response.providerData,
+                        usage: { prompt_tokens_details: inputTokensDetails },
+                      },
+                    }
+                  : {}),
+                output: withChatReasoning(event.response.output, reasoning, reasoningDetails),
+              },
+              reportedCostUsd,
+            ),
+          }
+        : event;
     }
   }
 }
 
+/** Bound on remembered refused artifacts per provider (process-local). */
+const REFUSED_ARTIFACTS_PER_PROVIDER = 4_096;
+const refusedArtifacts = new Map<string, Set<string>>();
+const artifactFingerprints = new WeakMap<object, string | null>();
+
+function artifactFingerprint(item: Record<string, unknown>): string | null {
+  let fingerprint = artifactFingerprints.get(item);
+  if (fingerprint === undefined) {
+    fingerprint = opaqueProviderArtifactFingerprint(item);
+    artifactFingerprints.set(item, fingerprint);
+  }
+  return fingerprint;
+}
+
+function rememberRefusedArtifacts(scope: string, items: readonly Record<string, unknown>[]) {
+  let refused = refusedArtifacts.get(scope);
+  if (!refused) refusedArtifacts.set(scope, (refused = new Set()));
+  for (const item of items) {
+    const fingerprint = artifactFingerprint(item);
+    if (!fingerprint) continue;
+    refused.add(fingerprint);
+    if (refused.size > REFUSED_ARTIFACTS_PER_PROVIDER)
+      refused.delete(refused.values().next().value as string);
+  }
+}
+
+function hasNativeOpaqueReasoning(item: unknown): item is Record<string, unknown> {
+  if (!item || typeof item !== "object") return false;
+  const record = item as Record<string, unknown>;
+  if (record.type !== "reasoning") return false;
+  const metadata =
+    record.providerData && typeof record.providerData === "object"
+      ? (record.providerData as Record<string, unknown>)
+      : undefined;
+  return [
+    record.encrypted_content,
+    record.encryptedContent,
+    metadata?.encrypted_content,
+    metadata?.encryptedContent,
+  ].some((value) => typeof value === "string" && value.length > 0);
+}
+
 export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
+  /** Opaque reasoning the last built request sent natively to this provider. */
+  private lastNativeOpaqueArtifacts: Record<string, unknown>[] = [];
+
   constructor(
     client: OpenAI,
     model: string,
     protected readonly provider: ResolvedModelProvider,
+    private readonly declaredReasoning?: DeclaredModelReasoning,
   ) {
     super(client, model);
+  }
+
+  /**
+   * Opaque reasoning can be decrypted only by the provider that issued it.
+   * Record that provider on each such output item so a later request to any
+   * other provider replays it as readable text (see projectHistoryForProvider).
+   */
+  private withArtifactOrigins<T extends { output: unknown[] }>(response: T): T {
+    let changed = false;
+    const output = response.output.map((item) => {
+      const tagged = withArtifactOrigin(item, this.provider.id);
+      changed ||= tagged !== item;
+      return tagged;
+    });
+    return changed ? { ...response, output } : response;
+  }
+
+  /**
+   * A provider refused ciphertext the request carried (for example opaque
+   * reasoning another provider issued before origins were recorded). Remember
+   * those items as unreadable for this provider so the retry, and every later
+   * request in this process, sends their readable text instead. Codex has its
+   * own account-aware recovery and keeps it.
+   */
+  private refusedNativeArtifacts(error: unknown): boolean {
+    if (this.provider.kind === "codex-subscription") return false;
+    if (!classifyEncryptedArtifactRejection(error)) return false;
+    const sent = this.lastNativeOpaqueArtifacts;
+    if (sent.length === 0) return false;
+    rememberRefusedArtifacts(this.provider.id, sent);
+    this.lastNativeOpaqueArtifacts = [];
+    return true;
+  }
+
+  override async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    let response: ModelResponse;
+    try {
+      response = await super.getResponse(request);
+    } catch (error) {
+      if (!this.refusedNativeArtifacts(error)) throw error;
+      response = await super.getResponse(request);
+    }
+    return this.withArtifactOrigins(response);
+  }
+
+  override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
+    for (let attempt = 0; ; attempt += 1) {
+      let started = false;
+      try {
+        for await (const event of this.preemptibleStream(request)) {
+          started = true;
+          if (event.type !== "response_done") {
+            yield event;
+            continue;
+          }
+          const response = this.withArtifactOrigins(event.response);
+          yield response === event.response ? event : { ...event, response };
+        }
+        return;
+      } catch (error) {
+        // Only a request refused before any output is resent.
+        if (started || attempt > 0 || !this.refusedNativeArtifacts(error)) throw error;
+      }
+    }
+  }
+
+  /**
+   * A Steer can cut the stream short (see streamWithPreemption). End it with
+   * the assistant messages the provider already marked done
+   * (`response.output_item.done`) instead of failing the request. Usage is
+   * unknown: Responses reports it only on the terminal event.
+   */
+  private async *preemptibleStream(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
+    let responseId: string | undefined;
+    const completed: unknown[] = [];
+    try {
+      for await (const event of super.getStreamedResponse(request)) {
+        if (event.type === "model") {
+          const raw = event.event as {
+            type?: unknown;
+            item?: unknown;
+            response?: { id?: unknown };
+          };
+          if (raw?.type === "response.created" && typeof raw.response?.id === "string")
+            responseId = raw.response.id;
+          if (raw?.type === "response.output_item.done" && raw.item) completed.push(raw.item);
+        }
+        yield event;
+      }
+    } catch (error) {
+      if (!isModelPreempted(request.signal)) throw error;
+      // Completed wire message items already have the SDK message shape that
+      // preemptedResponseDone keeps (role, status, output_text parts, phase).
+      yield preemptedResponseDone({ id: responseId, output: completed });
+    }
   }
 
   protected override _fetchResponse(
@@ -179,7 +563,30 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     const startedAt = performance.now();
     let outcome: "completed" | "failed" = "completed";
     try {
-      return super._buildResponsesCreateRequest(request, stream);
+      request = withDeclaredReasoning(request, this.declaredReasoning);
+      const scope = this.provider.id;
+      const refused = refusedArtifacts.get(scope);
+      const input =
+        typeof request.input === "string"
+          ? request.input
+          : (projectHistoryForProvider(request.input, "responses", {
+              declaresAdditionalTools: responsesRouteDeclaresAdditionalTools(this.provider.kind),
+              artifactScope: scope,
+              ...(refused?.size
+                ? {
+                    isRejectedArtifact: (item: Record<string, unknown>) => {
+                      const fingerprint = artifactFingerprint(item);
+                      return fingerprint !== null && refused.has(fingerprint);
+                    },
+                  }
+                : {}),
+            }) as ModelRequest["input"]);
+      this.lastNativeOpaqueArtifacts =
+        typeof input === "string" ? [] : (input as unknown[]).filter(hasNativeOpaqueReasoning);
+      return super._buildResponsesCreateRequest(
+        input === request.input ? request : { ...request, input },
+        stream,
+      );
     } catch (error) {
       outcome = "failed";
       throw error;
@@ -199,16 +606,29 @@ export function buildModelInstance(
   provider: ResolvedModelProvider,
   client: OpenAI,
   modelId: string,
+  residency: InferenceResidencyRequirement | null = null,
+  declaredReasoning?: DeclaredModelReasoning,
 ): Model {
   if (provider.api === "anthropic-messages")
     return new AnthropicMessagesModel(
       provider,
       modelId,
-      instrumentedModelFetch(provider.id, globalThis.fetch),
+      instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
     );
   return provider.api === "chat"
-    ? new OpenGeniChatCompletionsModel(client, modelId)
-    : new OpenGeniResponsesModel(client, modelId, provider);
+    ? new OpenGeniChatCompletionsModel(client, modelId, declaredReasoning)
+    : new OpenGeniResponsesModel(client, modelId, provider, declaredReasoning);
+}
+
+/** A workspace's or organization's own OpenAI-compatible endpoint sends only the reasoning its model declares. */
+function declaredReasoningFor(
+  provider: ResolvedModelProvider,
+  configured: ConfiguredModel,
+): DeclaredModelReasoning | undefined {
+  return provider.kind === "direct-compatible-workspace" ||
+    provider.kind === "direct-compatible-organization"
+    ? configured.capabilities.reasoning
+    : undefined;
 }
 
 /**
@@ -230,13 +650,28 @@ export function resolveTurnModel(
 } | null {
   const resolved = resolveModelProvider(settings, modelId);
   if (!resolved) {
+    // EU-only inference has no unlisted-model fallback: the legacy global
+    // client is not an EU route.
+    if (settings.requiredModelGeography === "eu") {
+      throw new InferenceRegionRestrictedError(modelId);
+    }
     return null;
+  }
+  // The live residency record decides, on every resolution.
+  if (!modelRouteMeetsResidencyRequirement(settings, resolved.model.residency)) {
+    throw new InferenceRegionRestrictedError(modelId);
   }
   const client = buildProviderClient(resolved.provider, settings);
   return {
     provider: resolved.provider,
     client,
-    model: buildModelInstance(resolved.provider, client, resolved.model.upstreamModelId),
+    model: buildModelInstance(
+      resolved.provider,
+      client,
+      resolved.model.upstreamModelId,
+      inferenceResidencyRequirement(settings),
+      declaredReasoningFor(resolved.provider, resolved.model),
+    ),
     configured: resolved.model,
   };
 }
@@ -314,6 +749,7 @@ export class MultiProviderModelProvider implements ModelProvider {
           client: resolved.client,
           model: resolved.model,
           modelId: resolved.configured.upstreamModelId,
+          residency: resolved.configured.residency,
         };
       }
       // A `codex/<slug>` id only resolves when the per-workspace worker overlay
@@ -334,19 +770,30 @@ export class MultiProviderModelProvider implements ModelProvider {
         throw new XaiSubscriptionUnavailableError(modelName);
       }
     }
+    if (
+      modelName &&
+      (isDirectModelId(modelName) || organizationCompatibleConnectionIdOf(modelName) !== null)
+    ) {
+      throw new Error("The selected model connection is unavailable");
+    }
     // Preserve the legacy unlisted-model fallback, but bind it through the same
     // typed request-policy model as every configured Responses call. This keeps
     // Azure wire normalization at the object stage instead of reintroducing a
     // JSON parse/stringify transport wrapper on the fallback path.
     const builtin = configuredProviders(this.settings)[0];
     if (!builtin) throw new Error("Built-in model provider is unavailable");
-    const client = buildProviderClient(builtin, this.settings);
     const modelId = modelName ?? this.settings.openaiModel;
+    const residency = builtinModelResidency(this.settings, modelId);
+    if (!modelRouteMeetsResidencyRequirement(this.settings, residency)) {
+      throw new InferenceRegionRestrictedError(modelId);
+    }
+    const client = buildProviderClient(builtin, this.settings);
     return {
       provider: builtin,
       client,
       model: new OpenGeniResponsesModel(client, modelId, builtin),
       modelId,
+      residency,
     };
   }
 }
@@ -357,6 +804,8 @@ export type ModelProviderBinding = {
   model: Model;
   /** The id sent on the provider wire (the upstream id for a registry model). */
   modelId: string;
+  /** The residency record of the route that serves the binding (never from a name). */
+  residency: ConfiguredModel["residency"];
 };
 
 function settingsForRunScopedModelResolution(settings: Settings, modelName: string): Settings {

@@ -1,16 +1,23 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import * as opengeniCore from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
-import { agentRunAdmissionDenial } from "../src/activities/agent-run-admission";
+import { testSettings } from "@opengeni/testing/settings";
+import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
+import { metadataWithTurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { agentRunAdmissionDenial } from "@opengeni/core";
 import { createGoalActivities, goalRunBudgetBlocked } from "../src/activities/goals";
 import type { ControlActivityServices } from "../src/activities/types";
+import { checkLimit } from "@opengeni/core";
+import { ensureRunAllowedBetweenModelCalls } from "../src/activities/agent-turn/admission";
+import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
+// Fake databases have no per-task usage limit state.
+useNoSessionUsageLimitForFakeDatabases();
 
 const ACCOUNT = "00000000-0000-4000-8000-000000000001";
 const WORKSPACE = "00000000-0000-4000-8000-000000000002";
 
 function mockZeroBalance(): () => void {
-  const spy = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
+  const spy = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
     accountId: ACCOUNT,
     balanceMicros: 0,
     currency: "usd",
@@ -24,16 +31,135 @@ function mockCodexBilled(active: boolean): () => void {
   return () => spy.mockRestore();
 }
 
+/** SuperGrok runs only on the shared core: its funding is the core's answer. */
+function mockXaiFunding(
+  answer: Awaited<ReturnType<typeof opengeniDb.readSubscriptionCoreFunding>>,
+): () => void {
+  const spy = spyOn(opengeniDb, "readSubscriptionCoreFunding").mockResolvedValue(answer);
+  return () => spy.mockRestore();
+}
+
 describe("worker agent-run admission funding", () => {
   let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
+  // SuperGrok admission reads the core's funding answer; these cases run
+  // unfunded unless a case says otherwise.
+  let routeFunding: ReturnType<typeof spyOn<typeof opengeniDb, "readSubscriptionCoreFunding">>;
   beforeEach(() => {
     allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
+    routeFunding = spyOn(opengeniDb, "readSubscriptionCoreFunding").mockResolvedValue(false);
   });
-  afterEach(() => allowance.mockRestore());
+  afterEach(() => {
+    allowance.mockRestore();
+    routeFunding.mockRestore();
+  });
 
-  test("admits SuperGrok subscription runs with zero OpenGeni credits", async () => {
+  test("a SuperGrok organization on the core is funded by the core's answer", async () => {
     const restoreBalance = mockZeroBalance();
     const restoreCodex = mockCodexBilled(false);
+    const admit = () =>
+      agentRunAdmissionDenial(
+        {
+          db: {} as opengeniDb.Database,
+          entitlements: null,
+          settings: testSettings({
+            billingMode: "stripe",
+            usageLimitsMode: "managed",
+            supergrokSubscriptionEnabled: true,
+          }),
+        },
+        {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          model: "supergrok/grok-4.7",
+          requestedAgentRuns: 1,
+        },
+      );
+    try {
+      routeFunding.mockResolvedValue(true);
+      expect(await admit()).toBeNull();
+      routeFunding.mockResolvedValue(false);
+      expect(await admit()).toBe("insufficient_credits");
+      expect(routeFunding.mock.calls.at(-1)?.[1]).toMatchObject({
+        provider: "xai",
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        productModelId: "supergrok/grok-4.7",
+      });
+    } finally {
+      restoreCodex();
+      restoreBalance();
+    }
+  });
+
+  test("API, run admission and between-call admission all respect eligible models", async () => {
+    // Keep model eligibility projection real while stubbing the database boundary:
+    // getSpendableCreditBalance now evaluates abuse evidence in an RLS transaction.
+    const ledgerBalance = {
+      accountId: ACCOUNT,
+      balanceMicros: 100,
+      generalBalanceMicros: 0,
+      creditPolicyRevision: 7,
+      currency: "usd",
+      updatedAt: new Date().toISOString(),
+      promotionalCredits: [
+        {
+          grantId: crypto.randomUUID(),
+          label: "Welcome credits",
+          remainingMicros: 100,
+          eligibleModelIds: ["gpt-6-luna"],
+        },
+      ],
+    };
+    const balance = spyOn(opengeniDb, "getSpendableCreditBalance").mockImplementation(
+      async (_db, _accountId, usage) => ({
+        ...ledgerBalance,
+        balanceMicros: opengeniDb.spendableCreditMicros(ledgerBalance, usage),
+      }),
+    );
+    const codex = spyOn(opengeniDb, "isCodexBilledTurn").mockResolvedValue(false);
+    const services = {
+      db: {} as opengeniDb.Database,
+      settings: testSettings({ billingMode: "stripe" }),
+      entitlements: null,
+    };
+    try {
+      for (const model of ["gpt-6-luna", "gpt-6-sol"]) {
+        const allowed = model === "gpt-6-luna";
+        const input = { accountId: ACCOUNT, workspaceId: WORKSPACE, model, requestedAgentRuns: 1 };
+        expect((await checkLimit(services, { ...input, action: "agent_run:create" })).allowed).toBe(
+          allowed,
+        );
+        expect(await agentRunAdmissionDenial(services, input)).toBe(
+          allowed ? null : "insufficient_credits",
+        );
+        const check = ensureRunAllowedBetweenModelCalls({
+          ...services,
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          modelId: model,
+          isExternallyBilledTurn: false,
+          chargesOpenGeniCredits: true,
+          countsTowardTokenCap: true,
+          initiatingHumanSubjectId: null,
+        });
+        if (allowed) await expect(check).resolves.toBe(7);
+        else await expect(check).rejects.toThrow("insufficient workspace credits");
+        expect(balance.mock.calls.slice(-3).map((call) => call.slice(0, 3))).toEqual([
+          [services.db, ACCOUNT, model],
+          [services.db, ACCOUNT, model],
+          [services.db, ACCOUNT, model],
+        ]);
+      }
+    } finally {
+      balance.mockRestore();
+      codex.mockRestore();
+    }
+  });
+
+  test("admits SuperGrok subscription runs the shared core funds with zero Opengeni credits", async () => {
+    const restoreBalance = mockZeroBalance();
+    const restoreCodex = mockCodexBilled(false);
+    const restoreFunding = mockXaiFunding(true);
     try {
       expect(
         await agentRunAdmissionDenial(
@@ -55,8 +181,63 @@ describe("worker agent-run admission funding", () => {
         ),
       ).toBeNull();
     } finally {
+      restoreFunding();
       restoreCodex();
       restoreBalance();
+    }
+  });
+
+  test("API work without credits gets its own refusal; origin is read once even without credit billing", async () => {
+    const balance = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
+      accountId: ACCOUNT,
+      balanceMicros: 0,
+      currency: "usd",
+      updatedAt: new Date().toISOString(),
+    });
+    const restoreCodex = mockCodexBilled(false);
+    const input = {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      model: "gpt-6-luna",
+      requestedAgentRuns: 1,
+    };
+    const billed = {
+      db: {} as opengeniDb.Database,
+      entitlements: null,
+      settings: testSettings({ billingMode: "stripe" }),
+    };
+    try {
+      expect(await agentRunAdmissionDenial(billed, { ...input, billingOrigin: "api" })).toBe(
+        "api_credits_required",
+      );
+      expect(balance.mock.calls.at(-1)?.[5]).toBe("api");
+      expect(await agentRunAdmissionDenial(billed, { ...input, billingOrigin: "app" })).toBe(
+        "insufficient_credits",
+      );
+      // A lazily read origin decides the same way.
+      const resolve = async () => "api" as const;
+      expect(await agentRunAdmissionDenial(billed, { ...input, billingOrigin: resolve })).toBe(
+        "api_credits_required",
+      );
+      expect(balance.mock.calls.at(-1)?.[5]).toBe("api");
+      // Origin still decides subscription eligibility without credit billing.
+      let reads = 0;
+      expect(
+        await agentRunAdmissionDenial(
+          { ...billed, settings: testSettings() },
+          {
+            ...input,
+            billingOrigin: async () => {
+              reads += 1;
+              return "api";
+            },
+          },
+        ),
+      ).toBeNull();
+      expect(reads).toBe(1);
+    } finally {
+      restoreCodex();
+      balance.mockRestore();
     }
   });
 
@@ -159,15 +340,22 @@ describe("worker agent-run admission funding", () => {
     { model: "codex/gpt-5.6-sol", active: true, codexSubscriptionEnabled: true },
     { model: "supergrok/grok-4.7", active: false, supergrokSubscriptionEnabled: true },
   ])(
-    "exempts externally funded $model from exhausted allowances",
+    "admits externally funded $model unless the allowance counts unbilled usage",
     async ({ model, active, ...overrides }) => {
       const restoreCodex = mockCodexBilled(active);
-      allowance.mockResolvedValue({
-        code: "allowance_exhausted",
-        scope: "workspace",
-        resetsAt: null,
-        message: "Exhausted",
-      });
+      const restoreFunding = mockXaiFunding(true);
+      // The real check admits credit-free work unless the allowance opts into
+      // counting unbilled usage.
+      allowance.mockImplementation(async (_db, check) =>
+        check.fundedWithoutCredits
+          ? null
+          : {
+              code: "allowance_exhausted",
+              scope: "workspace",
+              resetsAt: null,
+              message: "Exhausted",
+            },
+      );
       try {
         expect(
           await agentRunAdmissionDenial(
@@ -189,8 +377,14 @@ describe("worker agent-run admission funding", () => {
             },
           ),
         ).toBeNull();
-        expect(allowance).not.toHaveBeenCalled();
+        expect(allowance).toHaveBeenCalledWith(expect.anything(), {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          subjectId: "user:schedule-creator",
+          fundedWithoutCredits: true,
+        });
       } finally {
+        restoreFunding();
         restoreCodex();
       }
     },
@@ -222,7 +416,7 @@ describe("worker agent-run admission funding", () => {
         ),
       ).toEqual({
         pausedReason: "allowance",
-        message: "OpenGeni usage allowance exhausted",
+        message: "Usage allowance exhausted. Resume when your allowance is available.",
       });
       expect(allowance).toHaveBeenCalledWith(expect.anything(), {
         accountId: ACCOUNT,
@@ -236,10 +430,28 @@ describe("worker agent-run admission funding", () => {
 
   test("goal activity publishes an allowance pause using locked causal admission", async () => {
     const restoreCodex = mockCodexBilled(false);
+    const origin = spyOn(opengeniDb, "readSessionBillingOrigin").mockResolvedValue("app");
     const settings = testSettings({ billingMode: "disabled", usageLimitsMode: "none" });
-    const catalog = spyOn(opengeniCore, "resolveCatalogSettings").mockResolvedValue({
+    const sessionId = "00000000-0000-4000-8000-000000000004";
+    const causalTurnId = "00000000-0000-4000-8000-000000000005";
+    const sourcePolicy = {
+      ...resolveTurnExecutionPolicyV1(settings, {
+        modelId: "scripted-model",
+        requestedModelId: null,
+        modelSource: "session",
+        reasoningEffort: "medium",
+        reasoningSource: "session",
+      }),
+      credentialRestriction: "developer_setup" as const,
+    };
+    const source = spyOn(opengeniDb, "getSessionTurn").mockResolvedValue({
+      id: causalTurnId,
+      sessionId,
+      metadata: metadataWithTurnExecutionPolicyV1({}, sourcePolicy),
+    } as Awaited<ReturnType<typeof opengeniDb.getSessionTurn>>);
+    const catalog = spyOn(opengeniCore, "resolveWorkspaceCatalogSettings").mockResolvedValue({
       settings,
-    } as Awaited<ReturnType<typeof opengeniCore.resolveCatalogSettings>>);
+    } as Awaited<ReturnType<typeof opengeniCore.resolveWorkspaceCatalogSettings>>);
     const goal = spyOn(opengeniDb, "getSessionGoal").mockResolvedValue({
       status: "active",
     } as Awaited<ReturnType<typeof opengeniDb.getSessionGoal>>);
@@ -257,19 +469,25 @@ describe("worker agent-run admission funding", () => {
       initiator: { kind: "service", subjectId: "scheduler" },
     } as Awaited<ReturnType<typeof opengeniDb.getLatestStartedSessionTurn>>);
     const policy = spyOn(opengeniDb, "getWorkspaceModelPolicy").mockResolvedValue(null);
+    const workspace = spyOn(opengeniDb, "requireWorkspace").mockResolvedValue({
+      id: WORKSPACE,
+      settings: {},
+    } as Awaited<ReturnType<typeof opengeniDb.requireWorkspace>>);
     const event = { type: "goal.paused" };
     const lockedDb = {} as opengeniDb.Database;
     const materialize = spyOn(opengeniDb, "materializeGoalContinuation").mockImplementation(
       async (_db, input) => {
         expect(
           await input.admission!(lockedDb, {
-            id: "00000000-0000-4000-8000-000000000005",
+            id: causalTurnId,
             initiatingHumanSubjectId: "user:original-goal-human",
           }),
         ).toEqual({
-          budgetBlocked: "OpenGeni usage allowance exhausted",
+          budgetBlocked: "Usage allowance exhausted. Resume when your allowance is available.",
           budgetPausedReason: "allowance",
         });
+        expect(source).toHaveBeenCalledWith(lockedDb, WORKSPACE, causalTurnId);
+        expect(input.policy.turnExecutionPolicy?.credentialRestriction).toBe("developer_setup");
         return {
           action: "paused",
           events: [event],
@@ -295,7 +513,6 @@ describe("worker agent-run admission funding", () => {
       message: "Exhausted",
     });
     try {
-      const sessionId = "00000000-0000-4000-8000-000000000004";
       expect(
         await createGoalActivities(async () => services).maybeContinueGoal({
           accountId: ACCOUNT,
@@ -308,6 +525,11 @@ describe("worker agent-run admission funding", () => {
         accountId: ACCOUNT,
         workspaceId: WORKSPACE,
         subjectId: "user:original-goal-human",
+      });
+      expect(origin).toHaveBeenCalledWith(lockedDb, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId,
       });
       expect(materialize).toHaveBeenCalledWith(
         services.db,
@@ -322,7 +544,10 @@ describe("worker agent-run admission funding", () => {
       session.mockRestore();
       previous.mockRestore();
       policy.mockRestore();
+      workspace.mockRestore();
       materialize.mockRestore();
+      source.mockRestore();
+      origin.mockRestore();
       restoreCodex();
     }
   });

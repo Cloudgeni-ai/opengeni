@@ -1,0 +1,10 @@
+# Windows binaries link the C runtime statically. With the default dynamic
+# runtime they import VCRUNTIME140.dll, which CI runners have and a stock
+# Windows install does not, so the agent would exit before it starts on an
+# ordinary PC. The release workflow checks the shipped imports
+# (scripts/check-windows-binary-imports.ts).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

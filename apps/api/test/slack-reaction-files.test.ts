@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { FileAsset } from "@opengeni/contracts";
+import { currentSessionRlsActorContext } from "@opengeni/db";
 import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
 
 import { sniffSlackReactionImageMime, validateSlackMcpImage } from "../src/integrations/slack-bot";
@@ -142,6 +143,59 @@ describe("Slack reaction image workspace imports", () => {
     );
     expect(safeSlackImageFilename("../../diagram.svg", "image/jpeg")).toBe("diagram.svg.jpg");
   });
+
+  test("imports a private interaction's image as its owner's personal file", async () => {
+    const objects = new Map<string, { head: ObjectHead; bytes: Uint8Array }>();
+    const storage = fakeStorage(objects, async (upload) => {
+      objects.set(upload.key, {
+        bytes: upload.body,
+        head: objectHead(upload.body, upload.contentType, upload.sha256),
+      });
+      return true;
+    });
+    const seen: Array<{ step: string; owner: unknown; input?: unknown }> = [];
+    let prepared: FileAsset | null = null;
+    const dependencies = {
+      db: {} as never,
+      objectStorage: storage,
+      async prepareFile(_db: never, input: Record<string, unknown>) {
+        seen.push({
+          step: "prepare",
+          owner: currentSessionRlsActorContext()?.privateFileOwnerSubjectId,
+          input: input.privateOwnerSubjectId,
+        });
+        prepared = fileAsset(input, "pending_upload");
+        return { file: prepared, uploadId: input.uploadId as string, created: true };
+      },
+      async completeFile() {
+        seen.push({
+          step: "complete",
+          owner: currentSessionRlsActorContext()?.privateFileOwnerSubjectId,
+        });
+        prepared = { ...prepared!, status: "ready" };
+        return prepared;
+      },
+    };
+    const owned = { ...source, privateOwnerSubjectId: "user:dm-owner" };
+
+    await importSlackReactionImage(dependencies as never, owned, image, 1);
+    expect(seen).toEqual([
+      { step: "prepare", owner: "user:dm-owner", input: "user:dm-owner" },
+      { step: "complete", owner: "user:dm-owner" },
+    ]);
+    // Ownership is the audience, not part of which Slack file this is.
+    expect(slackReactionImageIdentity(owned, image.fileId)).toBe(
+      slackReactionImageIdentity(source, image.fileId),
+    );
+
+    seen.length = 0;
+    objects.clear();
+    await importSlackReactionImage(dependencies as never, source, image, 1);
+    expect(seen).toEqual([
+      { step: "prepare", owner: undefined, input: undefined },
+      { step: "complete", owner: undefined },
+    ]);
+  });
 });
 
 describe("Slack reaction image magic sniffing", () => {
@@ -169,7 +223,7 @@ describe("Slack reaction image magic sniffing", () => {
 
 test("on-demand Slack MCP images must fully decode before reaching the model", async () => {
   const valid = Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X9p8AAAAASUVORK5CYII=",
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=",
     "base64",
   );
   await expect(validateSlackMcpImage(valid)).resolves.toBeUndefined();

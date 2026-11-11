@@ -5,7 +5,7 @@ import {
   type NativeSnapshotDescriptor,
   type RigProviderImage,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { createHash, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import {
@@ -228,7 +228,6 @@ describe("rig CRUD lifecycle", () => {
         setupScript: "apt-get install -y ripgrep",
         checks: [{ name: "rg", command: "rg --version" }],
         credentialHooks: ["azure-cli-login"],
-        defaultVariableSetIds: [],
         changelog: "Initial version",
         createdBy: "user:alice",
       },
@@ -597,7 +596,9 @@ describe("rig provider image build ledger", () => {
       image: rotatedBuild,
       staleAfterMs: 60_000,
     });
-    expect(rotation).toEqual({ status: "claimed", image: rotatedBuild });
+    // The claim names the ready record it replaced, so a build can release the
+    // provider image nothing references any more once its own is published.
+    expect(rotation).toEqual({ status: "claimed", image: rotatedBuild, replaced: oldReady });
     expect((await getRigVersionById(db, ws.workspaceId, versionId))?.providerImages.modal).toEqual(
       rotatedBuild,
     );

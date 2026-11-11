@@ -3,6 +3,10 @@ import {
   type ToolDisplayMetadata,
   type SessionEvent,
 } from "@opengeni/sdk";
+import {
+  parseMcpElicitationApprovalRequest,
+  type McpElicitationApprovalRequest as McpElicitation,
+} from "@opengeni/contracts/mcp-elicitation-model";
 
 /* ----------------------------------------------------------------------------
    Pending-approvals projection
@@ -32,6 +36,11 @@ export type PendingApproval = {
   name: string;
   display?: ToolDisplayMetadata;
   arguments?: unknown;
+  /**
+   * The tool's MCP server stopped mid-call to ask the person these questions.
+   * Approving answers them; declining ends the call.
+   */
+  elicitation?: McpElicitation;
   /** The raw approval entry from the `session.requiresAction` payload. */
   raw?: unknown;
 };
@@ -55,12 +64,15 @@ export function approvalsFromRequiresAction(payload: unknown): PendingApproval[]
         ? (raw.rawItem as Record<string, unknown>)
         : {};
     const display = parseToolDisplayMetadata(raw.display);
+    const elicitation =
+      raw.elicitation === undefined ? null : parseMcpElicitationApprovalRequest(raw.elicitation);
     return {
       // Mirror the runtime's canonical interruption identity before retaining
       // the legacy top-level callId fallback for already-normalized payloads.
       id: String(rawItem.callId ?? rawItem.id ?? raw.id ?? raw.callId ?? raw.name ?? index),
       name: String(raw.name ?? raw.toolName ?? rawItem.name ?? "approval"),
       ...(display ? { display } : {}),
+      ...(elicitation ? { elicitation } : {}),
       arguments: raw.arguments ?? rawItem.arguments,
       raw: approval,
     };
@@ -90,7 +102,9 @@ export function projectPendingApprovals(events: SessionEvent[]): PendingApproval
       }
       case "turn.completed":
       case "turn.failed":
-      case "turn.cancelled": {
+      case "turn.cancelled":
+      // A Steer that replaces an approval wait closes its approvals unexecuted.
+      case "turn.superseded": {
         // Scope clearing to the turn that raised the approvals when both
         // sides carry a turn id; clear conservatively when either is unknown.
         if (owningTurnId === null || event.turnId == null || event.turnId === owningTurnId) {
@@ -104,4 +118,20 @@ export function projectPendingApprovals(events: SessionEvent[]): PendingApproval
     }
   }
   return pending;
+}
+
+/**
+ * Whether a session in `status` takes decisions for its pending approvals.
+ * Deciding one approval resumes the turn, and the pause's other approvals stay
+ * decidable while it resumes: their cards stay up instead of vanishing until
+ * the turn pauses again. Only a session whose turn ended has none.
+ */
+export function approvalsDecidable(status: string | null | undefined): boolean {
+  return (
+    status === "requires_action" ||
+    status === "running" ||
+    status === "queued" ||
+    status === "recovering" ||
+    status === "waiting_capacity"
+  );
 }

@@ -11,12 +11,22 @@ import {
   type VideoGenerationFundingSource,
   type VideoGenerationPolicy as VideoGenerationPolicyValue,
 } from "@opengeni/contracts";
+import { API_CREDITS_REQUIRED_MESSAGE } from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
 import { checkWorkspaceAllowance } from "./usage-allowances";
 import { creditDebitAttributionForTurn } from "./credit-debit-attribution";
+import {
+  chargeBillingOrigin,
+  getSpendableCreditBalance,
+  paidCreditReceipt,
+  paidDrawnMicros,
+  planPostUseCreditAllocations,
+  readBillingBalance,
+} from "./credit-balances";
+import { beginPlanCreditSettlement } from "./subscription-plans";
 
 export const ACTIVE_VIDEO_GENERATION_STATUSES = [
   "preparing",
@@ -43,14 +53,18 @@ export class VideoGenerationConflictError extends Error {
 }
 
 export class VideoGenerationCapacityError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** Too many videos in progress at once, or no storage left for another. */
+    readonly limit: "concurrency" | "storage",
+  ) {
     super(message);
     this.name = "VideoGenerationCapacityError";
   }
 }
 
 export class VideoGenerationCreditError extends Error {
-  constructor(message = "insufficient OpenGeni credits") {
+  constructor(message = "insufficient workspace credits") {
     super(message);
     this.name = "VideoGenerationCreditError";
   }
@@ -235,7 +249,10 @@ export async function admitVideoGenerationOperation(
           )
           .for("update");
         if (active.length >= input.maxConcurrentPerWorkspace) {
-          throw new VideoGenerationCapacityError("Workspace video generation limit reached");
+          throw new VideoGenerationCapacityError(
+            "Workspace video generation limit reached",
+            "concurrency",
+          );
         }
         await tx
           .insert(schema.workspaceVideoGenerationQuotas)
@@ -254,7 +271,10 @@ export async function admitVideoGenerationOperation(
           .limit(1);
         if (!quota) throw new Error("Video generation quota row disappeared");
         if (quota.reservedBytes + quota.readyBytes + reservedBytes > input.workspaceQuotaBytes) {
-          throw new VideoGenerationCapacityError("Workspace video storage quota reached");
+          throw new VideoGenerationCapacityError(
+            "Workspace video storage quota reached",
+            "storage",
+          );
         }
         const [operation] = await tx
           .insert(schema.videoGenerationOperations)
@@ -292,7 +312,7 @@ export async function admitVideoGenerationOperation(
         if (!operation) throw new Error("Video generation operation was not admitted");
         if (input.pricedCostMicros > 0) {
           if (input.fundingSource !== "opengeni_credits" || input.connectionId !== null) {
-            throw new Error("Only OpenGeni-funded video operations may debit credits");
+            throw new Error("Only Opengeni-funded video operations may debit credits");
           }
           await debitVideoGenerationCredits(tx, operation);
         }
@@ -317,44 +337,6 @@ export async function admitVideoGenerationOperation(
         return { operation, created: true };
       }),
   );
-}
-
-/** Persist a rotated provider token before it is used for another remote call. */
-export async function rotateVideoGenerationCredential(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    operationId: string;
-    requestDigest: string;
-    expectedCredentialEncrypted: string;
-    credentialEncrypted: string;
-  },
-): Promise<VideoGenerationOperation> {
-  const [row] = await db
-    .update(schema.videoGenerationOperations)
-    .set({
-      credentialEncrypted: input.credentialEncrypted,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(schema.videoGenerationOperations.accountId, input.accountId),
-        eq(schema.videoGenerationOperations.workspaceId, input.workspaceId),
-        eq(schema.videoGenerationOperations.id, input.operationId),
-        eq(schema.videoGenerationOperations.requestDigest, input.requestDigest),
-        eq(schema.videoGenerationOperations.credentialEncrypted, input.expectedCredentialEncrypted),
-        inArray(schema.videoGenerationOperations.status, [
-          "accepted",
-          "submission_uncertain",
-          "provider_started",
-          "retaining",
-        ]),
-      ),
-    )
-    .returning();
-  if (!row) throw new VideoGenerationConflictError("Video provider credential changed");
-  return row;
 }
 
 /**
@@ -1370,6 +1352,7 @@ async function debitVideoGenerationCredits(
   // Model settlement locks the account before the ledger trigger's workspace
   // allowance fence. Preserve that order during prepaid media admission.
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${operation.accountId}))`);
+  const settledAt = await beginPlanCreditSettlement(tx, operation.accountId);
   const attribution = await creditDebitAttributionForTurn(tx, {
     accountId: operation.accountId,
     workspaceId: operation.workspaceId,
@@ -1381,16 +1364,36 @@ async function debitVideoGenerationCredits(
     subjectId: attribution.kind === "turn" ? attribution.initiatingHumanSubjectId : null,
   });
   if (refusal) throw Object.assign(new VideoGenerationCreditError(refusal.message), refusal);
-  const [balanceRow] = await tx
-    .select({
-      balanceMicros: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
-    })
-    .from(schema.creditLedgerEntries)
-    .where(eq(schema.creditLedgerEntries.accountId, operation.accountId));
-  const balanceMicros = Number(balanceRow?.balanceMicros ?? 0);
+  // Billed like the chat it runs in: API work spends credits only.
+  const usageOrigin = attribution.kind === "turn" ? attribution.billingOrigin : undefined;
+  const { balanceMicros } = await getSpendableCreditBalance(
+    tx,
+    operation.accountId,
+    undefined,
+    undefined,
+    settledAt,
+    usageOrigin,
+  );
   if (!Number.isSafeInteger(balanceMicros) || balanceMicros < operation.pricedCostMicros) {
-    throw new VideoGenerationCreditError();
+    throw new VideoGenerationCreditError(
+      chargeBillingOrigin(usageOrigin) === "api" ? API_CREDITS_REQUIRED_MESSAGE : undefined,
+    );
   }
+  // App use: plan credit (the Free plan's scoped credit too) pays first.
+  const origin = chargeBillingOrigin(usageOrigin);
+  const before = await readBillingBalance(tx, operation.accountId, undefined, settledAt, true);
+  const allocations =
+    origin === "app"
+      ? planPostUseCreditAllocations(before.balance, operation.pricedCostMicros, undefined)
+      : [];
+  // A refund returns as paid credit what this debit drew from paid credit.
+  const paidDrawn = paidDrawnMicros(
+    before.balance,
+    before.paid,
+    operation.pricedCostMicros,
+    allocations,
+    origin,
+  );
   const now = new Date();
   const inserted = await tx
     .insert(schema.creditLedgerEntries)
@@ -1401,19 +1404,31 @@ async function debitVideoGenerationCredits(
       amountMicros: -operation.pricedCostMicros,
       sourceType: "video_generation_operation",
       sourceId: operation.id,
+      usageOrigin: origin,
       idempotencyKey: `credit:video_generation_debit:${operation.id}`,
       metadata: {
         turnId: operation.turnId,
         modelId: operation.modelId,
         sourceMode: operation.sourceMode,
         pricedCostMicros: operation.pricedCostMicros,
+        ...(paidDrawn > 0 ? { paidDrawnMicros: paidDrawn } : {}),
       },
       occurredAt: now,
+      createdAt: sql`${settledAt}::timestamptz`,
     })
     .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
     .returning({ id: schema.creditLedgerEntries.id });
   if (inserted.length !== 1) {
     throw new VideoGenerationConflictError("Video generation credit debit already exists");
+  }
+  if (allocations.length) {
+    await tx.insert(schema.creditDebitAllocations).values(
+      allocations.map((allocation) => ({
+        ...allocation,
+        accountId: operation.accountId,
+        debitEntryId: inserted[0]!.id,
+      })),
+    );
   }
   await tx
     .insert(schema.usageEvents)
@@ -1444,13 +1459,36 @@ async function refundVideoGenerationCredits(
     throw new Error("Video generation credit refund has an invalid funding binding");
   }
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${operation.accountId}))`);
+  const settledAt = await beginPlanCreditSettlement(tx, operation.accountId);
+  // Scoped plan credit (the Free plan's) has no refund path back into its
+  // grant: return only what other credit paid, so it never becomes credits.
+  const [scoped] = await rawRows<{ micros: string }>(
+    tx,
+    sql`select coalesce(sum(a.amount_micros), 0)::text as micros
+      from ${schema.creditDebitAllocations} a
+      join ${schema.creditLedgerEntries} debit on debit.id = a.debit_entry_id
+      join ${schema.creditLedgerEntries} grant_row on grant_row.id = a.grant_entry_id
+      where a.account_id = ${operation.accountId}
+        and debit.idempotency_key = ${`credit:video_generation_debit:${operation.id}`}
+        and grant_row.type = 'plan_credit_grant' and grant_row.eligible_model_ids is not null`,
+  );
+  const refundMicros = operation.pricedCostMicros - Number(scoped?.micros ?? 0);
+  if (refundMicros <= 0) return "refunded";
+  const receipt = await paidCreditReceipt(tx, {
+    accountId: operation.accountId,
+    settledAt,
+    type: "video_generation_refund",
+    amountMicros: refundMicros,
+    sourceType: "video_generation_operation",
+    sourceId: operation.id,
+  });
   const inserted = await tx
     .insert(schema.creditLedgerEntries)
     .values({
       accountId: operation.accountId,
       workspaceId: operation.workspaceId,
       type: "video_generation_refund",
-      amountMicros: operation.pricedCostMicros,
+      amountMicros: refundMicros,
       sourceType: "video_generation_operation",
       sourceId: operation.id,
       idempotencyKey: `credit:video_generation_refund:${operation.id}`,
@@ -1459,8 +1497,10 @@ async function refundVideoGenerationCredits(
         modelId: operation.modelId,
         sourceMode: operation.sourceMode,
         pricedCostMicros: operation.pricedCostMicros,
+        ...receipt.metadata,
       },
       occurredAt: now,
+      createdAt: receipt.createdAt,
     })
     .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
     .returning({ id: schema.creditLedgerEntries.id });

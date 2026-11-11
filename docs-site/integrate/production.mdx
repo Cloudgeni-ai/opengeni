@@ -6,61 +6,68 @@ icon: "rocket"
 
 ## Store and rotate keys
 
-- Keep the organization API key in your secret manager and load it only on the server. Never ship it in a browser bundle, a Skill, a prompt, or `modelContext`.
-- Use a **workspace API key** instead for a component that should reach only one workspace, and a **read-only organization key** for reporting.
-- Rotate by creating a new key, deploying it, and deleting the old one with `deleteOrganizationApiKey`. Keys can also carry an expiry.
+- Keep the organization API key in your secret manager, on the server only. Never put it in a browser bundle, a prompt, or `modelContext`.
+- Use a **workspace API key** for a component that needs only one workspace, and a **read-only organization key** for reporting.
+- Rotate by creating a new key, deploying it, and deleting the old one with `deleteOrganizationApiKey`. Keys can also expire.
+- Narrow a key's permissions or workspaces with `updateOrganizationApiKey`. It takes effect on the next request.
 
 See [Authentication](/reference/authentication).
 
 ## Receive events and supply credentials
 
-To hear when work finishes without polling, or to hand each run short-lived credentials from your backend, register one webhook and one credential provider for all your customers' workspaces. See [Webhooks and credentials](/guides/webhooks-and-credentials).
+To hear when work finishes, or to give each run short-lived credentials from your backend, register one webhook and one credential provider for all workspaces. See [Webhooks and credentials](/guides/webhooks-and-credentials).
 
 ## Understand costs
 
-On [app.opengeni.ai](https://app.opengeni.ai), agent usage is paid with prepaid OpenGeni credits, or billed by the provider when your organization connects its own model subscription or gateway key. When credits run out, the current turn ends gracefully and the session stays intact, so it continues after a top-up.
+API and embedded-product usage spends prepaid credits, not monthly plan credit. Connected AI subscriptions cannot serve API requests, even on a paid plan. Choose a credit-billed model, or connect your own provider API key; own-key fees follow the deployment's configuration and are currently paused at 0% on [app.opengeni.ai](https://app.opengeni.ai). Your provider still bills its own key usage.
 
-- A single turn can include several model responses and tool calls. Long goals and large tool schemas cost more.
-- `getBillingUsage` returns usage for accounting and requires billing permission. Chat replies do not carry a per-request price.
-- Distinguish OpenGeni credit charges from what your model provider bills you directly.
+In the Opengeni apps, Free provides eligible accounts $10 monthly trial credit. Pro starts at $20/month; Pro, Max and Enterprise include connected AI subscriptions with no usage fee, within the provider's limits. When credits run out on a credit-billed model, add credits before continuing.
 
-For per-seat included usage, administrator splits, top-ups, team budgets, or
-browser progress meters, see [Usage allowances](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/usage-allowances.md).
-Use the session proxy's own-usage read and render `fraction`, or the
-[usage components](/guides/usage-allowances), for browser meters. Responses still
-include amounts; hiding them requires your own authenticated server projection.
-Keep organization-budget writes on your backend; the conversation proxy exposes
-only the user's own usage. Allowances are post-call ceilings, not prepaid reservations.
+- One turn can include several model calls and tool calls. Long goals and large tool schemas cost more.
+- `getBillingUsage` returns usage for accounting (requires billing permission).
+
+Organization owners and admins receive alerts when general available credits reach
+$10 or run out, and when hourly spending is unusually high. Scoped promotional and
+Free-plan funding is separate and may remain usable. Read the threshold with
+`getBillingAlertSettings({ accountId })` and change it with
+`updateBillingAlertSettings({ accountId, lowBalanceThresholdMicros })` (USD
+micro-units; requires billing-management permission). `listBillingCreditNotifications`
+returns the current recipient's retained notices. The [backend contract](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/credit-notifications.md)
+describes the spend rule, receipt semantics and top-up integration.
+
+- For per-user budgets and usage meters, see [Usage allowances](/guides/usage-allowances).
 
 ## Keep SDK and server compatible
 
-Published SDKs and servers are compatible within the same major version. Within a major, changes are additive: servers ignore unknown request fields, and clients ignore unknown response fields and event types. Install `@opengeni/sdk` and `@opengeni/react` from the same release, and read the server version from `/healthz` or `/v1/config/client`. See the [API compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).
+Server updates don't break existing integrations: the API only grows, so a pinned SDK keeps working and you upgrade when you want new features. Rare exceptions (an emergency security fix or an explicit product-owner decision) are announced with migration notes. Pin all `@opengeni` packages to the same version, install stable releases (the npm `latest` tag) rather than canaries, and let your code ignore unknown response fields and event types. Deprecated members keep working; their docs name the replacement. Read the server version from `/healthz`. See the [API compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).
+
+Our [published SDK test matrix](https://github.com/Cloudgeni-ai/opengeni/blob/main/test/integration/sdk-compatibility/versions.json) exercises pinned stable releases and known integrator pins against the current server. The bounded test matrix is not a limit on the compatibility promise.
 
 ## Keep the tool surface minimal
 
-Every tool the agent can see costs prompt tokens and widens what it can do. For a product agent that should use only your tools, close every optional surface explicitly:
+Every visible tool costs prompt tokens and widens what the agent can do. For an agent that should use only your tools, return this from the proxy's `createSession` hook:
+
+{/* doc-snippets: excerpt SessionProxyHandlerOptions from "@opengeni/sdk" */}
 
 ```ts
-await og.asUser(user.id, { source }).createSession(workspaceId, {
+createSession: ({ initialMessage, idempotencyKey }) => ({
   initialMessage,
   idempotencyKey,
+  agent: { identity: "You are Acme's assistant.", capabilities: "none" }, // only this session's tools
+  sandboxBackend: "none", // no sandbox, shell, or file tools
   mcpServers: [{ id: "acme", url: ACME_MCP_URL, allowedTools: ["get_ticket", "update_ticket"] }],
   tools: [{ kind: "mcp", id: "acme" }], // exactly your server
-  firstPartyMcpTools: [], // no OpenGeni workspace or session tools
-  bundledSkillIds: [], // no bundled OpenGeni guidance
-  sandboxBackend: "none", // no sandbox, shell, or file tools
-  agentLearning: { knowledge: "off", instructions: "off", skills: "off" },
   skills: productSkills, // your own versioned Skills, if any
-});
+}),
 ```
 
-Omitting `tools` or `firstPartyMcpTools` inherits workspace and deployment defaults, including tools that reach other sessions. Always pass explicit lists.
+`capabilities: "none"` limits the agent to the session's own tools plus the essentials: no Opengeni workspace or session tools, workspace connectors, or bundled Opengeni guides, so empty `firstPartyMcpTools` or `bundledSkillIds` lists add nothing. See [Configure the agent](/integrate/configure-the-agent).
 
-Organization owners can also restrict which integrations may be set up at all in **Organization settings → Integrations**, or through `@opengeni/sdk/organization-integration-policy`.
+Organization owners can restrict which integrations may be set up in **Organization settings → Integrations**.
 
 ## Test isolation before launch
 
-Beyond a working conversation, verify that:
+Verify that:
 
 - user A cannot open, stream, message, or attach files to user B's session through your routes;
 - a request carrying another workspace or session id is rejected;
@@ -75,6 +82,6 @@ Beyond a working conversation, verify that:
 | A user's access | `cancelExternalWorkspaceMemberGrant`, which also cancels their running turns                        |
 | A tenant        | `deleteWorkspace`, which permanently deletes the workspace and everything in it                     |
 
-A workspace cannot be deleted while a session is running. Organization owners can also set a retention policy in organization settings.
+A workspace can't be deleted while a session is running. Owners can set a retention policy in organization settings.
 
 <Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

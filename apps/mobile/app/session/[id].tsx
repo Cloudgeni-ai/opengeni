@@ -1,0 +1,664 @@
+import { compactModelPill } from "@opengeni/react/model-policy";
+import { useOpenGeniText } from "@opengeni/react/messages";
+import { NativeMenu, type MenuAction } from "@/native-menu";
+import { sessionDisplayTitle } from "@opengeni/react/session-list-model";
+import {
+  ADMIN_ACCESS_DURATIONS,
+  ADMIN_ACCESS_GRANT_DESCRIPTION,
+  endsText,
+  type AdminAccessDuration,
+} from "@opengeni/react/session-admin-access-model";
+import { useOpenGeniNativeSession } from "@opengeni/react-native";
+import {
+  ComposerPill,
+  Icon,
+  ModelMark,
+  ModelPickerSheet,
+  NativeSessionScreen,
+  SessionActionsButton,
+  SessionHeaderTitle,
+  useNativeSessionIdentity,
+  useNativeTimelineTheme,
+  type NativeInChatConnectOptions,
+} from "@opengeni/react-native/timeline";
+import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
+import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
+import { resolveOpenGeniLinkTarget, type OpenGeniLinkTarget } from "@opengeni/sdk";
+import { desktopAppReturnUrl } from "@opengeni/contracts";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import type { InteractiveAnswerStore } from "@opengeni/react/interactive-answer-model";
+import * as Haptics from "expo-haptics";
+import * as SecureStore from "expo-secure-store";
+import * as WebBrowser from "expo-web-browser";
+import { Stack, router, useFocusEffect, useLocalSearchParams } from "expo-router";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Alert, Linking, Platform, Pressable, Share, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useAccount } from "@/account";
+import { BrandMark } from "@/brand-mark";
+import { useAgentCall } from "@/call";
+import {
+  pinCallSession,
+  rememberOpenedSession,
+  unpinCallSession,
+  useOutsideCallPreferences,
+} from "@/call-preferences";
+import { copyText } from "@/clipboard";
+import { markSessionInboxRead, useSessionRepliesMute } from "@/notifications";
+import { useSessionComputeLabel } from "@/compute-label";
+import { useWorkspaceModelCatalog } from "@/model-catalog";
+import { readPendingPrompt, forgetPendingPrompt } from "@/pending-prompt";
+import { ComposerPlusMenu } from "@/new-session-options";
+import { useSessionFullAccess, type SessionFullAccess } from "@/session-full-access";
+import { AppThemeProvider } from "@/theme";
+import { rememberSessionRow } from "@/session-list-cache";
+import { useComposerVoice } from "@/voice";
+import { openLinkFromApp } from "@/app-link-registry";
+import { appSessionPath } from "@/app-links";
+import { openOnWeb, webPaths, webUrl } from "@/web-links";
+
+/** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
+const CALL_PIN_ACTION = "opengeni.take-calls-here";
+/** The session menu item that opens this conversation in the web app. */
+const OPEN_ON_WEB_ACTION = "opengeni.open-on-web";
+/** The session menu item that copies this conversation's web link. */
+const COPY_LINK_ACTION = "opengeni.copy-link";
+/** The session menu item that mutes or unmutes this session's replies for the person. */
+const MUTE_REPLIES_ACTION = "opengeni.mute-replies";
+/** Session menu items for full access: a time limit to give it for, or turning it off. */
+const FULL_ACCESS_ACTION = "opengeni.full-access";
+const FULL_ACCESS_GRANT_PREFIX = "opengeni.full-access.grant:";
+const FULL_ACCESS_REVOKE_ACTION = "opengeni.full-access.revoke";
+
+/** The session menu's full access entry, as the web header's shield and ⋯ menu offer it. */
+function fullAccessMenuAction(access: SessionFullAccess | null): MenuAction[] {
+  if (!access) return [];
+  const durations = ADMIN_ACCESS_DURATIONS.map((each) => ({
+    id: `${FULL_ACCESS_GRANT_PREFIX}${each.value}`,
+    title: each.label,
+  }));
+  const { state } = access;
+  if (!state.active) {
+    return state.canGrant
+      ? [
+          {
+            id: FULL_ACCESS_ACTION,
+            title: "Give full access",
+            image: "checkmark.shield" as MenuAction["image"],
+            subactions: durations,
+          },
+        ]
+      : [];
+  }
+  const subactions: MenuAction[] = [
+    ...(state.canGrant
+      ? [{ id: `${FULL_ACCESS_ACTION}.change`, title: "Change time limit", subactions: durations }]
+      : []),
+    ...(state.canRevoke
+      ? [
+          {
+            id: FULL_ACCESS_REVOKE_ACTION,
+            title: "Turn off full access",
+            image: "xmark.shield" as MenuAction["image"],
+            attributes: { destructive: true },
+          },
+        ]
+      : []),
+  ];
+  return subactions.length > 0
+    ? [
+        {
+          id: FULL_ACCESS_ACTION,
+          title: `Full access · ${endsText(state.expiresAt)}`,
+          image: "checkmark.shield.fill" as MenuAction["image"],
+          subactions,
+        },
+      ]
+    : [];
+}
+
+/** Interactive answers remember picks and what was sent across app launches. */
+const answerStore: InteractiveAnswerStore = {
+  get: (key) => AsyncStorage.getItem(key),
+  set: (key, value) => AsyncStorage.setItem(key, value),
+};
+
+export default function SessionScreen() {
+  const { id, at, workspace } = useLocalSearchParams<{
+    id: string;
+    at?: string;
+    workspace?: string;
+  }>();
+  // Opened from the inbox, a notification or a link: land on that moment.
+  const focusSequence = at && /^[1-9][0-9]*$/u.test(at) ? Number(at) : undefined;
+  const { account, client, models, workspaceId: currentWorkspaceId } = useAccount();
+  // A session opened from elsewhere names its own workspace, so the screens
+  // underneath keep theirs and Back returns to them unchanged.
+  const workspaceId = workspace || currentWorkspaceId;
+  if (!workspaceId || !id) {
+    return (
+      <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+        <Text>No workspace selected</Text>
+      </View>
+    );
+  }
+  return (
+    <AppThemeProvider>
+      <LiveSession
+        key={`${account?.id ?? "signed-out"}:${workspaceId}:${id}`}
+        client={client}
+        models={models}
+        baseUrl={account?.baseUrl ?? null}
+        sessionId={id}
+        workspaceId={workspaceId}
+        focusSequence={focusSequence}
+      />
+    </AppThemeProvider>
+  );
+}
+
+/** Where the system sign-in browser hands back to the app (app.json `scheme`). */
+const CONNECT_RETURN_PREFIX = "opengeni://open";
+
+/**
+ * Where a connect card remembers the attempt it is waiting on, so setup picks
+ * up again when the app was closed mid-sign-in. Only the attempt id is kept;
+ * the server checks who may recover it.
+ */
+const connectAttemptHints = {
+  read(key: string): string | null {
+    try {
+      return SecureStore.getItem(attemptHintKey(key));
+    } catch {
+      return null;
+    }
+  },
+  remember(key: string, attemptId: string): void {
+    try {
+      SecureStore.setItem(attemptHintKey(key), attemptId);
+    } catch {
+      /* Recovery hint only. */
+    }
+  },
+  forget(key: string): void {
+    void SecureStore.deleteItemAsync(attemptHintKey(key)).catch(() => undefined);
+  },
+};
+
+/** Secure storage keys allow letters, digits, ".", "-" and "_" only. */
+function attemptHintKey(key: string): string {
+  return key.replace(/[^A-Za-z0-9._-]/gu, "_");
+}
+
+/**
+ * Connect requests in this conversation sign in through the system sign-in
+ * browser. The provider returns to the deployment's hand-back page, which
+ * opens this conversation in the app again.
+ */
+function inChatConnectOptions(
+  baseUrl: string | null,
+  workspaceId: string,
+  sessionId: string,
+): NativeInChatConnectOptions | undefined {
+  if (!baseUrl) return undefined;
+  const origin = baseUrl.replace(/\/+$/u, "");
+  const conversation = `${origin}${webPaths.session(workspaceId, sessionId)}`;
+  return {
+    browser: {
+      openAuthSession: (url) => WebBrowser.openAuthSessionAsync(url, CONNECT_RETURN_PREFIX),
+      dismiss: () => WebBrowser.dismissAuthSession(),
+    },
+    returnUrl: desktopAppReturnUrl(conversation, origin),
+    openUrl: (url) => void Linking.openURL(url),
+    attemptHints: connectAttemptHints,
+    // A computer connects from the computer itself: send this chat there.
+    // iOS shares a URL as a link; Android shares text.
+    shareConversation: () =>
+      void Share.share(
+        Platform.OS === "ios" ? { url: conversation } : { message: conversation },
+      ).catch(() => {}),
+  };
+}
+
+function LiveSession(props: {
+  focusSequence?: number | undefined;
+  client: ReturnType<typeof useAccount>["client"];
+  models: ReturnType<typeof useAccount>["models"];
+  baseUrl: string | null;
+  sessionId: string;
+  workspaceId: string;
+}) {
+  const t = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const insets = useSafeAreaInsets();
+  const inChatConnect = useMemo(
+    () => inChatConnectOptions(props.baseUrl, props.workspaceId, props.sessionId),
+    [props.baseUrl, props.workspaceId, props.sessionId],
+  );
+  // Reading the session reads its replies in the inbox, on arrival and on leaving.
+  const { client: inboxClient, sessionId: readSessionId } = props;
+  useFocusEffect(
+    useCallback(() => {
+      void markSessionInboxRead(inboxClient, readSessionId);
+      return () => void markSessionInboxRead(inboxClient, readSessionId);
+    }, [inboxClient, readSessionId]),
+  );
+  useEffect(() => {
+    rememberOpenedSession({ workspaceId: props.workspaceId, sessionId: props.sessionId });
+  }, [props.workspaceId, props.sessionId]);
+  const controller = useOpenGeniNativeSession({
+    client: props.client,
+    sessionId: props.sessionId,
+    workspaceId: props.workspaceId,
+  });
+  const session = controller.session.session;
+  // The lists underneath follow this chat's row while it is open, so going back
+  // shows them already in order rather than reordering under the next tap.
+  useEffect(() => {
+    if (session && session.workspaceId === props.workspaceId) rememberSessionRow(session);
+  }, [session, props.workspaceId]);
+  const feedback = useMemo(
+    () => ({ client: props.client, workspaceId: props.workspaceId, sessionId: props.sessionId }),
+    [props.client, props.workspaceId, props.sessionId],
+  );
+  const { account } = useAccount();
+  const webBaseUrl = account?.baseUrl ?? null;
+  // Agent images and previews resolve through this workspace; artifacts and Sites open on web.
+  const renderMarkdown = useMemo(() => {
+    const openResolvedLink = (target: OpenGeniLinkTarget) => {
+      // Another chat opens here in the app, in the workspace the link names (or this one).
+      if (target.kind === "session") {
+        router.push(
+          appSessionPath(target.sessionId, target.workspaceId ?? props.workspaceId, null),
+        );
+        return;
+      }
+      if (!webBaseUrl) return;
+      const workspace = encodeURIComponent(props.workspaceId);
+      if (target.kind === "site")
+        openOnWeb(
+          webBaseUrl,
+          `/workspaces/${workspace}/artifacts/${encodeURIComponent(target.artifactId)}`,
+        );
+      else if (target.kind === "file")
+        openOnWeb(
+          webBaseUrl,
+          `/workspaces/${workspace}/artifacts/files/${encodeURIComponent(target.fileId)}`,
+        );
+      else if (target.kind === "editable-artifact")
+        openOnWeb(
+          webBaseUrl,
+          `/workspaces/${workspace}/artifacts/editable/${encodeURIComponent(target.artifactId)}`,
+        );
+    };
+    const openLink = (target: OpenGeniLinkTarget) => {
+      void resolveOpenGeniLinkTarget(props.client, target, props.workspaceId, {
+        sessionId: props.sessionId,
+      })
+        .then(openResolvedLink)
+        .catch((error: unknown) =>
+          Alert.alert(
+            t("markdown.openArtifact"),
+            error instanceof Error ? error.message : String(error),
+          ),
+        );
+    };
+    return createWebMarkdownRenderer({
+      // Opengeni conversations open in the app; anything else in the browser.
+      onLinkPress: (url) => {
+        openLinkFromApp(url);
+        return false;
+      },
+      onCopy: (text) => void copyText(text),
+      onOpenGeniLink: openLink,
+      ...createNativePreviewRenderers(t, {
+        client: props.client,
+        workspaceId: props.workspaceId,
+        onOpenLink: openLink,
+      }),
+    });
+  }, [props.client, props.workspaceId, props.sessionId, webBaseUrl, t]);
+  const catalog = useWorkspaceModelCatalog(props.workspaceId);
+  const computeLabel = useSessionComputeLabel(props.workspaceId, props.sessionId);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  // The composer owns the next turn's policy, exactly as the web picker edits it.
+  const composer = controller.composer;
+  const voice = useComposerVoice({
+    workspaceId: props.workspaceId,
+    value: composer.value,
+    setValue: composer.setValue,
+    scope: props.sessionId,
+  });
+  const policy = composer.policy ?? null;
+  const model = policy?.model ?? session?.model ?? null;
+  const effort = policy?.reasoningEffort ?? session?.reasoningEffort ?? null;
+  // The web composer's phone-width pill: compact model name, effort when it is a choice.
+  const pill = model ? compactModelPill(t, props.models, model, effort ?? undefined) : null;
+  const [pendingPrompt] = useState(() =>
+    readPendingPrompt(props.client, props.workspaceId, props.sessionId),
+  );
+  useEffect(() => {
+    if (controller.initialHistoryReady)
+      forgetPendingPrompt(props.client, props.workspaceId, props.sessionId);
+  }, [controller.initialHistoryReady, props.client, props.workspaceId, props.sessionId]);
+  // A session the runtime could not start reads as stuck, never "Waiting on you".
+  const status = controller.displayStatus;
+  // Archiving stops (and so pauses) a chat's work: it reads as archived, not paused.
+  const paused = !controller.archived && controller.queue.effectiveControl?.state === "paused";
+  // Web header: the status badge beside the title (a paused workstream says so).
+  const refreshSession = controller.session.refresh;
+  const title = session ? sessionDisplayTitle(session) : "";
+  // The agent's (or the chat's own) avatar beside the title, as on the web header.
+  const identity = useNativeSessionIdentity(session, props.client);
+  const agentCall = useAgentCall();
+  const onCall = agentCall.sessionId === props.sessionId;
+  // In the call's own conversation the green phone button returns to the call,
+  // so the floating on-call pill would only cover the header.
+  const { hidePillFor } = agentCall;
+  useFocusEffect(
+    useCallback(
+      () => (onCall ? hidePillFor(props.sessionId) : undefined),
+      [hidePillFor, onCall, props.sessionId],
+    ),
+  );
+  const callPreferences = useOutsideCallPreferences();
+  const takesCalls =
+    callPreferences.target === "pinned" && callPreferences.pinned?.sessionId === props.sessionId;
+  const workspaceId = props.workspaceId;
+  const repliesMute = useSessionRepliesMute(
+    props.client,
+    props.workspaceId,
+    props.sessionId,
+    session ? session.parentSessionId === null : false,
+  );
+  const fullAccess = useSessionFullAccess(props.client, props.workspaceId, props.sessionId);
+  const fullAccessOn = fullAccess?.state.active === true;
+  const onFullAccessAction = useCallback(
+    (event: string) => {
+      if (!fullAccess) return;
+      const done = (ok: boolean, failure: string) => {
+        if (ok) void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        else Alert.alert(failure, "Try again in a moment.");
+      };
+      if (event === FULL_ACCESS_REVOKE_ACTION) {
+        void fullAccess.revoke().then((ok) => done(ok, "Couldn't turn off full access"));
+        return;
+      }
+      const duration = event.slice(FULL_ACCESS_GRANT_PREFIX.length) as AdminAccessDuration;
+      const give = () =>
+        void fullAccess
+          .grant(duration)
+          .then((ok) =>
+            done(
+              ok,
+              fullAccess.state.active
+                ? "Couldn't change the time limit"
+                : "Couldn't give full access",
+            ),
+          );
+      // Changing the time limit needs no second confirmation; turning it on does.
+      if (fullAccess.state.active) {
+        give();
+        return;
+      }
+      Alert.alert(
+        "Give this session your full access?",
+        `${ADMIN_ACCESS_GRANT_DESCRIPTION} You can turn it off at any time from this menu.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Give full access", onPress: give },
+        ],
+      );
+    },
+    [fullAccess],
+  );
+  const headerTitle = useCallback(
+    () => (
+      <AppThemeProvider>
+        <SessionHeaderTitle
+          title={title}
+          status={paused ? "queued" : status}
+          statusLabel={paused ? "Paused" : undefined}
+          fullAccess={fullAccessOn}
+          avatar={identity.avatar}
+          agentName={identity.agentName}
+        />
+      </AppThemeProvider>
+    ),
+    [fullAccessOn, identity, paused, status, title],
+  );
+  const headerRight = useCallback(
+    () =>
+      session ? (
+        <AppThemeProvider>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={onCall ? "Return to call" : "Call this session"}
+              hitSlop={8}
+              onPress={() => {
+                void Haptics.selectionAsync();
+                agentCall.callSession(props.sessionId, workspaceId);
+              }}
+              style={({ pressed }) => ({
+                width: 36,
+                height: 36,
+                borderRadius: 18,
+                alignItems: "center",
+                justifyContent: "center",
+                opacity: pressed ? 0.6 : 1,
+                backgroundColor: onCall ? "#34C759" : "transparent",
+              })}
+            >
+              <Icon name="phone" size={20} color={onCall ? "#FFFFFF" : theme.colors.fg} />
+            </Pressable>
+            <SessionActionsButton
+              session={session}
+              client={props.client}
+              onChanged={() => void refreshSession()}
+              onActionFeedback={() => void Haptics.selectionAsync()}
+              renderMenu={({ actions, trigger }) => (
+                <NativeMenu
+                  actions={[
+                    ...(webBaseUrl
+                      ? [
+                          {
+                            id: OPEN_ON_WEB_ACTION,
+                            title: "Open in web",
+                            image: "safari" as MenuAction["image"],
+                          },
+                          {
+                            id: COPY_LINK_ACTION,
+                            title: "Copy link",
+                            image: "link" as MenuAction["image"],
+                          },
+                        ]
+                      : []),
+                    {
+                      id: CALL_PIN_ACTION,
+                      title: takesCalls ? "Stop taking calls here" : "Take calls here",
+                      image: (takesCalls
+                        ? "phone.down"
+                        : "phone.arrow.down.left") as MenuAction["image"],
+                    },
+                    ...(repliesMute
+                      ? [
+                          {
+                            id: MUTE_REPLIES_ACTION,
+                            title: repliesMute.muted ? "Unmute replies" : "Mute replies",
+                            image: (repliesMute.muted
+                              ? "bell"
+                              : "bell.slash") as MenuAction["image"],
+                          },
+                        ]
+                      : []),
+                    ...fullAccessMenuAction(fullAccess),
+                    ...actions.map((action) => ({
+                      id: action.key,
+                      title: action.label,
+                      ...(action.systemImage
+                        ? { image: action.systemImage as MenuAction["image"] }
+                        : {}),
+                      ...(action.destructive ? { attributes: { destructive: true } } : {}),
+                    })),
+                  ]}
+                  onPressAction={({ nativeEvent }) => {
+                    if (nativeEvent.event === OPEN_ON_WEB_ACTION) {
+                      if (webBaseUrl)
+                        openOnWeb(webBaseUrl, webPaths.session(workspaceId, props.sessionId));
+                      return;
+                    }
+                    if (nativeEvent.event === COPY_LINK_ACTION) {
+                      if (!webBaseUrl) return;
+                      void copyText(
+                        webUrl(webBaseUrl, webPaths.session(workspaceId, props.sessionId)),
+                      ).then(() =>
+                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success),
+                      );
+                      return;
+                    }
+                    if (nativeEvent.event === CALL_PIN_ACTION) {
+                      void Haptics.selectionAsync();
+                      if (takesCalls) unpinCallSession();
+                      else if (workspaceId)
+                        pinCallSession({ workspaceId, sessionId: props.sessionId, title });
+                      return;
+                    }
+                    if (nativeEvent.event === MUTE_REPLIES_ACTION) {
+                      void Haptics.selectionAsync();
+                      void repliesMute?.toggle().then((muted) => {
+                        if (muted === null) {
+                          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+                        }
+                      });
+                      return;
+                    }
+                    if (
+                      nativeEvent.event === FULL_ACCESS_REVOKE_ACTION ||
+                      nativeEvent.event.startsWith(FULL_ACCESS_GRANT_PREFIX)
+                    ) {
+                      void Haptics.selectionAsync();
+                      onFullAccessAction(nativeEvent.event);
+                      return;
+                    }
+                    actions.find((action) => action.key === nativeEvent.event)?.onPress();
+                  }}
+                >
+                  {trigger}
+                </NativeMenu>
+              )}
+            />
+          </View>
+        </AppThemeProvider>
+      ) : null,
+    [
+      agentCall,
+      fullAccess,
+      onCall,
+      onFullAccessAction,
+      props.client,
+      props.sessionId,
+      refreshSession,
+      repliesMute,
+      session,
+      takesCalls,
+      theme.colors.fg,
+      title,
+      webBaseUrl,
+      workspaceId,
+    ],
+  );
+  // Camera, photos and files, as the web composer's + offers them.
+  const takePhoto = controller.attachments.takePhoto;
+  const attachMenu = (
+    <ComposerPlusMenu
+      onTakePhoto={takePhoto ? () => void takePhoto() : undefined}
+      onPickImages={() => void controller.attachments.pickImages()}
+      onPickFiles={() => void controller.attachments.pickDocuments()}
+    />
+  );
+  return (
+    <>
+      <Stack.Screen
+        options={{
+          title,
+          headerTitle,
+          headerRight,
+          headerStyle: { backgroundColor: theme.colors.bg },
+          headerTintColor: theme.colors.fg,
+          headerShadowVisible: false,
+        }}
+      />
+      <NativeSessionScreen
+        controller={controller}
+        pendingPrompt={pendingPrompt}
+        focusSequence={props.focusSequence}
+        client={props.client}
+        models={props.models}
+        renderMarkdown={renderMarkdown}
+        answerStore={answerStore}
+        onCopy={(text) => void copyText(text)}
+        onOpenSession={(sessionId) => router.push(`/session/${sessionId}`)}
+        bottomInset={insets.bottom}
+        inChatConnect={inChatConnect}
+        computeLabel={computeLabel}
+        feedback={feedback}
+        composer={{
+          onActionFeedback: () => void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light),
+          voice,
+          // An empty composer calls this session, as its header button does.
+          call: {
+            active: onCall,
+            onPress: () => {
+              void Haptics.selectionAsync();
+              agentCall.callSession(props.sessionId, workspaceId);
+            },
+          },
+          renderLeading: () => attachMenu,
+          options: pill ? (
+            <ComposerPill
+              label={pill.name}
+              detail={pill.effort}
+              fast={(policy?.latencyMode ?? session?.latencyMode) === "fast"}
+              ultrafast={(policy?.latencyMode ?? session?.latencyMode) === "ultrafast"}
+              leading={<ModelMark model={model ?? ""} size={14} color={theme.colors.fg} />}
+              onPress={
+                policy
+                  ? () => {
+                      catalog.refresh();
+                      setPickerOpen(true);
+                    }
+                  : undefined
+              }
+            />
+          ) : null,
+        }}
+      />
+      {policy ? (
+        <ModelPickerSheet
+          open={pickerOpen}
+          onClose={() => setPickerOpen(false)}
+          rows={catalog.rows}
+          loading={catalog.loading && catalog.rows.length === 0}
+          error={catalog.error}
+          model={policy.model}
+          effort={policy.reasoningEffort}
+          latencyMode={policy.latencyMode}
+          hasImageAttachments={controller.attachments.attachments.some(
+            (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
+          )}
+          groupPresentation={{
+            opengeni_credits: {
+              label: "Opengeni",
+              icon: <BrandMark width={15} color={theme.colors["fg-subtle"]} />,
+            },
+          }}
+          onModelChange={composer.setModel}
+          onEffortChange={composer.setReasoningEffort}
+          onLatencyModeChange={composer.setLatencyMode}
+          onSelectionFeedback={() => void Haptics.selectionAsync()}
+        />
+      ) : null}
+    </>
+  );
+}

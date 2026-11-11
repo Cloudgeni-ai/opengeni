@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BrowserAction,
@@ -8,10 +8,13 @@ import type {
   BrowserObservation,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
-import { InteractionDefiniteDriverError } from "@opengeni/interaction";
+import {
+  InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
+} from "@opengeni/interaction";
 import {
   AgentBrowserDriver,
-  AgentBrowserJsonRunner,
+  ManagedBrowserRunner,
   BrowserDownloadStore,
   BrowserWorkspaceFileStager,
   LightpandaRunner,
@@ -82,13 +85,8 @@ e2e(
           binary: lightpandaBinary,
           sessionDirectory: join(directory, "lightpanda"),
         })
-      : await AgentBrowserJsonRunner.create({
-          namespace: `conformance_${randomUUID().slice(0, 8)}`,
-          sessionName: "s",
-          socketDirectory: join(directory, "s"),
+      : await ManagedBrowserRunner.create({
           profileDirectory: join(directory, "profile"),
-          downloadDirectory: downloadStore.filesDirectory,
-          screenshotDirectory: join(directory, "screenshots"),
           headed: false,
           ...(browserExecutablePath ? { browserExecutablePath } : {}),
         });
@@ -185,10 +183,28 @@ e2e(
         "locator_not_found",
       );
       if (!lightpandaBinary) {
+        // Preparing the action point may first scroll the target into view,
+        // which can run page handlers even though the covering layer prevents
+        // pointer input, so that refusal may only be an unknown outcome.
+        const failure = await driver
+          .dispatch(command(page, clickRole("button", "Covered target")))
+          .catch((error: unknown) => error);
+        if (failure instanceof InteractionOutcomeUnknownDriverError) {
+          expect(failure).toMatchObject({ code: "outcome_unknown", retryable: false });
+          expect(failure.message).toContain("covered");
+        } else {
+          expect(failure).toBeInstanceOf(InteractionDefiniteDriverError);
+          expect(failure).toMatchObject({ code: "invalid_action" });
+        }
+        // Inspect after the potentially effectful preparation; do not replay.
+        page = await driver.observe(page.target.id);
+        // Now in view, nothing scrolls and no pointer input is sent, so the
+        // same covered target is a definite refusal.
         await expectDefiniteError(
           driver.dispatch(command(page, clickRole("button", "Covered target"))),
           "invalid_action",
         );
+        page = await driver.observe(page.target.id);
       }
 
       if (!lightpandaBinary) {
@@ -263,22 +279,19 @@ e2e(
         page = await act(driver, page, { type: "clipboard", operation: "copy" });
         expect(driver.readClipboard().text).toBe("same-frame clipboard value");
       }
-      await expectDefiniteError(
-        driver.dispatch(
-          command(page, {
-            type: "clipboard",
-            operation: "copy",
-            locator: lightpandaBinary
-              ? { kind: "css", selector: "#clipboardPassword" }
-              : { kind: "label", text: "Protected clipboard" },
-            content: "value",
-          }),
-        ),
-        "permission_denied",
-      );
+      // An explicit copy of a password field is never refused.
+      page = await act(driver, page, {
+        type: "clipboard",
+        operation: "copy",
+        locator: lightpandaBinary
+          ? { kind: "css", selector: "#clipboardPassword" }
+          : { kind: "label", text: "Protected clipboard" },
+        content: "value",
+      });
+      expect(driver.readClipboard().text).toBe("password-field-value");
       page = await act(driver, page, { type: "clipboard", operation: "clear" });
       expect(driver.readClipboard()).toMatchObject({
-        revision: lightpandaBinary ? 3 : 5,
+        revision: lightpandaBinary ? 4 : 6,
         text: "",
         source: "clear",
       });
@@ -313,12 +326,8 @@ e2e(
       page = await act(driver, page, clickRole("button", "Request fixture failure"));
       page = await act(driver, page, clickRole("button", "Throw page error"));
       await Bun.sleep(100);
-      page = await driver.observe(page.target.id);
-      expect(page.diagnostics).toMatchObject({
-        consoleErrorCount: 1,
-        failedRequestCount: 1,
-        pageErrorCount: lightpandaBinary ? 0 : 1,
-      });
+      // Console messages and page errors are read on request (Runtime stays
+      // disabled so pages cannot detect it); observations count them afterwards.
       const diagnostics = await driver.debug(page.target.id);
       expect(diagnostics.entries.map((entry) => entry.kind)).toEqual(
         expect.arrayContaining(
@@ -327,6 +336,12 @@ e2e(
             : ["console", "failed_request", "page_error"],
         ),
       );
+      page = await driver.observe(page.target.id);
+      expect(page.diagnostics).toMatchObject({
+        consoleErrorCount: 1,
+        failedRequestCount: 1,
+        pageErrorCount: lightpandaBinary ? 0 : 1,
+      });
 
       if (!lightpandaBinary) {
         page = await act(driver, page, {
@@ -350,6 +365,13 @@ e2e(
           receivedBytes: expectedDownloadBytes.byteLength,
           sha256: createHash("sha256").update(expectedDownloadBytes).digest("hex"),
         });
+        // Chromium saved it under its own name, as in any downloads folder.
+        expect(await readFile(join(downloadStore.filesDirectory, "fixture-download.txt"))).toEqual(
+          expectedDownloadBytes,
+        );
+        expect(
+          await readFile((await downloadStore.completedFile(completedDownload.id)).path),
+        ).toEqual(expectedDownloadBytes);
         let publishedBytes = Buffer.alloc(0);
         const publicationServer = Bun.serve({
           port: 0,

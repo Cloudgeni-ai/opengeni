@@ -66,6 +66,6 @@ export function confinedFileReadCommand(root: string, path: string, maxBytes: nu
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   const script = confinedFileReadScript(root, path, maxBytes);
   return `/usr/bin/env -u BASH_ENV /bin/bash --noprofile --norc -c ${quote(
-    `exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/local/bin python3 -I -S -c ${quote(script)}`,
+    `exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/local/bin:/run/current-system/sw/bin python3 -I -S -c ${quote(script)}`,
   )}`;
 }

@@ -1,0 +1,24 @@
+[package]
+name = "compute-guest"
+description = "The Opengeni compute guest init: PID 1 inside every sandbox built from an OCI image"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "compute-guest"
+path = "src/main.rs"
+
+# Small on purpose: this runs in every guest, as a static musl binary.
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[lints]
+workspace = true

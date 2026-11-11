@@ -50,9 +50,9 @@ function listClient(overrides: Record<string, unknown> = {}) {
     updateSessionArchive: async (
       _workspace: string,
       id: string,
-      request: { archived: boolean },
+      request: { archived: boolean; mode?: string },
     ) => {
-      calls.push(`archive:${id}:${request.archived}`);
+      calls.push(`archive:${id}:${request.archived}:${request.mode}`);
       sessions.splice(0, 1);
       return {} as never;
     },
@@ -109,8 +109,16 @@ describe("SessionList", () => {
         view.container.querySelector<HTMLButtonElement>("[aria-label^='Archive:']")!.click(),
       );
       await flush(50);
-      expect(calls).toContain("archive:aaaaaaaa-0000-4000-8000-000000000001:true");
+      expect(calls).toContain("archive:aaaaaaaa-0000-4000-8000-000000000001:true:undefined");
       expect(view.container.textContent).toContain("No chats yet");
+      // Undo is offered for a few seconds and un-archives the same chat.
+      const undo = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Undo",
+      );
+      expect(view.container.textContent).toContain("Archived “");
+      await actRun(() => undo!.click());
+      await flush(50);
+      expect(calls).toContain("archive:aaaaaaaa-0000-4000-8000-000000000001:false:undefined");
     } finally {
       await view.unmount();
     }
@@ -118,6 +126,108 @@ describe("SessionList", () => {
 });
 
 describe("OpenGeniChat", () => {
+  test("default new chat preserves newer text through uncertain retry and native draft hydration", async () => {
+    const { client } = listClient();
+    const calls: unknown[][] = [];
+    let finish!: (id: string) => void;
+    const view = await renderComponent(
+      <OpenGeniChat
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        createSession={async (...args) => {
+          calls.push(args);
+          if (calls.length === 1) throw new TypeError("Response lost");
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        }}
+      />,
+    );
+    const edit = async (text: string) => {
+      const input = view.container.querySelector<HTMLTextAreaElement>(
+        "[data-og-new-chat-composer] textarea",
+      )!;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+        input,
+        text,
+      );
+      const key = Object.keys(input).find((name) => name.startsWith("__reactProps$"))!;
+      await actRun(() =>
+        (input as unknown as Record<string, { onChange: (event: unknown) => void }>)[key]!.onChange(
+          { target: input },
+        ),
+      );
+      return input;
+    };
+    try {
+      await flush(40);
+      const input = await edit("First question");
+      await actRun(() => input.form!.requestSubmit());
+      expect(view.container.textContent).toContain("Creation is not confirmed");
+      await edit("Keep this newer thought");
+      const retry = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Retry",
+      )!;
+      await actRun(() => retry.click());
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).toEqual(calls[0]);
+      await actRun(() => finish("bbbbbbbb-0000-4000-8000-000000000002"));
+      await flush(50);
+      expect(view.container.querySelector("[data-og-new-chat-composer]")).toBeNull();
+      expect(
+        view.container.querySelector<HTMLTextAreaElement>(
+          "[data-og-conversation-composer] textarea",
+        )?.value,
+      ).toBe("Keep this newer thought");
+      await flush(650);
+      expect(
+        view.container.querySelector<HTMLTextAreaElement>(
+          "[data-og-conversation-composer] textarea",
+        )?.value,
+      ).toBe("Keep this newer thought");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("conversation appearance reaches the stock model picker without replacing the conversation", async () => {
+    const { client, sessions } = listClient();
+    const view = await renderComponent(
+      <OpenGeniChat
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={sessions[0]!.id}
+        conversationProps={{
+          modelPicker: true,
+          modelPickerProps: {
+            groupPresentation: {
+              opengeni_credits: {
+                label: "Acme Assist",
+                icon: <svg data-testid="acme-conversation-model-mark" />,
+              },
+            },
+            messages: { label: "Choose a model" },
+          },
+        }}
+      />,
+    );
+    try {
+      await flush(150);
+      const trigger = view.container.querySelector('button[aria-label="Choose a model"]');
+      expect(trigger).not.toBeNull();
+      expect(
+        trigger?.querySelector(
+          '[aria-label="Acme Assist"] [data-testid="acme-conversation-model-mark"]',
+        ),
+      ).not.toBeNull();
+      expect(
+        view.container.querySelector("[data-og-conversation-composer] textarea"),
+      ).not.toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("starts a new chat from the first message and switches to it", async () => {
     const { client, calls } = listClient();
     const changes: Array<string | null> = [];
@@ -195,10 +305,66 @@ describe("OpenGeniChat", () => {
       await actRun(() => textarea.form!.requestSubmit());
       await flush(30);
       expect(view.container.querySelector("[role='alert']")?.textContent).toBe(
-        "custom create failed",
+        "The request could not be completed.",
       );
     } finally {
       await view.unmount();
+    }
+  });
+});
+
+describe("OpenGeniChat theme follows the host", () => {
+  test("a light host page gets a light chat blended into its background", async () => {
+    const { client } = listClient();
+    document.body.style.backgroundColor = "rgb(255, 255, 255)";
+    const view = await renderComponent(<OpenGeniChat client={client} workspaceId={WORKSPACE_ID} />);
+    try {
+      await flush(50);
+      const root = view.container.querySelector<HTMLElement>("[data-og-chat]")!;
+      expect(root.getAttribute("data-og-theme")).toBe("light");
+      expect(root.style.getPropertyValue("--og-color-canvas")).toBe("rgb(255 255 255)");
+    } finally {
+      await view.unmount();
+      document.body.style.backgroundColor = "";
+    }
+  });
+
+  test("an explicit theme wins and surface='theme' keeps the stock surfaces", async () => {
+    const { client } = listClient();
+    document.documentElement.classList.add("dark");
+    const view = await renderComponent(
+      <OpenGeniChat client={client} workspaceId={WORKSPACE_ID} theme="light" surface="theme" />,
+    );
+    try {
+      await flush(50);
+      const root = view.container.querySelector<HTMLElement>("[data-og-chat]")!;
+      expect(root.getAttribute("data-og-theme")).toBe("light");
+      expect(root.style.getPropertyValue("--og-color-canvas")).toBe("");
+    } finally {
+      await view.unmount();
+      document.documentElement.classList.remove("dark");
+    }
+  });
+
+  test("the nested conversation inherits the chat's resolution", async () => {
+    const { client } = listClient();
+    document.body.style.backgroundColor = "rgb(255, 255, 255)";
+    const view = await renderComponent(
+      <OpenGeniChat
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        defaultSessionId="aaaaaaaa-0000-4000-8000-000000000001"
+      />,
+    );
+    try {
+      await flush(80);
+      const conversation = view.container.querySelector<HTMLElement>("[data-og-conversation]")!;
+      expect(conversation).not.toBeNull();
+      expect(conversation.hasAttribute("data-og-theme")).toBe(false);
+      expect(conversation.style.getPropertyValue("--og-color-canvas")).toBe("");
+    } finally {
+      await view.unmount();
+      document.body.style.backgroundColor = "";
     }
   });
 });

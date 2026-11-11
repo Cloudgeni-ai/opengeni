@@ -3,13 +3,20 @@ import {
   WorkspaceVoiceInputSettings,
   type TranscribeAudioResponse,
 } from "@opengeni/contracts";
-import { type ApiRouteDeps, requireAccessGrant, TranscriptionServiceError } from "@opengeni/core";
+import {
+  type ApiRouteDeps,
+  requireAccessGrant,
+  TranscriptionBillingRefusedError,
+  TranscriptionServiceError,
+} from "@opengeni/core";
 import { getWorkspace } from "@opengeni/db";
+import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { Hono } from "hono";
-import { registerResumableTranscriptionRoutes } from "./transcription-recordings";
+import { creditDebitAttributionForGrant } from "../access-grant-rls";
+import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
+import { voiceInputRegionRestricted } from "../transcription/region";
 
 export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
-  registerResumableTranscriptionRoutes(app, deps);
   app.post("/v1/workspaces/:workspaceId/transcriptions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
@@ -19,13 +26,34 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
       return c.json({ code: "policy_blocked" }, 403);
     }
     const preferences = WorkspaceVoiceInputSettings.safeParse(workspace.settings.voiceInput).data;
-    const service = deps.transcription;
-    if (!service || !(await service.available({ workspaceId, subjectId: grant.subjectId }))) {
-      return c.json({ code: "unavailable" }, 503);
+    if (await voiceInputRegionRestricted(deps, { accountId: grant.accountId, workspaceId })) {
+      return c.json({ code: "region_restricted" }, 422);
     }
+    const service = deps.transcription;
+    if (!service) return c.json({ code: "unavailable" }, 503);
     try {
+      const context = {
+        workspaceId,
+        accountId: grant.accountId,
+        subjectId: grant.subjectId,
+        preferredProvider: preferences?.preferredProvider,
+        fallbackEnabled: preferences?.fallbackEnabled,
+      };
+      if (
+        !(service.selectProvider
+          ? await service.selectProvider(context)
+          : await service.available(context))
+      ) {
+        return c.json({ code: "unavailable" }, 503);
+      }
       const body = await audioRequest(c.req.raw, service.limits().maxSizeBytes);
+      // Server-generated: the correlation id is client-chosen and a reused
+      // settlement key would make every later call with it free.
       const result = await service.transcribe({
+        billing: {
+          sourceId: crypto.randomUUID(),
+          attribution: creditDebitAttributionForGrant(grant),
+        },
         preferredProvider: preferences?.preferredProvider,
         fallbackEnabled: preferences?.fallbackEnabled,
         workspaceId,
@@ -34,6 +62,7 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
         audio: body.audio,
         mimeType: body.mimeType,
         durationSeconds: body.durationSeconds,
+        ...(body.language ? { language: body.language } : {}),
         signal: c.req.raw.signal,
         requestId: c.req.header("x-opengeni-correlation-id") ?? crypto.randomUUID(),
       });
@@ -44,7 +73,14 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
       return c.json(response);
     } catch (error) {
       if (error instanceof TranscriptionServiceError) {
+        if (error.subscriptionCode) throw error;
         return c.json({ code: error.code }, error.status as never);
+      }
+      if (error instanceof TranscriptionBillingRefusedError) {
+        return transcriptionBillingRefusal(c, error);
+      }
+      if (error instanceof InferenceRegionRestrictedError) {
+        return c.json({ code: "region_restricted" }, 422);
       }
       if (isAbort(error)) return c.json({ code: "cancelled" }, 499 as never);
       return c.json({ code: "unknown" }, 500);
@@ -55,7 +91,7 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
 async function audioRequest(
   request: Request,
   maxSizeBytes: number,
-): Promise<{ audio: Uint8Array; mimeType: string; durationSeconds?: number }> {
+): Promise<{ audio: Uint8Array; mimeType: string; durationSeconds?: number; language?: string }> {
   const contentLength = Number(request.headers.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > maxSizeBytes + 64 * 1024) {
     throw new TranscriptionServiceError({
@@ -80,10 +116,12 @@ async function audioRequest(
       });
     }
     const durationSeconds = durationValue(stringValue(form.get("durationSeconds")));
+    const language = languageValue(stringValue(form.get("language")));
     return {
       audio: new Uint8Array(await audio.arrayBuffer()),
       mimeType: stringValue(form.get("mimeType")) ?? audio.type,
       ...(durationSeconds === undefined ? {} : { durationSeconds }),
+      ...(language ? { language } : {}),
     };
   }
   const mimeType = contentType.split(";", 1)[0]?.trim() ?? "";
@@ -94,10 +132,12 @@ async function audioRequest(
     });
   }
   const durationSeconds = durationValue(request.headers.get("x-opengeni-audio-duration-seconds"));
+  const language = languageValue(request.headers.get("x-opengeni-audio-language"));
   return {
     audio: await readBounded(request.body, maxSizeBytes, request.signal),
     mimeType,
     ...(durationSeconds === undefined ? {} : { durationSeconds }),
+    ...(language ? { language } : {}),
   };
 }
 
@@ -151,6 +191,19 @@ function durationValue(value: string | null | undefined): number | undefined {
     });
   }
   return duration;
+}
+
+/** An ISO 639-1 or 639-3 hint ("nb", "eng"); omitted means detect. */
+function languageValue(value: string | null | undefined): string | undefined {
+  if (value == null || value.trim() === "") return undefined;
+  const language = value.trim().toLowerCase();
+  if (!/^[a-z]{2,3}$/u.test(language)) {
+    throw new TranscriptionServiceError({
+      code: "invalid_audio",
+      message: "Invalid language.",
+    });
+  }
+  return language;
 }
 
 function stringValue(value: FormDataEntryValue | null): string | undefined {

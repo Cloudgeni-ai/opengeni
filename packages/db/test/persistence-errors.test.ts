@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ClassifiedDatabaseRefusal,
+  databaseReconnectBackoffSeconds,
+  DatabaseUnavailableError,
+  isDatabaseConnectionLoss,
   isDatabasePersistenceFailure,
   isRetryableDatabaseTransportFailure,
   nestedPostgresSqlState,
@@ -23,6 +27,40 @@ function databaseError(overrides: Record<string, unknown> = {}): Error {
 }
 
 describe("session event persistence failure truth", () => {
+  test("atomic checkpoints never retry an uncertain commit with an older rollback cause", async () => {
+    let attempts = 0;
+    await expect(
+      runIdempotentPersistenceTransaction({ stage: "atomic_checkpoint" }, async () => {
+        attempts++;
+        throw Object.assign(new Error("commit acknowledgement lost"), {
+          code: "ECONNRESET",
+          cause: { code: "40P01" },
+        });
+      }),
+    ).rejects.toMatchObject({
+      details: { attempts: 1, sqlState: null, retryOutcome: "not_retryable" },
+    });
+    expect(attempts).toBe(1);
+  });
+  test("a classified database refusal keeps its meaning and is never retried", async () => {
+    class Refusal extends ClassifiedDatabaseRefusal {}
+    const refusal = new Refusal("not authorized", {
+      cause: databaseError({ code: "42501" }),
+    });
+    let attempts = 0;
+    let rejected: unknown;
+    try {
+      await runIdempotentPersistenceTransaction({ stage: "prompt" }, async () => {
+        attempts++;
+        throw refusal;
+      });
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toBe(refusal);
+    expect(rejected).not.toBeInstanceOf(SessionEventPersistenceError);
+    expect(attempts).toBe(1);
+  });
   test("recognizes raw postgres transport failures without message heuristics", () => {
     for (const code of [
       "CONNECTION_CLOSED",
@@ -81,6 +119,32 @@ describe("session event persistence failure truth", () => {
     });
     expect(JSON.stringify(facts)).not.toContain(syntheticValue);
     expect(JSON.stringify(facts)).not.toContain("insert into");
+  });
+
+  test("names the PL/pgSQL functions and lines that raised, never the SQL or message", () => {
+    // The exact `where` shape postgres.js exposes for a RAISE two calls deep.
+    const error = databaseError({
+      cause: {
+        code: "42501",
+        severity: "ERROR",
+        routine: "exec_stmt_raise",
+        message: `refused for ${syntheticValue}`,
+        where: [
+          "PL/pgSQL function pg_temp_3.inner_fence(uuid,text) line 7 at RAISE",
+          `SQL statement "SELECT pg_temp.inner_fence(gen_random_uuid(), '${syntheticValue}')"`,
+          "PL/pgSQL function admit_turn_resources() line 31 at PERFORM",
+        ].join("\n"),
+      },
+    });
+    const facts = safeDatabaseErrorFacts(error);
+    expect(facts).toEqual({
+      severity: "ERROR",
+      routine: "exec_stmt_raise",
+      table: "session_events",
+      plpgsql: ["inner_fence:7", "admit_turn_resources:31"],
+    });
+    expect(JSON.stringify(facts)).not.toContain(syntheticValue);
+    expect(safeDatabaseErrorFacts({ where: 'SQL statement "SELECT 1"' })).toEqual({});
   });
 
   test("retries only the persistence closure with stable correlation", async () => {
@@ -295,5 +359,146 @@ describe("session event persistence failure truth", () => {
     expect((caught as Error).message).not.toContain(source.message);
     expect((caught as Error).message).not.toContain(syntheticValue);
     expect(nestedPostgresSqlState(caught)).toBe("23505");
+  });
+
+  test("a schema change under the transaction is retried after a short wait", async () => {
+    // A rolling migration changed a column type while a routine called by
+    // this transaction was already planned against the old one.
+    const delays: number[] = [];
+    let attempts = 0;
+    const result = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session_events.append_for_turn_attempt",
+        eventTypes: ["agent.toolCall.output"],
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+      },
+      async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw databaseError({ cause: { code: "42883", severity: "ERROR", routine: "op_error" } });
+        }
+        return "persisted";
+      },
+    );
+    expect(result).toBe("persisted");
+    expect(attempts).toBe(2);
+    expect(delays).toEqual([250]);
+  });
+
+  test("a schema error that persists stays a non-retryable failure after bounded waits", async () => {
+    const delays: number[] = [];
+    let attempts = 0;
+    let retries = 0;
+    const caught = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session_events.append_for_turn_attempt",
+        eventTypes: ["agent.toolCall.output"],
+        correlationId: "schema-change-correlation",
+        onRetry: () => {
+          retries += 1;
+        },
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+      },
+      async () => {
+        attempts += 1;
+        throw databaseError({ cause: { code: "42883", severity: "ERROR" } });
+      },
+    ).catch((error) => error);
+    expect(attempts).toBe(3);
+    expect(delays).toEqual([250, 1_000]);
+    expect(retries).toBe(0);
+    expect(caught).toBeInstanceOf(SessionEventPersistenceError);
+    expect((caught as SessionEventPersistenceError).details).toMatchObject({
+      code: "db_failure",
+      sqlState: "42883",
+      attempts: 3,
+      retryOutcome: "not_retryable",
+    });
+  });
+});
+
+describe("database connection loss", () => {
+  test("recognizes server-ended sessions, transport codes, and node-postgres socket loss", () => {
+    const adminShutdown = Object.assign(
+      new Error("terminating connection due to administrator command"),
+      {
+        name: "PostgresError",
+        code: "57P01",
+        severity: "FATAL",
+      },
+    );
+    const wrapped = Object.assign(new Error("Failed query: select 1"), {
+      name: "DrizzleQueryError",
+      query: "select 1",
+      params: [],
+      cause: adminShutdown,
+    });
+    for (const failure of [
+      adminShutdown,
+      wrapped,
+      // postgres.js connection error shape.
+      Object.assign(new Error("write CONNECTION_CLOSED 10.0.0.4:5432"), {
+        code: "CONNECTION_CLOSED",
+        errno: "CONNECTION_CLOSED",
+        address: ["10.0.0.4"],
+        port: [5432],
+      }),
+      // A socket failure postgres.js stamped with the failed query.
+      Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET", query: "select 1" }),
+      Object.assign(new Error("Failed query: select 1"), {
+        query: "select 1",
+        params: [],
+        cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+      }),
+      Object.assign(new Error("the database system is starting up"), { code: "57P03" }),
+      Object.assign(new Error("server closed the connection"), { code: "08006" }),
+      new Error("Connection terminated unexpectedly"),
+      new DatabaseUnavailableError("managed auth session store unavailable", {
+        cause: new Error("Failed to get session"),
+      }),
+      new Error("outer", { cause: new Error("Connection terminated unexpectedly") }),
+    ]) {
+      expect(isDatabaseConnectionLoss(failure)).toBe(true);
+    }
+  });
+
+  test("does not treat a rejected statement or an ordinary failure as connection loss", () => {
+    for (const failure of [
+      Object.assign(new Error("duplicate key"), { name: "PostgresError", code: "23505" }),
+      Object.assign(new Error("syntax error"), { name: "PostgresError", code: "42601" }),
+      Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" }),
+      Object.assign(new Error("deadlock detected"), { code: "40P01" }),
+      new Error("Connection terminated unexpectedly while parsing"),
+      // The same transport codes from another service are not database loss.
+      Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+      Object.assign(new Error("getaddrinfo ENOTFOUND api.example.com"), { code: "ENOTFOUND" }),
+      Object.assign(new Error("closed"), { name: "NatsError", code: "CONNECTION_CLOSED" }),
+      Object.assign(new Error("browser control failed"), {
+        cause: Object.assign(new TypeError("fetch failed"), {
+          cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+        }),
+      }),
+      new Error("Failed to get session"),
+      null,
+      "Connection terminated unexpectedly",
+    ]) {
+      expect(isDatabaseConnectionLoss(failure)).toBe(false);
+    }
+  });
+});
+
+describe("database reconnect backoff", () => {
+  test("keeps the driver's jittered growth but never waits more than 2 s", () => {
+    expect(databaseReconnectBackoffSeconds(0)).toBeLessThanOrEqual(0.01);
+    for (let retries = 0; retries < 40; retries += 1) {
+      const delay = databaseReconnectBackoffSeconds(retries);
+      expect(delay).toBeGreaterThanOrEqual(0);
+      expect(delay).toBeLessThanOrEqual(2);
+    }
+    expect(databaseReconnectBackoffSeconds(30)).toBeGreaterThanOrEqual(1);
   });
 });

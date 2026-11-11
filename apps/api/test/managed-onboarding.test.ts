@@ -7,12 +7,9 @@ import {
   listSelfOrganizationMemberships,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 
 import { createApp } from "../src/app";
@@ -392,6 +389,7 @@ describe("managed organization onboarding", () => {
       body: JSON.stringify({
         organizationName: "Orbital Mechanics",
         operationId,
+        useCase: "embed",
       }),
     });
     expect(complete.status).toBe(200);
@@ -404,16 +402,96 @@ describe("managed organization onboarding", () => {
         organizationName: string;
         workspaces: number;
         sharedWorkspaceMemberships: number;
+        personalWorkspaceMembers: string[];
       }>
     >`
       select account.name as "organizationName",
         (select count(*)::int from workspaces where account_id = account.id) as workspaces,
-        (select count(*)::int from workspace_memberships where account_id = account.id)
-          as "sharedWorkspaceMemberships"
+        (select count(*)::int from workspace_memberships
+          where account_id = account.id and workspace_id <> ${completion.personalWorkspaceId})
+          as "sharedWorkspaceMemberships",
+        (select coalesce(array_agg(subject_id), '{}') from workspace_memberships
+          where account_id = account.id and workspace_id = ${completion.personalWorkspaceId})
+          as "personalWorkspaceMembers"
       from managed_accounts account where account.id = ${completion.organizationId}`;
     expect(provisioned?.organizationName).toBe("Orbital Mechanics");
+    // The signup answer is kept once, for this person in this organization.
+    const signupUseCases = await shared.admin<Array<{ subjectId: string; useCase: string }>>`
+      select subject_id as "subjectId", use_case as "useCase"
+      from opengeni_private.organization_signup_use_cases
+      where account_id = ${completion.organizationId}`;
+    expect(signupUseCases).toHaveLength(1);
+    expect(signupUseCases[0]?.useCase).toBe("embed");
+    expect(signupUseCases[0]?.subjectId).toStartWith("user:");
+    // The person's current answer comes back with their memberships, so the
+    // new-chat page follows it on any device.
+    const membershipsUseCase = async () => {
+      const response = await app.request("/v1/organization-memberships", {
+        headers: { cookie: sessionCookie },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        memberships: Array<{ organizationId: string; signupUseCase?: string | null }>;
+      };
+      return body.memberships.find(
+        (membership) => membership.organizationId === completion.organizationId,
+      )?.signupUseCase;
+    };
+    expect(await membershipsUseCase()).toBe("embed");
+    // Back, then "Get help with everyday things": the current answer changes,
+    // the first one stays as recorded.
+    const changeUseCase = (body: unknown) =>
+      app.request("/v1/auth/organization-onboarding/use-case", {
+        method: "PUT",
+        headers: { cookie: sessionCookie, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const changed = await changeUseCase({
+      organizationId: completion.organizationId,
+      useCase: "everyday",
+    });
+    expect(changed.status).toBe(200);
+    expect(await changed.json()).toEqual({ useCase: "everyday" });
+    expect(await membershipsUseCase()).toBe("everyday");
+    const [answers] = await shared.admin<Array<{ first: string; current: string }>>`
+      select first.use_case as first, current.use_case as current
+      from opengeni_private.organization_signup_use_cases first
+      join opengeni_private.organization_signup_current_use_cases current
+        using (account_id, subject_id)
+      where account_id = ${completion.organizationId}`;
+    expect(answers).toEqual({ first: "embed", current: "everyday" });
+    // Only for an organization the person belongs to, and only known answers.
+    const foreignOrganizationId = crypto.randomUUID();
+    await shared.admin`insert into managed_accounts(id, name) values (${foreignOrganizationId}, 'Elsewhere')`;
+    expect(
+      (await changeUseCase({ organizationId: foreignOrganizationId, useCase: "embed" })).status,
+    ).toBe(403);
+    expect(
+      (await changeUseCase({ organizationId: completion.organizationId, useCase: "hobby" })).status,
+    ).toBe(422);
+    const anonymous = await app.request("/v1/auth/organization-onboarding/use-case", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ organizationId: completion.organizationId, useCase: "cloud" }),
+    });
+    expect(anonymous.status).toBe(401);
+    // A replayed setup keeps the changed answer.
+    const setupReplay = await app.request("/v1/auth/organization-onboarding", {
+      method: "POST",
+      headers: { cookie: sessionCookie, "content-type": "application/json" },
+      body: JSON.stringify({
+        organizationName: "Orbital Mechanics",
+        operationId,
+        useCase: "embed",
+      }),
+    });
+    expect(setupReplay.status).toBe(200);
+    expect(await membershipsUseCase()).toBe("everyday");
     expect(provisioned?.workspaces).toBe(1);
     expect(provisioned?.sharedWorkspaceMemberships).toBe(0);
+    // Only the owner's own row sits in their Personal workspace (migration 1231).
+    expect(provisioned?.personalWorkspaceMembers).toHaveLength(1);
+    expect(provisioned?.personalWorkspaceMembers[0]).toStartWith("user:");
     expect(completion.personalWorkspaceId).toBeTruthy();
 
     const compatibilityReplay = await app.request("/v1/organizations", {
@@ -484,6 +562,51 @@ describe("managed organization onboarding", () => {
     expect(await unavailable.json()).toEqual({ state: "unavailable" });
   }, 120_000);
 
+  test("disabled email verification admits a new password user directly into setup", async () => {
+    if (!shared || !client) return;
+    const sent: string[] = [];
+    const app = createApp({
+      settings: { ...settings, managedAuthRequireEmailVerification: false },
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+      managedEmailTransport: {
+        sender: "Auth <auth@example.test>",
+        idempotency: { scope: "test-provider-v1:verification-disabled", retentionSeconds: 86_400 },
+        send: async (message) => {
+          sent.push(message.kind);
+          return { status: "sent", providerMessageId: `test-${sent.length}` };
+        },
+      },
+    });
+    const email = `verification-disabled-${crypto.randomUUID()}@example.test`;
+    const signup = await app.request("/v1/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Example Tester", email, password: "password1234" }),
+    });
+    expect(signup.status).toBe(200);
+    expect(sent).not.toContain("email_verification");
+    const cookie = signup.headers
+      .getSetCookie()
+      .find((value) => value.includes("better-auth.session_token="));
+    expect(cookie).toBeTruthy();
+    const onboarding = await app.request("/v1/auth/organization-onboarding", {
+      headers: { cookie: cookie!.split(";", 1)[0]! },
+    });
+    expect(onboarding.status).toBe(200);
+    expect(await onboarding.json()).toEqual({ state: "required" });
+    const signin = await app.request("/v1/auth/sign-in/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "password1234" }),
+    });
+    expect(signin.status).toBe(200);
+    expect(
+      signin.headers.getSetCookie().some((value) => value.includes("better-auth.session_token=")),
+    ).toBe(true);
+  }, 120_000);
+
   test("the first verification click signs the new user in once, straight into setup", async () => {
     if (!shared || !client) return;
     const sent: Array<{ kind: string; to: string; text: string }> = [];
@@ -493,7 +616,7 @@ describe("managed organization onboarding", () => {
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
       managedEmailTransport: {
-        sender: "OpenGeni <auth@mail.opengeni.ai>",
+        sender: "Opengeni <auth@mail.opengeni.ai>",
         idempotency: { scope: "test-provider-v1:verify-sign-in", retentionSeconds: 86_400 },
         send: async (message) => {
           sent.push({ kind: message.kind, to: message.to, text: message.text });
@@ -566,7 +689,7 @@ describe("managed organization onboarding", () => {
     // be told not to use it.
     const sent: Array<{ kind: string; to: string; text: string; html?: string }> = [];
     const auth = createManagedAuth(settings, {} as never, {
-      sender: "OpenGeni <auth@mail.opengeni.ai>",
+      sender: "Opengeni <auth@mail.opengeni.ai>",
       idempotency: { scope: "test-provider-v1:verify-ignore", retentionSeconds: 86_400 },
       send: async (message) => {
         sent.push(message);
@@ -592,7 +715,7 @@ describe("managed organization onboarding", () => {
       "email_verification",
       "email_verification",
     ]);
-    const ignore = "If you did not create an OpenGeni account, ignore this email.";
+    const ignore = "If you did not create an Opengeni account, ignore this email.";
     for (const message of sent) {
       expect(message.to).toBe(user.email);
       expect(message.text).toContain(ignore);

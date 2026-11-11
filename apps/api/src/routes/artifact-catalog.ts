@@ -4,36 +4,54 @@ import {
   ArtifactCatalogKind,
   ArtifactCatalogListQuery,
   ArtifactCatalogListResponse,
+  ArtifactLinkResolution,
+  ArtifactPinResponse,
+  UpdateArtifactPinRequest,
   retainedArtifactReferenceFromFile,
   retainedGeneratedImageReferenceFromFile,
   type AccessGrant,
+  type FileAsset,
 } from "@opengeni/contracts";
 import {
   editableArtifactId,
   editableArtifactScope,
+  EDITABLE_ARTIFACT_READ_BATCH_LIMIT,
   fileOwnerContextForAccess,
   grantHasAgentAttemptAuthority,
   hasPermission,
   requireAccessGrantAuthorization,
   requireLiveAgentAttemptAuthorization,
-  requireSessionAuthorization,
+  requireSessionAuthorizations,
+  readSessionAttachmentFiles,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  siteViewerForGrant,
   type ApiRouteDeps,
+  type EditableArtifact,
 } from "@opengeni/core";
 import {
   getFilesForSubject,
-  getGeneratedImageArtifact,
-  getSessionAuthorityProjection,
+  getGeneratedImageArtifacts,
+  getSessionAuthorityProjections,
+  isWorkspaceArtifactVisible,
   listArtifactCatalogCandidates,
+  listSessionTreeIds,
+  nestedPostgresSqlState,
+  updateArtifactPin,
   withSessionRlsActorContext,
   type ArtifactCatalogCandidate,
   type ArtifactCatalogPosition,
+  type GeneratedImageArtifact,
   type SessionRlsActorContext,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
 import { artifactCatalogCursorCodec } from "../artifact-catalog-cursor";
+import {
+  editableArtifactAudienceViewer,
+  projectEditableArtifactAudience,
+} from "../editable-artifact-audience";
 import {
   editableArtifactActorForGrant,
   editableArtifactHttpError,
@@ -41,27 +59,186 @@ import {
   type EditableArtifactRouteDependencies,
 } from "./editable-artifacts";
 import { fileAuthoritySubjectIdForGrant } from "./files";
+import { parseRequestQuery, requestValidationError } from "../http/request-body";
 
 type Dependencies = ApiRouteDeps & EditableArtifactRouteDependencies;
 const editableKinds = new Set(["document", "spreadsheet", "presentation"]);
 const CANDIDATE_BATCH = 200;
+// Bound both the pool pressure and speculative work beyond the page frontier.
+const PROJECTION_BATCH = EDITABLE_ARTIFACT_READ_BATCH_LIMIT;
 const MAX_BATCHES = 10;
 const iso = (value: Date | string) => new Date(value).toISOString();
 const position = (row: ArtifactCatalogCandidate): ArtifactCatalogPosition => ({
   key: row.sort_key,
   kind: row.kind,
   id: row.id,
+  pinned: row.pinned ?? false,
 });
 
 export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): void {
+  app.get("/v1/workspaces/:workspaceId/artifact-catalog/:artifactId/resolve", async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(context, deps, workspaceId);
+    const grant = authorization.grant;
+    const id = z.string().uuid().safeParse(context.req.param("artifactId"));
+    const query = parseRequestQuery(
+      z.object({ sessionId: z.string().uuid().optional() }).strict(),
+      context.req.query(),
+      { status: 422, message: "Invalid artifact link query" },
+    );
+    if (!id.success) throw new HTTPException(422, { message: "Invalid artifact ID" });
+    const artifactId = id.data.toLowerCase();
+    const filesAllowed = hasPermission(grant.permissions, "files:read");
+    const sitesAllowed = hasPermission(grant.permissions, "artifacts:read");
+    if (!filesAllowed && !sitesAllowed)
+      throw new HTTPException(403, { message: "Artifact read access required" });
+    const actor = filesAllowed
+      ? await fileOwnerContextForAccess(deps, authorization, "files:read")
+      : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+    context.header("cache-control", "private, no-store");
+    return withSessionRlsActorContext(actor, async () => {
+      const [files, siteVisible] = await Promise.all([
+        !filesAllowed
+          ? []
+          : query.sessionId
+            ? readSessionAttachmentFiles(deps, grant, query.sessionId, [artifactId])
+            : getFilesForSubject(deps.db, {
+                accountId: grant.accountId,
+                workspaceId,
+                subjectId: await fileAuthoritySubjectIdForGrant(deps, grant),
+                fileIds: [artifactId],
+              }),
+        sitesAllowed
+          ? isWorkspaceArtifactVisible(
+              deps.db,
+              workspaceId,
+              await siteViewerForGrant(deps.db, grant),
+              artifactId,
+            )
+          : false,
+      ]);
+      // UUIDs are independent across domains. Historical artifact:UUID links
+      // meant files, so a readable file wins even if a Site has the same ID.
+      const kind = files.some((file) => file.status === "ready")
+        ? "file"
+        : siteVisible
+          ? "site"
+          : null;
+      if (!kind) throw new HTTPException(404, { message: "Artifact not found" });
+      return context.json(ArtifactLinkResolution.parse({ artifactId, kind }));
+    });
+  });
+  app.put("/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin", async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "artifacts:publish",
+    );
+    const grant = authorization.grant;
+    if (!hasPermission(grant.permissions, "artifacts:publish"))
+      throw new HTTPException(403, { message: "Artifact publish access required" });
+    const kind = ArtifactCatalogKind.safeParse(context.req.param("kind"));
+    const body = UpdateArtifactPinRequest.safeParse(await context.req.json().catch(() => null));
+    const requestedId = context.req.param("artifactId");
+    if (
+      !kind.success ||
+      !(editableKinds.has(kind.data)
+        ? /^[0-9a-f]{32}$/.test(requestedId)
+        : z.string().uuid().safeParse(requestedId).success)
+    )
+      throw new HTTPException(422, { message: "Invalid artifact pin request" });
+    if (!body.success)
+      throw requestValidationError(body.error, "body", {
+        status: 422,
+        message: "Invalid artifact pin request",
+      });
+    const artifactId = editableKinds.has(kind.data) ? requestedId : requestedId.toLowerCase();
+    const fileKind = kind.data === "file" || kind.data === "image";
+    if (!hasPermission(grant.permissions, fileKind ? "files:read" : "artifacts:read"))
+      throw new HTTPException(403, { message: "Artifact read access required" });
+    const actor = fileKind
+      ? await fileOwnerContextForAccess(deps, authorization, "files:read")
+      : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+    context.header("cache-control", "private, no-store");
+    return withSessionRlsActorContext(actor, async () => {
+      if (editableKinds.has(kind.data)) {
+        if (!deps.editableArtifacts)
+          throw new HTTPException(503, { message: "Editable artifacts are unavailable" });
+        try {
+          const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
+          const artifact = await deps.editableArtifacts.readArtifact({
+            scope,
+            actor: editableArtifactActorForGrant(grant, "0000000000000001"),
+            artifactId: editableArtifactId(artifactId),
+          });
+          if (
+            artifact.scope.accountId !== scope.accountId ||
+            artifact.scope.workspaceId !== scope.workspaceId ||
+            artifact.id !== artifactId ||
+            artifact.modality !== kind.data
+          )
+            throw new HTTPException(404, { message: "Artifact not found" });
+        } catch (error) {
+          if (isInvisibleListCandidate(error))
+            throw new HTTPException(404, { message: "Artifact not found" });
+          throw editableArtifactHttpError(error);
+        }
+      }
+      // An Only me Site someone else owns answers exactly like a missing one.
+      if (
+        kind.data === "site" &&
+        !(await isWorkspaceArtifactVisible(
+          deps.db,
+          workspaceId,
+          await siteViewerForGrant(deps.db, grant),
+          artifactId,
+        ))
+      )
+        throw new HTTPException(404, { message: "Artifact not found" });
+      if (fileKind) {
+        const subjectId = await fileAuthoritySubjectIdForGrant(deps, grant);
+        const [file] = await getFilesForSubject(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId,
+          fileIds: [artifactId],
+        });
+        if (!file || file.status !== "ready")
+          throw new HTTPException(404, { message: "Artifact not found" });
+      }
+      try {
+        await updateArtifactPin(
+          deps.db,
+          { accountId: grant.accountId, workspaceId },
+          {
+            kind: kind.data,
+            artifactId,
+            pinned: body.data.pinned,
+          },
+        );
+      } catch (error) {
+        if (nestedPostgresSqlState(error) === "42501")
+          throw new HTTPException(404, { message: "Artifact not found" });
+        throw error;
+      }
+      return context.json(
+        ArtifactPinResponse.parse({ kind: kind.data, artifactId, pinned: body.data.pinned }),
+      );
+    });
+  });
   app.get("/v1/workspaces/:workspaceId/artifact-catalog", async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(context, deps, workspaceId);
     const grant = authorization.grant;
-    const parsed = ArtifactCatalogListQuery.safeParse(context.req.query());
-    if (!parsed.success)
-      throw new HTTPException(422, { message: "Invalid artifact catalog query" });
-    const query = parsed.data;
+    const parsed = parseRequestQuery(ArtifactCatalogListQuery, context.req.query(), {
+      status: 422,
+      message: "Invalid artifact catalog query",
+    });
+    const query = parsed;
+    if (query.includeSubSessions && !query.sourceSessionId)
+      throw new HTTPException(422, { message: "includeSubSessions needs a sourceSessionId" });
     const artifactsAllowed = hasPermission(grant.permissions, "artifacts:read");
     const filesAllowed = hasPermission(grant.permissions, "files:read");
     if (!artifactsAllowed && !filesAllowed)
@@ -96,39 +273,63 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
         throw error;
       }
     }
-    const sourceDecisions = new Map<string, boolean>();
-    const canReadSession = async (sessionId: string): Promise<boolean> => {
-      if (!hasPermission(grant.permissions, "sessions:read")) return false;
-      if (sourceDecisions.has(sessionId)) return sourceDecisions.get(sessionId)!;
-      try {
-        await requireSessionAuthorization(deps, grant, {
-          sessionId,
-          operation: "session.read",
-          surface: "http",
-        });
-        // The optional-host seam can return null for both a shared standalone
-        // session and an RLS-hidden/missing row. Prove visibility independently
-        // AFTER it, so a permissive null is never itself provenance authority.
-        if (!(await getSessionAuthorityProjection(deps.db, workspaceId, sessionId))) {
-          sourceDecisions.set(sessionId, false);
-          return false;
-        }
-        sourceDecisions.set(sessionId, true);
-        return true;
-      } catch (error) {
-        if (error instanceof SessionAuthorizationDeniedError) {
-          sourceDecisions.set(sessionId, false);
-          return false;
-        }
-        if (error instanceof SessionAuthorizationUnavailableError)
-          throw new HTTPException(503, { message: "Session authorization is unavailable" });
-        throw error;
+    const sourceDecisions = new Map<string, Promise<boolean>>();
+    const prepareSourceDecisions = (sessionIds: readonly string[]) => {
+      const pending = [...new Set(sessionIds)].filter((id) => !sourceDecisions.has(id));
+      if (!pending.length) return;
+      if (!hasPermission(grant.permissions, "sessions:read")) {
+        for (const id of pending) sourceDecisions.set(id, Promise.resolve(false));
+        return;
       }
+      const batch = requireSessionAuthorizations(deps, grant, {
+        sessionIds: pending,
+        operation: "session.read",
+        surface: "http",
+      }).then(async (decisions) => {
+        // Keep the independent visibility proof AFTER every host decision in
+        // this bounded window. A permissive null is not provenance authority,
+        // and a source revoked during a host callback must remain hidden.
+        const visible = await getSessionAuthorityProjections(
+          deps.db,
+          workspaceId,
+          pending.filter((_id, index) => decisions[index]!.status === "fulfilled"),
+        );
+        return { decisions, visible };
+      });
+      for (const [index, id] of pending.entries()) {
+        sourceDecisions.set(
+          id,
+          batch.then(({ decisions, visible }) => {
+            const decision = decisions[index]!;
+            if (decision.status === "fulfilled") return visible.has(id.toLowerCase());
+            const error = decision.reason;
+            if (error instanceof SessionAuthorizationDeniedError) return false;
+            if (error instanceof SessionAuthorizationUnavailableError)
+              throw new HTTPException(503, { message: "Session authorization is unavailable" });
+            throw error;
+          }),
+        );
+      }
+    };
+    const canReadSession = (sessionId: string): Promise<boolean> => {
+      prepareSourceDecisions([sessionId]);
+      return sourceDecisions.get(sessionId)!;
     };
     context.header("cache-control", "private, no-store");
     return withSessionRlsActorContext(actor, async () => {
       if (query.sourceSessionId && !(await canReadSession(query.sourceSessionId)))
         throw new HTTPException(404, { message: "Session not found" });
+      // A chat and its sub-sessions in one read, so a client never lists the
+      // catalog once per sub-session. Only sessions this caller may read count.
+      let sourceSessionIds: string[] | undefined;
+      if (query.sourceSessionId && query.includeSubSessions) {
+        const tree = (await listSessionTreeIds(deps.db, workspaceId, query.sourceSessionId)) ?? [
+          query.sourceSessionId,
+        ];
+        prepareSourceDecisions(tree);
+        const readable = await Promise.all(tree.map(canReadSession));
+        sourceSessionIds = tree.filter((_id, index) => readable[index]);
+      }
       const secret = resolveFirstPartyDelegationSecret(deps.settings);
       if (!secret)
         throw new HTTPException(503, { message: "Artifact catalog cursor signing is unavailable" });
@@ -156,6 +357,10 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
       let lastReturned: ArtifactCatalogPosition | undefined;
       let nextCursor: string | null = null;
       const fileSubject = includesFiles ? await fileAuthoritySubjectIdForGrant(deps, grant) : null;
+      // Sites and documents list the workspace's and this person's own Only me ones.
+      const siteViewer = kinds.some((kind) => kind === "site" || editableKinds.has(kind))
+        ? await siteViewerForGrant(deps.db, grant)
+        : { subjectId: null };
       for (let batch = 0; batch < MAX_BATCHES; batch++) {
         const candidates = await listArtifactCatalogCandidates(
           deps.db,
@@ -163,28 +368,80 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
           {
             query,
             kinds,
+            siteViewer,
             snapshotAt,
             ...(after ? { after } : {}),
+            ...(sourceSessionIds ? { sourceSessionIds } : {}),
             limit: CANDIDATE_BATCH,
           },
         );
-        for (const candidate of candidates) {
-          after = position(candidate);
-          const item = await projectCandidate(deps, grant, candidate, fileSubject);
-          if (
-            !item ||
-            item.status !== query.status ||
-            (query.q && !item.title.toLowerCase().includes(query.q.toLowerCase()))
-          )
-            continue;
-          if (items.length === query.limit) {
+        for (let offset = 0; offset < candidates.length;) {
+          const window = candidates.slice(
+            offset,
+            offset + Math.min(PROJECTION_BATCH, query.limit - items.length + 1),
+          );
+          offset += window.length;
+          const fileProjection = loadCandidateFiles(deps, grant, window, fileSubject);
+          const editableProjection = loadCandidateEditableArtifacts(deps, grant, window);
+          // Retain each application's live read/authorization boundary. Settling
+          // in parallel must not reorder rows or surface an error after the first
+          // eligible lookahead row, which belongs to the next page.
+          const projected = await Promise.allSettled(
+            window.map((candidate) =>
+              projectCandidate(
+                deps,
+                grant,
+                candidate,
+                fileSubject,
+                fileProjection,
+                editableProjection,
+              ),
+            ),
+          );
+          const accepted: Array<{
+            item: ArtifactCatalogItem;
+            candidate: ArtifactCatalogCandidate;
+          }> = [];
+          let hasNext = false;
+          for (let index = 0; index < window.length; index++) {
+            const candidate = window[index]!;
+            after = position(candidate);
+            const result = projected[index]!;
+            if (result.status === "rejected") throw result.reason;
+            const item = result.value;
+            if (
+              !item ||
+              item.status !== query.status ||
+              (query.q && !item.title.toLowerCase().includes(query.q.toLowerCase()))
+            )
+              continue;
+            if (items.length + accepted.length === query.limit) {
+              hasNext = true;
+              break;
+            }
+            accepted.push({ item, candidate });
+          }
+          prepareSourceDecisions(
+            accepted.flatMap(({ candidate }) =>
+              candidate.source_session_id ? [candidate.source_session_id] : [],
+            ),
+          );
+          const authorizedItems = await Promise.all(
+            accepted.map(async ({ item, candidate }) => {
+              if (
+                candidate.source_session_id &&
+                (await canReadSession(candidate.source_session_id))
+              )
+                item.sourceSessionId = candidate.source_session_id;
+              return ArtifactCatalogItem.parse(item);
+            }),
+          );
+          items.push(...authorizedItems);
+          if (accepted.length) lastReturned = position(accepted[accepted.length - 1]!.candidate);
+          if (hasNext) {
             nextCursor = codec.encode({ version: 1, snapshotAt, expiresAt, after: lastReturned! });
             return context.json(ArtifactCatalogListResponse.parse({ items, nextCursor }));
           }
-          if (candidate.source_session_id && (await canReadSession(candidate.source_session_id)))
-            item.sourceSessionId = candidate.source_session_id;
-          items.push(ArtifactCatalogItem.parse(item));
-          lastReturned = after;
         }
         if (candidates.length < CANDIDATE_BATCH) break;
         // Bounded scanning may produce an empty page; the encrypted frontier
@@ -197,11 +454,81 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
   });
 }
 
+type CandidateFiles = {
+  files: Map<string, FileAsset>;
+  generated: Map<string, GeneratedImageArtifact>;
+};
+
+function loadCandidateEditableArtifacts(
+  deps: Dependencies,
+  grant: AccessGrant,
+  candidates: readonly ArtifactCatalogCandidate[],
+): Promise<Map<string, PromiseSettledResult<EditableArtifact>>> | null {
+  const application = deps.editableArtifacts;
+  if (!application?.readArtifacts) return null;
+  const artifactIds = candidates
+    .filter((row) => editableKinds.has(row.kind))
+    .map((row) => editableArtifactId(row.id));
+  if (!artifactIds.length) return null;
+  return Promise.resolve()
+    .then(() =>
+      application.readArtifacts!({
+        scope: editableArtifactScope({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+        }),
+        actor: editableArtifactActorForGrant(grant, "0000000000000001"),
+        artifactIds,
+      }),
+    )
+    .then((results) => {
+      if (results.length !== artifactIds.length)
+        throw new Error("Artifact application returned mismatched batch results");
+      return new Map(artifactIds.map((id, index) => [id, results[index]!]));
+    });
+}
+
+async function loadCandidateFiles(
+  deps: Dependencies,
+  grant: AccessGrant,
+  candidates: readonly ArtifactCatalogCandidate[],
+  fileSubject: string | null,
+): Promise<CandidateFiles> {
+  const fileIds = candidates
+    .filter((candidate) => candidate.kind === "file" || candidate.kind === "image")
+    .map((candidate) => candidate.id);
+  const files = new Map(
+    (
+      await getFilesForSubject(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: fileSubject,
+        fileIds,
+      })
+    ).map((file) => [file.id, file]),
+  );
+  const generatedIds = candidates
+    .filter(
+      (candidate) =>
+        candidate.origin === "generated_image" && files.get(candidate.id)?.status === "ready",
+    )
+    .map((candidate) => candidate.id);
+  const generated = new Map(
+    (await getGeneratedImageArtifacts(deps.db, grant.workspaceId, generatedIds)).map((artifact) => [
+      artifact.artifactId,
+      artifact,
+    ]),
+  );
+  return { files, generated };
+}
+
 async function projectCandidate(
   deps: Dependencies,
   grant: AccessGrant,
   row: ArtifactCatalogCandidate,
   fileSubject: string | null,
+  fileProjection: Promise<CandidateFiles>,
+  editableProjection: Promise<Map<string, PromiseSettledResult<EditableArtifact>>> | null,
 ): Promise<ArtifactCatalogItem | null> {
   const item: ArtifactCatalogItem = {
     id: row.id,
@@ -210,8 +537,11 @@ async function projectCandidate(
     status: row.status,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
+    ...(row.pinned !== undefined ? { pinned: row.pinned } : {}),
   };
   if (row.version_id) item.versionId = row.version_id;
+  if (row.kind === "site")
+    item.visibility = row.visibility === "user_private" ? "private" : "workspace";
   if (editableKinds.has(row.kind)) {
     const scope = editableArtifactScope({
       accountId: grant.accountId,
@@ -220,11 +550,18 @@ async function projectCandidate(
     try {
       // This is the HTTP application's read-only domain.getArtifact seam, NOT
       // EditableArtifactAgentApplication.read (which touches session links).
-      const artifact = await deps.editableArtifacts!.readArtifact({
-        scope,
-        actor: editableArtifactActorForGrant(grant, "0000000000000001"),
-        artifactId: editableArtifactId(row.id),
-      });
+      const batchResult = editableProjection ? (await editableProjection).get(row.id) : undefined;
+      if (batchResult?.status === "rejected") throw batchResult.reason;
+      if (editableProjection && !batchResult)
+        throw new Error("Artifact application omitted a batch result");
+      const artifact =
+        batchResult?.status === "fulfilled"
+          ? batchResult.value
+          : await deps.editableArtifacts!.readArtifact({
+              scope,
+              actor: editableArtifactActorForGrant(grant, "0000000000000001"),
+              artifactId: editableArtifactId(row.id),
+            });
       if (
         artifact.scope.accountId !== scope.accountId ||
         artifact.scope.workspaceId !== scope.workspaceId ||
@@ -238,6 +575,14 @@ async function projectCandidate(
         status: artifact.lifecycle,
         createdAt: artifact.createdAt,
         updatedAt: artifact.updatedAt,
+        // Who can open it, and whether this viewer may change that.
+        ...projectEditableArtifactAudience(
+          {
+            visibility: row.visibility === "user_private" ? "user_private" : "workspace_shared",
+            ownerSubjectId: row.owner_subject_id ?? null,
+          },
+          editableArtifactAudienceViewer(grant),
+        ),
       };
     } catch (error) {
       if (isInvisibleListCandidate(error)) return null;
@@ -245,17 +590,10 @@ async function projectCandidate(
     }
   }
   if (row.kind === "file" || row.kind === "image") {
-    const [file] = await getFilesForSubject(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      subjectId: fileSubject,
-      fileIds: [row.id],
-    });
+    const projection = await fileProjection;
+    const file = projection.files.get(row.id);
     if (!file || file.status !== "ready") return null;
-    const generated =
-      row.origin === "generated_image"
-        ? await getGeneratedImageArtifact(deps.db, grant.workspaceId, row.id)
-        : null;
+    const generated = projection.generated.get(row.id);
     const reference =
       row.origin === "generated_image"
         ? generated?.status === "ready"
@@ -269,6 +607,9 @@ async function projectCandidate(
     if (!reference) return null;
     return {
       ...item,
+      // Who can open it, and whether this viewer may change that.
+      visibility: file.scope === "personal" ? "private" : "workspace",
+      ownedByViewer: fileSubject !== null && file.ownerSubjectId === fileSubject,
       file: reference,
       filename: file.filename,
       contentType: reference.contentType,

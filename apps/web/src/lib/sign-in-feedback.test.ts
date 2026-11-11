@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  organizationSecurityReturnPath,
   readSignInCallbackError,
   securityReauthenticationPath,
   signInCallbackError,
@@ -37,8 +38,45 @@ test("Security reauthentication preserves only a bounded outcome on a fixed loca
   expect(securityReauthenticationPath("?signInMethod=arbitrary")).toBe("/settings/security");
 });
 
+test("signing in again from Security & data returns there, carrying nothing else", () => {
+  const workspace = "11111111-1111-4111-8111-111111111111";
+  const page = `/workspaces/${workspace}/organization`;
+  expect(
+    organizationSecurityReturnPath(page, "?section=security&returnTo=https://evil.example"),
+  ).toBe(`${page}?section=security`);
+  expect(organizationSecurityReturnPath(page, "?section=billing")).toBeNull();
+  expect(
+    organizationSecurityReturnPath(`/workspaces/x/organization`, "?section=security"),
+  ).toBeNull();
+  expect(organizationSecurityReturnPath(`${page}/other`, "?section=security")).toBeNull();
+});
+
 test("integration callbacks and success hints cannot claim a login change", () => {
   expect(readSignInCallbackError("?github=connected&google=success")).toBeNull();
   expect(readSignInCallbackError("?signin=connected")).toBeNull();
   expect(signInCallbackError(null)).toBeNull();
+});
+
+test("a refused social sign-up while new accounts are paused says so and points to sign-in", () => {
+  const message = readSignInCallbackError("?error=signup_disabled");
+  expect(message).toContain("We're at capacity for new accounts right now.");
+  expect(message).toContain("sign in with the method you used before");
+});
+
+test("a refused social sign-up for an unapproved address says who to ask", () => {
+  const message = readSignInCallbackError("?error=signup_email_not_allowed");
+  expect(message).toContain("This email can't create an account here. Ask your admin for access.");
+  expect(message).not.toContain("Try again");
+});
+
+test("a refused social sign-in for an address that isn't allowed says who to ask", () => {
+  expect(readSignInCallbackError("?error=sign_in_email_not_allowed")).toBe(
+    "This email can't sign in here. Ask your admin for access.",
+  );
+});
+
+test("unchallenged OAuth signup says no account was created and to try again", () => {
+  expect(readSignInCallbackError("?error=signup_challenge_required")).toBe(
+    "Verification didn't complete, so no account was created. Try again.",
+  );
 });

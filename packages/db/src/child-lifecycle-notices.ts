@@ -2,17 +2,21 @@ import {
   CHILD_PAUSED_REASON_MAX_BYTES,
   CHILD_PROGRESS_NOTE_MAX_BYTES,
   CHILD_REQUIRES_ACTION_MAX_REQUESTS,
+  CHILD_REQUIRES_ACTION_OPTION_LABEL_MAX_BYTES,
   CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES,
   CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES,
   approvalIdentifier,
   type ChildPausedPayload,
   type ChildProgressPayload,
   type ChildRequiresActionPayload,
+  type ChildRequiresActionQuestion,
   type ChildRequiresActionRequest,
   type ChildRequiresActionResolvedPayload,
   type ChildWaitingCapacityPayload,
   type HumanInputQuestion,
+  secretUseApprovalIdFromQuestionId,
 } from "@opengeni/contracts";
+import { capacityWaitProviderName, capacityWaitResetText } from "./capacity-wait-attention";
 
 /**
  * Child lifecycle notices (`child_requires_action`,
@@ -22,9 +26,14 @@ import {
  * once at boot by `@opengeni/config` (`settings.childLifecycleNoticesEnabled`)
  * and installed here by the API app and both worker roles. Rolling hazard: a
  * worker from before these kinds existed throws in `mapSessionSystemUpdate`
- * on an unknown kind, so the flag stays off until the whole fleet runs a new
- * image. Delivery and consumption of an already committed notice never read
- * the flag; only production does.
+ * on an unknown kind, and current workers drop a row they cannot parse, so a
+ * release turns the flag on only once its whole fleet runs the candidate, or
+ * from its first rollout when the live and candidate
+ * `child-lifecycle-notice-protocol.gen.json` are byte-identical. Changing
+ * anything here an older consumer relies on (dedupe keys, `sourceId`,
+ * classification, summary, lineage) requires bumping
+ * `CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION`. Delivery and consumption of an
+ * already committed notice never read the flag; only production does.
  */
 let childLifecycleNoticesEnabledFlag = false;
 
@@ -109,13 +118,41 @@ function approvalToolName(value: unknown): string | null {
     : null;
 }
 
+/** Compact, secret-free copy of one question: ids, kind, prompt and option labels. */
+function compactChildQuestion(question: HumanInputQuestion): ChildRequiresActionQuestion {
+  return {
+    id: question.id,
+    kind: question.kind,
+    prompt: boundedChildNoticeText(
+      typeof question.prompt === "string" ? question.prompt : "",
+      CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES,
+    ).text,
+    required: question.required !== false,
+    options:
+      question.kind === "secret"
+        ? []
+        : (question.options ?? []).map((option) => ({
+            id: option.id,
+            label: boundedChildNoticeText(
+              option.label,
+              CHILD_REQUIRES_ACTION_OPTION_LABEL_MAX_BYTES,
+            ).text,
+          })),
+    ...(question.skillReview != null || secretUseApprovalIdFromQuestionId(question.id) !== null
+      ? { humanOnly: true as const }
+      : {}),
+  };
+}
+
 /**
  * Build the bounded child_requires_action payload from the child's frozen
- * human-input requests and pending approvals. Only typed, content-free facts
- * plus one bounded first-question preview per request cross to the parent:
- * never subject ids, credentials, or raw tool arguments. The whole payload
- * stays within CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES by dropping trailing
- * requests and recording `truncated`.
+ * human-input requests and pending approvals. Typed facts, a bounded
+ * first-question preview and a compact copy of every question (ids, kind,
+ * prompt, option labels) cross to the parent so its agent can answer:
+ * never subject ids, secret specs, credentials, or raw tool arguments. The
+ * whole payload stays within CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES: compact
+ * questions are dropped from trailing requests first, then trailing requests
+ * themselves, recording `truncated`.
  */
 export function buildChildRequiresActionPayload(input: {
   childSessionId: string;
@@ -142,6 +179,7 @@ export function buildChildRequiresActionPayload(input: {
       ).text,
       allowSkip: request.allowSkip,
       expiresAt: request.expiresAt ? request.expiresAt.toISOString() : null,
+      questions: request.questions.map(compactChildQuestion),
     });
   }
   const seenApprovals = new Set<string>();
@@ -166,6 +204,20 @@ export function buildChildRequiresActionPayload(input: {
     truncated,
   });
   let payload = build();
+  // Compact questions are a convenience: drop them (last request first)
+  // before dropping a whole request.
+  for (
+    let index = bounded.length - 1;
+    index >= 0 &&
+    Buffer.byteLength(JSON.stringify(payload)) > CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES;
+    index -= 1
+  ) {
+    const request = bounded[index]!;
+    if (request.kind !== "human_input" || request.questions === undefined) continue;
+    const { questions: _omitted, ...withoutQuestions } = request;
+    bounded = [...bounded.slice(0, index), withoutQuestions, ...bounded.slice(index + 1)];
+    payload = build();
+  }
   while (
     bounded.length > 0 &&
     Buffer.byteLength(JSON.stringify(payload)) > CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES
@@ -201,6 +253,13 @@ export function childRequiresActionSummary(
     );
   }
   if (payload.truncated) lines.push("The request list was truncated.");
+  if (
+    humanInputs.some((request) => request.kind === "human_input" && request.questions === undefined)
+  ) {
+    lines.push(
+      "Some questions did not fit this notice; read the worker's request_human_input call with session_events before answering.",
+    );
+  }
   return lines.join(" ");
 }
 
@@ -221,7 +280,13 @@ export function childWaitingCapacitySummary(
   childSessionId: string,
   payload: ChildWaitingCapacityPayload,
 ): string {
-  return `Worker ${childSessionId} is waiting for ${payload.provider === "codex" ? "Codex" : "xAI"} provider capacity${payload.nextCheckAt ? ` (next check ${payload.nextCheckAt})` : ""}; its turn resumes automatically.`;
+  const name = capacityWaitProviderName(payload.provider);
+  // Rows from before `resetsAt` existed keep their original wording.
+  if (payload.resetsAt === undefined) {
+    return `Worker ${childSessionId} is waiting for ${payload.provider === "codex" ? "Codex" : "xAI"} provider capacity${payload.nextCheckAt ? ` (next check ${payload.nextCheckAt})` : ""}; its turn resumes automatically.`;
+  }
+  const reset = capacityWaitResetText(payload.resetsAt);
+  return `Worker ${childSessionId} is blocked: no ${name} subscription has capacity ${reset ? `until about ${reset}` : "and no reset time is known"}. Its turn resumes by itself then. To continue sooner, switch the worker to a model with capacity with session_set_model; its waiting turn then continues on that model.`;
 }
 
 export function childProgressSummary(

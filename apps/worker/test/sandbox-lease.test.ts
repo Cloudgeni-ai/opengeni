@@ -24,12 +24,13 @@
 // a real box, drains its lease, and asserts the reaper's real terminate path
 // stops it — terminating the box in `finally` regardless.
 //
-// pgvector/pgvector:pg16 (0000_initial does CREATE EXTENSION vector). The package
+// pgvector/pgvector:pg16 (the migration baseline does CREATE EXTENSION vector). The package
 // fns connect as opengeni_app (non-superuser → FORCE RLS applies; the global
 // sweep rides the SECURITY-DEFINER fn). Container torn down in afterAll.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import { dropScratchBypassRole, reapStaleBypassRoles } from "./scratch-bypass-role";
 import {
   captureRetainedRouterOutput,
   createProviderCommandRetainer,
@@ -48,7 +49,7 @@ import {
   appendSessionEvents,
   authorizeHistoricalSandboxCheckpointRecovery,
   registerSandboxCheckpointArtifact,
-  enrollUnobservableCommandIdleDrain,
+  enrollRetainedCommandContainment,
   reapStaleLeaseHoldersGlobal,
   advanceWorkspaceGeneration,
   advanceWorkspaceGenerationForDirectRequest,
@@ -60,6 +61,8 @@ import {
   claimSessionWorkForAttempt,
   commitWarmingToWarm,
   confirmDrainCold,
+  createEnrollment,
+  createSandbox,
   createSession,
   createDb,
   deferRetainedProcessReconciliation,
@@ -77,6 +80,7 @@ import {
   releaseLeaseHolder,
   releaseWorkspaceArchiveCapture,
   replaceWorkspaceArchiveCaptureAfterProof,
+  readActiveSandbox,
   readLease,
   readRecentSandboxRecoveryObservations,
   reconcileColdLostLeaseInstanceBlockers,
@@ -84,6 +88,8 @@ import {
   retainedProcessSettlementIdentity,
   SandboxRetainedProcessPromotionFencedError,
   SandboxWorkspaceMutationFencedError,
+  SandboxWorkspaceMutationOutputRejectedError,
+  setActiveSandbox,
   settleRetainedProcess,
   touchLeaseHolder,
   verifyWorkspaceMutationSettlement,
@@ -96,9 +102,10 @@ import { RoutingSandboxSession } from "@opengeni/runtime";
 import { workspaceArchiveObjectKey } from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
+  recordTestRoleOwner,
   type SharedTestDatabase,
-  testSettings,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   createSandboxLeaseActivities,
   sandboxLeaseTelemetryKey,
@@ -541,6 +548,8 @@ beforeAll(async () => {
   admin = shared.admin;
   client = createDb(shared.appUrl);
   db = client.db;
+  // Earlier runs killed before their cleanup can leave a bypass role behind.
+  await reapStaleBypassRoles(admin, shared.adminUrl);
 }, 180_000);
 
 afterAll(async () => {
@@ -727,6 +736,90 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(spy.calls).toContainEqual({ group: ids.groupId, epoch: 1 });
     expect(result.terminated).toBeGreaterThanOrEqual(1);
     expect((await readRow(ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+  }, 60_000);
+
+  test("reaping a chat's idle box during a turn on its Connected Machine leaves the machine selected", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      initialMessage: "work on my desktop",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "selfhosted",
+      sandboxGroupId: ids.groupId,
+    });
+    const enrollment = await createEnrollment(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "windows",
+      arch: "x86_64",
+    });
+    const machine = await createSandbox(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      kind: "selfhosted",
+      name: "desktop",
+      enrollmentId: enrollment.id,
+    });
+    const moved = await setActiveSandbox(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      targetSandboxId: machine.id,
+      expectedEpoch: session.activeEpoch,
+    });
+    expect(moved.swapped).toBe(true);
+    await initializeSessionStartAtomically(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const claim = await claimSessionWorkForAttempt(db, ids.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `machine-turn-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    // The chat's own managed box, opened by a viewer, sits idle past its grace
+    // while the turn works on the machine.
+    await insertLease(ids, {
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 1,
+      expiresInMs: -1_000,
+      instanceId: "box-idle-beside-machine",
+      backend: "local",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
+    });
+    const spy = makeTerminateSpy();
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+    });
+
+    await reapSandboxLeases();
+
+    expect(spy.calls).toContainEqual({ group: ids.groupId, epoch: 1 });
+    expect((await readRow(ids.workspaceId, ids.groupId))?.liveness).toBe("cold");
+    // The turn keeps the machine: same pointer, same route epoch.
+    expect(await readActiveSandbox(db, ids.workspaceId, session.id)).toMatchObject({
+      activeSandboxId: machine.id,
+      activeEpoch: moved.pointer!.activeEpoch,
+    });
   }, 60_000);
 
   test("(1) one pass reaps stale holders and bounded subsequent passes terminate every due box", async () => {
@@ -3207,6 +3300,66 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     ).toMatchObject({ workspaceGeneration: admission.workspaceGeneration });
   }, 60_000);
 
+  test("(1b-home-route) a home command's output survives the session moving to another machine", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 11,
+      expiresInMs: 600_000,
+      instanceId: "box-home-swap",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-home-swap" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+
+    // A command admitted on the session's own home sandbox, the way routed
+    // home mutations are admitted: no explicit route, so the route epoch is
+    // the session's epoch at admission.
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-home-swap",
+      operation: "execCommand",
+    });
+    expect(admission.routeKind).toBe("home");
+    expect(admission.routeEpoch).toBe(0);
+    // While it runs, the same turn moves the session to another machine.
+    await admin`
+      update sessions set active_epoch = active_epoch + 1
+      where workspace_id = ${ids.workspaceId} and id = ${attempt.sessionId}`;
+
+    // The home command still settles with its output accepted: moving the
+    // session's active route does not touch what ran on its home sandbox.
+    await verifyWorkspaceMutationSettlement(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-home-swap",
+      admission,
+      operation: "execCommand",
+      outcome: "resolved",
+    });
+    const [settled] = await admin<{ providerOutcome: string | null; settledAt: Date | null }[]>`
+      select provider_outcome as "providerOutcome", settled_at as "settledAt"
+      from sandbox_workspace_mutation_admissions where id = ${admission.id}`;
+    expect(settled?.providerOutcome).toBe("resolved");
+    expect(settled?.settledAt).toBeInstanceOf(Date);
+  }, 60_000);
+
   test("(1b-settlement-race) provider success settles once before a stale-route rejection", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
@@ -3262,6 +3415,14 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const stale = await settle().catch((error) => error);
     expect(stale).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
     expect((stale as SandboxWorkspaceMutationFencedError).code).toBe("route_fenced");
+    expect(stale).toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
+    expect((stale as SandboxWorkspaceMutationOutputRejectedError).physicalSettlement).toEqual({
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      admission,
+      operation: "providerResolvedBeforeRouteMove",
+      outcome: "resolved",
+    });
 
     const [first] = await admin<{ providerOutcome: string | null; settledAt: Date | null }[]>`
       select provider_outcome as "providerOutcome", settled_at as "settledAt"
@@ -3290,6 +3451,23 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       from sandbox_workspace_mutation_admissions where id = ${admission.id}`;
     expect(afterReplay?.providerOutcome).toBe("resolved");
     expect(afterReplay?.settledAt?.getTime()).toBe(first?.settledAt?.getTime());
+    expect(replay).toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
+    const mismatch = await verifyWorkspaceMutationSettlement(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-settlement-race",
+      admission: { ...admission, workspaceGeneration: admission.workspaceGeneration + 1 },
+      operation: "providerResolvedBeforeRouteMove",
+      outcome: "resolved",
+      routeKind: "active",
+      routeTargetId: null,
+      routeEpoch: 0,
+    }).catch((error) => error);
+    expect(mismatch).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+    expect(mismatch).not.toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
   }, 60_000);
 
   test("(1b-lock-order) settlement and retained promotion lock authority before admission", async () => {
@@ -3620,7 +3798,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         workspaceId: ids.workspaceId,
         sandboxGroupId: ids.groupId,
       };
-      expect(await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 1 })).toBeNull();
+      expect(
+        await enrollRetainedCommandContainment(db, { ...scope, idleCommandContainmentMs: 1 }),
+      ).toBeNull();
       // Model enrollment from an older worker/rollout, not fresh authority.
       // Current DB writers must reject it even if application checks are skipped.
       await expect(
@@ -3641,7 +3821,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         (tx) => tx`update sandbox_leases set liveness='draining',
         unobservable_command_drain_ids=array[${processId}::uuid] where id=${leaseId}`,
       );
-      expect(await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 1 })).toBeNull();
+      expect(
+        await enrollRetainedCommandContainment(db, { ...scope, idleCommandContainmentMs: 1 }),
+      ).toBeNull();
       const captureId = crypto.randomUUID();
       const capture = {
         ...scope,
@@ -3818,13 +4000,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     }, 180_000);
   }
 
-  for (const [lateExit, stoppingErrors] of [
+  for (const [lateExit, providerErrors] of [
     [false, false],
     [true, false],
     [false, true],
     [true, true],
   ] as const) {
-    test(`idle unobservable commands use the existing drain; late exit=${lateExit}, stopping errors=${stoppingErrors}`, async () => {
+    test(`idle legacy commands use the existing drain; late exit=${lateExit}, provider errors=${providerErrors}`, async () => {
       if (!available) throw new Error("Real PostgreSQL required for idle drain regression");
       const ids = await freshWorkspace();
       const attempt = await freshWarmSnapshotAttempt(ids);
@@ -3887,7 +4069,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
         sandboxGroupId: ids.groupId,
-        idleGraceMs: 1,
+        idleCommandContainmentMs: 1,
       };
       await admin`update sandbox_retained_processes set
         last_reconcile_outcome = 'quarantined_process_observation_unavailable',
@@ -3913,42 +4095,40 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
           })
         ).get(attempt.sessionId),
       ).toMatchObject({ count: 1, unavailableCount: 1 });
-      if (stoppingErrors) {
+      if (providerErrors) {
+        // Repeated observer errors without any stop intent: command health is
+        // not the containment policy, whole-group idleness is.
         await admin`update sandbox_retained_processes set last_reconcile_outcome = 'provider_error',
-          reconcile_attempts = 5 where id = ${processId}`;
-        await admin`update session_background_commands set state = 'stopping',
-          cancel_requested_at = now() - interval '2 minutes', cancel_requested_by = 'test:stop-request'
-          where id = ${processId}`;
+          reconcile_attempts = 7 where id = ${processId}`;
       }
-      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
       // A live attempt without a holder is still protected.
-      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
       closed_at = now(), quiesced_at = now() where id = ${attempt.attemptId}`;
       await insertHolder(ids, leaseId, "viewer", "viewer-idle-regression", 0, attempt.sessionId);
-      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'viewer'`;
       await admin`update sandbox_leases set refcount = 1, turn_holders = 0, viewer_holders = 0 where id = ${leaseId}`;
       const sibling = await freshWarmSnapshotAttempt({ ...ids, sandboxGroupId: ids.groupId });
-      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
       closed_at = now(), quiesced_at = null where id = ${sibling.attemptId}`;
       expect(
-        await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 60_000 }),
+        await enrollRetainedCommandContainment(db, { ...scope, idleCommandContainmentMs: 60_000 }),
       ).toBeNull();
       await admin`update session_turn_attempts set quiesced_at = null, closed_at = now() - interval '2 minutes'
       where id in (${sibling.attemptId}, ${attempt.attemptId})`;
-      if (stoppingErrors) {
-        // A failed owner cannot inherit the completed owner's closed-at proof.
-        await admin`update session_turn_attempts set outcome = 'failed'
-          where id = ${attempt.attemptId}`;
-        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
-        await admin`update session_turn_attempts set outcome = 'completed'
-          where id = ${attempt.attemptId}`;
-      }
+      // Both turns settled: an open turn in any group session would still block.
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
+      await admin`update session_turns set status = 'completed', active_attempt_id = null,
+        finished_at = now() - interval '2 minutes'
+        where id in (${sibling.turnId}, ${attempt.turnId})`;
+      await admin`update sessions set status = 'idle', active_turn_id = null
+        where id in (${sibling.sessionId}, ${attempt.sessionId})`;
       await verifyPendingQuiescenceBlocks(ids, sibling, async () => {
-        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+        expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       });
       const child = await advanceWorkspaceGenerationForRetainedProcess(db, {
         accountId: ids.accountId,
@@ -3957,7 +4137,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         processId,
         operation: "pollUnknownCommand",
       });
-      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       await verifyRetainedProcessMutationSettlement(db, {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
@@ -3967,23 +4147,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         admission: child,
         outcome: "resolved",
       });
-      if (stoppingErrors) {
-        await admin`update sandbox_retained_processes set reconcile_attempts = 4 where id = ${processId}`;
-        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
-        await admin`update sandbox_retained_processes set reconcile_attempts = 5 where id = ${processId}`;
-        await admin`update session_background_commands set state = 'running', cancel_requested_at = null,
-          cancel_requested_by = null
-          where id = ${processId}`;
-        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
-        await admin`update session_background_commands set state = 'stopping', cancel_requested_at = now(),
-          cancel_requested_by = 'test:stop-request'
-          where id = ${processId}`;
-        expect(
-          await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 60_000 }),
-        ).toBeNull();
-        await admin`update session_background_commands set cancel_requested_at = now() - interval '2 minutes'
-          where id = ${processId}`;
-      }
+      // The child write just settled: that admission is fresh activity.
+      expect(
+        await enrollRetainedCommandContainment(db, { ...scope, idleCommandContainmentMs: 60_000 }),
+      ).toBeNull();
       if (!lateExit) {
         const ordinaryIds = await freshWorkspace();
         await insertLease(ordinaryIds, {
@@ -4003,7 +4170,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
           const inventory = await reapStaleLeaseHoldersGlobal(db, {
             viewerHolderTtlMs: 60_000,
             idleGraceMs: REAPER_SETTINGS.sandboxIdleGraceMs,
-            onUnobservableCommandDrainError: (error) => {
+            idleCommandContainmentMs: 1,
+            onCommandContainmentError: (error) => {
               failures.push(error);
             },
           });
@@ -4020,9 +4188,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         await reapStaleLeaseHoldersGlobal(db, {
           viewerHolderTtlMs: 60_000,
           idleGraceMs: REAPER_SETTINGS.sandboxIdleGraceMs,
+          idleCommandContainmentMs: 1,
         })
       ).find((row) => row.sandboxGroupId === ids.groupId);
-      expect(target).not.toBeNull();
+      expect(target).toBeDefined();
       expect(
         (
           await getRetainedProcess(db, {
@@ -4233,16 +4402,16 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.groupId,
-      idleGraceMs: 15 * 60_000,
+      idleCommandContainmentMs: 30 * 60_000,
     };
     // A live owner remains a writer, even after the command stop window.
-    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
     await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
     await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
       closed_at = now() - interval '3 minutes', quiesced_at = null
       where id = ${attempt.attemptId}`;
     // The command itself still gets the full stop window.
-    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
     // Deadline capture must not depend on an observer reason or a crashed claim.
     const strandedClaimId = crypto.randomUUID();
     await admin`update sandbox_retained_processes
@@ -4253,24 +4422,23 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       where id = ${secondProcessId}`;
     await admin`update sandbox_retained_processes
       set started_at = now() - interval '3 minutes' where id in (${processId}, ${secondProcessId})`;
-    // A closed failure has no physical-quiescence receipt: unlike an ordinary
-    // completed attempt, it cannot license a potentially lossy capture.
-    await admin`update session_turn_attempts set outcome = 'failed'
-      where id = ${attempt.attemptId}`;
-    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
-    await admin`update session_turn_attempts set outcome = 'completed'
-      where id = ${attempt.attemptId}`;
+    // A closed owner with pending quiescence (an unsettled interruption or
+    // writer) cannot license the capture, whatever its outcome.
+    await verifyPendingQuiescenceBlocks(ids, attempt, async () => {
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
+    });
     const strandedProcess = await getRetainedProcess(db, {
       workspaceId: ids.workspaceId,
       sessionId: attempt.sessionId,
       processId: secondProcessId,
     });
     expect(strandedProcess).not.toBeNull();
-    expect(await enrollUnobservableCommandIdleDrain(db, scope)).not.toBeNull();
+    expect(await enrollRetainedCommandContainment(db, scope)).not.toBeNull();
     const target = (
       await reapStaleLeaseHoldersGlobal(db, {
         viewerHolderTtlMs: 60_000,
-        idleGraceMs: scope.idleGraceMs,
+        idleGraceMs: 15 * 60_000,
+        idleCommandContainmentMs: scope.idleCommandContainmentMs,
       })
     ).find((row) => row.sandboxGroupId === ids.groupId);
     expect(target).toBeDefined();
@@ -4407,15 +4575,15 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.groupId,
-      idleGraceMs: 15 * 60_000,
+      idleCommandContainmentMs: 30 * 60_000,
     };
-    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
     await releaseLeaseHolder(db, {
       ...scope,
       kind: "direct",
       holderId,
     });
-    const target = await enrollUnobservableCommandIdleDrain(db, scope);
+    const target = await enrollRetainedCommandContainment(db, scope);
     expect(target).not.toBeNull();
     const spy = makeTerminateSpy();
     const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
@@ -4433,38 +4601,6 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       ).status,
     ).toBe("terminated");
   }, 180_000);
-
-  test("deadline-command inventory function replays without widening public authority", async () => {
-    if (!available) throw new Error("Real PostgreSQL required for containment migration");
-    const definition = async () => {
-      const [row] = await admin`select pg_get_functiondef(
-        'opengeni_private.list_unobservable_command_drain_candidates(integer)'::regprocedure
-      ) as definition`;
-      return String(row!.definition);
-    };
-    const before = await definition();
-    expect(before).toContain("process.reconcile_attempts >= 5");
-    expect(before).toContain("command.cancel_requested_at IS NOT NULL");
-    expect(before).toContain(
-      "process.deadline_cancellation_requested_at < now() - interval '2 minutes'",
-    );
-    expect(before).toContain("THEN lease.provider_deadline_at END NULLS LAST");
-    const migration = await Bun.file(
-      new URL(
-        "../../../packages/db/drizzle/0508_deadline_command_workspace_capture.sql",
-        import.meta.url,
-      ),
-    ).text();
-    await admin.begin(async (tx) => {
-      await tx.unsafe(migration.slice(migration.indexOf("DO $install$")));
-    });
-    expect(await definition()).toBe(before);
-    const [permission] = await admin`select coalesce(bool_or(acl.grantee = 0
-        and acl.privilege_type = 'EXECUTE'), false) as public_execute
-      from pg_proc p cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
-      where p.oid = 'opengeni_private.list_unobservable_command_drain_candidates(integer)'::regprocedure`;
-    expect(permission!.public_execute).toBe(false);
-  }, 60_000);
 
   test("(1b-retained-race) yielded success is tracked once before stale-route rejection and remains settleable", async () => {
     if (!available) return;
@@ -4980,6 +5116,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       admittedWorkspaceGeneration: admission.workspaceGeneration,
       operation: "preFixRetainedProcess",
       providerBinding: MODAL_PROVIDER_BINDING,
+      backgroundCommand: { commandId: processId, command: "pre-fix server" },
       owner: {
         kind: "turn",
         turnId: attempt.turnId,
@@ -5290,6 +5427,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       await admin.unsafe(
         `create role ${quotedBypassRole} with login nosuperuser bypassrls nocreaterole nocreatedb noreplication inherit password '${roleCredential}'`,
       );
+      // If this run dies before the finally below, the harness reaper drops it.
+      await recordTestRoleOwner(admin, bypassRole);
       await admin`grant ${admin(new URL(shared!.appUrl).username)} to ${admin(bypassRole)}`;
       const [bypassPosture] = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
         select rolsuper, rolbypassrls from pg_roles where rolname = ${bypassRole}`;
@@ -5323,7 +5462,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expect(await readReconciliationState()).toEqual(beforeBypass);
     } finally {
       await bypassClient?.close();
-      await admin.unsafe(`drop role if exists ${quotedBypassRole}`);
+      // Memberships first, then grants that migrations elsewhere copied to it.
+      // A short deadline keeps this inside the test's own limit; anything
+      // left is for the stale-role cleanup or the shared reaper.
+      const leftovers = await dropScratchBypassRole(admin, shared!.adminUrl, bypassRole, {
+        deadline: Date.now() + 20_000,
+      });
+      if (leftovers.length > 0) console.warn(leftovers.join("; "));
     }
 
     const unknownProviderPreview = await previewColdLostLeaseInstanceBlockers(db, {
@@ -5603,6 +5748,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(rows).toEqual([
       { id: admission.id, outcome: "rejected", state: "lost" },
       { id: orphan.id, outcome: "rejected", state: null },
+    ]);
+    // The operator settlement tells the owning session, like automatic loss.
+    const finished = await admin<{ payload: { state: string; reason: string } }[]>`
+      select payload from session_events where session_id = ${attempt.sessionId}
+        and type = 'session.command.finished'`;
+    expect(finished.map((event) => event.payload)).toEqual([
+      expect.objectContaining({ state: "lost", reason: "provider_instance_lost" }),
     ]);
 
     const duplicate = await reconcileColdLostLeaseInstanceBlockers(db, {
@@ -6412,41 +6564,6 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         () => getSettings(),
       ),
     ).not.toThrow();
-  });
-
-  test("(5) the Schedule registration is idempotent — a second create() collides and no-ops (registers exactly once)", async () => {
-    // The registration's idempotency is the ScheduleAlreadyRunning catch in
-    // registerSandboxReaperSchedule. We assert the contract WITHOUT a live
-    // Temporal server by exercising the same create→collide shape through a fake
-    // ScheduleClient: the first create succeeds, the second throws
-    // ScheduleAlreadyRunning, and the helper treats it as a no-op (registered:false)
-    // rather than a failure.
-    const { ScheduleAlreadyRunning } = await import("@temporalio/client");
-    let created = 0;
-    const fakeCreate = async (opts: { scheduleId: string }) => {
-      if (created > 0) {
-        throw new ScheduleAlreadyRunning("already running", opts.scheduleId);
-      }
-      created += 1;
-    };
-
-    // First registration creates the Schedule.
-    await fakeCreate({ scheduleId: "opengeni-sandbox-lease-reaper" });
-    expect(created).toBe(1);
-
-    // A second worker booting (same scheduleId) collides → caught as a no-op.
-    let collided = false;
-    try {
-      await fakeCreate({ scheduleId: "opengeni-sandbox-lease-reaper" });
-    } catch (error) {
-      if (error instanceof ScheduleAlreadyRunning) {
-        collided = true; // the helper's catch arm — registered:false, not a throw.
-      } else {
-        throw error;
-      }
-    }
-    expect(collided).toBe(true);
-    expect(created).toBe(1); // still exactly one Schedule.
   });
 
   test("(5a) a missing exact provider settles stale mutation blockers and drains cold", async () => {
@@ -7371,6 +7488,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       actor: "reaper",
       instanceId: "box-terminated-reason",
       drainReason: "provider_deadline",
+      providerStopped: true,
     });
   }, 60_000);
 

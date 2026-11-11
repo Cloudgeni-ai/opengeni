@@ -6,6 +6,7 @@
 // the SDK at create() time.
 
 import type { SandboxBackend } from "@opengeni/contracts";
+import { UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE } from "@opengeni/config";
 
 export class SandboxConfigError extends Error {
   readonly backend: SandboxBackend | string;
@@ -14,6 +15,28 @@ export class SandboxConfigError extends Error {
     super(`[sandbox:${backend}] ${message}`);
     this.name = "SandboxConfigError";
     this.backend = backend;
+  }
+}
+
+export const SANDBOX_BACKEND_NOT_SERVED_CODE = "sandbox_backend_not_served";
+
+/**
+ * A box was about to be built on a host backend (`local`, `docker`) that this
+ * deployment does not serve: it is not the configured default. Building it
+ * would run the box as processes on the worker or API host, so nothing is
+ * constructed. A configuration failure: the same answer on every retry, so the
+ * turn fails terminally with this user-facing message.
+ */
+export class SandboxBackendNotServedError extends SandboxConfigError {
+  readonly code = SANDBOX_BACKEND_NOT_SERVED_CODE;
+  readonly deploymentBackend: SandboxBackend | string;
+
+  constructor(backend: SandboxBackend | string, deploymentBackend: SandboxBackend | string) {
+    super(backend, "");
+    this.name = "SandboxBackendNotServedError";
+    this.deploymentBackend = deploymentBackend;
+    // Plain words for the person; the backend IDs stay on the error fields.
+    this.message = UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE;
   }
 }
 
@@ -30,7 +53,7 @@ export class SandboxResumeStateUnavailableError extends Error {
   }
 }
 
-/** The OpenGeni-owned envelope identity and the SDK's resumed live handle name
+/** The Opengeni-owned envelope identity and the SDK's resumed live handle name
  * different physical providers. Neither address may be guessed away: callers
  * must fail closed before issuing a command or publishing readiness. */
 export class SandboxResumeIdentityMismatchError extends Error {
@@ -115,6 +138,19 @@ export class SandboxProviderContinuityUnavailableError extends Error {
       `Sandbox backend "${backend}" could not recover workspace continuity from ${sourceInstanceId}`,
       options,
     );
+  }
+}
+
+/** The elected continuity owner proved the lost workspace itself is gone: the
+ * provider that held it (for Docker: the same daemon that ran the exact
+ * container) reports the box missing and the durable workspace it owned no
+ * longer exists. Only this, never a NotFound alone, lets the lease record that
+ * the workspace is dead rather than temporarily unreachable. */
+export class SandboxProviderWorkspaceAbsentError extends SandboxProviderContinuityUnavailableError {
+  readonly workspaceAbsent = true;
+
+  constructor(backend: SandboxBackend | string, sourceInstanceId: string) {
+    super(backend, sourceInstanceId, false);
   }
 }
 

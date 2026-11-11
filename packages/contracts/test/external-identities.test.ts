@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AddExternalWorkspaceMemberRequest,
   ExternalActorAttribution,
   ExternalActorSelection,
+  ExternalActorStatedMembership,
   ExternalIdentityReference,
 } from "../src/external-identities";
 
@@ -50,6 +52,44 @@ describe("external actor wire boundary", () => {
         effectiveSubjectId: "user:admin",
       }).success,
     ).toBe(false);
+  });
+  test("a stated membership is a permission list on plain external mode only", () => {
+    const identity = { externalId: "alice", source: "product" };
+    expect(
+      ExternalActorSelection.parse({
+        mode: "external",
+        identity,
+        membership: { permissions: ["workspace:read", "sessions:create"] },
+      }),
+    ).toEqual({
+      mode: "external",
+      identity,
+      membership: { permissions: ["workspace:read", "sessions:create"] },
+    });
+    for (const membership of [
+      { permissions: [] },
+      { permissions: ["workspace:read", "not:a-permission"] },
+      { permissions: ["workspace:read"], role: "admin" },
+      { permissions: "workspace:read" },
+    ])
+      expect(
+        ExternalActorSelection.safeParse({ mode: "external", identity, membership }).success,
+      ).toBe(false);
+    expect(
+      ExternalActorSelection.safeParse({
+        mode: "linked_native",
+        identity,
+        linkId: crypto.randomUUID(),
+        expectedLinkRevision: 1,
+        membership: { permissions: ["workspace:read"] },
+      }).success,
+    ).toBe(false);
+    // The same permission list as an external-members grant.
+    expect(
+      ExternalActorStatedMembership.shape.permissions.safeParse(["workspace:read"]).success,
+    ).toBe(
+      AddExternalWorkspaceMemberRequest.shape.permissions.safeParse(["workspace:read"]).success,
+    );
   });
   test("external attribution cannot carry a native owner or link", () => {
     const externalSubjectId = `external_user:${crypto.randomUUID()}`;

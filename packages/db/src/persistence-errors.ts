@@ -1,3 +1,5 @@
+import { isRecord } from "@opengeni/contracts/values";
+
 export type DatabaseFailureCode = "db_deadlock" | "db_serialization_failure" | "db_failure";
 
 export type PersistenceRetryOutcome = "not_retryable" | "exhausted";
@@ -10,6 +12,12 @@ export type SafeDatabaseErrorFacts = {
   dataType?: string;
   constraint?: string;
   routine?: string;
+  /**
+   * Our own PL/pgSQL functions on the error's call chain, innermost first, as
+   * `name:line` (for example `fence_turn:42`). This names the exact check that
+   * raised a refusal; the raised message and SQL text are never copied.
+   */
+  plpgsql?: string[];
 };
 
 export type PersistenceFailureDetails = {
@@ -70,8 +78,25 @@ const SAFE_FACT_KEYS = [
   ["routine", "routine"],
 ] as const;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object");
+/**
+ * The objects in a possibly wrapped driver error, breadth first: the error,
+ * then everything under its `cause`, `original`, `driverError`, `error` and
+ * `errors` keys. Stops after 64 distinct objects.
+ */
+export function* nestedErrorRecords(error: unknown): Generator<Record<string, unknown>> {
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 64) {
+    const current = queue.shift();
+    if (!isRecord(current) || seen.has(current)) continue;
+    seen.add(current);
+    yield current;
+    for (const key of NESTED_ERROR_KEYS) {
+      const nested = current[key];
+      if (Array.isArray(nested)) queue.push(...nested);
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
 }
 
 function safeFact(value: unknown): string | undefined {
@@ -81,13 +106,8 @@ function safeFact(value: unknown): string | undefined {
 
 /** Find the driver SQLSTATE even when Drizzle wrapped it under nested causes. */
 export function nestedPostgresSqlState(error: unknown): string | null {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
   let fallback: string | null = null;
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
+  for (const current of nestedErrorRecords(error)) {
     for (const key of SQLSTATE_KEYS) {
       const value = current[key];
       if (typeof value !== "string" || !/^[0-9A-Z]{5}$/i.test(value)) continue;
@@ -98,13 +118,43 @@ export function nestedPostgresSqlState(error: unknown): string | null {
       if (normalized === "40P01" || normalized === "40001") return normalized;
       fallback ??= normalized;
     }
-    for (const key of NESTED_ERROR_KEYS) {
-      const nested = current[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
-    }
   }
   return fallback;
+}
+
+/**
+ * The message PostgreSQL raised with the SQLSTATE, even under nested causes.
+ * Fences raise fixed, data-free reasons; callers use this to say which one
+ * refused instead of collapsing every refusal into one generic answer.
+ */
+export function nestedPostgresMessage(error: unknown): string | null {
+  for (const current of nestedErrorRecords(error)) {
+    const carriesSqlState = SQLSTATE_KEYS.some((key) => {
+      const value = current[key];
+      return (
+        typeof value === "string" &&
+        /^[0-9A-Z]{5}$/i.test(value) &&
+        !RETRYABLE_DATABASE_TRANSPORT_CODES.has(value.toUpperCase())
+      );
+    });
+    if (carriesSqlState && typeof current.message === "string" && current.message.length > 0)
+      return current.message;
+  }
+  return null;
+}
+
+/** The DETAIL PostgreSQL raised with `sqlState`, even under nested causes. */
+export function nestedPostgresDetail(error: unknown, sqlState: string): string | null {
+  for (const current of nestedErrorRecords(error)) {
+    const matches = SQLSTATE_KEYS.some(
+      (key) =>
+        typeof current[key] === "string" &&
+        (current[key] as string).toUpperCase() === sqlState.toUpperCase(),
+    );
+    if (matches && typeof current.detail === "string" && current.detail.length > 0)
+      return current.detail;
+  }
+  return null;
 }
 
 export function databaseFailureCode(sqlState: string | null): DatabaseFailureCode {
@@ -117,6 +167,19 @@ export function isRetryablePersistenceSqlState(sqlState: string | null): boolean
   return sqlState === "40P01" || sqlState === "40001";
 }
 
+// SQLSTATEs a rolling migration produces for a moment in a transaction that
+// overlaps it: a statement already inside a routine planned against the old
+// definition meets the new column type (42883, 42804), or a cached plan meets
+// a changed table (0A000, 42703, 42P01). Outside a migration they are
+// deterministic, so they get only a short, bounded retry and never become
+// retryable failures themselves.
+const SCHEMA_CHANGE_SQLSTATES = new Set(["42883", "42804", "0A000", "42703", "42P01"]);
+const SCHEMA_CHANGE_RETRY_DELAYS_MS = [250, 1_000] as const;
+
+export function isSchemaChangePersistenceSqlState(sqlState: string | null): boolean {
+  return sqlState !== null && SCHEMA_CHANGE_SQLSTATES.has(sqlState);
+}
+
 /**
  * Recognize only explicit postgres.js/Node transport codes, including nested
  * driver causes. These failures can arrive as plain Errors with no SQLSTATE or
@@ -125,13 +188,7 @@ export function isRetryablePersistenceSqlState(sqlState: string | null): boolean
  * contain connection detail.
  */
 export function isRetryableDatabaseTransportFailure(error: unknown): boolean {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
-
+  for (const current of nestedErrorRecords(error)) {
     for (const key of ["code", "errno"] as const) {
       const value = current[key];
       if (
@@ -141,14 +198,111 @@ export function isRetryableDatabaseTransportFailure(error: unknown): boolean {
         return true;
       }
     }
-
-    for (const key of NESTED_ERROR_KEYS) {
-      const nested = current[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
-    }
   }
   return false;
+}
+
+/**
+ * SQLSTATEs PostgreSQL sends when it ends or refuses the session itself:
+ * operator intervention (`pg_terminate_backend`, shutdown, crash recovery,
+ * "the database system is starting up") and the connection-exception class.
+ */
+const DATABASE_CONNECTION_LOSS_SQLSTATES = new Set([
+  "57P01", // admin_shutdown (pg_terminate_backend, smart/fast shutdown)
+  "57P02", // crash_shutdown
+  "57P03", // cannot_connect_now
+  "08000", // connection_exception
+  "08001", // sqlclient_unable_to_establish_sqlconnection
+  "08003", // connection_does_not_exist
+  "08004", // sqlserver_rejected_establishment_of_sqlconnection
+  "08006", // connection_failure
+]);
+
+/**
+ * node-postgres (Better Auth's pool) reports a lost socket as a plain Error with
+ * no code. Only these exact library sentences are recognized.
+ */
+const NODE_POSTGRES_CONNECTION_LOSS_MESSAGES = new Set([
+  "Connection terminated unexpectedly",
+  "Connection terminated",
+  "Connection terminated due to connection timeout",
+  "Client has encountered a connection error and is not queryable",
+  "Client was closed and is not queryable",
+]);
+
+/**
+ * Explicit marker for a dependency that hid its driver error behind its own
+ * generic failure but is known to have failed reading the database.
+ */
+export class DatabaseUnavailableError extends Error {
+  readonly code = "DATABASE_UNAVAILABLE";
+
+  constructor(message = "database unavailable", options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "DatabaseUnavailableError";
+  }
+}
+
+/**
+ * True when a failure means the database connection itself went away (an
+ * operator drain, failover, restart, or socket loss), not that a statement was
+ * rejected. Such a failure is transient: a fresh pooled connection succeeds once
+ * the server accepts connections again. It says nothing about whether a write
+ * in flight committed.
+ *
+ * Socket and postgres.js transport codes (`ECONNRESET`, `CONNECTION_CLOSED`,
+ * ...) count only when the same failure proves it came from the database: a
+ * query-bearing driver or ORM error, a PostgresError, or postgres.js's own
+ * connection error. The same codes from NATS, a provider fetch, or a browser
+ * transport are not database loss.
+ */
+export function isDatabaseConnectionLoss(error: unknown): boolean {
+  let transportFailure = false;
+  let databaseOrigin = false;
+  for (const current of nestedErrorRecords(error)) {
+    if (current instanceof DatabaseUnavailableError) return true;
+    for (const key of SQLSTATE_KEYS) {
+      const value = current[key];
+      if (
+        typeof value === "string" &&
+        DATABASE_CONNECTION_LOSS_SQLSTATES.has(value.toUpperCase())
+      ) {
+        return true;
+      }
+    }
+    if (
+      typeof current.message === "string" &&
+      NODE_POSTGRES_CONNECTION_LOSS_MESSAGES.has(current.message)
+    ) {
+      return true;
+    }
+    if (hasTransportCode(current)) transportFailure = true;
+    if (isDatabaseOrigin(current)) databaseOrigin = true;
+    if (transportFailure && databaseOrigin) return true;
+  }
+  return false;
+}
+
+function hasTransportCode(current: Record<string, unknown>): boolean {
+  return (["code", "errno"] as const).some((key) => {
+    const value = current[key];
+    return typeof value === "string" && RETRYABLE_DATABASE_TRANSPORT_CODES.has(value.toUpperCase());
+  });
+}
+
+function isDatabaseOrigin(current: Record<string, unknown>): boolean {
+  if (typeof current.name === "string" && DATABASE_ERROR_NAMES.has(current.name)) return true;
+  // postgres.js stamps the failed query onto its error; Drizzle wraps it as
+  // DrizzleQueryError with `query` + `params`.
+  if (typeof current.query === "string") return true;
+  // postgres.js connection errors: `write <CODE> <host:port>` with errno === code.
+  return (
+    typeof current.code === "string" &&
+    current.errno === current.code &&
+    "address" in current &&
+    typeof current.message === "string" &&
+    current.message.startsWith(`write ${current.code} `)
+  );
 }
 
 /**
@@ -161,13 +315,7 @@ export function isDatabasePersistenceFailure(error: unknown): boolean {
     return true;
   }
 
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
-
+  for (const current of nestedErrorRecords(error)) {
     if (typeof current.name === "string" && DATABASE_ERROR_NAMES.has(current.name)) {
       return true;
     }
@@ -180,45 +328,63 @@ export function isDatabasePersistenceFailure(error: unknown): boolean {
     if (DATABASE_DIAGNOSTIC_KEYS.some((key) => Object.hasOwn(current, key))) {
       return true;
     }
-
-    for (const key of NESTED_ERROR_KEYS) {
-      const nested = current[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
-    }
   }
   return false;
 }
 
 /** Extract only PostgreSQL diagnostic identifiers; never query text/parameters. */
+// One `PL/pgSQL function <schema.>name(<arg types>) line <n> at <statement>`
+// context line. Interleaved `SQL statement "..."` lines can contain literal
+// values and never match.
+const PLPGSQL_CONTEXT_LINE =
+  /^PL\/pgSQL function (?:[A-Za-z_][A-Za-z0-9_$]*\.)?([A-Za-z_][A-Za-z0-9_$]*)\([^)\n]*\) line (\d+) at [A-Z][A-Z ]*$/;
+const MAX_PLPGSQL_LOCATIONS = 8;
+
+function plpgsqlLocations(where: unknown): string[] {
+  if (typeof where !== "string" || where.length === 0) return [];
+  const locations: string[] = [];
+  for (const line of where.split("\n")) {
+    const match = PLPGSQL_CONTEXT_LINE.exec(line.trim());
+    if (!match) continue;
+    locations.push(`${match[1]}:${match[2]}`);
+    if (locations.length === MAX_PLPGSQL_LOCATIONS) break;
+  }
+  return locations;
+}
+
 export function safeDatabaseErrorFacts(error: unknown): SafeDatabaseErrorFacts {
-  const queue: unknown[] = [error];
-  const seen = new Set<unknown>();
   const facts: SafeDatabaseErrorFacts = {};
-  while (queue.length > 0 && seen.size < 64) {
-    const current = queue.shift();
-    if (!isRecord(current) || seen.has(current)) continue;
-    seen.add(current);
+  for (const current of nestedErrorRecords(error)) {
     for (const [source, destination] of SAFE_FACT_KEYS) {
       if (facts[destination] !== undefined) continue;
       const value = safeFact(current[source]);
       if (value !== undefined) facts[destination] = value;
     }
-    for (const key of NESTED_ERROR_KEYS) {
-      const nested = current[key];
-      if (Array.isArray(nested)) queue.push(...nested);
-      else if (nested !== undefined) queue.push(nested);
+    if (facts.plpgsql === undefined) {
+      const locations = plpgsqlLocations(current.where);
+      if (locations.length > 0) facts.plpgsql = locations;
     }
   }
   return facts;
 }
 
-/**
- * Typed persistence classification that retains the exact original failure as
- * `cause` for internal diagnostics. The ordinary Error message is deliberately
- * stable and source-free so a generic presentation path can never disclose SQL,
- * parameters, or driver detail by rendering `.message`.
- */
+/** Own-driver transaction boundary; callback errors never establish provenance. */
+export class DatabaseTransactionError extends Error {
+  readonly name = "DatabaseTransactionError";
+
+  constructor(
+    readonly stage: "admission" | "settlement",
+    cause: unknown,
+    // A rollback failure must not erase a callback's no-replay/permanent
+    // evidence. The recovery classifier inspects both branches for vetoes.
+    readonly original?: unknown,
+  ) {
+    super(`Database transaction ${stage} failed`, { cause });
+  }
+}
+
+/** Typed persistence classification retaining the original cause internally.
+ * Its ordinary message is stable and contains no SQL or driver parameters. */
 export class SessionEventPersistenceError extends Error {
   readonly name = "SessionEventPersistenceError";
 
@@ -247,12 +413,23 @@ export function isSessionEventPersistenceError(
   return error instanceof SessionEventPersistenceError;
 }
 
+/**
+ * A database guard refused the request on purpose, and the application has
+ * already said what that means (for example a stale access version or a
+ * missing grant). It keeps the database error as its cause for diagnostics,
+ * but it is a decision, not a database failure: the persistence retry helper
+ * rethrows it unchanged and never retries it.
+ */
+export class ClassifiedDatabaseRefusal extends Error {}
+
 export type IdempotentPersistenceTransactionOptions = {
   stage: string;
   eventTypes?: string[];
   maxAttempts?: number;
   correlationId?: string;
   onRetry?: (input: { attempt: number; sqlState: "40P01" | "40001" }) => void | Promise<void>;
+  /** Waits before retrying a schema-change SQLSTATE; tests shorten it. */
+  sleep?: (ms: number) => Promise<void>;
 };
 
 /**
@@ -274,13 +451,32 @@ export async function runIdempotentPersistenceTransaction<T>(
     try {
       return await transaction(attempt);
     } catch (error) {
-      const sqlState = nestedPostgresSqlState(error);
+      if (error instanceof ClassifiedDatabaseRefusal) throw error;
+      // An uncertain transport/commit outcome is not a confirmed rollback,
+      // even when an older error in its cause chain carries a retryable state.
+      const sqlState = isRetryableDatabaseTransportFailure(error)
+        ? null
+        : nestedPostgresSqlState(error);
       const retryable = isRetryablePersistenceSqlState(sqlState);
       if (retryable && attempt < maxAttempts) {
         await options.onRetry?.({
           attempt,
           sqlState: sqlState as "40P01" | "40001",
         });
+        continue;
+      }
+      if (
+        isSchemaChangePersistenceSqlState(sqlState) &&
+        attempt < maxAttempts &&
+        isDatabasePersistenceFailure(error)
+      ) {
+        // A migration may be swapping a type under this transaction; give it
+        // a moment to commit, then run the same idempotent transaction again.
+        const delayMs =
+          SCHEMA_CHANGE_RETRY_DELAYS_MS[attempt - 1] ?? SCHEMA_CHANGE_RETRY_DELAYS_MS.at(-1)!;
+        await (options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(
+          delayMs,
+        );
         continue;
       }
       if (!isDatabasePersistenceFailure(error)) throw error;

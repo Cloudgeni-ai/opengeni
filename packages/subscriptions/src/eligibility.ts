@@ -1,0 +1,292 @@
+import { modelCooldownUntil, quotaCapacity, type QuotaCapacity } from "./quota";
+import { providerSwitchesFor } from "./settings";
+import type {
+  ModelDescriptor,
+  ModelId,
+  PlacementInput,
+  PlacementPerson,
+  PlacementWorkspace,
+  SubscriptionConnection,
+} from "./types";
+
+/**
+ * Reasons a connection may not serve a session at all. These are authority:
+ * the database enforces the same rules, so a connection with any of them must
+ * never be selected (SUB-ELIG-01, SUB-ELIG-05, SUB-SET-06, SUB-FAIL-04).
+ */
+export type AuthorizationIneligibility =
+  | "provider_disabled"
+  | "out_of_scope"
+  | "personal_connections_disabled"
+  | "personal_owner_inactive"
+  | "personal_not_owners_work"
+  | "personal_authority_missing";
+
+/** Reasons an authorized connection cannot serve a model now (SUB-ELIG-02..04). */
+export type ServiceIneligibility =
+  | "unhealthy"
+  | "allocator_disabled"
+  | "wrong_provider"
+  | "model_unknown"
+  | "model_not_allowed_by_workspace"
+  | "model_not_entitled"
+  | "model_not_allowed_by_connection"
+  | "model_cooling_down"
+  | "exhausted";
+
+export type Ineligibility = AuthorizationIneligibility | ServiceIneligibility;
+
+export const AUTHORIZATION_INELIGIBILITIES: readonly AuthorizationIneligibility[] = Object.freeze([
+  "provider_disabled",
+  "out_of_scope",
+  "personal_connections_disabled",
+  "personal_owner_inactive",
+  "personal_not_owners_work",
+  "personal_authority_missing",
+]);
+
+const AUTHORIZATION_SET = new Set<Ineligibility>(AUTHORIZATION_INELIGIBILITIES);
+
+export function isAuthorizationIneligibility(
+  reason: Ineligibility,
+): reason is AuthorizationIneligibility {
+  return AUTHORIZATION_SET.has(reason);
+}
+
+const PERMANENT_SERVICE = new Set<Ineligibility>([
+  "wrong_provider",
+  "model_unknown",
+  "model_not_allowed_by_workspace",
+  "model_not_entitled",
+  "model_not_allowed_by_connection",
+]);
+
+/**
+ * Reasons that neither time nor a quota reset clears: the work is not
+ * authorized on the account, or the account cannot serve the model at all.
+ * Health and allocator eligibility are not permanent: reconnecting or
+ * re-enabling allocation restores them.
+ */
+export function isPermanentIneligibility(reason: Ineligibility): boolean {
+  return AUTHORIZATION_SET.has(reason) || PERMANENT_SERVICE.has(reason);
+}
+
+/** Capacity of a connection now, with the input's staleness bound for its provider. */
+export function connectionCapacity(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+): QuotaCapacity {
+  const capacity = quotaCapacity(
+    connection.quota,
+    input.now,
+    input.quotaStaleAfterMs?.[connection.provider],
+  );
+  if (connectionUsesExtraCredits(input, connection)) return { kind: "available" };
+  return capacity;
+}
+
+/** Only included-window exhaustion is eligible for opted-in credit fallback. */
+export function connectionUsesExtraCredits(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+): boolean {
+  return (
+    connection.extraCreditsEnabled === true &&
+    !(connection.quota?.exhaustedUntil != null && connection.quota.exhaustedUntil > input.now) &&
+    quotaCapacity(connection.quota, input.now, input.quotaStaleAfterMs?.[connection.provider])
+      .kind === "exhausted"
+  );
+}
+
+function findModel(input: PlacementInput, modelId: ModelId): ModelDescriptor | undefined {
+  return input.models.find((model) => model.id === modelId);
+}
+
+function findPerson(input: PlacementInput, membershipId: string): PlacementPerson | undefined {
+  return input.people.find((person) => person.membershipId === membershipId);
+}
+
+/** Workspace model restrictions are a ceiling on every selection (SUB-ELIG-02). */
+export function modelAllowedInWorkspace(workspace: PlacementWorkspace, modelId: ModelId): boolean {
+  return workspace.allowedModelIds === null || workspace.allowedModelIds.includes(modelId);
+}
+
+/** Is the provider switched on for this workspace (SUB-SET-06)? */
+export function providerEnabled(input: PlacementInput, provider: string): boolean {
+  return providerSwitchesFor(input.settings, provider).enabled;
+}
+
+/**
+ * Authorization of one connection for the session's work, independent of
+ * model and capacity. Personal connections serve only their owner's own work,
+ * in the owner's private sessions or Personal workspace, or the exact
+ * connection a turn of theirs accepted for this session (an explicit choice,
+ * or their own subscription turned on in this workspace, D-53), with frozen
+ * personal authority for that provider (SUB-ELIG-05, design 3.7, 3.8). Shared
+ * connections serve the workspaces and people in their scope, where people are
+ * evaluated against the session owner.
+ */
+export function authorizationIneligibility(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+): AuthorizationIneligibility[] {
+  const reasons: AuthorizationIneligibility[] = [];
+  const { session, workspace } = input;
+  const switches = providerSwitchesFor(input.settings, connection.provider);
+  if (!switches.enabled) reasons.push("provider_disabled");
+  const ownership = connection.ownership;
+  if (ownership.kind === "personal") {
+    const owner = ownership.ownerMembershipId;
+    if (!input.settings.personalConnectionsAllowed) reasons.push("personal_connections_disabled");
+    if (!findPerson(input, owner)?.active) reasons.push("personal_owner_inactive");
+    const authority = session.personalAuthority.find(
+      (entry) => entry.provider === connection.provider && entry.ownerMembershipId === owner,
+    );
+    // A new shared-chat entry is a restriction, never a pool-wide grant and
+    // never an alias for the chat owner's identity. Historical entries keep
+    // their private-work eligibility unchanged.
+    const ownersOwnWork = authority?.sharedSessionChoice
+      ? session.ownerMembershipId !== null &&
+        authority.sharedSessionChoice.sessionId === session.id &&
+        authority.sharedSessionChoice.connectionId === connection.id
+      : session.ownerMembershipId === owner &&
+        (session.visibility === "private" ||
+          (workspace.kind === "personal" && workspace.ownerMembershipId === owner));
+    if (!ownersOwnWork) reasons.push("personal_not_owners_work");
+    if (!authority) reasons.push("personal_authority_missing");
+    return reasons;
+  }
+  const scope = ownership.scope;
+  const inScope =
+    scope.kind === "organization" ||
+    (scope.kind === "workspaces" &&
+      (scope.workspaceIds.includes(workspace.id) ||
+        (workspace.kind === "personal" && scope.allowPersonalWorkspaces))) ||
+    (scope.kind === "people" &&
+      session.ownerMembershipId !== null &&
+      scope.membershipIds.includes(session.ownerMembershipId));
+  if (!inScope) reasons.push("out_of_scope");
+  return reasons;
+}
+
+/** Reasons the connection cannot serve this model, ignoring capacity and cooldowns. */
+function staticServiceIneligibility(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+  modelId: ModelId,
+): ServiceIneligibility[] {
+  const reasons: ServiceIneligibility[] = [];
+  if (connection.health !== "healthy") reasons.push("unhealthy");
+  if (!connection.allocatorEnabled) reasons.push("allocator_disabled");
+  const model = findModel(input, modelId);
+  if (!model) reasons.push("model_unknown");
+  else if (model.provider !== connection.provider) reasons.push("wrong_provider");
+  if (!modelAllowedInWorkspace(input.workspace, modelId)) {
+    reasons.push("model_not_allowed_by_workspace");
+  }
+  const entitled =
+    (connection.entitledModelIds === null || connection.entitledModelIds.includes(modelId)) &&
+    !connection.excludedModelIds.includes(modelId);
+  if (!entitled) reasons.push("model_not_entitled");
+  if (connection.allowedModelIds !== null && !connection.allowedModelIds.includes(modelId)) {
+    reasons.push("model_not_allowed_by_connection");
+  }
+  return reasons;
+}
+
+/** Every reason this connection cannot serve this session and model now; empty when it can. */
+export function connectionIneligibility(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+  modelId: ModelId,
+): Ineligibility[] {
+  const reasons: Ineligibility[] = [
+    ...authorizationIneligibility(input, connection),
+    ...staticServiceIneligibility(input, connection, modelId),
+  ];
+  if (modelCooldownUntil(connection.quota, modelId, input.now) !== null) {
+    reasons.push("model_cooling_down");
+  }
+  if (connectionCapacity(input, connection).kind === "exhausted") reasons.push("exhausted");
+  return reasons;
+}
+
+/** SUB-ELIG-01..06: may this connection serve this session's model now? */
+export function canServe(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+  modelId: ModelId,
+): boolean {
+  return connectionIneligibility(input, connection, modelId).length === 0;
+}
+
+/**
+ * When a connection that is blocked only by capacity or a model cooldown can
+ * serve this model again. Returns `undefined` when something other than time
+ * blocks it, or when it is not blocked at all, and `null` when the reset time
+ * is unknown.
+ */
+export function servableAgainAt(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+  modelId: ModelId,
+): number | null | undefined {
+  if (authorizationIneligibility(input, connection).length > 0) return undefined;
+  if (staticServiceIneligibility(input, connection, modelId).length > 0) return undefined;
+  const capacity = connectionCapacity(input, connection);
+  const cooldown = modelCooldownUntil(connection.quota, modelId, input.now);
+  if (capacity.kind !== "exhausted" && cooldown === null) return undefined;
+  // A refusal can expire before an exhausted allowance resets. At that
+  // point credit consent may make the account usable, even without a known
+  // allowance reset. Evaluate every observed transition using the same policy.
+  const transitions = [
+    cooldown,
+    connection.quota?.exhaustedUntil,
+    ...(connection.quota?.windows.map((window) => window.resetsAt) ?? []),
+  ]
+    .filter((at): at is number => at != null && at > input.now)
+    .sort((a, b) => a - b);
+  return transitions.find((now) => canServe({ ...input, now }, connection, modelId)) ?? null;
+}
+
+/**
+ * Is this connection the turn person's own subscription, turned on where the
+ * turn runs (D-53)? That is their own Personal workspace, or the exact
+ * connection the turn's accepted personal authority names for this session.
+ * Acceptance writes that entry from the person's explicit choice or from
+ * their "use it for my turns here" switch. Authorization is separate
+ * (`authorizationIneligibility`): this only says the account takes part in
+ * automatic selection, and ranks first there (SUB-SEL-01).
+ */
+export function ownSubscriptionTurnedOn(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+): boolean {
+  const ownership = connection.ownership;
+  if (ownership.kind !== "personal") return false;
+  const owner = ownership.ownerMembershipId;
+  if (input.workspace.kind === "personal" && input.workspace.ownerMembershipId === owner) {
+    return true;
+  }
+  return input.session.personalAuthority.some(
+    (entry) =>
+      entry.provider === connection.provider &&
+      entry.ownerMembershipId === owner &&
+      entry.sharedSessionChoice?.sessionId === input.session.id &&
+      entry.sharedSessionChoice.connectionId === connection.id,
+  );
+}
+
+/**
+ * May automatic selection consider this connection at all (SUB-SEL-01,
+ * SUB-SEL-02)? Shared connections may; a personal one only when it is the
+ * turn person's own subscription turned on here. Any other personal
+ * authority, such as an Only me chat in a shared workspace, serves only an
+ * explicit choice.
+ */
+export function automaticallyUsable(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+): boolean {
+  return connection.ownership.kind === "shared" || ownSubscriptionTurnedOn(input, connection);
+}

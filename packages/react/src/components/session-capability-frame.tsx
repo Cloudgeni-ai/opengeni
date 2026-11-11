@@ -1,19 +1,52 @@
-import { CheckIcon, ShieldCheckIcon, XIcon } from "lucide-react";
+import {
+  CalendarIcon,
+  CheckIcon,
+  CloudIcon,
+  ContactIcon,
+  FilesIcon,
+  InfoIcon,
+  MailIcon,
+  ShieldCheckIcon,
+  XIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { Dialog } from "radix-ui";
+import type { IntegrationExperienceIcon } from "../integration-presentation";
+import { containedPortal } from "../ui/portal-container";
 import { useRef, useState, type ReactNode, type RefObject } from "react";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
+import { useOpenGeniText } from "../messages/runtime";
+
+const DialogContainedPortal = containedPortal(Dialog.Portal);
 
 export type SessionCapabilityFrameProps = {
   name: string;
   subtitle: string;
   logo: string | null;
+  /**
+   * The service's kind of content, drawn when it has no logo, so a reviewed
+   * service never reads as two letters of its name.
+   */
+  icon?: IntegrationExperienceIcon | undefined;
+  /** A short kind label for the setup dialog's subtitle; the card itself shows none. */
   typeLabel: string;
+  /**
+   * A quiet label beside the name, only where it tells a person what they are
+   * trusting (a server someone added by hand). Reviewed services show none.
+   */
+  badge?: string | undefined;
   description: string;
+  /**
+   * The description is the agent's reason for asking: keep it to two lines so
+   * a long rationale never pushes the action down. State and guidance copy
+   * stays whole.
+   */
+  clampDescription?: boolean | undefined;
   skill: boolean;
   expanded: boolean;
   complete: boolean;
   /** Completion copy must reflect the provider's actual scope of access. */
-  completeLabel?: string;
+  completeLabel?: string | undefined;
   actionLabel: string;
   /** Direct navigation actions should not announce a dialog on the card. */
   opensDialog?: boolean;
@@ -26,16 +59,56 @@ export type SessionCapabilityFrameProps = {
   children?: ReactNode;
   /** A catalogue row can own the opener while reusing the same details dialog. */
   dialogOnly?: boolean;
+  /**
+   * Replaces the action when the viewer cannot start setup here (the provider
+   * is not configured, or someone else must connect it). Say why and who can.
+   */
+  actionUnavailable?: ReactNode;
+  /** Host-owned content inside the card, under its status or actions. */
+  details?: ReactNode;
+  /** Protected setup can stay in the conversation instead of opening a dialog. */
+  inlineSetup?: ReactNode;
 };
 
-function Mark({ src, name }: { src: string | null; name: string }) {
+const MARK_ICONS: Readonly<Record<IntegrationExperienceIcon, LucideIcon>> = {
+  calendar: CalendarIcon,
+  cloud: CloudIcon,
+  contacts: ContactIcon,
+  files: FilesIcon,
+  mail: MailIcon,
+};
+
+/** "Google Calendar" reads as GC, a one-word name keeps its first two letters. */
+export function capabilityMarkInitials(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  const initials =
+    words.length > 1 ? words.map((word) => [...word][0]).join("") : [...(words[0] ?? "")].join("");
+  return [...initials].slice(0, 2).join("").toUpperCase();
+}
+
+function Mark({
+  src,
+  name,
+  icon,
+}: {
+  src: string | null;
+  name: string;
+  icon?: IntegrationExperienceIcon | undefined;
+}) {
   const [failed, setFailed] = useState<string | null>(null);
+  const Icon = icon ? MARK_ICONS[icon] : null;
   return (
-    <span className="og-session-capability-logo" aria-hidden>
+    <span
+      className="og-session-capability-logo"
+      data-mark={src && failed !== src ? "image" : Icon ? "icon" : "initials"}
+      aria-hidden
+    >
       {src && failed !== src ? (
         <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(src)} />
+      ) : Icon ? (
+        <Icon size={18} strokeWidth={1.75} />
       ) : (
-        name.trim().slice(0, 2).toUpperCase()
+        capabilityMarkInitials(name)
       )}
     </span>
   );
@@ -47,8 +120,11 @@ export function SessionCapabilityFrame({
   name,
   subtitle,
   logo,
+  icon,
   typeLabel,
+  badge,
   description,
+  clampDescription = false,
   skill,
   expanded,
   complete,
@@ -63,20 +139,26 @@ export function SessionCapabilityFrame({
   cardRef,
   children,
   dialogOnly = false,
+  actionUnavailable,
+  details,
+  inlineSetup,
 }: SessionCapabilityFrameProps) {
+  const t = useOpenGeniText();
   const localOpener = useRef<HTMLButtonElement>(null);
   const localCard = useRef<HTMLElement>(null);
   const buttonRef = opener ?? localOpener;
   const sectionRef = cardRef ?? localCard;
   const portalStyle = usePortalTokenStyle(sectionRef.current);
+  // A row without a better name is titled by its domain; never say it twice.
+  const shownSubtitle = subtitle.trim().toLowerCase() === name.trim().toLowerCase() ? "" : subtitle;
   const identity = (
     <>
-      <Mark src={logo} name={name} />
+      <Mark src={logo} name={name} icon={icon} />
       <div className="og-session-capability-identity">
         <h3>{name}</h3>
-        <span>{subtitle}</span>
+        {shownSubtitle ? <span>{shownSubtitle}</span> : null}
       </div>
-      <span className="og-session-capability-type">{typeLabel}</span>
+      {badge ? <span className="og-session-capability-type">{badge}</span> : null}
     </>
   );
   return (
@@ -86,7 +168,7 @@ export function SessionCapabilityFrame({
         style={dialogOnly ? { display: "none" } : undefined}
         ref={sectionRef}
         tabIndex={-1}
-        aria-label={`${name} setup`}
+        aria-label={t("sessionCapabilityFrame.nameSetup", { name })}
         data-state={complete ? "complete" : expanded ? "setup" : "suggested"}
         className="og-session-capability-shell"
       >
@@ -95,40 +177,65 @@ export function SessionCapabilityFrame({
           {complete ? <CheckIcon size={16} aria-hidden /> : null}
         </div>
         {complete ? (
-          <p role="status" className="og-session-capability-copy">
+          // Focusable so a card that just finished can keep keyboard focus.
+          <p role="status" tabIndex={-1} className="og-session-capability-copy">
             {completeLabel ??
-              (skill ? "Installed · Workspace" : "Connected · Available in this conversation")}
+              (skill
+                ? t("sessionCapabilityFrame.installedWorkspace")
+                : t("sessionCapabilityFrame.connectedAvailableInThisConversation"))}
           </p>
         ) : (
           <>
-            <p className="og-session-capability-copy">{description}</p>
-            <div className="og-session-capability-actions">
-              <span>
-                <ShieldCheckIcon size={13} aria-hidden />
-                {skill ? "Guidance only · no account access" : "You choose what to authorize"}
-              </span>
-              <button
-                ref={buttonRef}
-                type="button"
-                onClick={onOpen}
-                disabled={busy}
-                aria-haspopup={opensDialog ? "dialog" : undefined}
-                aria-expanded={opensDialog ? expanded : undefined}
-              >
-                {actionLabel}
-              </button>
-            </div>
+            <p
+              className="og-session-capability-copy"
+              data-clamp={clampDescription ? "" : undefined}
+              title={clampDescription ? description : undefined}
+            >
+              {description}
+            </p>
+            {inlineSetup ? (
+              <div className="og-session-capability-setup">{inlineSetup}</div>
+            ) : actionUnavailable ? (
+              <div className="og-session-capability-actions" data-unavailable="">
+                <span role="note">
+                  <InfoIcon size={13} aria-hidden />
+                  {actionUnavailable}
+                </span>
+              </div>
+            ) : (
+              <div className="og-session-capability-actions">
+                <span>
+                  <ShieldCheckIcon size={13} aria-hidden />
+                  {skill
+                    ? t("sessionCapabilityFrame.guidanceOnlyNoAccountAccess")
+                    : t("sessionCapabilityFrame.youChooseWhatToAuthorize")}
+                </span>
+                <button
+                  ref={buttonRef}
+                  type="button"
+                  onClick={onOpen}
+                  disabled={busy}
+                  aria-haspopup={opensDialog ? "dialog" : undefined}
+                  aria-expanded={opensDialog ? expanded : undefined}
+                >
+                  {actionLabel}
+                </button>
+              </div>
+            )}
           </>
         )}
+        {details}
       </section>
-      {!complete && !dialogOnly ? <p className="og-session-capability-note">{note}</p> : null}
+      {!complete && !dialogOnly && note ? (
+        <p className="og-session-capability-note">{note}</p>
+      ) : null}
       <Dialog.Root
         open={expanded && !complete}
         onOpenChange={(open) => {
           if (!open && !busy) onClose();
         }}
       >
-        <Dialog.Portal>
+        <DialogContainedPortal>
           <Dialog.Overlay className="og-root og-session-capability-overlay" style={portalStyle} />
           <Dialog.Content
             className="og-root og-session-capability-dialog"
@@ -144,27 +251,27 @@ export function SessionCapabilityFrame({
               const target = buttonRef.current?.isConnected
                 ? buttonRef.current
                 : sectionRef.current;
-              if (target?.isConnected) target.focus();
+              // Keep the view where the conversation is; focus alone must not scroll.
+              if (target?.isConnected) target.focus({ preventScroll: true });
             }}
           >
             <div className="og-session-capability-dialog-header">
-              <Mark src={logo} name={name} />
+              <Mark src={logo} name={name} icon={icon} />
               <div>
                 <Dialog.Title>{name}</Dialog.Title>
                 <Dialog.Description>
-                  {typeLabel}
-                  {subtitle ? ` · ${subtitle}` : ""}
+                  {[typeLabel, shownSubtitle].filter(Boolean).join(" · ")}
                 </Dialog.Description>
               </div>
               {!busy ? (
-                <Dialog.Close aria-label="Close connection setup">
+                <Dialog.Close aria-label={t("sessionCapabilityFrame.closeConnectionSetup")}>
                   <XIcon size={18} />
                 </Dialog.Close>
               ) : null}
             </div>
             <div className="og-session-capability-dialog-body">{children}</div>
           </Dialog.Content>
-        </Dialog.Portal>
+        </DialogContainedPortal>
       </Dialog.Root>
     </div>
   );

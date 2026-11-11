@@ -1,4 +1,5 @@
 import type { Permission } from "@opengeni/contracts";
+import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { hasPermission } from "../access";
 import { requireExternalContinuationAuthority } from "./external-continuation";
@@ -8,25 +9,83 @@ import {
   lockExternalWorkspaceMembershipLifecycle,
   withWorkspaceSubjectRls,
   type Database,
-  lockConnectionSetupKey,
+  lockConnectionSetupKeyAuthority,
   nestedPostgresSqlState,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
+/** Connect providers whose personal setup is only a sign-in: no installation. */
+const PERSONAL_SIGN_IN_PROVIDERS = new Set([
+  "mcp-oauth",
+  "gmail",
+  "google-drive",
+  "slack-personal",
+]);
+
+/**
+ * Deployment-reviewed integration definitions (Outlook Mail, OneDrive, ...).
+ * Each personal account gets its own instance of the reviewed tools, which
+ * resolves credentials for that person alone, so connecting one's own
+ * account to one is personal setup too. The install step separately allows
+ * only a fresh instance or one already bound to that same account.
+ */
+const REVIEWED_INTEGRATION_DEFINITION_IDS: ReadonlySet<string> = new Set(
+  CORE_INTEGRATION_DEFINITIONS.map((definition) => definition.id),
+);
+
+/**
+ * The permission a Connect step needs. Signing in to one's own account
+ * (personal ownership and no MCP setup, with a sign-in-only provider and no
+ * installation target, or a reviewed integration definition and no custom
+ * source) needs only `connections:personal`; everything else keeps
+ * `connections:write`. `connections:write` includes `connections:personal`.
+ */
+export function connectSetupPermission(attempt: {
+  providerId: string;
+  ownership: string;
+  mcpSetup?: unknown;
+  installationTarget?: unknown;
+  source?: unknown;
+}): "connections:personal" | "connections:write" {
+  if (attempt.ownership !== "personal" || attempt.mcpSetup) return "connections:write";
+  return (PERSONAL_SIGN_IN_PROVIDERS.has(attempt.providerId) && !attempt.installationTarget) ||
+    (REVIEWED_INTEGRATION_DEFINITION_IDS.has(attempt.providerId) && !attempt.source)
+    ? "connections:personal"
+    : "connections:write";
+}
+
+/**
+ * The owner a Connect step or OAuth callback re-checks. `personalOwnerVerified`
+ * is required: it is the only way to find a managed human's authority in their
+ * own Personal workspace, which has no membership row, so leaving it out must
+ * be a compile error rather than a silent denial in that workspace alone.
+ */
+export type ConnectOwner = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  personalOwnerVerified: boolean;
+  externalContinuation?: ExternalActorContinuation;
+};
+
 /** Accept only a verified request owner or authenticated server-minted OAuth
  * state. The callback does not need a browser cookie: it rechecks the stored
- * principal against current authority before claiming and committing effects. */
+ * principal against current authority before claiming and committing effects.
+ * Every OAuth/install callback re-checks its owner here, never through a bare
+ * membership lookup (`connect-owner-state-surface.test.ts`). */
 export async function requireConnectOwnerAuthority(
   db: Database,
-  state: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    personalOwnerVerified?: boolean;
-    externalContinuation?: ExternalActorContinuation;
-  },
+  state: ConnectOwner,
   permission: Permission = "connections:write",
   origin: ExternalActorContinuation | null = null,
+  options: {
+    /**
+     * Accept the verified owner of a Personal workspace for `workspace:admin`.
+     * Only for setups whose start step ran the full settings check
+     * (requireWorkspaceSettingsGrant): workspace-owned social accounts.
+     */
+    personalOwnerSettings?: boolean;
+  } = {},
 ): Promise<void> {
   async function requireExternal(continuation: ExternalActorContinuation) {
     try {
@@ -53,24 +112,33 @@ export async function requireConnectOwnerAuthority(
   if (state.subjectId.startsWith("external_user:"))
     throw new HTTPException(403, { message: "External Connect continuation required" });
   if (state.subjectId.startsWith("api_key:")) {
-    const permissions = await lockConnectionSetupKey(db, state);
-    if (!permissions || !hasPermission(permissions, permission))
+    const authority = await lockConnectionSetupKeyAuthority(db, state);
+    if (!authority || !hasPermission(authority.permissions, permission, authority.permissionMode))
       throw new HTTPException(403, { message: "Connection API key authority changed" });
     return;
   }
   await withWorkspaceSubjectRls(db, state.workspaceId, state.subjectId, async (tx) => {
     await lockExternalWorkspaceMembershipLifecycle(tx, state.accountId);
     const membership = await getWorkspaceGrant(tx, state.subjectId, state.workspaceId);
-    const grant =
-      membership?.accountId === state.accountId
-        ? membership
-        : state.personalOwnerVerified
-          ? await resolveNamedManagedPersonalWorkspaceGrant(tx, state)
-          : null;
+    const ownMembership = membership?.accountId === state.accountId;
+    const grant = ownMembership
+      ? membership
+      : state.personalOwnerVerified
+        ? await resolveNamedManagedPersonalWorkspaceGrant(tx, state)
+        : null;
+    // A Personal workspace's settings are its verified owner's, who never holds
+    // workspace:admin there (requireWorkspaceSettingsGrant). Callers that opt in
+    // minted this owner in a step that already passed that full check; here the
+    // owner only has to still own the workspace.
+    const personalOwnerSettings =
+      options.personalOwnerSettings === true &&
+      permission === "workspace:admin" &&
+      !ownMembership &&
+      grant !== null;
     if (
       !grant ||
       grant.accountId !== state.accountId ||
-      !hasPermission(grant.permissions, permission)
+      (!personalOwnerSettings && !hasPermission(grant.permissions, permission))
     )
       throw new HTTPException(403, { message: "Connection owner authority changed" });
   });

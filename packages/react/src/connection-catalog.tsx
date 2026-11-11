@@ -4,6 +4,7 @@ import {
   CapabilityCatalogRow,
   type CapabilityCatalogStatus,
 } from "./capability-catalog-row";
+import { useOpenGeniText } from "./messages/runtime";
 
 /** Status comes from the host/controller, never inferred from a display label. */
 export type ConnectionCatalogOption = {
@@ -35,6 +36,30 @@ export type ConnectionCatalogProps = {
   emptyMessage?: string;
 };
 
+/**
+ * Whether a connection needs the person to fix it: it reports attention
+ * (reconnect, failed health check). An unavailable entry is a limit the
+ * person can't act on here, such as restricted access, so it is not one.
+ */
+export function connectionOptionNeedsAttention(option: ConnectionCatalogOption): boolean {
+  return option.state === "attention";
+}
+
+/**
+ * Connections that need attention first, everything else in its given order.
+ * The sort is stable, so a short preview never hides a problem behind
+ * "View all" and the rest of the list keeps the host's ordering.
+ */
+export function attentionFirst<T extends { options: readonly ConnectionCatalogOption[] }>(
+  services: readonly T[],
+): T[] {
+  const attention = services.filter((service) =>
+    service.options.some(connectionOptionNeedsAttention),
+  );
+  if (!attention.length) return [...services];
+  return [...attention, ...services.filter((service) => !attention.includes(service))];
+}
+
 export function ConnectionOptionRow({ option }: { option: ConnectionCatalogOption }) {
   return (
     <div className="og-connection-catalog-action-row og-connection-option">
@@ -52,6 +77,7 @@ export function ConnectionOptionRow({ option }: { option: ConnectionCatalogOptio
 }
 
 export function ConnectionServiceRow({ service }: { service: ConnectionCatalogService }) {
+  const t = useOpenGeniText();
   if (!service.options.length) return null;
   const connected = service.options.filter((option) => option.connected).length;
   const attention = service.options.find(
@@ -77,7 +103,13 @@ export function ConnectionServiceRow({ service }: { service: ConnectionCatalogSe
       </span>
       <CapabilityCatalogIndicator
         status={groupState}
-        label={attention?.status ?? `${connected} of ${service.options.length} added`}
+        label={
+          attention?.status ??
+          t("connectionCatalog.connectedOfLengthAdded", {
+            connected,
+            length: service.options.length,
+          })
+        }
       />
     </>
   );
@@ -103,7 +135,10 @@ export function ConnectionServiceRow({ service }: { service: ConnectionCatalogSe
         </span>
       </summary>
       <div className="og-connection-catalog-options">
-        {service.options.map((option) => (
+        {[
+          ...service.options.filter(connectionOptionNeedsAttention),
+          ...service.options.filter((option) => !connectionOptionNeedsAttention(option)),
+        ].map((option) => (
           <ConnectionOptionRow key={option.id} option={option} />
         ))}
       </div>
@@ -119,8 +154,13 @@ export function ConnectionCatalog({
   resultLimit,
   onShowMore,
   className = "",
-  emptyMessage = "No connections match your search.",
+  emptyMessage: emptyMessageProp,
 }: ConnectionCatalogProps) {
+  const t = useOpenGeniText();
+  const emptyMessage =
+    emptyMessageProp === undefined
+      ? t("connectionCatalog.noConnectionsMatchYourSearch")
+      : emptyMessageProp;
   const search = query.trim().toLowerCase();
   const entries = grouped
     ? services
@@ -135,11 +175,16 @@ export function ConnectionCatalog({
           options: [option],
         })),
       );
-  const visible = entries.filter((service) =>
-    [service.name, ...service.options.flatMap((option) => [option.name, option.description ?? ""])]
-      .join(" ")
-      .toLowerCase()
-      .includes(search),
+  const visible = attentionFirst(
+    entries.filter((service) =>
+      [
+        service.name,
+        ...service.options.flatMap((option) => [option.name, option.description ?? ""]),
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(search),
+    ),
   );
   return (
     <>
@@ -154,7 +199,7 @@ export function ConnectionCatalog({
       </div>
       {resultLimit && visible.length > resultLimit ? (
         <button className="og-catalog-more" type="button" onClick={onShowMore}>
-          View all connections
+          {t("connectionCatalog.viewAllConnections")}
         </button>
       ) : null}
     </>

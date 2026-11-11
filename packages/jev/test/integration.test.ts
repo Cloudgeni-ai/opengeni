@@ -231,10 +231,10 @@ describeWithRipgrep("runCodeSearch end to end with a fake Jev", () => {
     const w2 = log.requests.find((q) => q.state.passages)!;
     expect(Object.keys(w2.questions).length).toBe(Object.keys(w2.state.passages).length * 3);
     // stats
-    expect(r.stats.jev.requests).toBe(log.requests.length);
-    expect(r.stats.jev.model).toBe("jev-fake-1");
-    expect(r.stats.jev.inputTokens).toBeGreaterThan(0);
-    expect(r.stats.jev.costUsd).toBeCloseTo((r.stats.jev.inputTokens * 0.042) / 1e6, 12);
+    expect(r.stats.decision.requests).toBe(log.requests.length);
+    expect(r.stats.decision.model).toBe("jev-fake-1");
+    expect(r.stats.decision.inputTokens).toBeGreaterThan(0);
+    expect(r.stats.decision.costUsd).toBeCloseTo((r.stats.decision.inputTokens * 0.042) / 1e6, 12);
     expect(r.stats.workspaceCalls).toBe(ws.calls.length);
     expect(r.stats.ripgrepTruncated).toBe(false);
     expect(r.stats.filesSelected).toBeGreaterThan(0);
@@ -249,7 +249,7 @@ describeWithRipgrep("runCodeSearch end to end with a fake Jev", () => {
       "wave2",
       "wave3",
     ]);
-    for (const s of ["start", "recall", "wave1", "wave2", "leads", "pack", "summary", "jev"])
+    for (const s of ["start", "recall", "wave1", "wave2", "leads", "pack", "summary", "decision"])
       expect(events).toContain(s);
     // every ripgrep call stayed inside the allowlist (the local workspace enforces it)
     expect(ws.calls.filter((c) => c.kind === "ripgrep").length).toBeGreaterThanOrEqual(3);

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, StrictMode, type ReactNode } from "react";
@@ -10,7 +11,7 @@ const toastError = mock(() => undefined);
 mock.module("sonner", () => ({
   toast: { success: toastSuccess, error: toastError },
 }));
-mock.module("@/components/ui/dialog", () => ({
+mock.module("@opengeni/react/ui/dialog", () => ({
   Dialog: ({ open, children }: { open: boolean; children: ReactNode }) =>
     open ? <div>{children}</div> : null,
   DialogContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -18,7 +19,7 @@ mock.module("@/components/ui/dialog", () => ({
   DialogHeader: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DialogTitle: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
 }));
-mock.module("@/components/ui/dropdown-menu", () => ({
+mock.module("@opengeni/react/ui/dropdown-menu", () => ({
   DropdownMenuItem: ({
     children,
     onSelect,
@@ -110,7 +111,7 @@ describe("global organization invitations", () => {
         nextCursor: null,
       })),
       acceptOrganizationInvitation,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     function Harness() {
       const controller = useOrganizationInvitations({
@@ -186,7 +187,7 @@ describe("global organization invitations", () => {
         nextCursor: null,
       })),
       acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     function Harness() {
       const controller = useOrganizationInvitations({
@@ -237,7 +238,7 @@ describe("global organization invitations", () => {
         nextCursor: null,
       })),
       acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     function Harness() {
       const controller = useOrganizationInvitations({
@@ -302,7 +303,7 @@ describe("global organization invitations", () => {
     const client = {
       listOrganizationInvitations,
       acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     function Harness() {
       const controller = useOrganizationInvitations({
@@ -436,7 +437,7 @@ describe("global organization invitations", () => {
     const client = {
       listOrganizationInvitations,
       acceptOrganizationInvitation,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     function Harness() {
       const controller = useOrganizationInvitations({

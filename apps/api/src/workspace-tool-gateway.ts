@@ -1,4 +1,4 @@
-import { knowledgeContextForGateway } from "@opengeni/core";
+import { isVerifiedDelegatedHumanAuthorization, knowledgeContextForGateway } from "@opengeni/core";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -6,68 +6,91 @@ import { withSiteSessionOrigin } from "@opengeni/core";
 import { resolveSiteSessionOrigin } from "./site-session-origin";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { recordToolApproval } from "@opengeni/observability";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
-import { CODEX_CLIENT_VERSION } from "@opengeni/codex";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
+import { CODEX_APPS_MCP_SERVER_ID } from "@opengeni/codex";
 import type { Settings } from "@opengeni/config";
 import {
   FIRST_PARTY_MCP_TOOL_NAMES,
+  EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
   ToolGatewayApprovalRequest,
   ToolGatewayApprovalResponse,
   ToolGatewayDeclarationsResponse,
+  toolPolicyActionName,
+  isSecretReferenceError,
   type AccessGrant,
-  type ToolGatewayCatalog,
   type ToolGatewayIdentity,
+  type ToolReviewContext,
   type ToolRef,
+  type ToolGatewayTarget,
 } from "@opengeni/contracts";
 import {
+  availableMcpAccountBindings,
   buildApiIntegrationMcpServers,
+  expandApiIntegrationAccountRoutes,
+  expandMcpAccountRoutes,
   hasPermission,
   externalActorContinuationForAuthorization,
   isVerifiedOrganizationServiceAuthorization,
   externalContinuationCommitAuthorizer,
   requireResolvedAccessGrantAuthorization,
-  resolveCodexAppsCredentialIdForRun,
+  codexAppsRequestAuthForDesignation,
+  resolveCodexAppsDesignationForRun,
   resolveWorkspaceCatalogSettings,
   settingsWithEnabledCapabilityMcpServers,
+  settingsWithEnabledCapabilityMcpServersForTargets,
+  visibleMcpAccountConnectionsByIds,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  siteViewerForGrant,
 } from "@opengeni/core";
 import {
-  buildCodexTokenResolver,
   buildConnectionTokenResolver,
-  lockActiveExternalOrganizationKey,
+  buildSlackApiRateLimiter,
+  lockActiveExternalOrganizationKeyAuthority,
   withAccountRls,
   requireWorkspace,
-  withCodexAppsRequestAuthorization,
   consumeToolGatewayApproval,
   getWorkspaceArtifactContentRef,
   issueToolGatewayApproval,
   ToolGatewayApprovalOperationStartedError,
   ToolGatewayApprovalRateLimitError,
   WorkspaceArtifactNotFoundError,
+  listConnectorToolPermissionPolicies,
+  projectConnectorToolPermission,
+  resolveConnectorActionPolicy,
+  connectorActionPolicyDecision,
   type ApiIntegrationRuntime,
+  type Database,
+  type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import {
+  ConnectionApprovalPreflightError,
+  isMcpAccountParameterChoiceError,
   type LocalMcpServerRegistration,
   type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
   prepareWorkspaceToolGatewayTools,
+  sessionMcpApprovalConnectionId,
 } from "@opengeni/runtime/workspace-tool-gateway";
 import {
   ToolGatewayApprovalRequiredError,
+  ToolGatewayBlockedError,
   ToolGatewayCatalogStaleError,
   ToolGatewayInputValidationError,
   ToolGatewayToolNotFoundError,
   digestCanonicalJson,
   generateToolGatewayDeclarations,
+  safeNamespaceSegment,
+  projectToolGatewayPath,
   type PreparedToolGatewayCall,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
@@ -76,9 +99,28 @@ import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "./http/api-error";
 import { buildDocumentsMcpServer } from "./mcp/documents";
 import { buildFilesMcpServer } from "./mcp/files";
-import { buildOpenGeniMcpServer } from "./mcp/server";
+import { buildOpenGeniMcpServer, resolveSlackBotToolAvailability } from "./mcp/server";
 import { startWorkspaceToolGatewayObservation } from "./workspace-tool-gateway-observability";
+import {
+  withSiteSecretContext,
+  workspaceGatewaySecretArguments,
+} from "./workspace-tool-gateway-secrets";
+import { vaultProviderRegistryFor } from "./routes/vault-providers";
+import type { TargetAuthorityFence } from "./workspace-tool-target-fence";
+import {
+  digestWorkspaceToolGatewayCatalogEntry,
+  type WorkspaceToolGatewayCatalogAttestations,
+} from "./workspace-tool-gateway-attestations";
 import type { Observability } from "@opengeni/observability";
+import {
+  isPublishedSiteToolAuthorization,
+  publishedSiteToolAuthority,
+  type PublishedSiteToolAuthorization,
+} from "./site-publishing/page-tool-authority";
+
+export type WorkspaceToolGatewayAuthorization =
+  | AccessGrantAuthorization
+  | PublishedSiteToolAuthorization;
 
 export type PreparedWorkspaceToolGateway = Pick<
   PreparedWorkspaceToolGatewayTools,
@@ -87,12 +129,27 @@ export type PreparedWorkspaceToolGateway = Pick<
   toolGateway: NonNullable<PreparedWorkspaceToolGatewayTools["toolGateway"]>;
   toolGatewayCatalog: NonNullable<PreparedWorkspaceToolGatewayTools["toolGatewayCatalog"]>;
   reauthorize?: () => Promise<void>;
+  /**
+   * The provider's own review of exact arguments (for Gmail, the message as it
+   * would be sent), read through the same fenced connection. Empty when the
+   * provider has none.
+   */
+  review?: (
+    identity: ToolGatewayIdentity,
+    args: Record<string, unknown>,
+  ) => Promise<Partial<ToolReviewContext>>;
 };
 
 type WorkspaceSiteToolContext = {
   siteArtifactId: string;
   siteVersionId: string;
   identity: { serverId: string; toolName: string };
+  /**
+   * The declared identity that authorizes `identity` when the Site routed a
+   * declared canonical connector to the viewer's own account
+   * (`site-tool-routing.ts`). Server-derived, never a request field.
+   */
+  declaredIdentity?: { serverId: string; toolName: string };
 };
 
 type AuthorizeWorkspaceSiteTool = (
@@ -119,8 +176,9 @@ export function requireWorkspaceToolGatewayGrant(grant: AccessGrant): void {
 }
 
 export function requireWorkspaceToolGatewayAuthorization(
-  authorization: AccessGrantAuthorization,
+  authorization: WorkspaceToolGatewayAuthorization,
 ): AccessGrant {
+  if (isPublishedSiteToolAuthorization(authorization)) return authorization.grant;
   const grant = requireResolvedAccessGrantAuthorization(
     authorization,
     authorization.grant.workspaceId,
@@ -136,6 +194,7 @@ export function requireWorkspaceToolGatewayAuthorization(
   if (
     !authorization.canonicalManagedHumanSession &&
     !authorization.canonicalLocalHumanSession &&
+    !isVerifiedDelegatedHumanAuthorization(authorization) &&
     !externalActorContinuationForAuthorization(authorization)
   ) {
     throw new HTTPException(403, { message: "current-human tool access required" });
@@ -143,11 +202,98 @@ export function requireWorkspaceToolGatewayAuthorization(
   return grant;
 }
 
+/**
+ * An approval capability records one person's consent to one call. A verified
+ * organization service key may call tools, but there is no person behind it to
+ * consent, so it cannot approve its own calls. A host approves as the verified
+ * external actor whose approval UI it showed.
+ */
+export function requireWorkspaceToolApprovalAuthorization(
+  authorization: WorkspaceToolGatewayAuthorization,
+): AccessGrant {
+  const grant = requireWorkspaceToolGatewayAuthorization(authorization);
+  if (
+    isPublishedSiteToolAuthorization(authorization) ||
+    isVerifiedOrganizationServiceAuthorization(authorization)
+  ) {
+    throw new HTTPException(403, { message: "tool approval requires a person" });
+  }
+  return grant;
+}
+
 export async function prepareWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
-  authorization: AccessGrantAuthorization,
+  authorization: WorkspaceToolGatewayAuthorization,
+  options: {
+    /**
+     * Prepare only these exact (account-qualified) identities. Servers outside
+     * them are never constructed, credentialed, connected, or listed; the
+     * resulting catalog and digest describe only this subset.
+     */
+    allowedIdentities?: readonly ToolGatewayIdentity[];
+  } & WorkspaceToolGatewayPreparationOptions = {},
 ): Promise<PreparedWorkspaceToolGateway> {
   const grant = requireWorkspaceToolGatewayAuthorization(authorization);
+  if (isPublishedSiteToolAuthorization(authorization)) {
+    const site = publishedSiteToolAuthority(authorization);
+    const same = (left: ToolGatewayIdentity, right: ToolGatewayIdentity) =>
+      left.serverId === right.serverId && left.toolName === right.toolName;
+    const allowed = site.requestedTools.filter(
+      (identity) =>
+        !options.allowedIdentities ||
+        options.allowedIdentities.some((item) => same(item, identity)),
+    );
+    // A declared canonical identity runs on the viewer's own account route.
+    const route = options.siteRoute;
+    if (
+      route &&
+      options.target &&
+      "identity" in options.target &&
+      same(route.identity, options.target.identity) &&
+      site.requestedTools.some((identity) => same(identity, route.declaredIdentity)) &&
+      !allowed.some((identity) => same(identity, route.identity))
+    )
+      allowed.push(route.identity);
+    // Targeted preparation replaces its allowlist with the target. It must be
+    // an exact declared identity first; paths are resolved by the Site adapter.
+    const target = options.target;
+    if (
+      target &&
+      (!("identity" in target) ||
+        !allowed.some(
+          (item) =>
+            item.serverId === target.identity.serverId &&
+            item.toolName === target.identity.toolName,
+        ))
+    )
+      throw new HTTPException(403, { message: "site_tool_not_authorized" });
+    await site.reauthorize();
+    const prepared = await prepareWorkspaceToolGatewayForGrantInternal(
+      routeDeps,
+      grant,
+      allowed,
+      site.reauthorize,
+      options,
+    );
+    try {
+      await site.reauthorize();
+    } catch (error) {
+      await prepared.close().catch(() => undefined);
+      throw error;
+    }
+    return { ...prepared, reauthorize: site.reauthorize };
+  }
+  if (options.fence) {
+    // The fence owns live caller authority for a targeted request: admission
+    // ran before preparation, and each physical request evaluates it once.
+    return await prepareWorkspaceToolGatewayForGrantInternal(
+      routeDeps,
+      grant,
+      options.allowedIdentities,
+      undefined,
+      options,
+    );
+  }
   const external = externalActorContinuationForAuthorization(authorization);
   const reauthorizeExternal = externalContinuationCommitAuthorizer(authorization);
   const service = isVerifiedOrganizationServiceAuthorization(authorization);
@@ -163,15 +309,18 @@ export async function prepareWorkspaceToolGateway(
           await withAccountRls(routeDeps.db, scope.accountId, async (tx) => {
             if (reauthorizeExternal) await reauthorizeExternal(tx);
             else {
-              const live = await lockActiveExternalOrganizationKey(
+              const live = await lockActiveExternalOrganizationKeyAuthority(
                 tx,
                 scope.accountId,
                 scope.subjectId.slice("api_key:".length),
+                scope.workspaceId,
               );
               const workspace = await requireWorkspace(tx, scope.workspaceId);
               if (
                 !live ||
-                permissions.some((permission) => !hasPermission(live, permission)) ||
+                permissions.some(
+                  (permission) => !hasPermission(live.permissions, permission, live.permissionMode),
+                ) ||
                 workspace.accountId !== scope.accountId ||
                 workspace.kind !== "shared"
               )
@@ -180,20 +329,233 @@ export async function prepareWorkspaceToolGateway(
           });
         }
       : undefined;
-  await reauthorize?.();
+  const reauthorizeCaller = async () => {
+    options.signal?.throwIfAborted();
+    await options.reauthorize?.();
+    await reauthorize?.();
+  };
+  await reauthorizeCaller();
   const prepared = await prepareWorkspaceToolGatewayForGrantInternal(
     routeDeps,
     grant,
-    undefined,
-    reauthorize,
+    options.allowedIdentities,
+    reauthorizeCaller,
+    options,
   );
   try {
-    await reauthorize?.();
+    await reauthorizeCaller();
   } catch (error) {
-    await prepared.close();
+    await prepared.close().catch(() => undefined);
     throw error;
   }
-  return { ...prepared, ...(reauthorize ? { reauthorize } : {}) };
+  return {
+    ...prepared,
+    reauthorize: async () => {
+      await reauthorizeCaller();
+      await prepared.reauthorize?.();
+    },
+  };
+}
+
+/**
+ * Bounded caller scope for catalog attestations. It binds the exact caller,
+ * actor class, and permission set; attestations still grant no authority.
+ */
+export function workspaceToolGatewayAttestationScope(
+  authorization: AccessGrantAuthorization,
+): string {
+  const grant = authorization.grant;
+  const external = externalActorContinuationForAuthorization(authorization);
+  return digestCanonicalJson({
+    version: 1,
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+    principalKind: grant.principalKind ?? null,
+    permissions: [...new Set(grant.permissions)].sort(),
+    actor: isVerifiedOrganizationServiceAuthorization(authorization)
+      ? "service"
+      : external
+        ? { external: digestCanonicalJson(external) }
+        : "human",
+  });
+}
+
+export type WorkspaceToolGatewayPreparationScope = "complete" | "target";
+export type WorkspaceToolGatewayAttestationOutcome = "hit" | "miss" | "mismatch" | "bypass";
+
+export type WorkspaceToolGatewayTiming = {
+  /** Wall time spent preparing gateways (all preparations, including fallback). */
+  prepareMs: number;
+  /** Wall time from the last successful preparation to the response. */
+  callMs: number;
+  scope: WorkspaceToolGatewayPreparationScope;
+  attestation: WorkspaceToolGatewayAttestationOutcome;
+};
+
+/** Prepare one complete current-caller catalog and remember its content-free attestation. */
+export async function prepareAttestedWorkspaceToolGateway(
+  routeDeps: ApiRouteDeps,
+  authorization: AccessGrantAuthorization,
+  attestations: WorkspaceToolGatewayCatalogAttestations | undefined,
+  prepare: typeof prepareWorkspaceToolGateway = prepareWorkspaceToolGateway,
+): Promise<PreparedWorkspaceToolGateway> {
+  const prepared = await prepare(routeDeps, authorization);
+  attestations?.record(
+    workspaceToolGatewayAttestationScope(authorization),
+    prepared.toolGatewayCatalog,
+  );
+  return prepared;
+}
+
+/**
+ * HTTP/SDK/Site call adapter. When the caller's `catalogDigest` names a
+ * complete catalog this process prepared for the same caller scope, only the
+ * target identity's connector is prepared live and its entry must match the
+ * attested entry exactly. Every other case (approval capability, unknown or
+ * expired digest, missing/changed entry) prepares the complete catalog and
+ * applies the unchanged stale-catalog contract.
+ */
+export async function callWorkspaceToolGatewayForCaller(
+  routeDeps: ApiRouteDeps,
+  authorization: AccessGrantAuthorization,
+  request: ToolGatewayCallRequest,
+  options: {
+    attestations?: WorkspaceToolGatewayCatalogAttestations;
+    observability?: Observability;
+    /** Must enforce current-caller gateway authorization before provider work. */
+    prepare?: typeof prepareWorkspaceToolGateway;
+    authorizeSiteTool?: AuthorizeWorkspaceSiteTool;
+    resolveOrigin?: typeof resolveSiteSessionOrigin;
+    /** Called once with the preparation split, whether the call succeeds or fails. */
+    onPreparation?: (
+      preparation: Pick<WorkspaceToolGatewayTiming, "prepareMs" | "scope" | "attestation">,
+    ) => void;
+  } = {},
+): Promise<{ response: ToolGatewayCallResponse; timing: WorkspaceToolGatewayTiming }> {
+  // `prepare` (prepareWorkspaceToolGateway in production) rejects any caller
+  // without live current-caller gateway authority before provider work. The
+  // attestation lookup below grants nothing and reveals nothing to a caller
+  // that preparation then rejects.
+  const grant = authorization.grant;
+  const prepare = options.prepare ?? prepareWorkspaceToolGateway;
+  const callGateway = (
+    prepared: PreparedWorkspaceToolGateway,
+    callRequest: ToolGatewayCallRequest,
+  ) =>
+    callWorkspaceToolGateway(
+      prepared,
+      grant,
+      callRequest,
+      routeDeps.db,
+      undefined,
+      options.observability,
+      options.authorizeSiteTool,
+      options.resolveOrigin,
+    );
+  const scope = workspaceToolGatewayAttestationScope(authorization);
+  let prepareMs = 0;
+  const timedPrepare = async (allowedIdentities?: readonly ToolGatewayIdentity[]) => {
+    const startedAt = performance.now();
+    try {
+      return await prepare(
+        routeDeps,
+        authorization,
+        // A target-only call must behave exactly like the complete call: only
+        // provider construction narrows, never the settings first-party tools see.
+        allowedIdentities ? { allowedIdentities, firstPartySettings: "caller" } : {},
+      );
+    } finally {
+      prepareMs += performance.now() - startedAt;
+    }
+  };
+  const attestedEntry =
+    request.approvalToken === undefined
+      ? options.attestations?.entryDigest(scope, request.catalogDigest, request.identity)
+      : undefined;
+  let attestation: WorkspaceToolGatewayAttestationOutcome =
+    request.approvalToken !== undefined || !options.attestations
+      ? "bypass"
+      : attestedEntry
+        ? "hit"
+        : "miss";
+  let preparedScope: WorkspaceToolGatewayPreparationScope = "complete";
+  try {
+    if (attestedEntry) {
+      preparedScope = "target";
+      const target = await timedPrepare([request.identity]);
+      try {
+        const entry = target.toolGatewayCatalog.entries.find(
+          (candidate) =>
+            candidate.identity.serverId === request.identity.serverId &&
+            candidate.identity.toolName === request.identity.toolName,
+        );
+        if (entry && digestWorkspaceToolGatewayCatalogEntry(entry) === attestedEntry) {
+          const callStartedAt = performance.now();
+          // The target-only gateway verifies its own digest; the caller's
+          // complete digest was verified through the exact attested entry.
+          const response = await callGateway(target, {
+            ...request,
+            catalogDigest: target.toolGatewayCatalog.digest,
+          });
+          return {
+            response: ToolGatewayCallResponse.parse({
+              ...response,
+              catalogDigest: request.catalogDigest,
+            }),
+            timing: {
+              prepareMs,
+              callMs: performance.now() - callStartedAt,
+              scope: "target",
+              attestation,
+            },
+          };
+        }
+        attestation = "mismatch";
+        preparedScope = "complete";
+      } finally {
+        await target.close();
+      }
+    }
+    const prepared = await timedPrepare();
+    try {
+      options.attestations?.record(scope, prepared.toolGatewayCatalog);
+      const callStartedAt = performance.now();
+      const response = await callGateway(prepared, request);
+      return {
+        response,
+        timing: {
+          prepareMs,
+          callMs: performance.now() - callStartedAt,
+          scope: "complete",
+          attestation,
+        },
+      };
+    } finally {
+      await prepared.close();
+    }
+  } finally {
+    try {
+      options.onPreparation?.({ prepareMs, scope: preparedScope, attestation });
+    } catch {
+      // Telemetry must never change gateway execution truth.
+    }
+  }
+}
+
+/** Content-free Server-Timing for gateway preparation versus execution. */
+export function workspaceToolGatewayServerTiming(timing: {
+  prepareMs: number;
+  callMs?: number;
+  scope: WorkspaceToolGatewayPreparationScope;
+  attestation?: WorkspaceToolGatewayAttestationOutcome;
+}): string {
+  const prepare = `gw-prepare;dur=${timing.prepareMs.toFixed(1)};desc="${timing.scope}${
+    timing.attestation ? `/${timing.attestation}` : ""
+  }"`;
+  return timing.callMs === undefined
+    ? prepare
+    : `${prepare}, gw-call;dur=${timing.callMs.toFixed(1)}`;
 }
 
 export async function prepareMcpOAuthWorkspaceToolGateway(
@@ -211,9 +573,43 @@ export async function prepareWorkspaceToolGatewayForGrant(
   routeDeps: ApiRouteDeps,
   grant: AccessGrant,
   allowedIdentities?: readonly { serverId: string; toolName: string }[],
+  options: WorkspaceToolGatewayPreparationOptions = {},
 ): Promise<PreparedWorkspaceToolGateway> {
-  return await prepareWorkspaceToolGatewayForGrantInternal(routeDeps, grant, allowedIdentities);
+  return await prepareWorkspaceToolGatewayForGrantInternal(
+    routeDeps,
+    grant,
+    allowedIdentities,
+    undefined,
+    options,
+  );
 }
+
+export type WorkspaceToolGatewayPreparationOptions = {
+  target?: ToolGatewayTarget;
+  signal?: AbortSignal;
+  /** Trusted transport callback, never a request-body field. */
+  reauthorize?: () => Promise<void>;
+  /**
+   * Trusted per-request live fence of a targeted or manifest request (never a
+   * request-body field). Required with `target`; replaces `reauthorize`.
+   */
+  fence?: TargetAuthorityFence;
+  /**
+   * Settings visible to first-party (opengeni/files/docs) tool handlers.
+   * `prepared` (default, MCP OAuth): the identity-narrowed server set.
+   * `caller`: the complete caller-authorized set, so a target-only call
+   * executes exactly as it would from the complete gateway.
+   */
+  firstPartySettings?: "prepared" | "caller";
+  /**
+   * Trusted Site routing of `target` (never a request-body field): the
+   * viewer's own account route and the declared identity that authorizes it.
+   */
+  siteRoute?: {
+    identity: ToolGatewayIdentity;
+    declaredIdentity: ToolGatewayIdentity;
+  };
+};
 
 /** Keep live caller authority independent of native connection acquisition and refresh. */
 export function withWorkspaceConnectionAuthorization(
@@ -231,7 +627,11 @@ export function withWorkspaceConnectionAuthorization(
       authorizeProviderRequest: async () => {
         try {
           await reauthorize();
-          return result.authorizeProviderRequest ? await result.authorizeProviderRequest() : true;
+          const allowed = result.authorizeProviderRequest
+            ? await result.authorizeProviderRequest()
+            : true;
+          await reauthorize();
+          return allowed;
         } catch {
           return false;
         }
@@ -240,22 +640,204 @@ export function withWorkspaceConnectionAuthorization(
   };
 }
 
+/**
+ * Credential boundary of a fenced targeted request. Before an execution-mode
+ * resolve (which may refresh a token or record use) only the live caller is
+ * checked. The returned hook runs immediately before one physical provider
+ * request: the native hook, then (targeted) a non-refreshing native preflight
+ * that must still name the same connection version, then one full fence
+ * evaluation, the hook's last step. A hook retained past the request scope
+ * reads nothing.
+ */
+export function withTargetFenceConnectionAuthorization(
+  resolve: ReturnType<typeof buildConnectionTokenResolver>,
+  fence: Pick<TargetAuthorityFence, "caller" | "allows" | "assertOpen">,
+  options: { preflight: boolean },
+): ReturnType<typeof buildConnectionTokenResolver> {
+  return async (input) => {
+    await fence.caller();
+    const result = await resolve(input);
+    if (result.status !== "ok") return result;
+    return {
+      ...result,
+      authorizeProviderRequest: async () => {
+        try {
+          fence.assertOpen();
+          if (result.authorizeProviderRequest && !(await result.authorizeProviderRequest()))
+            return false;
+          if (options.preflight) {
+            const live = await resolve({
+              ...input,
+              forceRefresh: false,
+              credentialResolutionMode: "preflight",
+            });
+            if (
+              live.status !== "ok" ||
+              live.connectionId !== result.connectionId ||
+              live.connectionVersion !== result.connectionVersion ||
+              (live.authorizeProviderRequest && !(await live.authorizeProviderRequest()))
+            )
+              return false;
+          }
+        } catch {
+          return false;
+        }
+        return await fence.allows();
+      },
+    };
+  };
+}
+
+/**
+ * The route part of a targeted fence. It reads only the rows that can produce
+ * the selected servers (their capability installations and explicit claimants,
+ * integrations with their runtime keys, the selected connections, and Codex
+ * only for a Codex target) and feeds them through the same projections as
+ * preparation. Any difference from the prepared route denies.
+ */
+function workspaceToolGatewayTargetRouteCheck(input: {
+  grant: AccessGrant;
+  staticSettings: Settings;
+  gatewaySettings: Settings;
+  integrations: readonly ApiIntegrationRuntime[];
+  capabilityServers: readonly EnabledMcpCapabilityServer[];
+  accountBindings: Awaited<ReturnType<typeof availableMcpAccountBindings>>;
+  bindingSource: Parameters<typeof availableMcpAccountBindings>[0]["source"];
+}): (db: Database, stop: AbortSignal) => Promise<void> {
+  const { grant, gatewaySettings, bindingSource } = input;
+  const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
+  const selectedBindings = input.accountBindings.filter((binding) =>
+    gatewayServerIds.has(binding.serverId),
+  );
+  // Canonical connector ids plus the account route ids themselves: any row
+  // that could produce, shadow or collide with the selected route is read.
+  const serverIds = [
+    ...new Set(
+      gatewaySettings.mcpServers.flatMap((server) => [
+        server.id,
+        ...selectedBindings
+          .filter((binding) => binding.serverId === server.id)
+          .map((binding) => binding.canonicalServerId),
+      ]),
+    ),
+  ];
+  const capabilityIds = [
+    ...new Set(
+      input.capabilityServers
+        .filter((server) => serverIds.includes(server.id))
+        .map((server) => server.capabilityId),
+    ),
+  ];
+  const connectionIds = (scope: "workspace" | "subject") =>
+    selectedBindings
+      .filter((binding) => binding.subjectScope === scope)
+      .map((binding) => binding.connectionId);
+  const integrationRoutes = (
+    integrations: readonly ApiIntegrationRuntime[],
+    bindings: typeof input.accountBindings,
+  ) =>
+    expandApiIntegrationAccountRoutes({
+      integrations,
+      bindings,
+      tools: allGatewayToolRefs(gatewaySettings),
+    });
+  const expectedServers = digestCanonicalJson(gatewaySettings.mcpServers);
+  const expectedIntegrations = digestCanonicalJson(
+    integrationRoutes(input.integrations, input.accountBindings),
+  );
+  const changed = () => new HTTPException(403, { message: "tool_access_changed" });
+  return async (db, stop) => {
+    let currentIntegrations: readonly ApiIntegrationRuntime[] = [];
+    const currentSettings = await settingsWithEnabledCapabilityMcpServersForTargets(
+      db,
+      grant.workspaceId,
+      input.staticSettings,
+      {
+        subjectId: grant.subjectId,
+        accountId: grant.accountId,
+        serverIds,
+        capabilityIds,
+        onResolvedApiIntegrations: (items) => {
+          currentIntegrations = items;
+        },
+        signal: stop,
+      },
+    );
+    stop.throwIfAborted();
+    const connections = await visibleMcpAccountConnectionsByIds(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      source: bindingSource,
+      workspaceConnectionIds: connectionIds("workspace"),
+      personalConnectionIds: connectionIds("subject"),
+    });
+    // Reads nothing more: the selected connections are supplied.
+    const currentBindings = await availableMcpAccountBindings({
+      db,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      settings: currentSettings,
+      tools: allGatewayToolRefs(currentSettings),
+      source: bindingSource,
+      connections,
+    });
+    let currentServers: string;
+    let currentIntegrationRoutes: string;
+    try {
+      const currentRoutes = expandMcpAccountRoutes({
+        settings: currentSettings,
+        tools: allGatewayToolRefs(currentSettings),
+        bindings: currentBindings,
+      });
+      currentServers = digestCanonicalJson(
+        workspaceToolGatewaySettingsForGrant(currentRoutes.settings, grant).mcpServers.filter(
+          (server) => gatewayServerIds.has(server.id),
+        ),
+      );
+      currentIntegrationRoutes = digestCanonicalJson(
+        integrationRoutes(currentIntegrations, currentBindings),
+      );
+    } catch {
+      // A route that can no longer be expanded is a changed route.
+      throw changed();
+    }
+    if (currentServers !== expectedServers || currentIntegrationRoutes !== expectedIntegrations)
+      throw changed();
+  };
+}
+
 async function prepareWorkspaceToolGatewayForGrantInternal(
   routeDeps: ApiRouteDeps,
   grant: AccessGrant,
   allowedIdentities?: readonly { serverId: string; toolName: string }[],
   reauthorize?: () => Promise<void>,
+  options: WorkspaceToolGatewayPreparationOptions = {},
 ): Promise<PreparedWorkspaceToolGateway> {
   const catalogSourceSettings = routeDeps.catalogSourceSettings ?? routeDeps.settings;
-  const resolvedCatalog = await resolveWorkspaceCatalogSettings(
-    routeDeps.db,
-    catalogSourceSettings,
-    {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-    },
-  );
+  // Remote tools do not consume the model catalog. First-party handlers keep
+  // the complete caller model/settings context (not a narrowed provider view).
+  const targetNamespace =
+    options.target &&
+    ("identity" in options.target ? options.target.identity.serverId : options.target.path[0]);
+  const needsModelContext =
+    !targetNamespace || ["opengeni", "docs", "files", "artifacts"].includes(targetNamespace);
+  const resolvedCatalog = needsModelContext
+    ? await resolveWorkspaceCatalogSettings(routeDeps.db, catalogSourceSettings, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+      })
+    : { settings: catalogSourceSettings };
   let integrations: readonly ApiIntegrationRuntime[] = [];
+  let capabilityServers: readonly EnabledMcpCapabilityServer[] = [];
+  // One designation read serves the catalog overlay and the Apps request
+  // authentication below (every Apps request is rechecked by the database).
+  let codexAppsDesignationRead: ReturnType<typeof resolveCodexAppsDesignationForRun> | null = null;
+  const codexAppsDesignationForGrant = () =>
+    (codexAppsDesignationRead ??= resolveCodexAppsDesignationForRun(
+      routeDeps.db,
+      grant.workspaceId,
+      { accountId: grant.accountId },
+    ));
   const settings = await settingsWithEnabledCapabilityMcpServers(
     routeDeps.db,
     grant.workspaceId,
@@ -265,15 +847,92 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       onResolvedApiIntegrations: (resolved) => {
         integrations = resolved;
       },
+      onResolvedCapabilityServers: (resolved) => {
+        capabilityServers = resolved;
+      },
+      ...(resolvedCatalog.settings.codexConnectedAppsEnabled
+        ? { codexApps: codexAppsDesignationForGrant() }
+        : {}),
     },
   );
-  const gatewaySettings = workspaceToolGatewaySettingsForGrant(settings, grant, allowedIdentities);
-  const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
-  const deps = { ...routeDeps, catalogSourceSettings, settings: gatewaySettings };
-  const resolveConnection = withWorkspaceConnectionAuthorization(
-    buildConnectionTokenResolver(routeDeps.db, gatewaySettings),
-    reauthorize,
+  // Transport admission has already verified the current caller. A service
+  // receives workspace accounts only; human transports use their exact subject.
+  const bindingSource: Parameters<typeof availableMcpAccountBindings>[0]["source"] =
+    grant.principalKind === "service" || grant.principalKind === "api_key"
+      ? { kind: "none" }
+      : { kind: "subject", accountId: grant.accountId, subjectId: grant.subjectId };
+  const accountBindings = await availableMcpAccountBindings({
+    db: routeDeps.db,
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    settings,
+    tools: allGatewayToolRefs(settings),
+    source: bindingSource,
+  });
+  const accountRoutes = expandMcpAccountRoutes({
+    settings,
+    tools: allGatewayToolRefs(settings),
+    bindings: accountBindings,
+  });
+  const callerSettings = workspaceToolGatewaySettingsForGrant(accountRoutes.settings, grant);
+  const targetServerId = options.target
+    ? workspaceToolGatewayTargetServer(callerSettings, options.target)
+    : undefined;
+  if (options.target && "identity" in options.target) allowedIdentities = [options.target.identity];
+  // OAuth/Site identities are account-qualified. Intersect only after expansion;
+  // canonical connector IDs are never aliases for an account's execution route.
+  const gatewaySettings = workspaceToolGatewaySettingsForGrant(
+    targetServerId
+      ? {
+          ...accountRoutes.settings,
+          mcpServers: accountRoutes.settings.mcpServers.filter(
+            (server) => server.id === targetServerId,
+          ),
+        }
+      : accountRoutes.settings,
+    grant,
+    allowedIdentities,
   );
+  const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
+  const fence = options.fence;
+  // Targeted preparation is always fenced: its live route and policy checks
+  // exist only as fence parts. Frozen attempt/Codemode decisions and the
+  // complete gateway retain their existing lifecycle semantics.
+  if (options.target && !fence) throw new Error("targeted tool preparation requires a live fence");
+  if (fence && options.target)
+    fence.setRoute(
+      workspaceToolGatewayTargetRouteCheck({
+        grant,
+        staticSettings: resolvedCatalog.settings,
+        gatewaySettings,
+        integrations,
+        capabilityServers,
+        accountBindings,
+        bindingSource,
+      }),
+    );
+  const firstPartySettings =
+    options.firstPartySettings === "caller" && (allowedIdentities || options.target)
+      ? callerSettings
+      : gatewaySettings;
+  const deps = { ...routeDeps, catalogSourceSettings, settings: firstPartySettings };
+  const nativeResolveConnection = buildConnectionTokenResolver(routeDeps.db, gatewaySettings);
+  const resolveConnection = fence
+    ? withTargetFenceConnectionAuthorization(nativeResolveConnection, fence, {
+        preflight: options.target !== undefined,
+      })
+    : withWorkspaceConnectionAuthorization(nativeResolveConnection, reauthorize);
+  // The runtime's guarded transport runs this before every remote MCP request.
+  // Connection-broker requests are already fenced by their credential hook, so
+  // only Codex Apps and connectors without a connection reference (the
+  // runtime's own routing rule, widened to every Codex id) evaluate it here.
+  const authorizeTransportRequest = fence
+    ? gatewaySettings.mcpServers.some(
+        (server) => server.id === CODEX_APPS_MCP_SERVER_ID || !server.connectionRef,
+      )
+      ? async () => await fence.full()
+      : async () => fence.assertOpen()
+    : reauthorize;
   const resolveCredential = async (
     input: ResolveConnectionCredentialInput,
   ): Promise<ResolveConnectionCredentialResult> =>
@@ -283,7 +942,15 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     });
   const firstPartyServers = await Promise.all([
     ...(gatewayServerIds.has("opengeni")
-      ? [inMemoryMcpRegistration("opengeni", buildOpenGeniMcpServer(deps, grant))]
+      ? [
+          // Read alongside the other first-party servers, not before them.
+          resolveSlackBotToolAvailability(routeDeps.db, grant).then((slackBotAvailable) =>
+            inMemoryMcpRegistration(
+              "opengeni",
+              buildOpenGeniMcpServer(deps, grant, { slackBotAvailable }),
+            ),
+          ),
+        ]
       : []),
     ...(gatewayServerIds.has("files")
       ? [inMemoryMcpRegistration("files", buildFilesMcpServer(deps, grant))]
@@ -299,7 +966,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
               routeDeps.getDocumentServices(),
               {
                 knowledge: await knowledgeContextForGateway(routeDeps, grant),
-                settings: gatewaySettings,
+                settings: firstPartySettings,
               },
             ),
           ),
@@ -308,7 +975,11 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   ]);
   const apiIntegrationServers = buildApiIntegrationMcpServers({
     settings: gatewaySettings,
-    integrations: integrations.filter((integration) => gatewayServerIds.has(integration.serverId)),
+    integrations: expandApiIntegrationAccountRoutes({
+      integrations,
+      bindings: accountBindings,
+      tools: allGatewayToolRefs(gatewaySettings),
+    }),
     authority: {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -320,37 +991,51 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
         ...(input.connectionRef.subjectScope === "subject" ? { subjectId: grant.subjectId } : {}),
       }),
   });
-  const codexAppsCredentialId = gatewayServerIds.has("codex_apps")
-    ? await resolveCodexAppsCredentialIdForRun(routeDeps.db, grant.workspaceId)
+  // Legacy designation without a Codex cutover row; the core designation
+  // (rechecked by the database on every request) with an enabled cutover;
+  // none with a disabled cutover.
+  const codexAppsDesignation = gatewayServerIds.has("codex_apps")
+    ? await codexAppsDesignationForGrant()
     : null;
-  const codexAppsAuth = codexAppsCredentialId
-    ? (() => {
-        const resolver = buildCodexTokenResolver(
-          routeDeps.db,
-          settings,
-          grant.workspaceId,
-          codexAppsCredentialId,
-        );
-        return {
-          clientVersion: CODEX_CLIENT_VERSION,
-          withAuthorization: async <T>(
-            use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
-          ): Promise<T> =>
-            await resolver.getToken().then(
-              async (token) =>
-                await withCodexAppsRequestAuthorization(
-                  routeDeps.db,
-                  {
-                    workspaceId: grant.workspaceId,
-                    credentialId: codexAppsCredentialId,
-                  },
-                  async () => await use(token),
-                ),
-            ),
-        };
-      })()
+  const codexAppsAuth = codexAppsDesignation
+    ? codexAppsRequestAuthForDesignation(
+        routeDeps.db,
+        settings,
+        grant.workspaceId,
+        codexAppsDesignation,
+      )
     : undefined;
   const localMcpServers = [...firstPartyServers, ...apiIntegrationServers];
+  const policyTargets = new Map(
+    gatewaySettings.mcpServers.map((config) => {
+      const binding = accountBindings.find((candidate) => candidate.serverId === config.id);
+      return [
+        config.id,
+        {
+          connectionId:
+            binding?.connectionId ??
+            config.connectionRef?.connectionId ??
+            sessionMcpApprovalConnectionId(config.id, config.url),
+          serverId: binding?.canonicalServerId ?? config.id,
+        },
+      ] as const;
+    }),
+  );
+  const policiesByServer = new Map(
+    await Promise.all(
+      [...policyTargets].map(
+        async ([id, target]) =>
+          [
+            id,
+            await listConnectorToolPermissionPolicies(routeDeps.db, {
+              ...grant,
+              connectionId: target.connectionId,
+            }),
+          ] as const,
+      ),
+    ),
+  );
+  const recommendations = new Map<string, "allow" | "ask">();
   const prepared = await prepareWorkspaceToolGatewayTools(
     gatewaySettings,
     allGatewayToolRefs(gatewaySettings),
@@ -358,14 +1043,126 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       subjectId: grant.subjectId,
+      ...(options.signal ? { requestSignal: options.signal } : {}),
+      ...(authorizeTransportRequest ? { authorizeProviderRequest: authorizeTransportRequest } : {}),
+      // A person may confirm an approval-required connection tool here, so
+      // every connection-backed server gets the non-refreshing preflight.
+      connectionApprovalPreflight: true,
       credentialSubjectId: grant.subjectId,
+      mcpAccountLabels: accountRoutes.accountLabels,
       resolveCredential,
+      slackRateLimit: buildSlackApiRateLimiter(routeDeps.db, gatewaySettings),
       localMcpServers,
       ...(codexAppsAuth ? { codexAppsAuth } : {}),
       workspaceToolGateway: {
-        requireApproval: (entry, _caller, context) =>
-          entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
-        filterDefinition: workspaceToolGatewayDefinitionFilter(gatewaySettings, allowedIdentities),
+        resolveArguments: workspaceGatewaySecretArguments({
+          db: routeDeps.db,
+          settings: gatewaySettings,
+          grant,
+          providersForSubject: (subjectId, site) =>
+            vaultProviderRegistryFor(routeDeps, {
+              workspaceId: grant.workspaceId,
+              subjectId,
+              ...(site ? { executionContext: { siteId: site.siteId } } : {}),
+            }),
+        }),
+        mapDefinition: (definition) => {
+          // Raw/local providers have no native credential revision. The legacy
+          // gateway fallback binds the whole public catalog, including Ask/Allow
+          // presentation. Targeted approvals instead use the runtime's existing
+          // executable authority plus the exact selected configuration already
+          // fenced by the target route check. Never replace adapter authority.
+          if (options.target && definition.approvalAuthorityDigest === undefined) {
+            const config = gatewaySettings.mcpServers.find(
+              (server) => server.id === definition.identity.serverId,
+            );
+            if (!config || !definition.effectAuthorityDigest)
+              throw new Error("target approval authority unavailable");
+            definition = {
+              ...definition,
+              approvalAuthorityDigest: digestCanonicalJson({
+                domain: "opengeni.target-tool-config-authority",
+                version: 1,
+                accountId: grant.accountId,
+                workspaceId: grant.workspaceId,
+                identity: definition.identity,
+                effectAuthorityDigest: definition.effectAuthorityDigest,
+                configuration: config,
+              }),
+            };
+          }
+          const recommendation = definition.approval === "human" ? "ask" : "allow";
+          recommendations.set(workspaceToolGatewayIdentityKey(definition.identity), recommendation);
+          const target = policyTargets.get(definition.identity.serverId);
+          if (!target) return definition;
+          const permission = projectConnectorToolPermission(
+            policiesByServer.get(definition.identity.serverId) ?? [],
+            {
+              ...target,
+              toolName: definition.identity.toolName,
+              defaultDecision: recommendation,
+            },
+          );
+          // The filter then hides a tool that still needs approval only when
+          // its provider recommends Ask and it has no approval preflight. Its
+          // execution still resolves the exact arguments.
+          return { ...definition, approval: permission.approvalRequired ? "human" : "policy" };
+        },
+        resolveApproval: async ({ call, entry }) => {
+          const defaultDecision =
+            recommendations.get(workspaceToolGatewayIdentityKey(entry.identity)) ??
+            (entry.approval === "human" ? "ask" : "allow");
+          const target = policyTargets.get(entry.identity.serverId);
+          if (!target) return defaultDecision;
+          const resolveSelectedPolicy = async (db: Database = routeDeps.db) =>
+            resolveConnectorActionPolicy(
+              await listConnectorToolPermissionPolicies(db, {
+                ...grant,
+                connectionId: target.connectionId,
+              }),
+              {
+                ...target,
+                toolName: entry.identity.toolName,
+                defaultDecision,
+                actionName: toolPolicyActionName(
+                  entry.identity.toolName,
+                  entry.inputSchema,
+                  call.arguments,
+                ),
+              },
+            );
+          const resolved = await resolveSelectedPolicy();
+          const decision = !resolved.managed
+            ? defaultDecision
+            : connectorActionPolicyDecision(resolved);
+          recordToolApproval(decision, resolved.managed ? resolved.source : "default");
+          // Only targeted current requests fence their decided action policy
+          // live, at every later physical-request boundary of this call.
+          if (fence && options.target)
+            fence.setPolicy(async (db) => {
+              const live = await resolveSelectedPolicy(db);
+              const current = live.managed ? connectorActionPolicyDecision(live) : defaultDecision;
+              if (current === "block") throw new ToolGatewayBlockedError();
+              if (current === "ask" && decision !== "ask")
+                throw new ToolGatewayApprovalRequiredError();
+            });
+          return decision;
+        },
+        filterDefinition: (definition) => {
+          if (
+            !workspaceToolGatewayDefinitionFilter(gatewaySettings, allowedIdentities, (identity) =>
+              recommendations.get(workspaceToolGatewayIdentityKey(identity)),
+            )(definition)
+          )
+            return false;
+          const target = options.target;
+          if (!target || "identity" in target) return true;
+          const path = projectToolGatewayPath(definition);
+          return (
+            path.length === target.path.length &&
+            path.every((part, index) => part === target.path[index])
+          );
+        },
       },
     },
   );
@@ -373,16 +1170,68 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     await prepared.close().catch(() => undefined);
     throw new Error("workspace tool gateway preparation did not produce a gateway");
   }
+  if (options.signal?.aborted) {
+    await prepared.close().catch(() => undefined);
+    options.signal.throwIfAborted();
+  }
   return {
     toolGateway: prepared.toolGateway,
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
+    review: async (identity, args) => {
+      const server = prepared.mcpServers.find(
+        (candidate) => (candidate as { registryId?: unknown }).registryId === identity.serverId,
+      ) as
+        | {
+            reviewContext?: (
+              toolName: string,
+              args: Record<string, unknown>,
+            ) => Promise<Partial<ToolReviewContext>>;
+          }
+        | undefined;
+      // The route's own server is always prepared here; failing to find it
+      // must not read as "this provider has no review".
+      if (!server) throw new Error("tool review server unavailable");
+      return typeof server.reviewContext === "function"
+        ? await server.reviewContext(identity.toolName, args)
+        : {};
+    },
   };
+}
+
+/** Select one authorized connector without constructing any provider. */
+export function workspaceToolGatewayTargetServer(
+  settings: Pick<Settings, "mcpServers">,
+  target: ToolGatewayTarget,
+): string {
+  if ("identity" in target) {
+    if (settings.mcpServers.some((server) => server.id === target.identity.serverId))
+      return target.identity.serverId;
+  } else {
+    const candidates = new Set(
+      settings.mcpServers
+        .filter((server) => safeNamespaceSegment(server.id) === target.path[0])
+        .map((server) => server.id),
+    );
+    if (
+      Object.values(EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS).some(
+        (path) =>
+          path.length === target.path.length &&
+          path.every((part, index) => part === target.path[index]),
+      ) &&
+      settings.mcpServers.some((server) => server.id === "opengeni")
+    )
+      candidates.add("opengeni");
+    if (candidates.size === 1) return [...candidates][0]!;
+  }
+  throw new HTTPException(404, { message: "tool_unavailable" });
 }
 
 export function workspaceToolGatewayDefinitionFilter(
   settings: Pick<Settings, "allowedFirstPartyMcpTools">,
   allowedIdentities?: readonly ToolGatewayIdentity[],
+  /** The provider's own Ask/Allow recommendation, before saved choices. */
+  recommendedApproval?: (identity: ToolGatewayIdentity) => "ask" | "allow" | undefined,
 ): (definition: ToolGatewayDefinition) => boolean {
   const allowedFirstPartyTools: ReadonlySet<string> = new Set(
     settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
@@ -397,8 +1246,13 @@ export function workspaceToolGatewayDefinitionFilter(
     ) {
       return false;
     }
+    // `approval` is the effective one: the runtime maps saved Allow/Ask
+    // choices before filtering, so a saved Allow keeps a recommended-Ask tool.
+    // A saved Ask over a recommended Allow stays listed and answers
+    // approval_required at call time instead of disappearing.
     if (
       definition.approval === "human" &&
+      recommendedApproval?.(definition.identity) !== "allow" &&
       definition.requiresProviderPreflight === true &&
       !definition.preflightCall
     ) {
@@ -549,7 +1403,9 @@ export async function callWorkspaceToolGateway(
     );
     await prepared.reauthorize?.();
     let approvalConfirmed = false;
-    const approvalRequired = preparedCall.entry.approval === "human";
+    const approvalRequired =
+      preparedCall.approvalDecision === "ask" ||
+      (preparedCall.approvalDecision === undefined && preparedCall.entry.approval === "human");
     if (approvalRequired && request.approvalToken && db) {
       approvalConfirmed = await consumeApproval(db, {
         tokenHash: hashOpaqueValue(request.approvalToken),
@@ -569,17 +1425,16 @@ export async function callWorkspaceToolGateway(
     transportMeta.approvalConfirmed = approvalConfirmed;
     const origin =
       siteContext && db
-        ? await resolveOrigin(
-            db,
-            grant.workspaceId,
-            siteContext.siteArtifactId,
-            siteContext.siteVersionId,
-          )
+        ? await resolveOrigin(db, grant, siteContext.siteArtifactId, siteContext.siteVersionId)
         : null;
     await prepared.reauthorize?.();
-    const result = await (origin
-      ? withSiteSessionOrigin(origin, () => preparedCall.execute())
-      : preparedCall.execute());
+    // Secret references in a Site call resolve with the viewer's reach.
+    const secretContext = siteContext
+      ? { siteId: siteContext.siteArtifactId, siteVersion: siteContext.siteVersionId }
+      : null;
+    const result = await withSiteSecretContext(secretContext, () =>
+      origin ? withSiteSessionOrigin(origin, () => preparedCall.execute()) : preparedCall.execute(),
+    );
     observation.end(result.isError ? "tool_error" : "ok");
     return ToolGatewayCallResponse.parse({
       operationId,
@@ -617,7 +1472,10 @@ export async function approveWorkspaceToolGatewayCall(
   } catch (error) {
     throwWorkspaceToolGatewayHttpError(error);
   }
-  if (preparedCall.entry.approval !== "human") {
+  if (
+    preparedCall.approvalDecision !== "ask" &&
+    !(preparedCall.approvalDecision === undefined && preparedCall.entry.approval === "human")
+  ) {
     throw new HTTPException(422, { message: "tool_does_not_require_human_approval" });
   }
   const observation = startWorkspaceToolGatewayObservation(observability, {
@@ -682,7 +1540,7 @@ function catalogStaleHttpError(): ApiHttpError {
   });
 }
 
-function throwWorkspaceToolGatewayHttpError(error: unknown): never {
+export function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   if (error instanceof ToolGatewayCatalogStaleError) {
     throw catalogStaleHttpError();
   }
@@ -706,6 +1564,46 @@ function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   if (error instanceof ToolGatewayApprovalRequiredError) {
     throw new HTTPException(409, { message: error.code, cause: error });
   }
+  if (error instanceof ToolGatewayBlockedError) {
+    throw new HTTPException(403, { message: error.code, cause: error });
+  }
+  if (isMcpAccountParameterChoiceError(error)) {
+    // Nothing was sent; the message names the account's values to choose from.
+    throw new ApiHttpError(422, {
+      code: "validation_failed",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: "account_parameter_choice_required", parameter: error.parameter },
+    });
+  }
+  if (error instanceof ConnectionApprovalPreflightError) {
+    // Nothing reached the provider: the person's connection needs attention.
+    throw new ApiHttpError(409, {
+      code: "conflict",
+      message: "Reconnect this account in Opengeni, then try again.",
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: "tool_connection_needs_attention", reason: error.reason },
+    });
+  }
+  if (isSecretReferenceError(error)) {
+    // Nothing ran. The failures name references, never values.
+    throw new ApiHttpError(422, {
+      code: "validation_failed",
+      message: error.message,
+      retryable: false,
+      details: {
+        code: error.code,
+        failures: error.failures.map((failure) => ({
+          raw: failure.raw,
+          code: failure.code,
+          message: failure.message,
+          ...(failure.candidates ? { candidates: failure.candidates } : {}),
+        })),
+      },
+    });
+  }
   if (error instanceof IntegrationInvocationError && error.outcome === "unknown") {
     throw new ApiHttpError(502, {
       code: "upstream_unavailable",
@@ -719,23 +1617,51 @@ function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   throw error;
 }
 
+/** A saved Site version, only when the caller can see the Site. */
+export type WorkspaceSiteVersionResolver = (
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+  artifactId: string,
+  versionId: string,
+) => Promise<{
+  status: Awaited<ReturnType<typeof getWorkspaceArtifactContentRef>>["status"];
+  version: Pick<
+    Awaited<ReturnType<typeof getWorkspaceArtifactContentRef>>["version"],
+    "id" | "requestedTools"
+  >;
+}>;
+
+const resolveVisibleSiteVersion: WorkspaceSiteVersionResolver = async (
+  db,
+  grant,
+  artifactId,
+  versionId,
+) =>
+  await getWorkspaceArtifactContentRef(
+    db,
+    grant.workspaceId,
+    await siteViewerForGrant(db, grant),
+    artifactId,
+    versionId,
+  );
+
 export async function requireWorkspaceSiteToolAuthorization(
   db: ApiRouteDeps["db"],
   grant: AccessGrant,
   context: WorkspaceSiteToolContext,
-  resolveVersion = getWorkspaceArtifactContentRef,
+  resolveVersion: WorkspaceSiteVersionResolver = resolveVisibleSiteVersion,
 ): Promise<void> {
   try {
     const { status, version } = await resolveVersion(
       db,
-      grant.workspaceId,
+      grant,
       context.siteArtifactId,
       context.siteVersionId,
     );
+    const declared = context.declaredIdentity ?? context.identity;
     const requested = version.requestedTools.some(
       (identity) =>
-        identity.serverId === context.identity.serverId &&
-        identity.toolName === context.identity.toolName,
+        identity.serverId === declared.serverId && identity.toolName === declared.toolName,
     );
     if (status !== "active" || version.id !== context.siteVersionId || !requested) {
       throw new HTTPException(403, { message: "site_tool_not_authorized" });
@@ -760,7 +1686,7 @@ function workspaceToolGatewayOutcome(error: unknown) {
   return "failed" as const;
 }
 
-function allGatewayToolRefs(settings: Settings): ToolRef[] {
+export function allGatewayToolRefs(settings: Settings): ToolRef[] {
   return settings.mcpServers.map((server) => ({
     kind: "mcp" as const,
     id: server.id,
@@ -814,10 +1740,6 @@ async function inMemoryMcpRegistration(
       invalidateToolsCache: async () => undefined,
     },
   };
-}
-
-export function toolGatewayCatalogResponse(catalog: ToolGatewayCatalog): ToolGatewayCatalog {
-  return catalog;
 }
 
 export function workspaceToolGatewayDeclarations(

@@ -1,7 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { DatabaseTransactionError } from "../src/persistence-errors";
+import { readSessionHistoryToolIdentityPage } from "../src/session-history-tool-identities";
+import { historyCallId, historyItemType } from "../src/session-tool-call-settlement";
+import {
+  fromPostgresLosslessJson,
+  toPostgresLosslessJson,
+  LOSSLESS_JSON_STRING_PREFIX,
+} from "../src/lossless-json";
+import { withRlsContext } from "../src/database";
 import {
   applySessionTurnSettlement,
   bootstrapWorkspace,
@@ -13,6 +22,13 @@ import {
   recordPendingSessionToolCallResult,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
+  mutateAndAppendSessionEventsForTurnAttempt,
+  registerPendingSessionToolCallInTransaction,
+  recordPendingSessionToolCallResultInTransaction,
+  requestSessionTurnRecovery,
+  getActiveSessionHistoryItems,
+  appendSessionHistoryItems,
+  appendSessionHistoryItemsInTransaction,
   type PendingSessionToolCallInput,
 } from "../src/index";
 
@@ -171,7 +187,456 @@ async function receipts(input: PendingSessionToolCallInput) {
   return await shared.admin`SELECT * FROM session_pending_tool_calls WHERE turn_id = ${input.turnId}`;
 }
 
+async function checkpoint(
+  input: PendingSessionToolCallInput,
+  resultItem?: Record<string, unknown>,
+  failAfterReceipt = false,
+  db = client.db,
+) {
+  return await mutateAndAppendSessionEventsForTurnAttempt(
+    db,
+    input.workspaceId,
+    input.sessionId,
+    input.turnId,
+    input.executionGeneration,
+    input.attemptId,
+    [
+      {
+        type: resultItem ? "agent.toolCall.output" : "agent.toolCall.created",
+        payload: {
+          id: input.callId,
+          ...(resultItem
+            ? { output: { exact: "event projection", extension: { nul: "a\0b" } } }
+            : { name: "effect", arguments: "{}" }),
+        },
+      },
+    ],
+    {
+      rowProjection: "event",
+      mutate: async (tx, fence) => {
+        if (!fence.allowed) return false;
+        if (resultItem)
+          await recordPendingSessionToolCallResultInTransaction(
+            tx,
+            {
+              ...input,
+              resultItem,
+              eventOutput: { exact: "event projection", extension: { nul: "a\0b" } },
+            },
+            fence,
+          );
+        else await registerPendingSessionToolCallInTransaction(tx, input, fence);
+        if (failAfterReceipt) throw new Error("synthetic checkpoint failure after receipt");
+        return true;
+      },
+    },
+  );
+}
+
+describe("atomic tool receipt and timeline checkpoints", () => {
+  test("final tool result, event, history and receipt retirement commit or roll back together", async () => {
+    const { input } = await fixture();
+    await checkpoint(input);
+    const resultItem = { type: "function_call_result", callId: input.callId, output: "done" };
+    const commit = (fail: boolean) =>
+      mutateAndAppendSessionEventsForTurnAttempt(
+        client.db,
+        input.workspaceId,
+        input.sessionId,
+        input.turnId,
+        input.executionGeneration,
+        input.attemptId,
+        [{ type: "agent.toolCall.output", payload: { id: input.callId, output: "done" } }],
+        {
+          rowProjection: "event",
+          mutate: async (tx, fence) => {
+            if (!fence.allowed) return false;
+            await recordPendingSessionToolCallResultInTransaction(
+              tx,
+              { ...input, resultItem, eventOutput: "done" },
+              fence,
+            );
+            await appendSessionHistoryItemsInTransaction(
+              tx,
+              {
+                ...input,
+                expectedAttemptId: input.attemptId,
+                expectedExecutionGeneration: input.executionGeneration,
+                items: [
+                  { position: 100, item: input.callItem },
+                  { position: 101, item: resultItem },
+                ],
+                completedToolCallIds: [input.callId],
+              },
+              fence,
+            );
+            return true;
+          },
+          project: async () => {
+            if (fail) throw new Error("after checkpoint insert");
+          },
+        },
+      );
+    await expect(commit(true)).rejects.toThrow("after checkpoint insert");
+    const pending = await receipts(input);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.result_item_ordered).toBeNull();
+    expect(
+      await shared.admin`select id from session_history_items where session_id = ${input.sessionId} and position >= 100`,
+    ).toHaveLength(0);
+    expect(
+      await shared.admin`select id from session_events where session_id = ${input.sessionId} and type = 'agent.toolCall.output'`,
+    ).toHaveLength(0);
+    expect((await commit(false)).accepted).toBe(true);
+    expect(await receipts(input)).toHaveLength(0);
+    expect(
+      await shared.admin`select id from session_history_items where session_id = ${input.sessionId} and position >= 100`,
+    ).toHaveLength(2);
+    expect(
+      await shared.admin`select id from session_events where session_id = ${input.sessionId} and type = 'agent.toolCall.output'`,
+    ).toHaveLength(1);
+  });
+
+  test("transaction-local receipt helpers reject an identity different from the held fence", async () => {
+    const { input } = await fixture();
+    await expect(
+      mutateAndAppendSessionEventsForTurnAttempt(
+        client.db,
+        input.workspaceId,
+        input.sessionId,
+        input.turnId,
+        input.executionGeneration,
+        input.attemptId,
+        [{ type: "agent.toolCall.created", payload: { id: input.callId } }],
+        async (tx, fence) => {
+          if (!fence.allowed) return false;
+          await registerPendingSessionToolCallInTransaction(
+            tx,
+            { ...input, attemptId: crypto.randomUUID() },
+            fence,
+          );
+          return true;
+        },
+      ),
+    ).rejects.toThrow("Pending tool checkpoint does not match its locked attempt");
+    expect(await receipts(input)).toHaveLength(0);
+  });
+
+  test("lost commit acknowledgement retains the exact pair without retrying", async () => {
+    const { input } = await fixture();
+    let attempts = 0;
+    const uncertain = new Proxy(client.db, {
+      get(target, key, receiver) {
+        if (key === "transaction")
+          return async (...args: Parameters<typeof target.transaction>) => {
+            attempts++;
+            await target.transaction(...args);
+            throw Object.assign(new Error("commit acknowledgement lost"), {
+              code: "ECONNRESET",
+              cause: { code: "40001" },
+            });
+          };
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    await expect(checkpoint(input, undefined, false, uncertain)).rejects.toMatchObject({
+      details: { attempts: 1, sqlState: null, retryOutcome: "not_retryable" },
+    });
+    expect(attempts).toBe(1);
+    expect(await receipts(input)).toHaveLength(1);
+    expect(
+      await shared.admin`select id from session_events where session_id=${input.sessionId} and type='agent.toolCall.created'`,
+    ).toHaveLength(1);
+  });
+
+  test("history and receipt retirement share one checkpoint, but only with proven call/result pairs", async () => {
+    const { input } = await fixture();
+    const resultItem = { type: "function_call_result", callId: input.callId, output: "done" };
+    await checkpoint(input);
+    await checkpoint(input, resultItem);
+    const historyInput = {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      expectedExecutionGeneration: input.executionGeneration,
+      expectedAttemptId: input.attemptId,
+      completedToolCallIds: [input.callId],
+    };
+    expect(await appendSessionHistoryItems(client.db, { ...historyInput, items: [] })).toBe(true);
+    expect(await receipts(input)).toHaveLength(1);
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        ...historyInput,
+        items: [
+          { position: 100, item: input.callItem },
+          { position: 101, item: resultItem },
+        ],
+      }),
+    ).toBe(true);
+    expect(await receipts(input)).toHaveLength(0);
+    expect(await appendSessionHistoryItems(client.db, { ...historyInput, items: [] })).toBe(true);
+  });
+
+  test("rollback leaves neither receipt nor created event; retry commits both", async () => {
+    const { input } = await fixture();
+    await expect(checkpoint(input, undefined, true)).rejects.toThrow(
+      "synthetic checkpoint failure",
+    );
+    expect(await receipts(input)).toHaveLength(0);
+    const events =
+      await shared.admin`select id from session_events where session_id=${input.sessionId} and type='agent.toolCall.created'`;
+    expect(events).toHaveLength(0);
+    expect((await checkpoint(input)).accepted).toBe(true);
+    expect(await receipts(input)).toHaveLength(1);
+    const committed =
+      await shared.admin`select id from session_events where session_id=${input.sessionId} and type='agent.toolCall.created'`;
+    expect(committed).toHaveLength(1);
+  });
+
+  test("result rollback preserves the unresolved receipt; committed result and output recover byte-identically", async () => {
+    const histories: string[] = [];
+    for (const atomic of [false, true]) {
+      const { input, triggerEventId } = await fixture();
+      input.callId = "same-call";
+      input.callItem = {
+        ...input.callItem,
+        callId: input.callId,
+        extension: { nul: "a\0b", lone: "\ud800" },
+      };
+      const resultItem = {
+        type: "function_call_result",
+        callId: input.callId,
+        output: { type: "text", text: "retained\0result\ud800" },
+      };
+      if (atomic) {
+        await checkpoint(input);
+        await expect(checkpoint(input, resultItem, true)).rejects.toThrow(
+          "synthetic checkpoint failure",
+        );
+        expect((await receipts(input))[0]!.result_item).toBeNull();
+        expect(
+          await shared.admin`select id from session_events where session_id=${input.sessionId} and type='agent.toolCall.output'`,
+        ).toHaveLength(0);
+        await checkpoint(input, resultItem);
+      } else {
+        await registerPendingSessionToolCall(client.db, input);
+        await recordPendingSessionToolCallResult(client.db, {
+          ...input,
+          resultItem,
+          eventOutput: { exact: "event projection", extension: { nul: "a\0b" } },
+        });
+      }
+      // Crash after the durable receipt, before stable SDK history reconciliation.
+      const recovery = await requestSessionTurnRecovery(client.db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        triggerEventId,
+        attemptId: input.attemptId,
+        reason: "worker_shutdown",
+      });
+      expect(recovery.action).toBe("recovering");
+      const history = await getActiveSessionHistoryItems(
+        client.db,
+        input.workspaceId,
+        input.sessionId,
+      );
+      histories.push(JSON.stringify(history.slice(1).map((row) => row.item)));
+      expect(history.slice(1).map((row) => row.item.type)).toEqual([
+        "function_call",
+        "function_call_result",
+      ]);
+      const outputs =
+        await shared.admin`select id from session_events where session_id=${input.sessionId} and type='agent.toolCall.output'`;
+      expect(outputs).toHaveLength(1);
+    }
+    expect(histories[1]).toBe(histories[0]);
+  });
+
+  test("oversized tool output is stored and replayed within the output event bound", async () => {
+    const { input, triggerEventId } = await fixture();
+    input.callId = "oversized-output-call";
+    input.callItem = { ...input.callItem, callId: input.callId };
+    const head = "first-line-of-output\n";
+    const tail = "\nlast-line-of-output";
+    const hugeText = `${head}${"x".repeat(4 * 1024 * 1024)}${tail}`;
+    await registerPendingSessionToolCall(client.db, input);
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        ...input,
+        resultItem: {
+          type: "function_call_result",
+          callId: input.callId,
+          output: { type: "text", text: "model-facing output, already truncated" },
+        },
+        eventOutput: { content: [{ type: "text", text: hugeText }], isError: false },
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+
+    const [stored] = await shared.admin<
+      Array<{ bytes: number; eventOutput: unknown; codec: number | null }>
+    >`
+      select octet_length(event_output::text) as bytes, event_output as "eventOutput",
+        event_output_codec_version as "codec"
+      from session_pending_tool_calls
+      where session_id = ${input.sessionId} and call_id = ${input.callId}`;
+    expect(stored!.bytes).toBeLessThanOrEqual(256 * 1024);
+    const storedOutput = fromPostgresLosslessJson(stored!.eventOutput, stored!.codec) as {
+      value: { content: Array<{ text: string }>; isError: boolean };
+      truncation?: { truncated: boolean; originalBytes: number | null };
+    };
+    expect(storedOutput.value.isError).toBe(false);
+    const storedText = storedOutput.value.content[0]!.text;
+    expect(storedText.startsWith(head)).toBe(true);
+    expect(storedText.endsWith(tail)).toBe(true);
+    expect(storedOutput.truncation?.truncated).toBe(true);
+    expect(storedOutput.truncation?.originalBytes).toBeGreaterThan(hugeText.length);
+
+    // Crash after the durable result: recovery replays the bounded output event.
+    const recovery = await requestSessionTurnRecovery(client.db, input.workspaceId, {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      triggerEventId,
+      attemptId: input.attemptId,
+      reason: "worker_shutdown",
+    });
+    expect(recovery.action).toBe("recovering");
+    const [event] = await shared.admin<
+      Array<{ payload: Record<string, unknown>; codec: number | null }>
+    >`
+      select payload, payload_codec_version as codec from session_events
+      where session_id = ${input.sessionId} and type = 'agent.toolCall.output'`;
+    const payload = fromPostgresLosslessJson(event!.payload, event!.codec) as {
+      id: string;
+      output: { content: Array<{ text: string }> };
+      truncation?: { truncated: boolean };
+    };
+    expect(payload.id).toBe(input.callId);
+    expect(payload.output.content[0]!.text.startsWith(head)).toBe(true);
+    expect(payload.truncation?.truncated).toBe(true);
+  });
+
+  test("generation mismatch never mutates a receipt or projects an output", async () => {
+    const { input } = await fixture();
+    expect(
+      (await checkpoint({ ...input, executionGeneration: input.executionGeneration + 1 })).accepted,
+    ).toBe(false);
+    expect(await receipts(input)).toHaveLength(0);
+    expect(
+      await shared.admin`select id from session_events where session_id=${input.sessionId} and type='agent.toolCall.created'`,
+    ).toHaveLength(0);
+  });
+
+  test("atomic registration rollback retries the entire checkpoint", async () => {
+    const { input } = await fixture();
+    await inject(input, 1, "40P01");
+    expect((await checkpoint(input)).accepted).toBe(true);
+    expect(await attemptCount()).toBe(2);
+    expect(await receipts(input)).toHaveLength(1);
+    expect(
+      await shared.admin`select id from session_events where session_id=${input.sessionId} and type='agent.toolCall.created'`,
+    ).toHaveLength(1);
+  });
+});
+
 describe("pending tool registration rollback retries", () => {
+  test("receipt identity pages match full history for codec, precedence, malformed fields and pagination", async () => {
+    const { input } = await fixture();
+    const cases: Record<string, unknown>[] = [
+      {
+        type: "function_call",
+        callId: "direct",
+        call_id: "snake",
+        id: "item",
+        providerData: { callId: "provider" },
+      },
+      { type: "function_call_result", callId: "", call_id: "snake" },
+      {
+        type: "tool_search_output",
+        callId: false,
+        call_id: {},
+        providerData: { callId: "provider", call_id: "other" },
+        id: "item",
+      },
+      { type: "shell_call_output", providerData: { callId: "", call_id: "provider-snake" } },
+      { type: "computer_call", providerData: ["ignored"], id: "fallback" },
+      { type: "apply_patch_call_output", providerData: "ignored", id: "fallback" },
+      { type: null, callId: 7, id: [] },
+      { type: {}, callId: "identity" },
+      { type: "function_call", callId: "nul\0surrogate\ud800" },
+      {
+        type: `${LOSSLESS_JSON_STRING_PREFIX}literal`,
+        callId: `${LOSSLESS_JSON_STRING_PREFIX}also-literal`,
+      },
+      { type: "function_call", providerData: { callId: "nested\0\ud800" } },
+      {},
+    ];
+    let position = 100;
+    for (const codec of [null, 1] as const)
+      for (const original of cases) {
+        // Legacy JSON cannot contain NUL/lone surrogates; the versioned form can.
+        if (codec === null && JSON.stringify(original).match(/\\u0000|\\ud800/)) continue;
+        const item = { ...original, output: "large retained output".repeat(4000) };
+        const encoded = codec === 1 ? toPostgresLosslessJson(item) : item;
+        await shared.admin`insert into session_history_items(account_id,workspace_id,session_id,turn_id,position,item,item_codec_version)
+        values (${input.accountId},${input.workspaceId},${input.sessionId},${input.turnId},${position++},${JSON.stringify(encoded)}::jsonb,${codec})`;
+      }
+    const before =
+      await shared.admin`select position,item_ordered,item_codec_version from session_history_items
+      where turn_id=${input.turnId} order by position desc`;
+    const expected = before.map((row) => {
+      const item = fromPostgresLosslessJson(row.item_ordered, row.item_codec_version);
+      return {
+        position: Number(row.position),
+        callId: historyCallId(item),
+        type: historyItemType(item),
+      };
+    });
+    const actual = await withRlsContext(client.db, input, async (tx) => {
+      const narrow = new Proxy(tx, {
+        get(target, key, receiver) {
+          if (key === "execute")
+            return async (query: Parameters<typeof tx.execute>[0]) => {
+              const result = await target.execute(query);
+              // Assert the database response itself is narrow, not just the final
+              // mapped identities after discarding a large retained payload.
+              expect(JSON.stringify(result).length).toBeLessThan(8000);
+              expect(JSON.stringify(result)).not.toContain("large retained output");
+              return result;
+            };
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const rows: typeof expected = [];
+      let cursor: number | null = null;
+      for (;;) {
+        const page = await readSessionHistoryToolIdentityPage(narrow, input, cursor, 7);
+        rows.push(...page);
+        if (page.length < 7) return rows;
+        cursor = page.at(-1)!.position;
+      }
+    });
+    expect(actual).toEqual(expected);
+    expect(JSON.stringify(actual).length).toBeLessThan(8000);
+    expect(
+      await shared.admin`select position,item_ordered,item_codec_version from session_history_items
+      where turn_id=${input.turnId} order by position desc`,
+    ).toEqual(before);
+    const other = await fixture();
+    expect(
+      await withRlsContext(client.db, other.input, (tx) =>
+        readSessionHistoryToolIdentityPage(tx, input, null, 32),
+      ),
+    ).toEqual([]);
+    await shared.admin`insert into session_history_items(account_id,workspace_id,session_id,turn_id,position,item)
+      values (${input.accountId},${input.workspaceId},${input.sessionId},${input.turnId},999,'null'::jsonb)`;
+    await expect(
+      withRlsContext(client.db, input, (tx) =>
+        readSessionHistoryToolIdentityPage(tx, input, null, 32),
+      ),
+    ).rejects.toThrow();
+  });
+
   test("fixture enforces the non-owner FORCE-RLS application role", async () => {
     const rows = await client.db.execute(sql`
       SELECT current_user, r.rolsuper, r.rolbypassrls, c.relforcerowsecurity,
@@ -240,26 +705,88 @@ describe("pending tool registration rollback retries", () => {
     expect(await receipts(input)).toHaveLength(0);
   });
 
-  test("transport failures at transaction admission are not retried", async () => {
-    const { input } = await fixture();
-    for (const code of ["CONNECTION_CLOSED", "ECONNRESET", "EPIPE", "ETIMEDOUT"]) {
+  test("unentered transaction admission retries without registering or admitting an effect twice", async () => {
+    for (const code of [
+      "53300",
+      "57P03",
+      "CONNECTION_CLOSED",
+      "ECONNRESET",
+      "EPIPE",
+      "ETIMEDOUT",
+    ]) {
+      const { input } = await fixture();
       let attempts = 0;
+      let callbacks = 0;
+      let effects = 0;
       const unavailable = new Proxy(client.db, {
         get(target, key, receiver) {
           if (key === "transaction")
-            return async () => {
+            return async (callback: Parameters<typeof target.transaction>[0]) => {
               attempts += 1;
-              throw Object.assign(new Error("transport failure"), { code });
+              if (attempts < 3) {
+                expect(callbacks).toBe(0);
+                expect(await receipts(input)).toHaveLength(0);
+                throw Object.assign(new Error("transport failure"), { code });
+              }
+              return await target.transaction(async (tx) => {
+                callbacks += 1;
+                return await callback(tx);
+              });
             };
           return Reflect.get(target, key, receiver);
         },
       });
-      await expect(registerPendingSessionToolCall(unavailable, input)).rejects.toMatchObject({
+      const result = await registerPendingSessionToolCall(unavailable, input);
+      if (result.accepted && result.registered) effects += 1;
+      expect(result).toEqual({ accepted: true, registered: true });
+      expect(attempts).toBe(3);
+      expect(callbacks).toBe(1);
+      expect(effects).toBe(1);
+      expect(await receipts(input)).toHaveLength(1);
+    }
+  }, 30_000);
+
+  test("lost commit acknowledgement never replays registration or authorizes an effect", async () => {
+    for (const code of ["CONNECTION_CLOSED", "ECONNRESET", "EPIPE", "ETIMEDOUT"]) {
+      const { input } = await fixture();
+      let attempts = 0;
+      let effects = 0;
+      const uncertain = new Proxy(client.db, {
+        get(target, key, receiver) {
+          if (key === "transaction")
+            return async (...args: Parameters<typeof target.transaction>) => {
+              attempts += 1;
+              // Commit the actual receipt, then lose the acknowledgement. A
+              // fake that never calls the callback cannot prove this boundary.
+              await target.transaction(...args);
+              throw Object.assign(new Error("commit acknowledgement lost"), { code });
+            };
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const error = await registerPendingSessionToolCall(uncertain, input).then(
+        (result) => {
+          if (result.accepted && result.registered) effects += 1;
+          return null;
+        },
+        (caught: unknown) => caught,
+      );
+      expect(error).toMatchObject({
         details: { attempts: 1, retryOutcome: "not_retryable", sqlState: null },
+        cause: { stage: "settlement" },
       });
       expect(attempts).toBe(1);
+      expect(await receipts(input)).toHaveLength(1);
+      expect(effects).toBe(0);
+      // A later explicit duplicate acknowledges the existing identity without
+      // claiming another registration or replacing its original receipt.
+      const before = await receipts(input);
+      expect(await registerPendingSessionToolCall(client.db, input)).toEqual({
+        accepted: true,
+        registered: false,
+      });
+      expect(await receipts(input)).toEqual(before);
     }
-    expect(await receipts(input)).toHaveLength(0);
   });
 
   test("compatible reordered content acknowledges a duplicate without replacing origin", async () => {
@@ -303,9 +830,9 @@ describe("pending tool registration rollback retries", () => {
     expect(await receipts(input)).toEqual(before);
   });
 
-  test("transport evidence wins over nested rollback codes", async () => {
-    const { input } = await fixture();
+  test("transport evidence after callback entry wins over nested rollback codes", async () => {
     for (const code of ["40P01", "40001"]) {
+      const { input } = await fixture();
       let attempts = 0;
       const failure = Object.assign(new Error("transport outcome unknown"), {
         code: "ECONNRESET",
@@ -314,8 +841,9 @@ describe("pending tool registration rollback retries", () => {
       const unavailable = new Proxy(client.db, {
         get(target, key, receiver) {
           if (key === "transaction")
-            return async () => {
+            return async (...args: Parameters<typeof target.transaction>) => {
               attempts += 1;
+              await target.transaction(...args);
               throw failure;
             };
           return Reflect.get(target, key, receiver);
@@ -323,14 +851,16 @@ describe("pending tool registration rollback retries", () => {
       });
       await expect(registerPendingSessionToolCall(unavailable, input)).rejects.toMatchObject({
         details: { attempts: 1, retryOutcome: "not_retryable", sqlState: null },
+        cause: { stage: "settlement" },
       });
       expect(attempts).toBe(1);
+      expect(await receipts(input)).toHaveLength(1);
     }
-    expect(await receipts(input)).toHaveLength(0);
   });
 
   test("mixed transport evidence stops after a prior rollback and under error arrays", async () => {
     const { input } = await fixture();
+    await inject(input, 1, "40P01");
     let attempts = 0;
     const failure = Object.assign(new Error("mixed failure"), {
       code: "40001",
@@ -339,20 +869,29 @@ describe("pending tool registration rollback retries", () => {
     const unavailable = new Proxy(client.db, {
       get(target, key, receiver) {
         if (key === "transaction")
-          return async () => {
+          return async (...args: Parameters<typeof target.transaction>) => {
             attempts += 1;
-            if (attempts === 1) throw Object.assign(new Error("rollback"), { code: "40P01" });
+            // The first real transaction rolls back in the fixture trigger.
+            // The second commits, then loses its acknowledgement.
+            await target.transaction(...args);
             throw failure;
           };
         return Reflect.get(target, key, receiver);
       },
     });
-    await expect(registerPendingSessionToolCall(unavailable, input)).rejects.toMatchObject({
+    const error = await registerPendingSessionToolCall(unavailable, input).catch(
+      (caughtError: unknown) => caughtError,
+    );
+    expect(error).toMatchObject({
       details: { attempts: 2, retryOutcome: "not_retryable", sqlState: null },
-      cause: failure,
     });
+    const transaction = (error as Error).cause;
+    expect(transaction).toBeInstanceOf(DatabaseTransactionError);
+    expect(transaction).toMatchObject({ stage: "settlement" });
+    expect((transaction as Error).cause).toBe(failure);
     expect(attempts).toBe(2);
-    expect(await receipts(input)).toHaveLength(0);
+    expect(await attemptCount()).toBe(2);
+    expect(await receipts(input)).toHaveLength(1);
   });
 
   test("same identity with different call type or content fails closed", async () => {

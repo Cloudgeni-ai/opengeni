@@ -1,0 +1,248 @@
+import { afterEach, expect, spyOn, test } from "bun:test";
+import type { Settings } from "@opengeni/config";
+import { GROK_IMAGINE_VIDEO_1_5_MODEL_ID } from "@opengeni/contracts";
+import * as db from "@opengeni/db";
+import { createObservability } from "@opengeni/observability";
+import { buildOpenGeniAgent, prepareAgentTools, type BuildAgentOptions } from "@opengeni/runtime";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
+import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
+import { createTurnContext } from "../src/activities/agent-turn/turn-context";
+
+const restores: Array<{ mockRestore(): void }> = [];
+afterEach(() => {
+  while (restores.length > 0) restores.pop()!.mockRestore();
+});
+
+// Every live check of whether this turn can change the workspace's settings.
+const settingsChecks: unknown[] = [];
+
+// Execute the production builder for a SuperGrok turn with SuperGrok-funded
+// video and a connected image credential, and capture the media options it
+// hands to the runtime. The core video funding reads are spied on.
+async function buildSuperGrokTurn(
+  core: boolean,
+  videoFunding: "supergrok_subscription" | "opengeni_credits" = "supergrok_subscription",
+  sandboxBackend: "none" | "selfhosted" = "none",
+  policyEnabled = true,
+) {
+  const settings: Settings = testSettings({
+    sandboxBackend,
+    webSearchEnabled: false,
+    environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+    supergrokSubscriptionEnabled: true,
+  });
+  const context = createTurnContext({ settings, cancellationRequestedAt: null });
+  context.eventing.preparedTools = await prepareAgentTools(settings, [], {
+    accountId: "11111111-1111-4111-8111-111111111111",
+    workspaceId: "22222222-2222-4222-8222-222222222222",
+    sessionId: "33333333-3333-4333-8333-333333333333",
+    turnId: "44444444-4444-4444-8444-444444444444",
+    attemptId: "55555555-5555-4555-8555-555555555555",
+    executionGeneration: 1,
+    credentialSubjectId: null,
+  });
+  const coreFundingCalls: string[] = [];
+  restores.push(
+    spyOn(db, "readSubscriptionCoreSessionOwner").mockResolvedValue({
+      ownerSubjectId: "user:owner",
+    } as Awaited<ReturnType<typeof db.readSubscriptionCoreSessionOwner>>),
+    // Stub the core operation runtime; no provider call is made.
+    spyOn(db, "subscriptionCoreOperationConnections").mockReturnValue({
+      listSubscriptionCoreOperationCandidates: async () => {
+        coreFundingCalls.push("candidates");
+        return [
+          {
+            connectionId: "66666666-6666-4666-8666-666666666666",
+            planType: null,
+            explicit: false,
+            allowedModelIds: null,
+          },
+        ];
+      },
+      readSubscriptionCoreExhaustedConnectionIds: async () => {
+        coreFundingCalls.push("exhausted");
+        return new Set<string>();
+      },
+    } as unknown as ReturnType<typeof db.subscriptionCoreOperationConnections>),
+    spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
+    spyOn(db, "turnWorkspaceSettingsAccess").mockImplementation(async (_db, input) => {
+      settingsChecks.push(input);
+      return null;
+    }),
+    spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue(
+      policyEnabled
+        ? {
+            schemaVersion: 1,
+            revision: 0,
+            fundingSource: videoFunding,
+            enabledModelIds: [GROK_IMAGINE_VIDEO_1_5_MODEL_ID],
+            defaultModelId: GROK_IMAGINE_VIDEO_1_5_MODEL_ID,
+          }
+        : {
+            schemaVersion: 1,
+            revision: 3,
+            fundingSource: "workspace_gateway",
+            enabledModelIds: [],
+            defaultModelId: null,
+          },
+    ),
+    spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, input) => input.catalog),
+    spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(
+      async (_db, input) => input.governance,
+    ),
+    spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
+  );
+  const options: Array<BuildAgentOptions | undefined> = [];
+  const deps: Partial<BuildTurnAgentDeps> = {
+    ...context,
+    input: {
+      accountId: "account",
+      workspaceId: "workspace",
+      sessionId: "session",
+      attemptId: "attempt",
+      workflowId: "workflow",
+      workflowRunId: "workflow-run",
+      trigger: { kind: "next" },
+    },
+    db: {} as BuildTurnAgentDeps["db"],
+    runtime: {
+      buildAgent: (runSettings: Settings, resources, buildOptions) => {
+        options.push(buildOptions);
+        return buildOpenGeniAgent(runSettings, resources, {
+          ...buildOptions,
+          model: new ScriptedModel("done"),
+        });
+      },
+    } as BuildTurnAgentDeps["runtime"],
+    observability: createObservability(settings, { component: "worker" }),
+    objectStorage: {} as NonNullable<BuildTurnAgentDeps["objectStorage"]>,
+    media: {} as BuildTurnAgentDeps["media"],
+    turn: {
+      id: "turn",
+      executionGeneration: 1,
+      reasoningEffort: "low",
+      initiatingHumanSubjectId: "user:owner",
+    } as BuildTurnAgentDeps["turn"],
+    session: { id: "session" } as BuildTurnAgentDeps["session"],
+    runSettings: settings,
+    mcpServers: [],
+    skillCatalog: [],
+    turnExecutionPolicy: {
+      providerId: "xai-subscription",
+      latencyMode: "standard",
+    } as BuildTurnAgentDeps["turnExecutionPolicy"],
+    resolvedModel: {
+      provider: { kind: "xai-subscription", id: "xai-subscription", api: "responses" },
+      configured: { id: "xai/grok-4", capabilities: { reasoning: { runnable: false } } },
+    } as unknown as BuildTurnAgentDeps["resolvedModel"],
+    codexContext: {} as BuildTurnAgentDeps["codexContext"],
+    nativeImageProviderBinding: null,
+    providerTurn: {
+      ...context.providerTurn,
+      // Both routes carry a connected request context and connection id, so
+      // only the core gate separates them.
+      xaiRequestContext: {} as BuildTurnAgentDeps["providerTurn"]["xaiRequestContext"],
+      effectiveXaiCredentialId: "xai-connection",
+      xaiRotationEnabled: false,
+      xaiSubscriptionCore: core
+        ? {
+            identity: {
+              accountId: "account",
+              workspaceId: "workspace",
+              sessionId: "session",
+              turnId: "turn",
+              sessionOwnerSubjectId: "user:owner",
+              sessionOwnerMembershipId: null,
+              initiatingHumanSubjectId: "user:owner",
+              acceptedAuthorityV2: { version: 2, personal: [] },
+            },
+            connectionId: "xai-connection",
+            placedRefreshGeneration: 1,
+            personal: false,
+          }
+        : null,
+    },
+    runtimeResources: [],
+    sandboxEnvironment: {},
+    sandboxArtifactRuntime: { available: false, environment: {} },
+    fileResourceDownloads: [],
+    attemptConnectorActionBindings: [],
+    modelInputPolicy: { inputFileMediaTypes: [], supportsImageInput: true },
+    preparationIndependentToolNames: [],
+    groupBoxBackend: "none",
+    postToolPreparationStartedAt: performance.now(),
+    trigger: { type: "user.message", payload: {} } as BuildTurnAgentDeps["trigger"],
+  };
+  (deps as { workspaceCreditModelsAllowed?: boolean }).workspaceCreditModelsAllowed = false;
+  (deps as { leases?: unknown }).leases = {
+    codex: { generation: null },
+    xai: { subjectId: "user:owner", generation: 1 },
+  };
+  const built = buildTurnAgent(deps as BuildTurnAgentDeps);
+  return { built, options, coreFundingCalls };
+}
+
+test("a core-placed SuperGrok turn gets the core image tool and core video funding, and reads no legacy credential", async () => {
+  const { built, options, coreFundingCalls } = await buildSuperGrokTurn(
+    true,
+    "supergrok_subscription",
+    "selfhosted",
+  );
+  await built;
+  expect(options).toHaveLength(1);
+  // The core image path (an `image` operation lease on the placed connection).
+  expect(options[0]?.imageGeneration).toMatchObject({ kind: "provider_adapter" });
+  // Video funding is read when the tool is called, not when the turn starts.
+  expect(coreFundingCalls).toEqual([]);
+  const capabilities = await options[0]!.videoGeneration!.capabilities();
+  // Funded by a shared candidate.
+  expect(coreFundingCalls[0]).toBe("candidates");
+  expect(capabilities).toMatchObject({ defaultModelId: GROK_IMAGINE_VIDEO_1_5_MODEL_ID });
+});
+
+test("an unplaced SuperGrok turn cannot regain a retired connected image tool", async () => {
+  const { built, options } = await buildSuperGrokTurn(false, "opengeni_credits");
+  await built;
+  expect(options[0]?.imageGeneration).toBeUndefined();
+});
+
+test("a turn without a sandbox gets no video tools", async () => {
+  const { built, options } = await buildSuperGrokTurn(true);
+  await built;
+  expect(options[0]?.videoGeneration).toBeUndefined();
+});
+
+test("a workspace with video off keeps both video tools, which answer that it is off", async () => {
+  const { built, options, coreFundingCalls } = await buildSuperGrokTurn(
+    true,
+    "supergrok_subscription",
+    "selfhosted",
+    false,
+  );
+  await built;
+  const adapter = options[0]?.videoGeneration;
+  expect(adapter).toBeDefined();
+  settingsChecks.length = 0;
+  const off = await adapter!.capabilities();
+  expect(off).toMatchObject({
+    schemaVersion: 1,
+    status: "unavailable",
+    code: "video_generation_off",
+    operationCreated: false,
+  });
+  expect(off).not.toHaveProperty("turnOn");
+  await expect(
+    adapter!.execute({ prompt: "a beach" }, { toolCallId: "call-video" }),
+  ).resolves.toEqual(off);
+  // Who can turn it on is decided live, on each call, for this turn.
+  expect(settingsChecks).toHaveLength(2);
+  expect(settingsChecks[0]).toEqual({
+    accountId: "account",
+    workspaceId: "workspace",
+    sessionId: "session",
+    turnId: expect.any(String),
+  });
+  // An off policy reads no credential.
+  expect(coreFundingCalls).toEqual([]);
+});

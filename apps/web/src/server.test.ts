@@ -6,6 +6,8 @@ import { join } from "node:path";
 import {
   createWebHandler,
   demoApiProxyFromEnvironment,
+  noindexFromEnvironment,
+  previousAssetRootsFromEnvironment,
   publicWebOriginFromEnvironment,
   withAbsoluteLinkPreviewUrls,
 } from "./server";
@@ -90,9 +92,9 @@ describe("production web handler", () => {
     for (const response of responses) {
       expect(response.headers.get("x-content-type-options")).toBe("nosniff");
       expect(response.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
-      // Embedding is supported, so the shell never forbids framing.
-      expect(response.headers.get("x-frame-options")).toBeNull();
-      expect(response.headers.get("content-security-policy")).toBeNull();
+      // Only the console itself may frame its pages; no script policy is set.
+      expect(response.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+      expect(response.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
     }
 
     // The setup page keeps its stricter policy so the bearer never leaks.
@@ -101,6 +103,98 @@ describe("production web handler", () => {
     );
     expect(setup.headers.get("referrer-policy")).toBe("no-referrer");
     expect(setup.headers.get("x-content-type-options")).toBe("nosniff");
+
+    // A chat share link's address is its key: never a referrer, never indexed.
+    const shared = await handler(new Request("https://example.test/share/Zq3secretShareKey0000"));
+    expect(shared.status).toBe(200);
+    expect(shared.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(shared.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    expect(shared.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(shared.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+    expect(await shared.text()).toContain("Opengeni");
+  });
+
+  test("lets Office on the web frame only the Excel add-in pages", async () => {
+    const root = await fixture();
+    await mkdir(join(root, "office/assets"), { recursive: true });
+    await Bun.write(join(root, "office/index.html"), "<!doctype html><title>pane</title>");
+    await Bun.write(join(root, "office/auth-callback.html"), "<!doctype html><title>cb</title>");
+    await Bun.write(join(root, "office/assets/pane-abc.js"), "export {};\n");
+    const handler = createWebHandler(root);
+    for (const path of [
+      "/office/",
+      "/office/auth-callback.html",
+      "/office/assets/pane-abc.js",
+      "/office/manifest.xml",
+    ]) {
+      const response = await handler(new Request(`https://example.test${path}`));
+      expect(response.status).toBe(200);
+      const policy = response.headers.get("content-security-policy") ?? "";
+      expect(policy.startsWith("frame-ancestors 'self' ")).toBe(true);
+      for (const host of [
+        "https://*.officeapps.live.com",
+        "https://*.office.com",
+        "https://*.cloud.microsoft",
+        "https://*.sharepoint.com",
+      ]) {
+        expect(policy.split(" ")).toContain(host);
+      }
+      // X-Frame-Options cannot allow Microsoft's hosts, so it is not sent here.
+      expect(response.headers.get("x-frame-options")).toBeNull();
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    }
+    // A console route that merely starts with "office" keeps the strict policy.
+    const lookalike = await handler(new Request("https://example.test/officers"));
+    expect(lookalike.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
+    expect(lookalike.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+  });
+
+  test("asks search engines not to index anything when the deployment opts in", async () => {
+    const root = await fixture();
+    const requests = () => [
+      new Request("https://example.test/"),
+      new Request("https://example.test/workspaces/ws/sessions/id"),
+      new Request("https://example.test/assets/app-abc123.js"),
+      new Request("https://example.test/assets/missing.js"),
+      new Request("https://example.test/robots.txt"),
+      new Request("https://example.test/%2e%2e%2fsecret"),
+      new Request("https://example.test/", { method: "POST" }),
+      new Request("https://example.test/react-demo"),
+      new Request("https://example.test/", { method: "HEAD" }),
+      new Request(`https://example.test/setup-account?token=${VALID_SETUP_TOKEN}`),
+      new Request("https://example.test/demo-api/healthz"),
+    ];
+
+    const noindex = createWebHandler(root, {
+      noindex: true,
+      publicOrigin: "https://console.example.test",
+      demoApiProxy: {
+        targetBaseUrl: "http://api.internal:8000",
+        fetch: async () => Response.json({ ok: true }),
+      },
+    });
+    for (const response of await Promise.all(requests().map(noindex))) {
+      expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    }
+    const shell = await noindex(new Request("https://example.test/workspaces/x"));
+    expect(shell.status).toBe(200);
+    expect(await shell.text()).toContain("Opengeni");
+
+    // Off by default: only share and setup pages opt out of indexing.
+    const indexed = createWebHandler(root);
+    for (const path of ["/", "/workspaces/x", "/assets/app-abc123.js", "/robots.txt"]) {
+      const response = await indexed(new Request(`https://example.test${path}`));
+      expect(response.headers.get("x-robots-tag")).toBeNull();
+    }
+  });
+
+  test("reads the noindex opt-in from the environment", () => {
+    expect(noindexFromEnvironment({})).toBe(false);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: "" })).toBe(false);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: "false" })).toBe(false);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: "0" })).toBe(false);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: " TRUE " })).toBe(true);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: "1" })).toBe(true);
   });
 
   test("does not turn missing assets or path traversal into the SPA shell", async () => {
@@ -108,6 +202,19 @@ describe("production web handler", () => {
     const handler = createWebHandler(root);
     expect((await handler(new Request("https://example.test/assets/missing.js"))).status).toBe(404);
     expect((await handler(new Request("https://example.test/%2e%2e%2fsecret"))).status).toBe(400);
+  });
+
+  test("answers unknown well-known discovery paths with 404, never the SPA shell", async () => {
+    const handler = createWebHandler(await fixture());
+    for (const path of [
+      "/.well-known/openid-configuration",
+      "/.well-known/oauth-authorization-server/tenant/unknown",
+      "/.well-known/security.txt",
+    ]) {
+      const missing = await handler(new Request(`https://example.test${path}`));
+      expect(missing.status).toBe(404);
+      expect(missing.headers.get("content-type") ?? "").not.toContain("text/html");
+    }
   });
 
   test("answers missing top-level static files with 404 instead of the SPA shell", async () => {
@@ -500,6 +607,173 @@ describe("production web handler", () => {
     expect(headers.get("x-opengeni-access-key")).toBe("mounted-access-value");
   });
 });
+
+describe("previous web build assets", () => {
+  // A tab loaded from an older build (after a deploy) or a newer one (during a
+  // rollout) keeps requesting its own hashed names from whichever pod answers.
+  test("serves a hashed asset this build lacks from a previous build, with immutable caching", async () => {
+    const root = await fixture();
+    const previous = await previousBuild({
+      "assets/route-old111.js": "export const old = true;\n",
+      "assets/route-old111.js.gz": Bun.gzipSync("export const old = true;\n"),
+      "assets/styles-old111.css": "body{}\n",
+    });
+    const handler = createWebHandler(root, { previousAssetRoots: [previous] });
+
+    const chunk = await handler(
+      new Request("https://example.test/assets/route-old111.js", {
+        headers: { "accept-encoding": "gzip" },
+      }),
+    );
+    expect(chunk.status).toBe(200);
+    expect(chunk.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(chunk.headers.get("content-encoding")).toBe("gzip");
+    expect(chunk.headers.get("content-type")).toContain("javascript");
+    expect(chunk.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(
+      await new Response(chunk.body!.pipeThrough(new DecompressionStream("gzip"))).text(),
+    ).toBe("export const old = true;\n");
+
+    const stylesheet = await handler(new Request("https://example.test/assets/styles-old111.css"));
+    expect(stylesheet.status).toBe(200);
+    expect(stylesheet.headers.get("content-type")).toContain("text/css");
+    expect(stylesheet.headers.get("content-encoding")).toBeNull();
+    expect(await stylesheet.text()).toBe("body{}\n");
+  });
+
+  test("answers HEAD for a previous build's asset without a body", async () => {
+    const previous = await previousBuild({ "assets/route-old111.js": "export const old = 1;\n" });
+    const handler = createWebHandler(await fixture(), { previousAssetRoots: [previous] });
+    const head = await handler(
+      new Request("https://example.test/assets/route-old111.js", { method: "HEAD" }),
+    );
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-length")).toBe(String("export const old = 1;\n".length));
+    expect(head.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(await head.text()).toBe("");
+  });
+
+  test("prefers this build, then previous builds newest first", async () => {
+    const root = await fixture();
+    const newer = await previousBuild({ "assets/shared-1.js": "newer\n" });
+    const older = await previousBuild({
+      "assets/app-abc123.js": "older copy of current\n",
+      "assets/shared-1.js": "older\n",
+      "assets/only-older-2.js": "only older\n",
+    });
+    const handler = createWebHandler(root, { previousAssetRoots: [newer, older] });
+    const text = async (path: string) =>
+      (await handler(new Request(`https://example.test${path}`))).text();
+
+    expect(await text("/assets/app-abc123.js")).toBe("export const ready = true;\n");
+    expect(await text("/assets/shared-1.js")).toBe("newer\n");
+    expect(await text("/assets/only-older-2.js")).toBe("only older\n");
+  });
+
+  test("covers the Excel add-in and React demo asset directories with their usual caching", async () => {
+    const previous = await previousBuild({
+      "office/assets/taskpane-old.js": "office\n",
+      "office/assets/taskpane-old.js.gz": Bun.gzipSync("office\n"),
+      "react-demo/assets/demo-old.js": "demo\n",
+    });
+    const handler = createWebHandler(await fixture(), { previousAssetRoots: [previous] });
+    for (const [path, body] of [
+      ["/office/assets/taskpane-old.js", "office\n"],
+      ["/react-demo/assets/demo-old.js", "demo\n"],
+    ] as const) {
+      const response = await handler(new Request(`https://example.test${path}`));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("public, max-age=3600");
+      expect(await response.text()).toBe(body);
+    }
+    const compressed = await handler(
+      new Request("https://example.test/office/assets/taskpane-old.js", {
+        headers: { "accept-encoding": "gzip" },
+      }),
+    );
+    expect(compressed.headers.get("content-encoding")).toBe("gzip");
+    expect(compressed.headers.get("cache-control")).toBe("public, max-age=3600");
+    expect(
+      await new Response(compressed.body!.pipeThrough(new DecompressionStream("gzip"))).text(),
+    ).toBe("office\n");
+  });
+
+  test("still answers a missing asset with 404, never the SPA shell", async () => {
+    const previous = await previousBuild({ "assets/route-old111.js": "old\n" });
+    const handler = createWebHandler(await fixture(), {
+      previousAssetRoots: [join(previous, "missing-build"), previous],
+    });
+    for (const path of ["/assets/route-gone999.js", "/office/assets/gone.js", "/assets/"]) {
+      const missing = await handler(new Request(`https://example.test${path}`));
+      expect(missing.status).toBe(404);
+      expect(await missing.text()).toBe("Not Found");
+    }
+  });
+
+  test("serves only hashed asset directories from previous builds and stays inside them", async () => {
+    const root = await fixture();
+    const previous = await previousBuild({
+      "index.html": "<!doctype html><title>previous shell</title>",
+      "secret.js": "outside the asset directories\n",
+      "office/taskpane.html": "<!doctype html><title>previous office</title>",
+      "assets/route-old111.js": "old\n",
+      "assets/stray-old111.html": "<!doctype html><title>stray page</title>",
+      "office/assets/stray.HTM": "<!doctype html><title>stray office page</title>",
+    });
+    await Bun.write(join(previous, "..", "beside-previous.js"), "beside\n");
+    const handler = createWebHandler(root, { previousAssetRoots: [previous] });
+    const request = (path: string) => handler(new Request(`https://example.test${path}`));
+
+    // Encoded separators decode after URL normalization; no dot-segment form may
+    // reach a non-asset file in a previous build or a file beside it.
+    for (const path of [
+      "/assets/%2e%2e/secret.js",
+      "/assets/..%2fsecret.js",
+      "/assets/..%5csecret.js",
+      "/assets/%2e%2e/%2e%2e/beside-previous.js",
+      "/assets/..%2f..%2fbeside-previous.js",
+      "/office/assets/..%2f..%2fsecret.js",
+      "/assets/..%2f..%2f..%2fetc%2fpasswd",
+    ]) {
+      const response = await request(path);
+      expect([400, 404]).toContain(response.status);
+      expect(await response.text()).toMatch(/^(Bad Request|Not Found)$/u);
+    }
+    const officePage = await request("/office/taskpane.html");
+    expect(officePage.status).toBe(404);
+    expect(await officePage.text()).toBe("Not Found");
+    // Even inside an asset directory, a previous build never supplies a page.
+    for (const path of ["/assets/stray-old111.html", "/office/assets/stray.HTM"]) {
+      const page = await request(path);
+      expect(page.status).toBe(404);
+      expect(await page.text()).toBe("Not Found");
+    }
+    expect(await (await request("/")).text()).not.toContain("previous shell");
+    expect((await request("/secret.js")).status).toBe(404);
+    // A dot segment that stays inside the asset directory is still an asset.
+    expect(await (await request("/assets/nested/%2e%2e/route-old111.js")).text()).toBe("old\n");
+  });
+
+  test("reads previous asset roots from a comma-separated environment value", () => {
+    expect(previousAssetRootsFromEnvironment({})).toEqual([]);
+    expect(
+      previousAssetRootsFromEnvironment({
+        OPENGENI_WEB_PREVIOUS_ASSET_ROOTS: " /var/lib/a/0 ,,/var/lib/a/1, ",
+      }),
+    ).toEqual(["/var/lib/a/0", "/var/lib/a/1"]);
+  });
+});
+
+async function previousBuild(files: Record<string, string | Uint8Array>): Promise<string> {
+  const container = await mkdtemp(join(tmpdir(), "opengeni-web-previous-"));
+  roots.push(container);
+  const root = join(container, "build");
+  await mkdir(root, { recursive: true });
+  for (const [path, contents] of Object.entries(files)) {
+    await Bun.write(join(root, path), contents);
+  }
+  return root;
+}
 
 async function fixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "opengeni-web-handler-"));

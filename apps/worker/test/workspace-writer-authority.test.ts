@@ -7,7 +7,7 @@
 // and never re-owned.
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   advanceWorkspaceGeneration,
   advanceWorkspaceGenerationForDirectRequest,

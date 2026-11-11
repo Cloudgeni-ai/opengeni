@@ -32,6 +32,45 @@ function transport(overrides: Partial<ConnectTransport> = {}): ConnectTransport 
 }
 
 describe("Connect controller", () => {
+  test("passes prepared mapping separately from secrets and retains only setup metadata", async () => {
+    const setup = {
+      name: "Example MCP",
+      endpointUrl: "https://mcp.example.test/tools",
+      headers: [{ name: "Authorization", secret: "key", prefix: "Bearer " }],
+      secretFields: [{ id: "key", label: "API key" }],
+    };
+    let received: unknown;
+    const controller = new ConnectController(
+      transport({
+        begin: async (_workspace, input) => {
+          received = input;
+          return attempt({
+            providerId: "mcp-headers",
+            state: "credential_input",
+            ...(input.mcpSetup ? { mcpSetup: input.mcpSetup } : {}),
+            nextAction: {
+              type: "credentials",
+              fields: [{ name: "key", label: "API key", required: true, secret: true }],
+            },
+          });
+        },
+      }),
+      "workspace",
+    );
+    const input = {
+      providerId: "mcp-headers",
+      ownership: "personal" as const,
+      returnUrl: "https://console.example.test/connections",
+      idempotencyKey: "prepared-begin",
+      mcpSetup: setup,
+    };
+    await controller.begin(input);
+    expect(received).toEqual(input);
+    expect(controller.getSnapshot().attempt?.mcpSetup).toEqual(setup);
+    expect(Object.isFrozen(controller.getSnapshot().attempt?.mcpSetup?.headers)).toBe(true);
+    controller.dispose();
+  });
+
   test("failed credential submissions do not retain raw transport errors in snapshots", async () => {
     const secret = "synthetic-transport-secret";
     const failure = Object.assign(

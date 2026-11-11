@@ -8,13 +8,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { notifyKnowledgeReviewUpdated } from "@/components/rail/use-knowledge-review-indicator";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
-import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 /**
  * One line for a failed Knowledge request: advice for an API error, never the
- * raw "OpenGeni API 403: ... Reference: <uuid>." string.
+ * raw "Opengeni API 403: ... Reference: <uuid>." string.
  */
 export function errorText(reason: unknown): string {
   return userErrorText(reason);

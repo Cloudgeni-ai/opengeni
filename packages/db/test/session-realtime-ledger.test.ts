@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { MODEL_CONTEXT_LABEL, renderMessageSentAtForModel } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import {
   acceptSessionHumanInputResponse,
@@ -31,11 +31,9 @@ import {
   listOutstandingSessionSystemUpdates,
   mutateSessionControlInTransaction,
   peekSessionWork,
-  recoverSessionDispatch,
   resolveCompanyBrainContextSelection,
   SessionControlInvariantError,
   SessionRealtimeConflictError,
-  settleCodexCredentialLeaseLoss,
   settleSessionAttemptInterruptions,
   submitHumanPromptInTransaction,
   syncSessionRealtimeLedgerInTransaction,
@@ -46,6 +44,7 @@ import {
   type SessionActivityDatabase,
 } from "../src/index";
 import * as schema from "../src/schema";
+import { realtimeConnectionFixture } from "./realtime-connection-fixture";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -103,7 +102,7 @@ async function fixture() {
   return { grant, session, owner, started };
 }
 
-async function privateFixture() {
+async function privateFixture(withAccounts = false) {
   const suffix = crypto.randomUUID();
   const userId = `realtime-ledger-owner-${suffix}`;
   const subjectId = `user:${userId}`;
@@ -162,8 +161,9 @@ async function privateFixture() {
     ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
     model: "gpt-live-1-boulder-alpha" as const,
   };
+  const accounts = withAccounts ? await realtimeConnectionFixture(client.db, owner) : {};
   const started = await transaction(owner.workspaceId, (tx) =>
-    beginSessionRealtimeInTransaction(tx, owner),
+    beginSessionRealtimeInTransaction(tx, { ...owner, ...accounts }),
   );
   return { grant, session, owner, started };
 }
@@ -853,6 +853,7 @@ describe("session realtime ledger", () => {
     const base = delegationSyncInput(value, first.claimed.connection);
     const input = {
       ...base,
+      ownerSubjectLabel: "voice.owner@example.com",
       entries: [{ ...base.entries[0]!, modelContext: `  ${modelContext}  ` }],
     };
 
@@ -924,7 +925,11 @@ describe("session realtime ledger", () => {
       role: "user",
       content: [
         { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${modelContext}` },
-        { type: "input_text", text: renderMessageSentAtForModel(claim.turn.createdAt) },
+        // A voice request names the person on the call, not the voice channel.
+        {
+          type: "input_text",
+          text: renderMessageSentAtForModel(claim.turn.createdAt, "voice.owner@example.com"),
+        },
         { type: "input_text", text: input.entries[0]!.text },
       ],
     });
@@ -1319,7 +1324,23 @@ describe("session realtime ledger", () => {
     expect(admitted.accepted).toHaveLength(1);
     expect(admitted.accepted[0]).toMatchObject({ replay: false });
     expect(admitted.accepted[0]!.entry.turnId).toBeString();
-    expect(admitted.eventIds).toHaveLength(2);
+    // user.message + turn.queued, plus the idle shell's move to queued (#4330:
+    // creation reserves an idle shell rather than a queued projection).
+    expect(admitted.eventIds).toHaveLength(3);
+    const statusEvents = await transaction(value.owner.workspaceId, async (tx) =>
+      tx
+        .select({ type: schema.sessionEvents.type, payload: schema.sessionEvents.payload })
+        .from(schema.sessionEvents)
+        .where(inArray(schema.sessionEvents.id, admitted.eventIds)),
+    );
+    expect(statusEvents.map((event) => event.type).sort()).toEqual([
+      "session.status.changed",
+      "turn.queued",
+      "user.message",
+    ]);
+    expect(
+      statusEvents.find((event) => event.type === "session.status.changed")?.payload,
+    ).toMatchObject({ status: "queued" });
     expect(admitted.workflowWakeRevision).toBeGreaterThan(0);
     expect(replay.accepted[0]).toMatchObject({
       replay: true,
@@ -1428,6 +1449,87 @@ describe("session realtime ledger", () => {
     expect(persisted.session).toEqual(before.session);
   });
 
+  test("a delegation without an echoed input transcript is admitted, not a failed sync", async () => {
+    // Azure Live delegates without echoing the user's words. Throwing here
+    // failed the whole sync batch, which the browser retried forever.
+    const value = await privateFixture(true);
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const input = delegationSyncInput(value, connection.claimed.connection);
+    input.entries[0]!.payload.inputTranscript = "";
+    const admitted = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    expect(admitted.accepted[0]!.entry.turnId).toEqual(expect.any(String));
+  });
+
+  test("a person talking ends an automation's unattended default, not an explicit choice", async () => {
+    for (const [setting, expected] of [
+      ["unattended_by_default", "attended"],
+      ["unattended", "unattended"],
+    ] as const) {
+      const value = await privateFixture(true);
+      const where = and(
+        eq(schema.sessions.workspaceId, value.owner.workspaceId),
+        eq(schema.sessions.id, value.owner.sessionId),
+      );
+      await transaction(value.owner.workspaceId, async (tx) => {
+        await tx.update(schema.sessions).set({ unattendedSetting: setting }).where(where);
+      });
+      const connection = await claimInitial(value);
+      await complete(value, connection.claimed.connection);
+      await proveProviderStarted(value, connection.claimed.connection);
+      await transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(
+          tx,
+          delegationSyncInput(value, connection.claimed.connection),
+        ),
+      );
+      const [row] = await transaction(value.owner.workspaceId, (tx) =>
+        tx
+          .select({ setting: schema.sessions.unattendedSetting })
+          .from(schema.sessions)
+          .where(where),
+      );
+      expect(row!.setting).toBe(expected);
+    }
+  });
+
+  test("voice delegation preserves its frozen connector snapshot through replay", async () => {
+    const value = await privateFixture(true);
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const input = delegationSyncInput(value, connection.claimed.connection);
+    const first = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    const replay = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    expect(replay.accepted[0]!.entry.turnId).toBe(first.accepted[0]!.entry.turnId);
+    const facts = await transaction(value.owner.workspaceId, async (tx) => {
+      const [mode] = await tx
+        .select()
+        .from(schema.sessionRealtimeModes)
+        .where(eq(schema.sessionRealtimeModes.id, value.started.mode.id));
+      const [turn] = await tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, first.accepted[0]!.entry.turnId!));
+      return { mode, turn };
+    });
+    expect(JSON.stringify(facts.turn!.personalConnectionDelegations)).toBe(
+      JSON.stringify(facts.mode!.personalConnectionDelegations),
+    );
+    expect(facts.turn!.personalConnectionDelegations).toHaveLength(1);
+    expect(JSON.stringify(facts.turn!.mcpAccountBindings)).toBe(
+      JSON.stringify(facts.mode!.mcpAccountBindings),
+    );
+    expect(facts.turn!.initiatingHumanSubjectId).toBe(value.owner.ownerSubjectId);
+  });
+
   test("private-session voice delegation retains human authority through Company Brain selection", async () => {
     const value = await privateFixture();
     const connection = await claimInitial(value);
@@ -1464,7 +1566,7 @@ describe("session realtime ledger", () => {
     });
   });
 
-  test("delegation uses canonical Steer against an already-running ordinary turn", async () => {
+  test("delegation uses canonical Steer against an already-running ordinary turn, read at its next model step", async () => {
     const value = await fixture();
     const connection = await claimInitial(value);
     await complete(value, connection.claimed.connection);
@@ -1530,10 +1632,13 @@ describe("session realtime ledger", () => {
         delivery: "steer",
         replacedTurnId: foreground.turnId,
         replacedAttemptId: attemptId,
-        interruptionCount: 1,
+        interruptionCount: 0,
+        deferredUntilModelStep: true,
       },
     });
-    expect(facts.interruption).toMatchObject({ attemptId, kind: "steer", state: "pending" });
+    // Like every Steer, the running turn reads it at its next model step
+    // instead of being interrupted.
+    expect(facts.interruption).toBeUndefined();
     expect(facts.session?.activeTurnId).toBe(foreground.turnId);
   });
 
@@ -1602,6 +1707,55 @@ describe("session realtime ledger", () => {
         sourceTurnId: waiting.turn.id,
       },
     });
+  });
+
+  test("opens the voice call with the reason once after the person answers an agent call", async () => {
+    const value = await fixture();
+    await endMode(value);
+    const [call] = await shared.admin<{ id: string }[]>`
+      insert into agent_calls (
+        account_id, workspace_id, session_id, callee_subject_id, reason, state,
+        devices, ring_until, answered_by, ended_at
+      ) values (
+        ${value.owner.accountId}, ${value.owner.workspaceId}, ${value.owner.sessionId},
+        ${value.owner.ownerSubjectId}, ${"The deploy failed & needs a decision"}, 'answered',
+        1, now() + interval '30 seconds', 'phone-a', now()
+      ) returning id`;
+
+    const answered = await beginReplacementMode(value);
+    const connection = await claimInitial(answered);
+    await complete(answered, connection.claimed.connection);
+    await proveProviderStarted(answered, connection.claimed.connection);
+    const sync = await transaction(answered.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(answered),
+        connectionId: connection.claimed.connection.id,
+        connectionEpoch: connection.claimed.connection.connectionEpoch,
+      }),
+    );
+    const opener = sync.outbound.find((entry) => entry.payload.source === "agent_call");
+    expect(opener).toMatchObject({
+      kind: "session_update",
+      payload: { channel: "speakable", callId: call!.id, trigger: "realtime_start" },
+    });
+    expect(opener?.text).toContain("<reason>The deploy failed &amp; needs a decision</reason>");
+    const [claimed] = await shared.admin<{ realtime_id: string | null }[]>`
+      select realtime_id from agent_calls where id = ${call!.id}`;
+    expect(claimed?.realtime_id).toBe(answered.started.mode.id);
+
+    await endMode(answered);
+    const again = await beginReplacementMode(answered);
+    const againConnection = await claimInitial(again);
+    await complete(again, againConnection.claimed.connection);
+    await proveProviderStarted(again, againConnection.claimed.connection);
+    const againSync = await transaction(again.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...ownerProof(again),
+        connectionId: againConnection.claimed.connection.id,
+        connectionEpoch: againConnection.claimed.connection.connectionEpoch,
+      }),
+    );
+    expect(againSync.outbound.some((entry) => entry.payload.source === "agent_call")).toBe(false);
   });
 
   test("mirrors an accepted structured UI answer without delegating it again", async () => {
@@ -2103,7 +2257,13 @@ describe("session realtime ledger", () => {
       claimed.turn.id,
       claimed.turn.executionGeneration,
       attemptId,
-      [{ type: "agent.message.delta", payload: { text: "Still working on it." } }],
+      [
+        { type: "agent.message.delta", payload: { text: "Still working on it." } },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Still working on it.", phase: "commentary" },
+        },
+      ],
     );
     expect(appended.accepted).toBe(true);
     const settled = await applySessionTurnSettlement(client.db, active.owner.workspaceId, {
@@ -2135,7 +2295,7 @@ describe("session realtime ledger", () => {
     );
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({
-      text: "Still working on it.",
+      text: "Still working on it.\n",
       payload: { source: "assistant_progress", channel: "commentary", route: "session_context" },
     });
     expect(rows[1]).toMatchObject({
@@ -2171,7 +2331,12 @@ describe("session realtime ledger", () => {
       execution.turn.id,
       execution.turn.executionGeneration,
       execution.attemptId,
-      [{ type: "agent.message.delta", payload: { text: "Resumed delegation progress." } }],
+      [
+        {
+          type: "agent.message.completed",
+          payload: { text: "Resumed delegation progress.", phase: "commentary" },
+        },
+      ],
     );
     const settled = await applySessionTurnSettlement(client.db, active.owner.workspaceId, {
       sessionId: active.owner.sessionId,
@@ -2201,7 +2366,7 @@ describe("session realtime ledger", () => {
         .orderBy(asc(schema.sessionRealtimeEntries.sequence)),
     );
     expect(rows.map((row) => [row.text, row.payload.channel])).toEqual([
-      ["Resumed delegation progress.", "commentary"],
+      ["Resumed delegation progress.\n", "commentary"],
       ["Old delegation finished.", "speakable"],
     ]);
     expect(rows.every((row) => row.payload.priorRealtimeId === original.started.mode.id)).toBe(
@@ -2317,7 +2482,7 @@ describe("session realtime ledger", () => {
     expect(lostResponseRetry.outbound.map((entry) => entry.id)).not.toContain(terminalRows[0]!.id);
   });
 
-  test("projects accepted delegated assistant deltas as ordered durable progress", async () => {
+  test("projects accepted delegated working notes as ordered durable progress", async () => {
     const value = await fixture();
     const first = await claimInitial(value);
     await complete(value, first.claimed.connection);
@@ -2334,11 +2499,17 @@ describe("session realtime ledger", () => {
       [
         { type: "agent.message.delta", payload: { text: "Checking " } },
         { type: "agent.message.delta", payload: { text: "the workspace." } },
+        {
+          type: "agent.message.completed",
+          payload: { text: "Checking the workspace.", phase: "commentary" },
+        },
+        // The answer reaches the voice once, as the terminal result.
+        { type: "agent.message.completed", payload: { text: "Done.", phase: "final_answer" } },
       ],
     );
     expect(appended.accepted).toBe(true);
 
-    const [progress] = await transaction(value.owner.workspaceId, (tx) =>
+    const progressRows = await transaction(value.owner.workspaceId, (tx) =>
       tx
         .select()
         .from(schema.sessionRealtimeEntries)
@@ -2349,15 +2520,18 @@ describe("session realtime ledger", () => {
           ),
         ),
     );
+    // One whole note, never the streaming fragments or the final answer.
+    expect(progressRows).toHaveLength(1);
+    const [progress] = progressRows;
     expect(progress).toMatchObject({
       realtimeId: value.started.mode.id,
       delegationItemId: execution.admitted.accepted[0]!.entry.delegationItemId,
       direction: "provider_out",
-      text: "Checking the workspace.",
+      text: "Checking the workspace.\n",
       payload: {
         status: "running",
         turnId: execution.turn.id,
-        sourceEventIds: appended.events.map((event) => event.id),
+        sourceEventIds: [appended.events[2]!.id],
       },
     });
 
@@ -2509,73 +2683,6 @@ describe("session realtime ledger", () => {
     );
     expect(unacknowledged?.clientAckedAt).toBeNull();
     expect(unacknowledged?.providerAckedAt).toBeNull();
-  });
-
-  test("projects deterministic errors from both exceptional terminal failure paths", async () => {
-    const leaseValue = await fixture();
-    const leaseConnection = await claimInitial(leaseValue);
-    await complete(leaseValue, leaseConnection.claimed.connection);
-    await proveProviderStarted(leaseValue, leaseConnection.claimed.connection);
-    const leaseExecution = await admitAndClaimDelegation(
-      leaseValue,
-      leaseConnection.claimed.connection,
-    );
-    const leaseLoss = await settleCodexCredentialLeaseLoss(client.db, {
-      accountId: leaseValue.owner.accountId,
-      workspaceId: leaseValue.owner.workspaceId,
-      sessionId: leaseValue.owner.sessionId,
-      turnId: leaseExecution.turn.id,
-      attemptId: leaseExecution.attemptId,
-      holderId: crypto.randomUUID(),
-      generation: 1,
-      expectedRedispatches: 0,
-      checkpointDurable: false,
-      recoveryPayload: { reason: "unused" },
-      failedPayload: {
-        code: "codex_credential_lease_lost_without_checkpoint",
-        error: "Credential lease was lost before a durable checkpoint.",
-      },
-    });
-    expect(leaseLoss.action).toBe("failed");
-
-    const crashValue = await fixture();
-    const crashConnection = await claimInitial(crashValue);
-    await complete(crashValue, crashConnection.claimed.connection);
-    await proveProviderStarted(crashValue, crashConnection.claimed.connection);
-    const crashExecution = await admitAndClaimDelegation(
-      crashValue,
-      crashConnection.claimed.connection,
-    );
-    const exhausted = await recoverSessionDispatch(client.db, crashValue.owner.workspaceId, {
-      sessionId: crashValue.owner.sessionId,
-      attemptId: crashExecution.attemptId,
-      timeoutType: "HEARTBEAT",
-      maxRedispatches: 0,
-    });
-    expect(exhausted.action).toBe("exceeded");
-
-    for (const [value, turnId, code] of [
-      [leaseValue, leaseExecution.turn.id, "codex_credential_lease_lost_without_checkpoint"],
-      [crashValue, crashExecution.turn.id, "worker_death_redispatch_exhausted"],
-    ] as const) {
-      const rows = await transaction(value.owner.workspaceId, (tx) =>
-        tx
-          .select()
-          .from(schema.sessionRealtimeEntries)
-          .where(
-            and(
-              eq(schema.sessionRealtimeEntries.turnId, turnId),
-              eq(schema.sessionRealtimeEntries.direction, "provider_out"),
-            ),
-          ),
-      );
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({
-        kind: "error",
-        turnId,
-        payload: { code, status: "failed" },
-      });
-    }
   });
 
   test("does not deadlock ordinary work when delegation metadata is corrupted", async () => {

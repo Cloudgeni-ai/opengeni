@@ -1,9 +1,10 @@
 // The workspace shell: the Linear-style left rail (brand, org + workspace
 // switcher, workspace nav, the session list) plus a slim canvas top strip for
 // session-contextual actions around every workspace-scoped route.
-import { OpenGeniProvider } from "@opengeni/react";
+import { t } from "@opengeni/react/app/lib/console-text";
+import { OpenGeniProvider, SecretsUiProvider, useOpenGeni } from "@opengeni/react";
 import type { WorkspaceControlEvent } from "@opengeni/sdk";
-import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
+import { Link, Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import {
   lazy,
   Suspense,
@@ -14,22 +15,28 @@ import {
   type ComponentProps,
   type ReactNode,
 } from "react";
+import { CircleCheckIcon, LinkIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { LoadingPanel, ProblemPanel } from "@/components/common";
-import { RailProvider } from "@/components/rail/rail-context";
+import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/common";
+import { RailProvider } from "@opengeni/react/app/components/rail/rail-context";
+import { ActionsProvider } from "@opengeni/react/app/lib/actions/actions-provider";
+import { DesktopThisComputerProvider } from "@opengeni/react/app/components/desktop/this-computer";
+import { AppShotCoordinator } from "@opengeni/react/app/components/desktop/app-shots";
 import { RailShell } from "@/components/rail/rail-shell";
-import { workspaceManagementLocation } from "@/lib/workspace-management-location";
+import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
+import { workspaceManagementLocation } from "@opengeni/react/app/lib/workspace-management-location";
 import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
-import { Button } from "@/components/ui/button";
-import { WorkspaceTenantBoundary } from "@/components/workspace-tenant-boundary";
+import { Button } from "@opengeni/react/ui/button";
+import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { WorkspaceTenantBoundary } from "@opengeni/react/app/components/workspace-tenant-boundary";
 import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
-import { useAppContext, type AppContextValue } from "@/context";
-import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
-import { userErrorText } from "@/lib/api-error";
-import { isAbortError } from "@/lib/session-tools";
-import { orgLabel } from "@/lib/org";
-import { authorizedWorkspaceFromList } from "@/lib/workspace-scope-context";
+import { useAppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { useWorkspaceIntegrations } from "@opengeni/react/app/lib/use-workspace-integrations";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { orgLabel } from "@opengeni/react/app/lib/org";
+import { useStreamHealthTelemetry } from "@opengeni/react/app/lib/stream-health";
+import { authorizedWorkspaceFromList } from "@opengeni/react/app/lib/workspace-scope-context";
 import {
   updateWorkspaceOwnedState,
   workspaceOwnedValue,
@@ -38,8 +45,8 @@ import {
 import {
   beginWorkspaceOperationUnlessBlocked,
   type WorkspaceOperationIdentity,
-} from "@/lib/workspace-transition";
-import type { SlackUserLinkAccessRequest } from "@/types";
+} from "@opengeni/react/app/lib/workspace-transition";
+import type { SlackUserLinkAccessRequest } from "@opengeni/react/app/types";
 
 const LazyWorkspaceManagementShell = lazy(() =>
   import("@/components/settings/workspace-settings-shell").then((module) => ({
@@ -60,6 +67,25 @@ type SlackAccessState = {
   busy: boolean;
 };
 
+function useWorkspaceManagementLocation(workspaceId: string) {
+  // The URL can advance while Outlet still renders the outgoing matches.
+  // Choose the shell from those same matches, so a pending navigation does not
+  // remount the outgoing page inside the other shell (a session inside the
+  // settings shell, or settings inside the sessions shell).
+  return useMatches({
+    select: (matches) => {
+      const match = matches.at(-1);
+      return match
+        ? workspaceManagementLocation(
+            match.pathname,
+            workspaceId,
+            "section" in match.search ? match.search.section : undefined,
+          )
+        : null;
+    },
+  });
+}
+
 export function workspaceControlEventInvalidatesWorkspace(
   event: Pick<WorkspaceControlEvent, "scope">,
 ): boolean {
@@ -74,11 +100,123 @@ function emptySlackAccessState(): SlackAccessState {
   return { request: null, error: null, busy: false };
 }
 
-export function SlackLinkAccessRequiredDescription({ workspaceName }: { workspaceName: string }) {
-  return (
+export function SlackLinkAccessRequiredDescription({
+  workspaceName,
+  slackAccountLabel = null,
+}: {
+  workspaceName: string;
+  slackAccountLabel?: string | null | undefined;
+}) {
+  return slackAccountLabel ? (
+    <>
+      You need access to <strong>{workspaceName}</strong> to connect the Slack account{" "}
+      <strong>{slackAccountLabel}</strong>.
+    </>
+  ) : (
     <>
       You need access to <strong>{workspaceName}</strong> to connect your Slack account.
     </>
+  );
+}
+
+/**
+ * Names the Slack account a link would attach to the signed-in person. A link
+ * can come from someone else, so nothing is linked until they confirm it.
+ */
+export function SlackLinkConfirmationDescription({
+  slackAccountLabel,
+}: {
+  slackAccountLabel: string | null | undefined;
+}) {
+  return slackAccountLabel ? (
+    <>
+      Link <strong className="font-medium text-fg">{slackAccountLabel}</strong> to your Opengeni
+      account.
+    </>
+  ) : (
+    "Link this Slack account to your Opengeni account."
+  );
+}
+
+/**
+ * Linking a Slack account as an organization member who has no access to the
+ * link's workspace: first a confirmation naming the Slack account, then where
+ * to go. Linking gives them nothing else, so there is no workspace to open
+ * here: Slack is where they continue.
+ */
+export function SlackLinkPanel({
+  linked,
+  title,
+  description,
+  action,
+}: {
+  linked: boolean;
+  title: string;
+  description: ReactNode;
+  action: ReactNode;
+}) {
+  const Icon = linked ? CircleCheckIcon : LinkIcon;
+  return (
+    <section className="grid flex-1 place-items-center px-4 text-center">
+      <div
+        role={linked ? "status" : undefined}
+        className="w-full max-w-md rounded-lg border border-border bg-surface p-5"
+      >
+        <Icon
+          aria-hidden
+          className={`mx-auto mb-3 size-5 ${linked ? "text-status-idle" : "text-fg-muted"}`}
+        />
+        <h1 className="text-base font-semibold">{title}</h1>
+        <p className="mt-2 text-sm leading-5 text-fg-muted">{description}</p>
+        <div className="mt-4 flex flex-wrap justify-center gap-2">{action}</div>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * For someone who can already use the workspace: a link they opened is linked
+ * only after they confirm which Slack account it is, since the link may have
+ * come from someone else.
+ */
+export function SlackLinkConfirmDialog({
+  request,
+  busy,
+  error,
+  onLink,
+  onCancel,
+}: {
+  request: SlackUserLinkAccessRequest | null;
+  busy: boolean;
+  error: string | null;
+  onLink: () => Promise<void>;
+  onCancel: () => void;
+}) {
+  return (
+    <ConfirmDialog
+      open={request?.status === "prepared" && request.canLink === true}
+      destructive={false}
+      onOpenChange={(open) => {
+        if (!open && !busy) onCancel();
+      }}
+      title="Link your Slack account?"
+      description={
+        <SlackLinkConfirmationDescription slackAccountLabel={request?.slackAccountLabel} />
+      }
+      confirmLabel="Link account"
+      confirmDisabled={busy}
+      onConfirm={async () => {
+        await onLink();
+        // The dialog closes once the request reads as linked.
+        return false;
+      }}
+    >
+      {error ? (
+        <p role="alert" className="text-sm text-danger">
+          {error}
+        </p>
+      ) : null}
+    </ConfirmDialog>
   );
 }
 
@@ -102,19 +240,12 @@ export function WorkspaceShellRouteContent({
   });
   const activeWorkspaceId = activeWorkspace?.id ?? null;
   const {
-    accessKeyVersion,
     captureWorkspaceInvocation,
     clearSlackLinkContinuation,
     client,
     ownsWorkspaceInvocation,
     preparePendingSlackLink,
     revalidatePrincipalAccess,
-    resetWorkspaceIntegrations,
-    setSelectedRepoIds,
-    setSelectedRepoRefs,
-    refreshGitHub,
-    refreshPersonalGitHub,
-    refreshWorkspaceMcpServers,
   } = context;
   const [ownedSlackAccess, setOwnedSlackAccess] = useState<WorkspaceOwnedState<SlackAccessState>>(
     () => ({ workspaceId, value: emptySlackAccessState() }),
@@ -160,11 +291,6 @@ export function WorkspaceShellRouteContent({
     [ownsWorkspaceInvocation, workspaceId],
   );
   const workspaceStateReady = context.workspaceStateOwnerId === workspaceId;
-  useGitHubHistoryRefresh(
-    workspaceId,
-    activeWorkspaceId !== null && workspaceStateReady,
-    refreshGitHub,
-  );
 
   const hasSlackLinkContinuation = context.slackLinkContinuationWorkspaceId === workspaceId;
   const hasNarrowSlackFlow =
@@ -307,7 +433,50 @@ export function WorkspaceShellRouteContent({
     }
   }
 
-  async function cancelSlackAccess() {
+  async function linkSlackAccount() {
+    if (!slackAccessRequest || slackAccessRequest.status !== "prepared") return;
+    const operation = beginSlackOperation();
+    if (!operation) return;
+    slackMutationBusy.current = true;
+    updateSlackAccess(workspaceId, (current) => ({ ...current, busy: true }));
+    try {
+      const request = await client.linkSlackUserAsOrganizationMember(
+        workspaceId,
+        slackAccessRequest.id,
+        {
+          expectedVersion: slackAccessRequest.version,
+          idempotencyKey: crypto.randomUUID(),
+        },
+      );
+      if (!ownsSlackOperation(operation)) return;
+      updateSlackAccess(workspaceId, (current) => ({ ...current, request }));
+      if (request.status === "completed") {
+        completeSlackAccess(operation);
+      }
+    } catch (error) {
+      if (ownsSlackOperation(operation)) {
+        updateSlackAccess(workspaceId, (current) => ({
+          ...current,
+          error: userErrorText(error),
+        }));
+      }
+    } finally {
+      if (ownsSlackOperation(operation)) {
+        activeSlackOperation.current = null;
+        slackMutationBusy.current = false;
+        updateSlackAccess(workspaceId, (current) => ({
+          ...current,
+          busy: false,
+        }));
+      }
+    }
+  }
+
+  /**
+   * Cancel the request. In the narrow flow there is no workspace to stay in,
+   * so it goes home; someone already in the workspace (`stay`) stays there.
+   */
+  async function cancelSlackAccess(options?: { stay?: boolean }) {
     if (
       !slackAccessRequest ||
       (slackAccessRequest.status !== "prepared" && slackAccessRequest.status !== "pending")
@@ -326,6 +495,10 @@ export function WorkspaceShellRouteContent({
       if (!ownsSlackOperation(operation)) return;
       clearSlackLinkContinuation();
       if (!ownsSlackOperation(operation)) return;
+      if (options?.stay) {
+        updateSlackAccess(workspaceId, () => emptySlackAccessState());
+        return;
+      }
       await navigate({ to: "/", replace: true });
     } catch (error) {
       if (ownsSlackOperation(operation)) {
@@ -346,36 +519,7 @@ export function WorkspaceShellRouteContent({
     }
   }
 
-  useEffect(() => {
-    if (!activeWorkspaceId || !workspaceStateReady) {
-      return;
-    }
-    const abortController = new AbortController();
-    resetWorkspaceIntegrations();
-    setSelectedRepoIds(new Set());
-    setSelectedRepoRefs({});
-    void refreshGitHub(workspaceId, abortController.signal);
-    void refreshPersonalGitHub(workspaceId, abortController.signal);
-    void refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
-      if (!abortController.signal.aborted && !isAbortError(error)) {
-        toast.error("Couldn't load workspace MCP tools", {
-          description: userErrorText(error),
-        });
-      }
-    });
-    return () => abortController.abort();
-  }, [
-    accessKeyVersion,
-    activeWorkspaceId,
-    refreshGitHub,
-    refreshPersonalGitHub,
-    refreshWorkspaceMcpServers,
-    resetWorkspaceIntegrations,
-    setSelectedRepoIds,
-    setSelectedRepoRefs,
-    workspaceStateReady,
-    workspaceId,
-  ]);
+  useWorkspaceIntegrations(context, workspaceId, activeWorkspaceId !== null && workspaceStateReady);
 
   if (!activeWorkspace && !hasNarrowSlackFlow && managementLocation?.kind === "settings") {
     const unavailable = (
@@ -456,6 +600,48 @@ export function WorkspaceShellRouteContent({
         >
           {!slackAccessRequest && !slackAccessError ? (
             <LoadingPanel label="Checking Slack access" />
+          ) : slackAccessRequest?.status === "completed" && !slackAccessError ? (
+            <SlackLinkPanel
+              linked
+              title="Slack account linked"
+              description="You can go back to Slack."
+              action={
+                <Button asChild type="button" variant="outline">
+                  <Link to="/" onClick={context.clearSlackLinkContinuation}>
+                    Open Opengeni
+                  </Link>
+                </Button>
+              }
+            />
+          ) : slackAccessRequest?.status === "prepared" && slackAccessRequest.canLink ? (
+            <SlackLinkPanel
+              linked={false}
+              title="Link your Slack account"
+              description={
+                <SlackLinkConfirmationDescription
+                  slackAccountLabel={slackAccessRequest.slackAccountLabel}
+                />
+              }
+              action={
+                <>
+                  <Button
+                    type="button"
+                    disabled={slackAccessBusy}
+                    onClick={() => void linkSlackAccount()}
+                  >
+                    Link
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={slackAccessBusy}
+                    onClick={() => void cancelSlackAccess()}
+                  >
+                    Cancel
+                  </Button>
+                </>
+              }
+            />
           ) : activePendingState ? (
             <ProblemPanel
               title={
@@ -463,7 +649,16 @@ export function WorkspaceShellRouteContent({
                   ? "Access requested"
                   : "Workspace access required"
               }
-              description={<SlackLinkAccessRequiredDescription workspaceName={workspaceName} />}
+              description={
+                <SlackLinkAccessRequiredDescription
+                  workspaceName={workspaceName}
+                  slackAccountLabel={
+                    slackAccessRequest?.status === "prepared"
+                      ? slackAccessRequest.slackAccountLabel
+                      : null
+                  }
+                />
+              }
               action={
                 <div className="flex flex-wrap justify-center gap-2">
                   {slackAccessRequest?.status === "prepared" ? (
@@ -506,13 +701,22 @@ export function WorkspaceShellRouteContent({
   }
 
   return (
-    <AuthorizedWorkspaceShell
-      context={context}
-      workspaceId={workspaceId}
-      onMount={onAuthorizedShellMount}
-    >
-      <Outlet />
-    </AuthorizedWorkspaceShell>
+    <>
+      <SlackLinkConfirmDialog
+        request={slackAccessRequest}
+        busy={slackAccessBusy}
+        error={slackAccessError}
+        onLink={linkSlackAccount}
+        onCancel={() => void cancelSlackAccess({ stay: true })}
+      />
+      <AuthorizedWorkspaceShell
+        context={context}
+        workspaceId={workspaceId}
+        onMount={onAuthorizedShellMount}
+      >
+        <Outlet />
+      </AuthorizedWorkspaceShell>
+    </>
   );
 }
 
@@ -527,16 +731,11 @@ function AuthorizedWorkspaceShell({
   children: ReactNode;
   onMount?: () => void;
 }) {
-  const location = useRouterState({ select: (state) => state.location });
-  const managementLocation = workspaceManagementLocation(
-    location.pathname,
-    workspaceId,
-    location.search.section,
-  );
+  const managementLocation = useWorkspaceManagementLocation(workspaceId);
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const organizationName = activeWorkspace
-    ? orgLabel(activeWorkspace.accountId, context.accessContext.accountGrants)
+    ? orgLabel(t, activeWorkspace.accountId, context.accessContext.accountGrants)
     : "Organization";
   useEffect(() => {
     onMount?.();
@@ -545,49 +744,67 @@ function AuthorizedWorkspaceShell({
     <OpenGeniProvider
       client={context.client}
       workspaceId={workspaceId}
-      // The stock console owns its page: reload stale tabs after an API contract change.
-      reloadOnApiContractChange
+      // The console's API adapter owns update notices and guarded page reloads.
       onWorkspaceControlEvent={(event) => {
         if (workspaceControlEventInvalidatesWorkspace(event)) {
           void context.refreshWorkspace(workspaceId);
         }
       }}
     >
-      {/* Settings mode swaps the rail: workspace and organization settings
+      <WorkspaceStreamHealth />
+      {/* Secret reference chips and the ask card's Generate use the contracts
+          tokenizer and generator. */}
+      <SecretsUiProvider value={webSecretsUi}>
+        <DesktopThisComputerProvider workspaceId={workspaceId}>
+          <AppShotCoordinator workspaceId={workspaceId} />
+          {/* The desktop app's dictation shortcut records above the workspace
+          pages (in the root), so switching workspace never stops it. */}
+          {/* Settings mode swaps the rail: workspace and organization settings
           share one settings shell that draws the settings rail, and "Back to
           sessions" returns to the main rail. */}
-      {managementLocation ? (
-        <WorkspaceManagementShell
-          workspaceId={workspaceId}
-          workspaceName={activeWorkspace?.name}
-          organizationName={organizationName}
-          location={managementLocation}
-        >
-          {children}
-        </WorkspaceManagementShell>
-      ) : (
-        <RailProvider workspaceId={workspaceId}>
-          <RailShell>{children}</RailShell>
-        </RailProvider>
-      )}
+          {/* The rail state and the action system (⌘K, shortcuts, the desktop
+          menu bar) span both shells, so keys work in settings too. */}
+          {/* The meeting recorder lives above the workspace shell, in the
+          root route, so leaving a workspace doesn't end a recording. */}
+          <RailProvider workspaceId={workspaceId}>
+            <ActionsProvider>
+              {managementLocation ? (
+                <WorkspaceManagementShell
+                  workspaceId={workspaceId}
+                  workspaceName={activeWorkspace?.name}
+                  organizationName={organizationName}
+                  location={managementLocation}
+                >
+                  {children}
+                </WorkspaceManagementShell>
+              ) : (
+                <RailShell>{children}</RailShell>
+              )}
+            </ActionsProvider>
+          </RailProvider>
+        </DesktopThisComputerProvider>
+      </SecretsUiProvider>
     </OpenGeniProvider>
   );
+}
+
+/** Content-free workspace live-stream health; see lib/stream-health.ts. */
+function WorkspaceStreamHealth(): null {
+  const { workspaceControlConnectionState } = useOpenGeni();
+  useStreamHealthTelemetry("workspace", workspaceControlConnectionState);
+  return null;
 }
 
 export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const location = useRouterState({ select: (state) => state.location });
+  const managementLocation = useWorkspaceManagementLocation(workspaceId);
   return (
     <WorkspaceShellRouteContent
       workspaceId={workspaceId}
       context={context}
       navigate={navigate}
-      managementLocation={workspaceManagementLocation(
-        location.pathname,
-        workspaceId,
-        location.search.section,
-      )}
+      managementLocation={managementLocation}
     />
   );
 }

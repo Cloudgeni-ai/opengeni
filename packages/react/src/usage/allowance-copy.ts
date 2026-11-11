@@ -1,3 +1,4 @@
+import { type OpenGeniText } from "../messages/runtime";
 // Shared, replaceable words for usage allowances. The timeline refusal row
 // (session graph) and the opt-in `@opengeni/react/usage` surfaces both read
 // these, so a host that renames "workspace" or "admin" does it once.
@@ -25,10 +26,10 @@ export type AllowanceLabels = {
   formatDate: (iso: string) => string;
 };
 
-export function formatAllowanceDate(iso: string, now: Date = new Date()): string {
+export function formatAllowanceDate(t: OpenGeniText, iso: string, now: Date = new Date()): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(t.locale, {
     month: "short",
     day: "numeric",
     ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
@@ -36,26 +37,31 @@ export function formatAllowanceDate(iso: string, now: Date = new Date()): string
 }
 
 /** Full local date and time, for a title/tooltip next to the short date. */
-export function formatAllowanceInstant(iso: string): string {
+export function formatAllowanceInstant(t: OpenGeniText, iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(
+  return new Intl.DateTimeFormat(t.locale, { dateStyle: "medium", timeStyle: "short" }).format(
     date,
   );
 }
 
-export const DEFAULT_ALLOWANCE_LABELS: AllowanceLabels = {
-  memberLimitReachedTitle: "Usage limit reached",
-  workspaceLimitReachedTitle: "Workspace usage limit reached",
-  memberRemedy: "A workspace admin can raise this limit.",
-  workspaceRemedy: "An organization admin can raise the workspace budget.",
-  resets: (date) => `Resets ${date}.`,
-  noReset: "It doesn't reset automatically.",
-  formatDate: (iso) => formatAllowanceDate(iso),
+export const DEFAULT_ALLOWANCE_LABELS = (t: OpenGeniText): AllowanceLabels => {
+  return {
+    memberLimitReachedTitle: t("usage.allowanceCopy.usageLimitReached"),
+    workspaceLimitReachedTitle: t("usage.allowanceCopy.workspaceUsageLimitReached"),
+    memberRemedy: t("usage.allowanceCopy.aWorkspaceAdminCanRaise"),
+    workspaceRemedy: t("usage.allowanceCopy.anOrganizationAdminCanRaise"),
+    resets: (date) => t("usage.allowanceCopy.resetsDate", { date }),
+    noReset: t("usage.allowanceCopy.itDoesnTResetAutomatically"),
+    formatDate: (iso) => formatAllowanceDate(t, iso),
+  };
 };
 
-export function allowanceLabels(overrides?: Partial<AllowanceLabels>): AllowanceLabels {
-  return overrides ? { ...DEFAULT_ALLOWANCE_LABELS, ...overrides } : DEFAULT_ALLOWANCE_LABELS;
+export function allowanceLabels(
+  t: OpenGeniText,
+  overrides?: Partial<AllowanceLabels>,
+): AllowanceLabels {
+  return overrides ? { ...DEFAULT_ALLOWANCE_LABELS(t), ...overrides } : DEFAULT_ALLOWANCE_LABELS(t);
 }
 
 /** "Resets Nov 1." or the no-reset sentence. */

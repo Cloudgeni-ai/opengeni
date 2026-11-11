@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import {
   acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
@@ -8,15 +8,15 @@ import {
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
-  armCodexCapacityWait,
-  armXaiCapacityWait,
+  armSubscriptionCoreCapacityWait,
   bootstrapWorkspace,
+  buildChildRequiresActionPayload,
+  childRequiresActionSummary,
+  setSessionGoalStatus,
   childWaitingCapacityDedupeKey,
   claimPendingSessionSystemUpdateOutbox,
-  ensureCodexRotationSettings,
   failSessionWorkBeforeAttemptClaim,
   getSessionGoal,
-  updateCodexRotationSettings,
   childPausedDedupeKey,
   childProgressDedupeKey,
   childRequiresActionDedupeKey,
@@ -241,9 +241,9 @@ test.each([false, true])(
       sourceId: crypto.randomUUID(),
       dedupeKey: crypto.randomUUID(),
       summary: "Actionable peer result",
-      xaiProviderAccountAuthoritySnapshot: incompatible
+      claudeProviderAccountAuthoritySnapshot: incompatible
         ? { version: 1, scope: "organization" }
-        : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+        : WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
       payload: {
         type: "agent_message",
         text: "Actionable peer result",
@@ -611,7 +611,7 @@ describe("child lifecycle notices", () => {
     ).toBeNull();
   });
 
-  test("delivery wakes an idle parent only when its goal is active and the kind is immediate", async () => {
+  test("a blocking question wakes an idle parent with an active, completed or no goal, never a paused goal", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });
     const child = await startSession(grant, {
@@ -645,7 +645,9 @@ describe("child lifecycle notices", () => {
     const again = await deliver(row);
     expect(again.reason).toBe("duplicate");
 
-    // A parent without an active goal is not woken by a child notice.
+    // A parent with no goal (an ordinary chat that started a worker) is woken
+    // by the worker's question, exactly like by its terminal result, so it can
+    // answer or tell the person.
     const noGoalParent = await startSession(grant, { message: "no goal" });
     const noGoalChild = await startSession(grant, {
       parent: noGoalParent,
@@ -653,7 +655,7 @@ describe("child lifecycle notices", () => {
     });
     await settleIdle(grant, noGoalParent);
     await freezeChild(grant, noGoalChild);
-    const quiet = await deliver(
+    const woken = await deliver(
       (await outbox(
         grant,
         childRequiresActionDedupeKey({
@@ -663,9 +665,310 @@ describe("child lifecycle notices", () => {
         }),
       ))!,
     );
+    if (woken.reason !== "added") throw new Error(`unexpected ${woken.reason}`);
+    expect(woken.shouldWake).toBe(true);
+    expect(woken.workflowWakeRevision).not.toBeNull();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: noGoalParent.session.id,
+      workflowId: `session-${noGoalParent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    const [claimedNotice] = await shared.admin`
+      select state from session_system_updates
+      where session_id=${noGoalParent.session.id} and kind='child_requires_action'`;
+    expect(claimedNotice).toMatchObject({ state: "delivered" });
+
+    // A parent whose goal was settled (paused by intent) is not restarted by
+    // a late question; the notice stays pending for its next turn.
+    const pausedParent = await startSession(grant, { goal: true, message: "paused goal" });
+    const pausedChild = await startSession(grant, { parent: pausedParent, message: "work" });
+    await settleIdle(grant, pausedParent);
+    await setSessionGoalStatus(client.db, grant.workspaceId, pausedParent.session.id, {
+      status: "paused",
+      rationale: "waiting on the person",
+    });
+    await freezeChild(grant, pausedChild);
+    const quiet = await deliver(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: pausedChild.session.id,
+          turnId: pausedChild.turn.id,
+          turnGeneration: pausedChild.turn.executionGeneration,
+        }),
+      ))!,
+    );
     if (quiet.reason !== "added") throw new Error(`unexpected ${quiet.reason}`);
     expect(quiet.shouldWake).toBe(false);
     expect(quiet.workflowWakeRevision).toBeNull();
+
+    // A parent whose goal is completed still owns the worker: its question
+    // wakes the parent so the agent can answer before the person has to,
+    // without reopening the goal.
+    const completedParent = await startSession(grant, { goal: true, message: "completed goal" });
+    const completedChild = await startSession(grant, { parent: completedParent, message: "work" });
+    await settleIdle(grant, completedParent);
+    await setSessionGoalStatus(client.db, grant.workspaceId, completedParent.session.id, {
+      status: "completed",
+      evidence: "done",
+    });
+    await freezeChild(grant, completedChild);
+    const answerable = await deliver(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: completedChild.session.id,
+          turnId: completedChild.turn.id,
+          turnGeneration: completedChild.turn.executionGeneration,
+        }),
+      ))!,
+    );
+    if (answerable.reason !== "added") throw new Error(`unexpected ${answerable.reason}`);
+    expect(answerable.shouldWake).toBe(true);
+    expect(answerable.workflowWakeRevision).not.toBeNull();
+    expect(answerable.events.map((event) => event.type)).toEqual(["system.update.pending"]);
+    const completedClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: completedParent.session.id,
+      workflowId: `session-${completedParent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(completedClaim.action).toBe("claimed");
+    const [completedGoal] = await shared.admin`
+      select status from session_goals where session_id=${completedParent.session.id}`;
+    expect(completedGoal).toMatchObject({ status: "completed" });
+  });
+
+  test("a parent busy in a turn gets the child's question at its next turn, with every question", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    const { requestId } = await freezeChild(grant, child);
+    const row = (await outbox(
+      grant,
+      childRequiresActionDedupeKey({
+        childSessionId: child.session.id,
+        turnId: child.turn.id,
+        turnGeneration: child.turn.executionGeneration,
+      }),
+    ))!;
+    // The notice carries the compact questions the parent needs to answer.
+    expect(row.payload).toMatchObject({
+      requests: [
+        {
+          kind: "human_input",
+          requestId,
+          questions: [
+            {
+              id: "environment",
+              kind: "single_select",
+              prompt: "Which environment should I deploy to?",
+              required: true,
+              options: [
+                { id: "staging", label: "Staging" },
+                { id: "production", label: "Production" },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const delivered = await deliver(row);
+    if (delivered.reason !== "added") throw new Error("notice not added");
+    // Mid-turn: no wake now, the input waits for the turn to end.
+    expect(delivered.shouldWake).toBe(false);
+    await settleIdle(grant, parent);
+    expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
+      kind: "runnable",
+    });
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    if (claim.action !== "claimed") throw new Error("unreachable");
+    const [notice] = await shared.admin`
+      select state, delivered_turn_id from session_system_updates
+      where session_id=${parent.session.id} and kind='child_requires_action'`;
+    expect(notice).toMatchObject({ state: "delivered", delivered_turn_id: claim.turn.id });
+  });
+
+  test("a person and the parent agent answering at once: one answer, one resolution notice", async () => {
+    for (const round of [0, 1, 2, 3, 4, 5]) {
+      const grant = await workspace();
+      const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+      const child = await startSession(grant, { parent, message: "work" });
+      const { requestId } = await freezeChild(grant, child);
+      const answer = (who: "human" | "agent") =>
+        acceptSessionHumanInputResponse(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: child.session.id,
+          requestId,
+          response: {
+            outcome: "answered",
+            answers: [
+              { questionId: "environment", values: [who === "human" ? "production" : "staging"] },
+            ],
+          },
+          respondedBy: who === "human" ? grant.subjectId : `agent_attempt:${parent.attemptId}`,
+          clientEventId: crypto.randomUUID(),
+        });
+      const order = round % 2 === 0 ? (["human", "agent"] as const) : (["agent", "human"] as const);
+      const runs = order.map((who) => answer(who));
+      const results = await Promise.all(runs);
+      const accepted = results.filter((result) => result.action === "accepted");
+      const lost = results.filter((result) => result.action === "completed");
+      expect(accepted).toHaveLength(1);
+      expect(lost).toHaveLength(1);
+      expect(lost[0]).toMatchObject({ settledBy: "earlier_response" });
+      if (accepted[0]!.action !== "accepted" || lost[0]!.action !== "completed") {
+        throw new Error("unreachable");
+      }
+      // The loser is handed the winner's event, never a second answer.
+      expect(lost[0]!.event.id).toBe(accepted[0]!.event.id);
+      const responses = (
+        await listSessionEvents(client.db, grant.workspaceId, child.session.id)
+      ).filter((event) => event.type === "user.humanInputResponse");
+      expect(responses).toHaveLength(1);
+      const winner = accepted[0]!.request.respondedBy?.startsWith("agent_attempt:")
+        ? "agent_attempt"
+        : "human";
+      expect(responses[0]!.payload).toMatchObject({ requestId, respondedByKind: winner });
+      const resolutions = await shared.admin`
+        select payload from session_system_update_outbox
+        where source_session_id=${child.session.id} and kind='child_requires_action_resolved'`;
+      expect(resolutions).toHaveLength(1);
+      expect(resolutions[0]!.payload).toMatchObject({ requestId, respondedByKind: winner });
+    }
+  });
+
+  test("compact questions give way to the byte bound before whole requests do", () => {
+    const many = Array.from({ length: 20 }, (_, index) => ({
+      id: `q${index}`,
+      kind: "single_select" as const,
+      prompt: `Question ${index} ${"x".repeat(400)}`,
+      options: Array.from({ length: 20 }, (_unused, option) => ({
+        id: `o${option}`,
+        label: `Option ${option} ${"y".repeat(100)}`,
+      })),
+      required: true,
+      allowOther: false,
+    }));
+    const small = [{ ...questions[0]!, id: "env" }];
+    const payload = buildChildRequiresActionPayload({
+      childSessionId: crypto.randomUUID(),
+      childTurnId: crypto.randomUUID(),
+      childTurnGeneration: 1,
+      humanInputRequests: [
+        { id: crypto.randomUUID(), questions: small, allowSkip: false },
+        { id: crypto.randomUUID(), questions: many, allowSkip: true },
+      ],
+      pendingApprovals: [],
+    });
+    expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThanOrEqual(8 * 1024);
+    expect(payload.truncated).toBe(false);
+    expect(payload.requests).toHaveLength(2);
+    const [first, second] = payload.requests;
+    expect(first).toMatchObject({ kind: "human_input", questions: [{ id: "env" }] });
+    expect(second).toMatchObject({ kind: "human_input", questionCount: 20 });
+    expect(second && "questions" in second ? second.questions : undefined).toBeUndefined();
+    expect(childRequiresActionSummary(crypto.randomUUID(), payload)).toContain(
+      "read the worker's request_human_input call with session_events",
+    );
+  });
+
+  test("compact questions never carry a secret spec, and a Skill review is marked human-only", () => {
+    const payload = buildChildRequiresActionPayload({
+      childSessionId: crypto.randomUUID(),
+      childTurnId: crypto.randomUUID(),
+      childTurnGeneration: 1,
+      humanInputRequests: [
+        {
+          id: crypto.randomUUID(),
+          allowSkip: false,
+          questions: [
+            {
+              id: "github_password",
+              kind: "secret",
+              prompt: "GitHub password",
+              options: [{ id: "never", label: "never copied" }],
+              required: true,
+              allowOther: false,
+              secret: {
+                item: "GitHub",
+                field: "password",
+                fieldKind: "concealed",
+                itemType: "login",
+                website: "https://github.com",
+                username: { prompt: "Email", value: "owner@example.com" },
+                looksLike: "ghp_...",
+                saveTo: "user",
+                allowGenerate: true,
+                autocomplete: "current-password",
+              },
+            },
+            {
+              id: "skill:review",
+              kind: "single_select",
+              prompt: "Save this exact Skill revision for this workspace?",
+              options: [{ id: "approve", label: "Save" }],
+              required: true,
+              allowOther: false,
+              skillReview: {
+                sourceOperationId: crypto.randomUUID(),
+                skillId: crypto.randomUUID(),
+                revisionId: crypto.randomUUID(),
+                expectedRevisionId: null,
+                expectedScopeVersion: 1,
+              },
+            },
+          ],
+        },
+      ],
+      pendingApprovals: [],
+    });
+    const [request] = payload.requests;
+    expect(request && "questions" in request ? request.questions : undefined).toEqual([
+      {
+        id: "github_password",
+        kind: "secret",
+        prompt: "GitHub password",
+        required: true,
+        options: [],
+      },
+      {
+        id: "skill:review",
+        kind: "single_select",
+        prompt: "Save this exact Skill revision for this workspace?",
+        required: true,
+        options: [{ id: "approve", label: "Save" }],
+        humanOnly: true,
+      },
+    ]);
+    const serialized = JSON.stringify(payload);
+    for (const leaked of [
+      '"secret":',
+      '"username":',
+      '"website":',
+      '"looksLike":',
+      "owner@example.com",
+      "github.com",
+      "skillReview",
+      "never copied",
+    ]) {
+      expect(serialized).not.toContain(leaked);
+    }
   });
 
   test("child_progress is deferred: pending row without a wake, newer note supersedes older", async () => {
@@ -808,6 +1111,160 @@ describe("child lifecycle notices", () => {
     expect(pending.map((update) => update.kind)).toEqual(["child_requires_action_resolved"]);
   });
 
+  test("a question goes past a parent that can't act to the nearest ancestor that can, and its resolution follows", async () => {
+    const grant = await workspace();
+    const root = await startSession(grant, { goal: true, message: "coordinate" });
+    const coordinator = await startSession(grant, { parent: root, message: "coordinate a part" });
+    const parent = await startSession(grant, { parent: coordinator, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    // The parent failed: its agent cannot answer anything now.
+    await shared.admin`
+      update sessions set status = 'failed', active_turn_id = null
+      where id = ${parent.session.id}`;
+    const { requestId } = await freezeChild(grant, child);
+    const key = childRequiresActionDedupeKey({
+      childSessionId: child.session.id,
+      turnId: child.turn.id,
+      turnGeneration: child.turn.executionGeneration,
+    });
+    const row = (await outbox(grant, key))!;
+    // Only the nearest ancestor that can act gets it, not every ancestor.
+    expect(row.targetSessionId).toBe(coordinator.session.id);
+    expect(row.sourceSessionId).toBe(child.session.id);
+    expect(row.lineage).toMatchObject({
+      childSessionId: child.session.id,
+      parentSessionId: coordinator.session.id,
+      parentTurnId: coordinator.turn.id,
+      escalatedFromSessionId: parent.session.id,
+    });
+    expect(row.summary).toContain(`Its parent session ${parent.session.id} can't act on it`);
+    const delivered = await deliver(row);
+    if (delivered.reason !== "added") throw new Error(`unexpected ${delivered.reason}`);
+    expect(
+      (
+        await listOutstandingSessionSystemUpdates(
+          client.db,
+          grant.workspaceId,
+          coordinator.session.id,
+        )
+      ).map((update) => update.kind),
+    ).toEqual(["child_requires_action"]);
+
+    // The coordinator answers; the resolution lands where the question did.
+    const answered = await acceptSessionHumanInputResponse(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: child.session.id,
+      requestId,
+      response: {
+        outcome: "answered",
+        answers: [{ questionId: "environment", values: ["staging"] }],
+      },
+      respondedBy: `agent_attempt:${coordinator.attemptId}`,
+    });
+    expect(answered.action).toBe("accepted");
+    const resolved = (await outbox(
+      grant,
+      childRequiresActionResolvedDedupeKey({
+        childSessionId: child.session.id,
+        turnId: child.turn.id,
+        turnGeneration: child.turn.executionGeneration,
+        requestId,
+        approvalId: null,
+      }),
+    ))!;
+    expect(resolved.targetSessionId).toBe(coordinator.session.id);
+    const deliveredResolved = await deliver(resolved);
+    if (deliveredResolved.reason !== "added") throw new Error("resolution not added");
+    expect(deliveredResolved.events[1]?.payload).toMatchObject({
+      updateIds: [delivered.update.id],
+      reason: "superseded_by_resolution",
+    });
+
+    // A parent whose agent has no session tools also passes the question on.
+    const toolless = await startSession(grant, { parent: root, message: "no session tools" });
+    const toollessChild = await startSession(grant, { parent: toolless, message: "work" });
+    await shared.admin`
+      update sessions set agent_config = case
+        when agent_config is null then '{"capabilities":{"subagents":false}}'::jsonb
+        else jsonb_set(agent_config, '{capabilities,subagents}', 'false'::jsonb)
+      end
+      where id = ${toolless.session.id}`;
+    await freezeChild(grant, toollessChild);
+    const toollessRow = (await outbox(
+      grant,
+      childRequiresActionDedupeKey({
+        childSessionId: toollessChild.session.id,
+        turnId: toollessChild.turn.id,
+        turnGeneration: toollessChild.turn.executionGeneration,
+      }),
+    ))!;
+    expect(toollessRow.targetSessionId).toBe(root.session.id);
+
+    // Cancelling the child resolves its question where the question landed.
+    const toollessRequest = (await outbox(
+      grant,
+      childRequiresActionDedupeKey({
+        childSessionId: toollessChild.session.id,
+        turnId: toollessChild.turn.id,
+        turnGeneration: toollessChild.turn.executionGeneration,
+      }),
+    ))!;
+    expect(toollessRequest.targetSessionId).toBe(root.session.id);
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: toollessChild.session.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "cancel",
+        }),
+      ),
+    );
+    const [cancelledResolution] = await shared.admin`
+      select target_session_id, lineage from session_system_update_outbox
+      where source_session_id = ${toollessChild.session.id}
+        and kind = 'child_requires_action_resolved'`;
+    expect(cancelledResolution).toMatchObject({
+      target_session_id: root.session.id,
+      lineage: { childSessionId: toollessChild.session.id, parentSessionId: root.session.id },
+    });
+
+    // With no ancestor that can act, the question stays with the parent.
+    const lone = await startSession(grant, { message: "top level" });
+    const loneChild = await startSession(grant, { parent: lone, message: "work" });
+    await shared.admin`
+      update sessions set status = 'failed', active_turn_id = null where id = ${lone.session.id}`;
+    await freezeChild(grant, loneChild);
+    expect(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: loneChild.session.id,
+          turnId: loneChild.turn.id,
+          turnGeneration: loneChild.turn.executionGeneration,
+        }),
+      ))!.targetSessionId,
+    ).toBe(lone.session.id);
+
+    // A parent that can act keeps its child's question.
+    const able = await startSession(grant, { parent: root, message: "able" });
+    const ableChild = await startSession(grant, { parent: able, message: "work" });
+    await freezeChild(grant, ableChild);
+    const ableRow = (await outbox(
+      grant,
+      childRequiresActionDedupeKey({
+        childSessionId: ableChild.session.id,
+        turnId: ableChild.turn.id,
+        turnGeneration: ableChild.turn.executionGeneration,
+      }),
+    ))!;
+    expect(ableRow.targetSessionId).toBe(able.session.id);
+    expect(ableRow.lineage).not.toHaveProperty("escalatedFromSessionId");
+  });
+
   test("approval decisions and terminal cancellation also resolve, with the parent locked", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });
@@ -875,6 +1332,69 @@ describe("child lifecycle notices", () => {
     expect(
       await outbox(grant, `child-completion:${cancelledChild.session.id}:cancelled`),
     ).toMatchObject({ kind: "child_terminal_result" });
+  });
+
+  test("cancelling a chat with an undelivered update and an unanswered tool call writes events in order and ends its input wait", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await freezeChild(grant, child);
+    const json = shared.admin.json;
+    const updateId = crypto.randomUUID();
+    const call = { type: "function_call", callId: "call-1", name: "exec_command", arguments: "{}" };
+    // Fixture only: an update still waiting for the chat and a tool call of
+    // the frozen turn that never got its result.
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`insert into session_system_updates
+        (id, account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload, state)
+        values (${updateId}, ${grant.accountId}, ${grant.workspaceId}, ${child.session.id},
+          'agent_message', ${updateId}, ${updateId}, 'update', ${json({ type: "agent_message" })},
+          'pending')`;
+      await sql`insert into session_pending_tool_calls
+        (account_id, workspace_id, session_id, turn_id, execution_generation, attempt_id, call_id,
+          call_type, call_item, call_item_ordered)
+        values (${grant.accountId}, ${grant.workspaceId}, ${child.session.id}, ${child.turn.id},
+          ${child.turn.executionGeneration}, ${child.attemptId}, 'call-1', 'function_call',
+          ${json(call)}, ${JSON.stringify(call)})`;
+      // An input wait an earlier turn set, which nothing will settle once
+      // the chat is cancelled.
+      await sql`update sessions set input_wait_turn_id = ${child.turn.id},
+          input_wait_until = now() - interval '1 day', input_wait_reason = 'Waiting for CI',
+          input_wait_set_at = now() - interval '2 days'
+        where id = ${child.session.id}`;
+    });
+    const [before] = await shared.admin<{ last: number }[]>`
+      select last_sequence as last from session_event_cursors where session_id = ${child.session.id}`;
+
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: child.session.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "cancel",
+        }),
+      ),
+    );
+
+    const written = await shared.admin<{ sequence: number; type: string }[]>`
+      select sequence, type from session_events
+      where session_id = ${child.session.id} and sequence > ${before!.last} order by sequence`;
+    expect(written.map((event) => event.sequence)).toEqual(
+      written.map((_, index) => before!.last + 1 + index),
+    );
+    const types = written.map((event) => event.type);
+    expect(types).toContain("system.update.cancelled");
+    expect(types).toContain("turn.cancelled");
+    expect(types.indexOf("agent.toolCall.output")).toBeGreaterThanOrEqual(0);
+    expect(types.indexOf("agent.toolCall.output")).toBeLessThan(types.indexOf("turn.cancelled"));
+    const [session] = await shared.admin<{ status: string; waiting: boolean }[]>`
+      select status, input_wait_until is not null as waiting from sessions
+      where id = ${child.session.id}`;
+    expect(session).toEqual({ status: "cancelled", waiting: false });
   });
 
   test("direct human pause notifies the parent; the parent's own attempt or an ancestor pause does not", async () => {
@@ -1036,33 +1556,30 @@ describe("child lifecycle notices", () => {
     expect(events.filter((event) => event.type === "system.update.pending")).toHaveLength(2);
   });
 
-  test("codex and xai capacity waits enqueue child_waiting_capacity", async () => {
+  test("a long subscription capacity wait tells the parent at once, with its reset time", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });
     const codexChild = await startSession(grant, { parent, message: "codex work" });
-    await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
-    await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
-    const codex = await armCodexCapacityWait(client.db, {
+    const resetsAt = new Date(Date.now() + 4 * 24 * 60 * 60_000);
+    const codex = await armSubscriptionCoreCapacityWait(client.db, "codex", {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: codexChild.session.id,
       turnId: codexChild.turn.id,
       attemptId: codexChild.attemptId,
-      workflowId: `session-${codexChild.session.id}`,
-      earliestResetAt: new Date(Date.now() + 5 * 60_000),
-      resetKind: "authoritative",
+      waitReason: "no_eligible_capacity",
+      earliestResetAt: resetsAt,
       failurePayload: { error: "all connected Codex subscriptions are unavailable" },
     });
     if (codex.action !== "waiting") throw new Error(`codex wait not armed: ${codex.action}`);
-    expect(
-      await outbox(
-        grant,
-        childWaitingCapacityDedupeKey({
-          childSessionId: codexChild.session.id,
-          waiterId: codex.waiter.id,
-        }),
-      ),
-    ).toMatchObject({
+    const codexNotice = await outbox(
+      grant,
+      childWaitingCapacityDedupeKey({
+        childSessionId: codexChild.session.id,
+        waiterId: codex.waiter.waiterId,
+      }),
+    );
+    expect(codexNotice).toMatchObject({
       kind: "child_waiting_capacity",
       classification: "info",
       targetSessionId: parent.session.id,
@@ -1072,34 +1589,75 @@ describe("child lifecycle notices", () => {
         childTurnId: codexChild.turn.id,
         provider: "codex",
         nextCheckAt: codex.waiter.nextCheckAt.toISOString(),
+        resetsAt: resetsAt.toISOString(),
       },
     });
+    expect(codexNotice!.summary).toContain(
+      `until about ${resetsAt.toISOString().slice(0, 16).replace("T", " ")} UTC`,
+    );
+    expect(codexNotice!.summary).toContain("session_set_model");
+    // A worker's wait does not also notify the person: the parent handles it.
+    expect(
+      (await listSessionEvents(client.db, grant.workspaceId, codexChild.session.id)).some(
+        (event) => event.type === "session.notification.posted",
+      ),
+    ).toBe(false);
 
-    const xaiChild = await startSession(grant, { parent, message: "xai work" });
-    const xai = await armXaiCapacityWait(client.db, {
+    const claudeChild = await startSession(grant, { parent, message: "claude work" });
+    const claude = await armSubscriptionCoreCapacityWait(client.db, "claude", {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
-      subjectId: grant.subjectId,
-      sessionId: xaiChild.session.id,
-      turnId: xaiChild.turn.id,
-      attemptId: xaiChild.attemptId,
-      workflowId: `session-${xaiChild.session.id}`,
-      authoritySnapshot: WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+      sessionId: claudeChild.session.id,
+      turnId: claudeChild.turn.id,
+      attemptId: claudeChild.attemptId,
+      waitReason: "capacity",
       earliestResetAt: null,
-      failurePayload: { error: "all connected SuperGrok subscriptions are unavailable" },
+      failurePayload: { error: "all connected Claude subscriptions are unavailable" },
     });
-    if (xai.action !== "waiting") throw new Error(`xai wait not armed: ${xai.action}`);
+    if (claude.action !== "waiting") throw new Error(`claude wait not armed: ${claude.action}`);
     expect(
       await outbox(
         grant,
         childWaitingCapacityDedupeKey({
-          childSessionId: xaiChild.session.id,
-          waiterId: xai.waiter.id,
+          childSessionId: claudeChild.session.id,
+          waiterId: claude.waiter.waiterId,
         }),
       ),
     ).toMatchObject({
       kind: "child_waiting_capacity",
-      payload: { provider: "xai", childTurnId: xaiChild.turn.id },
+      payload: { provider: "claude", childTurnId: claudeChild.turn.id },
+    });
+
+    // A wait that ends within minutes resumes by itself and stays quiet.
+    const shortChild = await startSession(grant, { parent, message: "short wait" });
+    const short = await armSubscriptionCoreCapacityWait(client.db, "codex", {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: shortChild.session.id,
+      turnId: shortChild.turn.id,
+      attemptId: shortChild.attemptId,
+      waitReason: "no_eligible_capacity",
+      earliestResetAt: new Date(Date.now() + 5 * 60_000),
+      failurePayload: { error: "all connected Codex subscriptions are unavailable" },
+    });
+    if (short.action !== "waiting") throw new Error(`short wait not armed: ${short.action}`);
+    expect(
+      await outbox(
+        grant,
+        childWaitingCapacityDedupeKey({
+          childSessionId: shortChild.session.id,
+          waiterId: short.waiter.waiterId,
+        }),
+      ),
+    ).toBeNull();
+
+    // Immediate: it wakes the orchestrating parent instead of riding its next claim.
+    await settleIdle(grant, parent);
+    const delivered = await deliver(codexNotice!);
+    if (delivered.reason !== "added") throw new Error("capacity notice not added");
+    expect(delivered.workflowWakeRevision).not.toBeNull();
+    expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
+      kind: "runnable",
     });
   });
 
@@ -1453,17 +2011,14 @@ describe("child lifecycle notices", () => {
           }),
         ),
       ).toBeNull();
-      await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
-      await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
-      const codex = await armCodexCapacityWait(client.db, {
+      const codex = await armSubscriptionCoreCapacityWait(client.db, "codex", {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: child.session.id,
         turnId: child.turn.id,
         attemptId: child.attemptId,
-        workflowId: `session-${child.session.id}`,
+        waitReason: "capacity",
         earliestResetAt: null,
-        resetKind: "authoritative",
         failurePayload: { error: "unavailable" },
       });
       if (codex.action !== "waiting") throw new Error("codex wait not armed");
@@ -1472,7 +2027,7 @@ describe("child lifecycle notices", () => {
           grant,
           childWaitingCapacityDedupeKey({
             childSessionId: child.session.id,
-            waiterId: codex.waiter.id,
+            waiterId: codex.waiter.waiterId,
           }),
         ),
       ).toBeNull();

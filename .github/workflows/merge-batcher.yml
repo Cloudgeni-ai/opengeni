@@ -1,0 +1,90 @@
+name: Merge batcher
+# Lands queued PRs (queue-ready label or auto-merge) in tested batches. Each
+# pass reads the queue, the batch/<id> branch and its CI from GitHub, does the
+# next step and exits; see docs/merge-batcher.md. Inert until the repository
+# variable MERGE_BATCHER is "actions".
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+  workflow_run:
+    workflows: [CI, PR CI, Regenerate generated files]
+    types: [completed]
+  # labeled and auto_merge_enabled queue a PR. The other types matter only for
+  # a PR with the in-batch label: its change ends the running batch, which is
+  # then rebuilt at once instead of at the next scheduled pass.
+  pull_request_target:
+    types:
+      - labeled
+      - auto_merge_enabled
+      - synchronize
+      - unlabeled
+      - auto_merge_disabled
+      - converted_to_draft
+      - closed
+
+permissions: {}
+
+jobs:
+  pass:
+    name: Merge batcher pass
+    # Finished runs are matched by workflow file: CI names each run after its
+    # commit message, so workflow_run.name is not "CI".
+    if: >-
+      ${{ vars.MERGE_BATCHER == 'actions' && (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'pull_request_target' && (github.event.action == 'auto_merge_enabled' ||
+          (github.event.action == 'labeled' && (github.event.label.name == 'queue-ready' || github.event.label.name == 'queue-priority')))) ||
+        (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'in-batch') && (
+          github.event.action == 'synchronize' ||
+          github.event.action == 'auto_merge_disabled' ||
+          github.event.action == 'converted_to_draft' ||
+          (github.event.action == 'closed' && !github.event.pull_request.merged) ||
+          (github.event.action == 'unlabeled' && github.event.label.name == 'queue-ready'))) ||
+        (github.event_name == 'workflow_run' && (
+          (github.event.workflow_run.path == '.github/workflows/pr-ci.yml' && github.event.workflow_run.conclusion == 'success') ||
+          (github.event.workflow_run.path == '.github/workflows/regenerate-generated.yml' && github.event.workflow_run.head_branch == 'main') ||
+          (github.event.workflow_run.path == '.github/workflows/ci.yml' && startsWith(github.event.workflow_run.head_branch, 'batch/'))))) }}
+    # One pass at a time. The group is on the job, not the workflow, so a run
+    # whose job is skipped never replaces a pending pass. A pass never runs PR
+    # code: it checks out only scripts/batcher and the modules it imports (the
+    # migration ordinals it plans renumbering with and the registry of
+    # generated files it regenerates), from main, and talks to the GitHub API.
+    concurrency:
+      group: merge-batcher
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The App key lives only in this environment, which only main can use.
+    environment: merge-batcher
+    steps:
+      - name: Get the merge batcher App token
+        id: token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.MERGE_BATCHER_APP_ID }}
+          private-key: ${{ secrets.MERGE_BATCHER_APP_KEY }}
+      - name: Check out the batcher from main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          # Non-cone patterns so one file can be listed: the root files (as
+          # cone mode gives, including .bun-version), the batcher and its modules.
+          sparse-checkout: |
+            /*
+            !/*/
+            /scripts/batcher/
+            /scripts/migration-ordinals.ts
+            /scripts/ci/check-generated-artifacts.ts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+      - name: Run one pass
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          BATCHER_WINDOW_SECONDS: ${{ vars.MERGE_BATCHER_WINDOW_SECONDS }}
+          BATCHER_MAX_BATCH: ${{ vars.MERGE_BATCHER_MAX_BATCH }}
+        run: bun scripts/batcher/main.ts --max-minutes 10

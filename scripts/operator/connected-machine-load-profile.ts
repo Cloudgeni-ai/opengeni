@@ -1,3 +1,4 @@
+import { isRecord } from "@opengeni/contracts/values";
 const DEFAULT_MARKER = "opengeni-load-probe";
 
 export interface ConnectedMachineLoadArgs {
@@ -367,7 +368,7 @@ function printHumanResult(result: {
   verdict: { maxErrorRate: number; passed: boolean };
 }): void {
   console.log(
-    `OpenGeni Connected Machine load profile: ${result.target.baseUrl} (${result.target.sessionCount} session route${result.target.sessionCount === 1 ? "" : "s"})`,
+    `Opengeni Connected Machine load profile: ${result.target.baseUrl} (${result.target.sessionCount} session route${result.target.sessionCount === 1 ? "" : "s"})`,
   );
   for (const stage of result.stages) {
     console.log(
@@ -436,10 +437,6 @@ function requiredNext(values: string[], index: number, flag: string): string {
 function rounded(value: number, digits = 2): number {
   const factor = 10 ** digits;
   return Math.round(value * factor) / factor;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 if (import.meta.main) await main();

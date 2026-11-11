@@ -2,6 +2,12 @@ export type {
   ProviderCommandPersistence,
   ProviderCommandSession,
 } from "./provider-command-session";
+export {
+  ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandInputOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
+  isProviderCommandObservationUnavailableError,
+} from "./provider-command-session";
 // @opengeni/runtime/sandbox — the agent-loop-free sandbox leaf.
 //
 // This module is the load-bearing pre-req for the API-direct control plane
@@ -23,13 +29,45 @@ export type {
 // unchanged.
 
 import type { Settings } from "@opengeni/config";
-import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
+import {
+  collectSandboxEnvironment,
+  deploymentSandboxBackend,
+  hostSandboxBackendRefused,
+  parseExposedPorts,
+} from "@opengeni/config";
 export type { WorkspaceArchiveSpool, VerifiedHostWorkspaceArchive } from "./archive-spool";
+export {
+  sweepOrphanedHostArchiveTemporaryDirectoriesOnce,
+  workspaceArchiveDownloadTemporaryDirectory,
+} from "./host-archive-temporary";
+export type { DockerHostWorkspaceRelease } from "./providers/docker-workspace-drain";
+export { reduceModalRawOutputPage } from "./providers/modal-command-raw-page";
+export {
+  isInSandboxSupervisedProcess,
+  SUPERVISED_STOP_KILL_AFTER_SECONDS,
+} from "./durable-shell-process";
+export type {
+  ModalRawOutputPage,
+  ModalRawOutputStreams,
+  ModalRawOutputExit,
+} from "./providers/modal-command-raw-page";
 import type { WorkspaceArchiveSpool } from "./archive-spool";
-import { restoreHostWorkspaceArchive } from "./host-archive-spool";
+import {
+  convertHostWorkspaceArchiveToTar,
+  restoreHostWorkspaceArchive,
+  type PortableWorkspaceTar,
+} from "./host-archive-spool";
 export {
   captureWorkspaceArchiveForStorage,
   disposeWorkspaceArchive,
+  findRebuildableWorkspacePaths,
+  workspaceCaptureStillRunning,
+  probeRemoteWorkspaceSize,
+  WORKSPACE_SIZE_PROBE_TIMEOUT_SECONDS,
+  REBUILDABLE_WORKSPACE_DIRECTORY_NAMES,
+  workspaceSizeFromArchiveDescriptor,
+  type RebuildableWorkspacePaths,
+  type WorkspaceSizeProbe,
   type VerifiedWorkspaceArchivePayload,
 } from "./workspace-archive";
 
@@ -55,10 +93,12 @@ import type {
 import { serializeManifestRecord } from "@openai/agents-core/sandbox/internal";
 import { isProviderApiThrottleError, PROVIDER_REGISTRY } from "./providers";
 import { ensureModalRegistryImage } from "./providers/modal";
+import { ModalExecReadinessProbeLostError } from "./providers/modal-command-control";
 import type { ModalCreateIntent } from "./providers/modal-create-boundary";
 import type { ProviderRegistration } from "./providers/types";
 import { sandboxBackendForSdkBackendId } from "./select";
 import {
+  SandboxBackendNotServedError,
   SandboxConfigError,
   SandboxExactResumeReplacedError,
   SandboxProviderContinuityUnavailableError,
@@ -71,16 +111,30 @@ import {
   decodeNativeSnapshotRef,
   readVerifiedWorkspaceArchive,
   verifyRestoredWorkspace,
+  verifyRestoredWorkspaceContents,
+  workspaceArchiveExcludedPaths,
   WorkspaceArchiveIntegrityError,
   type VerifiedWorkspaceArchive,
   type WorkspaceArchiveDescriptor,
 } from "./workspace-archive";
 import type { RuntimeMetricsHooks } from "../metrics";
+import { instrumentSandboxClientSessionOperations } from "./operation-purpose";
+export {
+  currentSandboxOperationPurpose,
+  instrumentSandboxClientSessionOperations,
+  instrumentSandboxSessionOperations,
+  SANDBOX_OPERATION_PURPOSES,
+  sandboxHookOperationPurpose,
+  withSandboxOperationPurpose,
+  type SandboxOperationPurpose,
+  type SandboxSetupOperationObservation,
+} from "./operation-purpose";
 import { normalizeProtocolJsonValue } from "../protocol-json";
 import { sandboxCommandExitCode, sandboxCommandStillRunning } from "./command-result";
 import { parseExecBannerSessionId } from "./exec-banner";
-import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
 import type { ExposedPortEndpoint } from "./stream-port";
+import type { ComputeCreateIdentity } from "./compute/session";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
@@ -95,14 +149,10 @@ export {
 } from "./materialization-verification-error";
 export { sendCommandInput, type CommandInputSession } from "./command-input";
 export { OpStreamExecClient, type OpStreamOutputFrame } from "./selfhosted/op-stream";
-
 export {
-  repairSerializedRunStateExposedPorts,
-  runStateCompatibilityProvider,
-  runStateExposedPortsRecord,
-  type RunStateExposedPortsCompatibilityRepair,
-  type RunStateExposedPortsCompatibilityResult,
-} from "./run-state-compat";
+  replayConnectedCommandOutput,
+  connectedCommandExitProof,
+} from "./selfhosted/terminal-replay";
 
 // The provider registry surface — the descriptor table self-test, the per-
 // provider registrations, selection + capability negotiation, and the typed
@@ -115,11 +165,14 @@ export {
   type CapabilityDescriptor,
 } from "./capabilities";
 export {
+  SANDBOX_BACKEND_NOT_SERVED_CODE,
+  SandboxBackendNotServedError,
   SandboxConfigError,
   SandboxExactResumeInstanceUnavailableError,
   SandboxExactResumeReplacedError,
   SandboxProviderContinuityUnavailableError,
   SandboxProviderUnavailableError,
+  SandboxProviderWorkspaceAbsentError,
   SandboxResumeIdentityMismatchError,
   SandboxResumeIdentityUnavailableError,
   SandboxResumeStateUnavailableError,
@@ -133,6 +186,8 @@ export {
   providerSupportsImmutableImageBuild,
   renewSandboxProviderExpiration,
   providerWorkspaceCapturePolicy,
+  providerWorkspaceCaptureIsPointInTime,
+  providerDrainCaptureIsPointInTime,
   type ProviderRegistration,
   type ProviderConstructionContext,
   type ProviderExactResumeMode,
@@ -150,6 +205,11 @@ export {
   type ProviderSandboxFailure,
   type ProviderSandboxFailureKind,
 } from "./provider-errors";
+export {
+  isSandboxProviderCapacityError,
+  isSandboxProviderError,
+  loadE2BServiceBusyError,
+} from "./provider-capacity";
 export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
   WorkspaceArchiveIntegrityError,
@@ -173,10 +233,16 @@ export {
   type WorkspaceTreeFingerprint,
 } from "./workspace-archive";
 export {
+  ToolCallCommandNotStartedError,
+  toolCallCommandNotStartedCallIds,
+  withCommandNotStartedCallProof,
+} from "./tool-call-command-not-started";
+export {
   ensureModalRegistryImage,
   deleteModalCheckpointSnapshot,
   inspectModalSandboxLifecycle,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
   modalSessionMatchesCheckpointProviderBinding,
   modalSandboxAttributionEnvironment,
   modalSandboxAttributionTags,
@@ -184,6 +250,7 @@ export {
   findModalProviderCreateReceipt,
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBindingForSession,
+  modalAppHasRunningSandboxes,
   sweepModalOrphanSandboxes,
   tagModalSandbox,
   terminateModalSandboxById,
@@ -195,6 +262,19 @@ export {
   type ModalSandboxAttribution,
   type RevalidateModalOrphanTermination,
 } from "./providers/modal";
+export {
+  getModalCommandStartInvocation,
+  withModalCommandStartSignal,
+  type ModalCommandStartInvocation,
+} from "./providers/modal-command-start-errors";
+// Pure correlation only: these passive exports grant no dispatch authority.
+export {
+  compileNativeFreshCreate,
+  describeNativeFreshCreate,
+  type NativeFreshCreateSpec,
+  type NativeFreshCreatePreparation,
+  type NativeFreshCreateCompilation,
+} from "./providers/modal-native-create-preparation";
 export {
   OpenSandboxClient,
   OpenSandboxSession,
@@ -294,6 +374,7 @@ export {
 
 export {
   BROWSER_CONTROL_ADMIN_TOKEN_FILE,
+  BrowserControlActionDeadlineError,
   BrowserControlClient,
   BrowserControlProtocolError,
   BrowserControlRequestError,
@@ -317,6 +398,10 @@ export {
   type PlacementBrowserNetworkRoute,
   type PlacementBrowserTransport,
   type PlacementBrowserStateCaptureReceipt,
+  type PlacementBrowserWorkingCopyAdoption,
+  type PlacementBrowserWorkingCopyAuthority,
+  type PlacementBrowserWorkingCopyInspection,
+  type PlacementBrowserWorkingCopyRefusal,
   type ComputerControlFrame,
   type ComputerControlFrameMetadata,
   type ComputerFrameEvidenceMismatchReason,
@@ -346,6 +431,41 @@ export {
   type RunCredentialSessionReady,
   type MaterializeRunCredentialsOptions,
 } from "./run-credentials";
+
+// Secret references delivered at the physical exec boundary (W1). Values ride
+// an in-memory carry to the provider call; recorders keep references.
+export {
+  SECRET_ENV_TOTAL_MAX_BYTES,
+  SECRET_ENV_VALUE_MAX_BYTES,
+  SECRET_FILE_ROOT,
+  clearSecretFilesCommand,
+  prepareSecretExec,
+  prepareSecretStdin,
+  resolveSecretImagePath,
+  resolveSecretLiteralText,
+  resolveSecretPatchText,
+  runWithSecretCarry,
+  secretExecCarryFor,
+  secretFilePath,
+  secretScopeFor,
+  type SecretCarry,
+  type SecretExecCarry,
+  type SecretStdinCarry,
+} from "./secret-delivery";
+
+// Credential profiles: per-command environment variables resolved from secret
+// references at the same exec boundary (docs/secrets.md).
+export {
+  CREDENTIAL_PROFILE_GIT_HELPER,
+  CREDENTIAL_PROFILE_GIT_TOKEN_VARIABLE,
+  createCredentialEnvironment,
+  credentialProfileGitHelperEnvironment,
+  credentialProfileNoteText,
+  withCredentialProfileNotes,
+  type CreateCredentialEnvironmentInput,
+  type CredentialEnvironment,
+  type CredentialEnvironmentResult,
+} from "./credential-profile-delivery";
 
 // Session-specific Codemode token routing. The manifest retains one stable
 // legacy pointer for warm-box env parity; every session command selects its own
@@ -415,10 +535,12 @@ export {
 // (FileSystem + Git + Terminal) over a live, resumed-by-id session handle. The
 // API constructs one per request around the box it just resumed; no ownership.
 // Agent-loop-free, so the API-direct control plane imports it from this leaf.
+export { SynchronousCommandOutcomeUnknownError } from "./synchronous-command";
 export {
   SandboxChannelAService,
   ChannelAPartialMutationError,
   ChannelAValidationError,
+  ChannelASymlinkPathError,
   ChannelAUnavailableError,
   ChannelAConflictError,
   ChannelAFileSystemRouteChangedError,
@@ -434,6 +556,8 @@ export {
   parseUnifiedPatch,
   REPOSITORY_DISCOVERY_LIMIT,
   CODE_SEARCH_RG_MAX_BYTES,
+  MAC_HOME_FILES_DIRS,
+  MAC_HOME_PRIVACY_GUARDED_DIRS,
   validateCodeSearchRipgrepArgs,
   type CodeSearchRipgrepOutcome,
   type ChannelASession,
@@ -459,6 +583,7 @@ export {
   NatsControlRpc,
   SelfhostedControlError,
   agentErrorToControlError,
+  parseAgentRpcSubject,
   subjectFor,
   offlineControlResponse,
   timeoutControlResponse,
@@ -469,9 +594,38 @@ export {
   drainingMessage,
   execDeadlineHint,
   NEVER_SENT_DETAIL_KEY,
+  CONNECTION_REPLACED_DETAIL_KEY,
+  AGENT_UNANSWERED_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY,
+  type UnresponsiveAgentRecovery,
+  agentNotAnsweredReason,
+  isAgentNotAnswered,
+  requestWithoutWaking,
+  withoutWaking,
+  type NoWakeReply,
+  connectionReplacedAgentError,
   type NatsRequestConnection,
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
+export {
+  PROCESS_START_FAILURE_MARKER,
+  isMachineProcessStartFailureMessage,
+  isProcessStartFailureMessage,
+  sanitizeProcessStartFailureMessage,
+  MISSING_SHELL_NOTE,
+  processStartFailureMachineNote,
+} from "./selfhosted/process-start-failure";
+export {
+  isModalShellStartFailureMessage,
+  sanitizeModalShellStartFailureMessage,
+} from "./providers/modal-process-start";
+export {
+  AGENT_LINK_LOST_HEADER,
+  AGENT_UNANSWERED_HEADER,
+  NO_WAKE_HEADER,
+} from "./selfhosted/control-replay";
 // The transport-agnostic per-op observation seam (out-of-band telemetry — metrics
 // + machine.* events; the op-engine's op-stream client emits through this too).
 export type { SelfhostedOpObserver, SelfhostedOpObservation } from "./selfhosted/op-observer";
@@ -480,6 +634,9 @@ export {
   selfhostedFaultClass,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   renderSelfhostedFault,
+  CONNECTED_MACHINE_OFFLINE_DURING_COMMAND_NOTICE,
+  CONNECTED_MACHINE_AGENT_RECONNECTED_DURING_COMMAND_NOTICE,
+  type SelfhostedFaultContext,
   FAULT_FIELD_WHAT_HAPPENED,
   FAULT_FIELD_WHICH_LAYER,
   FAULT_FIELD_WHAT_PRESERVED,
@@ -493,6 +650,8 @@ export {
   SELFHOSTED_IDEMPOTENT_READONLY_OPS,
   SELFHOSTED_DRAINING_MAX_RETRIES,
   SELFHOSTED_EXEC_DRAINING_MAX_RETRIES,
+  SELFHOSTED_AGENT_UPDATE_DRAIN_REASON,
+  SELFHOSTED_UPDATE_DRAINING_MAX_RETRIES,
   SELFHOSTED_TIMEOUT_MAX_RETRIES,
   SELFHOSTED_NEVER_SENT_MAX_RETRIES,
   SELFHOSTED_RETRY_BACKOFF_BASE_MS,
@@ -506,7 +665,6 @@ export {
   SelfhostedWorkspaceRootChangedError,
   SelfhostedSandboxClient,
   buildSelfhostedBackendSession,
-  isSelfhostedProviderNotFoundError,
   setSelfhostedApplyDiff,
   SELFHOSTED_DEFAULT_TIMEOUT_MS,
   SELFHOSTED_RELAY_STREAM_PATH,
@@ -527,6 +685,7 @@ export {
   connectedMachinePathWithinRoot,
   connectedMachineWorkspaceRootsEqual,
   isConnectedMachineAbsolutePath,
+  isUnusableConnectedMachineWorkspace,
   isWindowsConnectedMachinePath,
   normalizeConnectedMachineWorkspaceRoot,
   relativeConnectedMachinePath,
@@ -535,6 +694,58 @@ export {
   type ConnectedMachineOs,
 } from "./selfhosted/workspace-path";
 export type { SelfhostedConnectionBinding } from "./routing/backend-resolver";
+// Opengeni compute: managed microVM sandboxes whose provider session is the
+// Connected Machine agent inside the box (docs/compute-backend.md).
+export {
+  ComputeControlClient,
+  ComputeControlError,
+  isComputeSandboxNotFound,
+  isComputeTemplateGone,
+  type ComputeCreateRequest,
+  type ComputeSandboxView,
+  type ComputeTemplateView,
+  type ComputeWokenView,
+} from "./compute/control";
+export {
+  buildComputeEnvironmentTemplate,
+  computeEnvironmentTemplateName,
+  computeSourceImage,
+  deleteComputeTemplate,
+  resolveComputeProviderBinding,
+  type ComputeProviderBinding,
+} from "./providers/compute";
+export {
+  getComputeAgentPlane,
+  setComputeAgentPlane,
+  usesAgentTransport,
+  type ComputeAgentConnection,
+  type ComputeAgentPlane,
+} from "./compute/plane";
+export {
+  COMPUTE_WORKSPACE_ROOT,
+  ComputeSandboxClient,
+  ComputeSandboxSession,
+  ComputeWakeGate,
+  ComputeWakingControlRpc,
+  deleteComputeBox,
+  wakeComputeSandboxOnNoResponders,
+  type ComputeCreateIdentity,
+  type ComputeSessionState,
+  type ComputeTurnDeps,
+  type UnresponsiveComputeMachine,
+  UNRESPONSIVE_RECOVERY_MS,
+} from "./compute/session";
+export {
+  COMPUTE_METADATA,
+  createComputeOrphanSweepProgress,
+  reconcileStaleComputeEnrollments,
+  sweepComputeOrphans,
+  type ComputeOrphanSweepProgress,
+  type StaleComputeEnrollment,
+  type StaleComputeEnrollmentPage,
+  type ComputeOrphanSweepResult,
+  type ComputeSandboxIdentity,
+} from "./compute/orphans";
 // The op-stream exec transport (op-stream protocol v1.1 — streaming exec to a
 // Connected Machine runner). The worker injects `NatsOpStreamTransport` (over
 // the same bus connection as the control rpc) plus an `OpStreamJournal`
@@ -551,11 +762,15 @@ export {
 } from "./selfhosted/op-transport";
 export {
   cancelSelfhostedOp,
+  isOpTombstone,
   OP_STREAM_ACK_INTERVAL_MS,
   OP_STREAM_DEFAULT_WINDOW_BYTES,
   OP_STREAM_RECONNECT_HOLD_MS,
   OP_STREAM_SILENCE_TIMEOUT_MS,
+  OP_START_RESEND_HORIZON_MS,
+  OP_START_UNANSWERED_MS,
   querySelfhostedOp,
+  releaseSelfhostedOpOutput,
   type ExactSelfhostedOpControlInput,
   type OpStreamExecOutcome,
   type OpStreamJournal,
@@ -590,6 +805,9 @@ export {
 // active at a time, fence-retrying on a swap race.
 export {
   isRoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
+  RoutingMutationOutputRejectedError,
+  withRoutingMutationOutputRejectionFence,
   RoutingBackendRecoveryRequiredError,
   RoutingMutationOutcomeUnknownError,
   renderRoutingMutationOutcomeUnknownToolResult,
@@ -651,6 +869,23 @@ export function createSandboxClient(
 }
 
 /**
+ * Refuse a host-backed box (`local`, `docker`) unless the deployment serves it,
+ * which for a host backend means it is the deployment's configured default
+ * (`sandboxBackendServed`, the same rule session creation applies). The
+ * deployment default is read from `settings.deploymentSandboxBackend`, which
+ * survives the per-session `{...settings, sandboxBackend}` rebinds, so a
+ * session's stored backend can never serve itself. A host box runs as
+ * processes on this worker or API host, so whether it is allowed is a
+ * deployment choice, never a consequence of what happens to be installed on
+ * the host image. Remote providers keep their own credential validation.
+ */
+export function assertHostSandboxBackendServed(settings: Settings, backend: SandboxBackend): void {
+  if (hostSandboxBackendRefused(settings, backend)) {
+    throw new SandboxBackendNotServedError(backend, deploymentSandboxBackend(settings));
+  }
+}
+
+/**
  * Construct the raw provider SandboxClient for an EXPLICIT backend, independent
  * of settings.sandboxBackend. This is the resume-by-id builder the per-turn
  * resume path (and the API-direct control plane) call: a lease's box was created
@@ -658,7 +893,9 @@ export function createSandboxClient(
  * resume_backend_id), and the client that reattaches to it must be built for
  * THAT backend, not the process's currently-configured default. When the backend
  * equals settings.sandboxBackend this is identical to createSandboxClient
- * (behavior-preserved). Returns undefined for "none".
+ * (behavior-preserved). Returns undefined for "none". A host backend (`local`,
+ * `docker`) that is not the default of `settings` is refused before anything is
+ * built (assertHostSandboxBackendServed).
  */
 export function createSandboxClientForBackend(
   backend: SandboxBackend,
@@ -673,6 +910,7 @@ export function createSandboxClientForBackend(
   if (registration.backend === "none") {
     return undefined;
   }
+  assertHostSandboxBackendServed(settings, registration.backend);
   registration.validateCredentials(settings); // fail-fast, typed
 
   const exposedPorts = parseExposedPorts(settings.dockerExposedPorts);
@@ -711,15 +949,20 @@ export function createSandboxClientForBackend(
     exposedPorts.push(BROWSER_CONTROL_PORT);
   }
 
-  const raw = withProviderExactResumeContract(
-    registration,
-    registration.build({
-      settings,
-      environment,
-      exposedPorts,
-      ...(metrics ? { metrics } : {}),
-    }),
-  );
+  const built = registration.build({
+    settings,
+    environment,
+    exposedPorts,
+    ...(metrics ? { metrics } : {}),
+  });
+  if (metrics?.onSandboxSetupOperation) {
+    instrumentSandboxClientSessionOperations(
+      built,
+      registration.backend,
+      metrics.onSandboxSetupOperation,
+    );
+  }
+  const raw = withProviderExactResumeContract(registration, built);
   // Docker network decoration stays backend-specific (only docker).
   return registration.backend === "docker"
     ? withDockerNetwork(raw as SandboxClient, settings.dockerNetwork)
@@ -826,11 +1069,17 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
     ...(exactResume
       ? {
           // Docker's ordinary SDK resume creates a replacement when the exact
-          // container is absent. Preserve OpenGeni's non-replacing attach path
+          // container is absent. Preserve Opengeni's non-replacing attach path
           // through the network decorator; dropping it would turn an exact
           // recovery probe into a provider mutation.
           resumeExact: async (state: SandboxSessionState) =>
             await wrapSession(await exactResume.call(client, state)),
+        }
+      : {}),
+    ...("attachWorkspaceForDrain" in client && typeof client.attachWorkspaceForDrain === "function"
+      ? {
+          // A drain handle has no networking or normal execution capability.
+          attachWorkspaceForDrain: client.attachWorkspaceForDrain.bind(client),
         }
       : {}),
     ...(client.delete
@@ -907,7 +1156,15 @@ async function connectDockerNetwork(network: string, containerId: string): Promi
  * for storage decoupled from the RunState blob (issue #35). Encapsulates the
  * underscore-internal `_sandbox` read in exactly one place.
  */
-export function sandboxStateEntryFromRunState(state: unknown): Record<string, unknown> | null {
+export function sandboxStateEntryFromRunState(
+  state: unknown,
+  options: {
+    /** W1 defensive strip: when set, persisted manifest/state env keeps only
+     *  names this predicate accepts (deployment constants), so a legacy box
+     *  whose live state still carries user values never re-persists them. */
+    keepEnvironmentName?: (name: string) => boolean;
+  } = {},
+): Record<string, unknown> | null {
   const sandboxState = (state as any)?._sandbox;
   if (!sandboxState) {
     return null;
@@ -925,10 +1182,50 @@ export function sandboxStateEntryFromRunState(state: unknown): Record<string, un
   if (!entry || !entry.sessionState) {
     return null;
   }
+  const persisted = sandboxEntryForPersistence(entry as Record<string, unknown>);
   return normalizeProtocolJsonValue(
-    sandboxEntryForPersistence(entry as Record<string, unknown>),
+    options.keepEnvironmentName
+      ? sandboxEntryWithConstantEnvironment(persisted, options.keepEnvironmentName)
+      : persisted,
     '$["sandboxSessionEnvelope"]',
   ) as Record<string, unknown>;
+}
+
+function filterEnvironmentRecord(value: unknown, keep: (name: string) => boolean): unknown {
+  if (!isObjectRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).filter(([name]) => keep(name)));
+}
+
+/** Copy of a persisted entry whose `sessionState.manifest.environment`,
+ *  `sessionState.environment` and `sessionState.providerState.environment` keep
+ *  only accepted names. Values are never inspected. */
+export function sandboxEntryWithConstantEnvironment(
+  entry: Record<string, unknown>,
+  keep: (name: string) => boolean,
+): Record<string, unknown> {
+  const sessionState = entry.sessionState;
+  if (!isObjectRecord(sessionState)) return entry;
+  const next: Record<string, unknown> = { ...sessionState };
+  const manifest = sessionState.manifest;
+  if (isObjectRecord(manifest) && Object.hasOwn(manifest, "environment")) {
+    const plain =
+      Object.getPrototypeOf(manifest) === Object.prototype ||
+      Object.getPrototypeOf(manifest) === null
+        ? manifest
+        : (serializeSdkManifestForEnvelope(manifest) as Record<string, unknown>);
+    next.manifest = { ...plain, environment: filterEnvironmentRecord(plain.environment, keep) };
+  }
+  if (Object.hasOwn(sessionState, "environment")) {
+    next.environment = filterEnvironmentRecord(sessionState.environment, keep);
+  }
+  const providerState = sessionState.providerState;
+  if (isObjectRecord(providerState) && Object.hasOwn(providerState, "environment")) {
+    next.providerState = {
+      ...providerState,
+      environment: filterEnvironmentRecord(providerState.environment, keep),
+    };
+  }
+  return { ...entry, sessionState: next };
 }
 
 /**
@@ -937,7 +1234,7 @@ export function sandboxStateEntryFromRunState(state: unknown): Record<string, un
  * `Manifest` instance at `sessionState.providerState.manifest`; the SDK restore
  * path always overlays the canonical outer value, so the duplicate is neither
  * read nor JSON-protocol-safe. Remove only that known redundant field before the
- * envelope crosses OpenGeni's durable canonical-JSON boundary.
+ * envelope crosses Opengeni's durable canonical-JSON boundary.
  */
 function sandboxEntryForPersistence(entry: Record<string, unknown>): Record<string, unknown> {
   const sessionState = entry.sessionState;
@@ -1034,6 +1331,12 @@ export function decodeModalSnapshotId(archive: Uint8Array): string | undefined {
     : undefined;
 }
 
+/** RunState owns `exposedPorts` as a port-keyed endpoint record; provider
+ * clients keep their configured port arrays in provider state. */
+function runStateExposedPortsRecord(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? structuredClone(value) : undefined;
+}
+
 export async function deserializeSandboxSessionStateEnvelope(
   client: SandboxClient,
   envelope: unknown,
@@ -1066,7 +1369,7 @@ export async function deserializeSandboxSessionStateEnvelope(
     if (!observedInstanceId) {
       const instanceIdField = PROVIDER_REGISTRY[backend as SandboxBackend]?.instanceIdFields[0];
       if (instanceIdField) {
-        // New envelopes persist one provider-neutral OpenGeni identity. SDK
+        // New envelopes persist one provider-neutral Opengeni identity. SDK
         // deserializers still require their legacy provider-specific address,
         // so materialize it into a cloned payload at this adapter boundary.
         // The live resumed handle is independently identity-checked before use.
@@ -1075,13 +1378,6 @@ export async function deserializeSandboxSessionStateEnvelope(
     }
   }
   const exposedPorts = runStateExposedPortsRecord(state.exposedPorts);
-  if (state.exposedPorts !== undefined && exposedPorts === undefined) {
-    console.warn("[sandbox] ignored incompatible RunState exposedPorts", {
-      provider: runStateCompatibilityProvider(client.backendId),
-      sessionClass: "root",
-      path: "sessionState.exposedPorts",
-    });
-  }
   return await client.deserializeSessionState({
     ...providerState,
     manifest: state.manifest,
@@ -1239,10 +1535,18 @@ export class SandboxExecReadinessError extends Error {
 
   constructor(
     public readonly backend: string,
-    public readonly code: "exec_probe_unavailable" | "exec_probe_timeout" | "exec_probe_failed",
+    /** `exec_probe_lost`: the provider no longer tracks the exact readiness
+     * probe exec (Modal router FAILED_PRECONDITION "exec not found"). The box
+     * has not proved command readiness; it is not probe replay authority. */
+    public readonly code:
+      | "exec_probe_unavailable"
+      | "exec_probe_timeout"
+      | "exec_probe_failed"
+      | "exec_probe_lost",
     public readonly timeoutMs: number,
     public readonly exitCode: number | null = null,
     public readonly instanceId: string | null = null,
+    options?: { cause?: unknown },
   ) {
     const target = instanceId ? `${backend} sandbox ${instanceId}` : `${backend} sandbox`;
     super(
@@ -1250,11 +1554,21 @@ export class SandboxExecReadinessError extends Error {
         ? `${target} timed out waiting for command readiness after ${timeoutMs}ms`
         : code === "exec_probe_unavailable"
           ? `${target} session does not expose an exec readiness probe`
-          : exitCode === null
-            ? `${target} exec readiness probe did not return a command exit code`
-            : `${target} exec readiness probe failed with exit code ${exitCode}`,
+          : code === "exec_probe_lost"
+            ? `${target} lost its command-readiness probe: the provider no longer tracks the probe command`
+            : exitCode === null
+              ? `${target} exec readiness probe did not return a command exit code`
+              : `${target} exec readiness probe failed with exit code ${exitCode}`,
+      options && "cause" in options ? { cause: options.cause } : undefined,
     );
   }
+}
+
+/** A fresh-box readiness probe whose exact exec the provider lost. */
+export function isSandboxExecReadinessProbeLostError(
+  error: unknown,
+): error is SandboxExecReadinessError & { code: "exec_probe_lost" } {
+  return error instanceof SandboxExecReadinessError && error.code === "exec_probe_lost";
 }
 
 /** A remote provider may return a sandbox handle before its command router
@@ -1278,9 +1592,12 @@ function sandboxExecProbeSessionId(result: unknown): number | null {
 export async function verifySandboxExecReadiness(
   established: EstablishedSandboxSession,
   timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   if (established.backendId !== "modal" && established.backendId !== "opensandbox") return;
   const session = established.session as {
+    verifyExecReadiness?: (signal: AbortSignal) => Promise<number>;
     exec?: (args: {
       cmd: string;
       yieldTimeMs?: number;
@@ -1299,7 +1616,9 @@ export async function verifySandboxExecReadiness(
     }) => Promise<unknown>;
   };
   const run = session.exec ?? session.execCommand;
-  if (!run) {
+  const nativeModalProbe =
+    established.backendId === "modal" ? session.verifyExecReadiness : undefined;
+  if (!run && !nativeModalProbe) {
     throw new SandboxExecReadinessError(
       established.backendId,
       "exec_probe_unavailable",
@@ -1318,24 +1637,64 @@ export async function verifySandboxExecReadiness(
     );
   const deadline = Date.now() + timeoutMs;
   const withinDeadline = async <T>(operation: () => Promise<T>): Promise<T> => {
+    signal?.throwIfAborted();
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw timeoutError();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let abort: (() => void) | undefined;
     try {
-      return await Promise.race([
-        operation(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(timeoutError()), remainingMs);
-          if (timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
-        }),
-      ]);
+      const interrupted = new Promise<never>((_, reject) => {
+        abort = () => reject(signal?.reason);
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
+        timer = setTimeout(() => reject(timeoutError()), remainingMs);
+        if (timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
+      });
+      const result = await Promise.race([operation(), interrupted]);
+      signal?.throwIfAborted();
+      return result;
     } finally {
       if (timer) clearTimeout(timer);
+      if (abort) signal?.removeEventListener("abort", abort);
     }
   };
+  if (nativeModalProbe) {
+    const cancellation = new AbortController();
+    const abort = () => cancellation.abort(signal?.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    try {
+      let exitCode: number;
+      try {
+        exitCode = await withinDeadline(() => nativeModalProbe.call(session, cancellation.signal));
+      } catch (error) {
+        if (!(error instanceof ModalExecReadinessProbeLostError)) throw error;
+        throw new SandboxExecReadinessError(
+          established.backendId,
+          "exec_probe_lost",
+          timeoutMs,
+          null,
+          established.instanceId,
+          { cause: error },
+        );
+      }
+      if (exitCode !== 0)
+        throw new SandboxExecReadinessError(
+          established.backendId,
+          "exec_probe_failed",
+          timeoutMs,
+          exitCode,
+          established.instanceId,
+        );
+      return;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      cancellation.abort(new Error("Sandbox readiness observation finished"));
+    }
+  }
   const execProbe = () =>
     withinDeadline(() =>
-      run.call(session, {
+      run!.call(session, {
         cmd: "true",
         yieldTimeMs: Math.min(1_000, Math.max(1, deadline - Date.now())),
         maxOutputTokens: 1_000,
@@ -1386,7 +1745,7 @@ type ResumeCapableClient = {
   backendId: string;
   deserializeSessionState?: (state: Record<string, unknown>) => Promise<unknown>;
   resume?: (state: unknown, options?: unknown) => Promise<unknown>;
-  /** OpenGeni extension implemented by providers whose ordinary SDK resume may
+  /** Opengeni extension implemented by providers whose ordinary SDK resume may
    * create a replacement. This method must either return the addressed wrapper
    * or prove it unavailable without creating anything. */
   resumeExact?: (state: unknown) => Promise<unknown>;
@@ -1453,7 +1812,7 @@ function legacySandboxProviderInstanceIdFromEnvelope(
   return resolvedBackend ? liveProviderInstanceIdFromState(resolvedBackend, providerState) : null;
 }
 
-/** Resolve the stable OpenGeni identity first, then legacy SDK provider keys.
+/** Resolve the stable Opengeni identity first, then legacy SDK provider keys.
  * The fallback is compatibility-only: new envelopes always persist the stable
  * top-level identity, so downstream lease/reaper code remains provider-neutral. */
 export function sandboxProviderInstanceIdFromEnvelope(
@@ -1466,7 +1825,7 @@ export function sandboxProviderInstanceIdFromEnvelope(
 }
 
 /** Validate rolling-format envelopes before addressing a provider. The stable
- * OpenGeni identity is authoritative, but a disagreeing legacy SDK address is
+ * Opengeni identity is authoritative, but a disagreeing legacy SDK address is
  * corruption/staleness—not evidence that the provider disappeared. */
 export function assertConsistentSandboxProviderIdentity(
   backend: SandboxBackend | string,
@@ -1610,7 +1969,7 @@ export async function resumeExactSandboxSession(
   const actualInstanceId = readInstanceId(backend, session);
   if (!actualInstanceId) {
     // Do not tear down an unidentifiable handle: it may be the requested live
-    // provider. The adapter must expose a stable identity before OpenGeni can
+    // provider. The adapter must expose a stable identity before Opengeni can
     // safely command, publish, snapshot, or delete it.
     throw new SandboxResumeIdentityUnavailableError(backend, expectedInstanceId);
   }
@@ -1791,6 +2150,9 @@ export async function establishSandboxSessionFromEnvelope(
     loadHostWorkspaceArchive?: (ref: WorkspaceArchiveObjectRef) => Promise<WorkspaceArchiveSpool>;
     backendOverride?: SandboxBackend;
     environment?: Record<string, string>;
+    /** The lease a created box belongs to. A compute sandbox's agent is
+     * enrolled under it, so creating one requires it; other backends ignore it. */
+    createIdentity?: ComputeCreateIdentity;
     onSandboxCreated?: SandboxCreatedCallback;
     /** Durable lease owners fence the attempt before invoking a provider create.
      * Called for each physical attempt, including logical-image fallback. A
@@ -1906,18 +2268,21 @@ export async function establishSandboxSessionFromEnvelope(
       objectDescriptor.workspace.projection === "sdk_local_archive_v1" &&
       opts.loadHostWorkspaceArchive
     ) {
+      // Local/Docker restore a host-backed archive natively. Any other backend
+      // hydrates a portable tar converted from it, so a deployment that changes
+      // sandbox backend can still continue chats archived before the change.
       if (
-        (backend !== "local" && backend !== "docker") ||
         objectRef.sha256 !== objectDescriptor.archiveSha256 ||
         objectRef.bytes !== objectDescriptor.archiveBytes
       ) {
         throw new WorkspaceArchiveIntegrityError(
           "archive_metadata_invalid",
-          "Host archive object reference does not match its provider and descriptor",
+          "Host archive object reference does not match its descriptor",
         );
       }
       workspaceArchive = { kind: "host_spool", descriptor: objectDescriptor, ref: objectRef };
     }
+    const hostBackedBackend = backend === "local" || backend === "docker";
     if (objectRef && !workspaceArchive) {
       throw new WorkspaceArchiveIntegrityError(
         "archive_hydration_failed",
@@ -2012,6 +2377,12 @@ export async function establishSandboxSessionFromEnvelope(
         // Non-Modal providers and isolated client-factory fixtures retain their
         // ordinary admission hook. Production Modal requires the wire intent.
         await opts.onBeforeSandboxCreate?.(createSettings);
+        if (backend === "compute") {
+          return await candidate.create!(
+            { manifest: createManifest },
+            opts.createIdentity ? { opengeniCreateIdentity: opts.createIdentity } : undefined,
+          );
+        }
         return await candidate.create!({ manifest: createManifest });
       };
       const createStarted = Date.now();
@@ -2131,12 +2502,16 @@ export async function establishSandboxSessionFromEnvelope(
         }
       }
       let hydrationApplied = false;
+      // A host-backed archive hydrated into a remote sandbox: what the converted
+      // tar materializes, verified after hydration instead of the archive's
+      // host-only fingerprint projection.
+      let portableContents: PortableWorkspaceTar["contents"] | null = null;
       if (workspaceArchive) {
         const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> })
           .hydrateWorkspace;
         if (
           !createdFromFilesystemSnapshot &&
-          workspaceArchive.kind !== "host_spool" &&
+          (workspaceArchive.kind !== "host_spool" || !hostBackedBackend) &&
           typeof hydrate !== "function"
         ) {
           await terminateCreatedSandbox(createdClient, restored, restoredState);
@@ -2157,7 +2532,7 @@ export async function establishSandboxSessionFromEnvelope(
             );
           }
           // Directory/tar hydration operates on the attributed destination.
-          if (workspaceArchive.kind === "host_spool") {
+          if (workspaceArchive.kind === "host_spool" && hostBackedBackend) {
             // This is the exact newly-created, unpublished destination. The lease
             // restore fence must exclude admitted writers until verification ends;
             // descriptor-relative filesystem access alone is not writer isolation.
@@ -2171,6 +2546,27 @@ export async function establishSandboxSessionFromEnvelope(
             await restoreHostWorkspaceArchive(root, hostSpool!, {
               archiveLimits: Reflect.get(restored as object, "archiveLimits"),
             });
+          } else if (workspaceArchive.kind === "host_spool") {
+            const portable = await convertHostWorkspaceArchiveToTar(hostSpool!, {
+              excludedPaths: workspaceArchiveExcludedPaths(restored),
+              mtimeSeconds: Date.parse(workspaceArchive.descriptor.capturedAt) / 1000,
+            });
+            // The descriptor was fingerprinted from the source tree when it was
+            // captured; the archive must still be exactly that tree.
+            const expected = workspaceArchive.descriptor.workspace;
+            if (
+              portable.fingerprint.sha256 !== expected.sha256 ||
+              portable.fingerprint.entryCount !== expected.entryCount ||
+              portable.fingerprint.fileCount !== expected.fileCount ||
+              portable.fingerprint.totalFileBytes !== expected.totalFileBytes
+            ) {
+              throw new WorkspaceArchiveIntegrityError(
+                "archive_hash_mismatch",
+                `workspace archive revision ${workspaceArchive.descriptor.revision} does not match its recorded fingerprint`,
+              );
+            }
+            await hydrate!.call(restored, portable.bytes);
+            portableContents = portable.contents;
           } else if (!createdFromFilesystemSnapshot) {
             await hydrate!.call(restored, workspaceArchive.bytes);
           }
@@ -2232,12 +2628,20 @@ export async function establishSandboxSessionFromEnvelope(
           }
         }
         // Native provider snapshots are restored by their exact opaque receipt.
-        // OpenGeni verifies receipt identity/hash before hydration, but it must not
+        // Opengeni verifies receipt identity/hash before hydration, but it must not
         // impose a tar/inode equivalence contract on the provider's filesystem
         // image. Tar archives remain content-verified after hydration.
         if (workspaceArchive.kind === "tar" || workspaceArchive.kind === "host_spool") {
           try {
-            await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
+            if (portableContents) {
+              await verifyRestoredWorkspaceContents(
+                restored,
+                portableContents,
+                workspaceArchive.descriptor.revision,
+              );
+            } else {
+              await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
+            }
           } catch (error) {
             await terminateCreatedSandbox(
               createdClient,
@@ -2286,8 +2690,8 @@ export async function establishSandboxSessionFromEnvelope(
 
   // Does the envelope carry a RESUMABLE box id (warm reattach), or only a
   // restorable archive (cold lease)? Archive-only state is not resumable: the
-  // provider's deserialize/resume path would reject it before OpenGeni could
-  // cold-restore. New envelopes use the stable OpenGeni identity; legacy SDK
+  // provider's deserialize/resume path would reject it before Opengeni could
+  // cold-restore. New envelopes use the stable Opengeni identity; legacy SDK
   // provider keys remain readable during rollout.
   const persistedInstanceId = assertConsistentSandboxProviderIdentity(backend, envelope);
   const hasResumableInstance = persistedInstanceId !== null;
@@ -2309,7 +2713,7 @@ export async function establishSandboxSessionFromEnvelope(
     } catch (error) {
       throw new SandboxConfigError(
         backend,
-        `Failed to deserialize sandbox resume envelope for backend "${backend}": ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to deserialize sandbox resume envelope for backend "${backend}": ${errorMessage(error)}`,
       );
     }
     if (resumedState !== undefined) {

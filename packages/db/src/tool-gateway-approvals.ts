@@ -22,12 +22,14 @@ export async function issueToolGatewayApproval(
     workspaceId: string;
     subjectId: string;
     operationId: string;
-    catalogDigest: string;
     identity: ToolGatewayIdentity;
     argumentsDigest: string;
     approvalAuthorityDigest: string;
     expiresAt: Date;
-  },
+  } & (
+    | { bindingVersion?: 1; catalogDigest: string; targetBindingDigest?: never }
+    | { bindingVersion: 2; targetBindingDigest: string; catalogDigest?: never }
+  ),
 ): Promise<void> {
   await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
     await lockApprovalSubject(scopedDb, input.workspaceId, input.subjectId);
@@ -92,7 +94,9 @@ export async function issueToolGatewayApproval(
       workspaceId: input.workspaceId,
       subjectId: input.subjectId,
       operationId: input.operationId,
-      catalogDigest: input.catalogDigest,
+      bindingVersion: input.bindingVersion ?? 1,
+      catalogDigest: input.catalogDigest ?? null,
+      targetBindingDigest: input.targetBindingDigest ?? null,
       serverId: input.identity.serverId,
       toolName: input.identity.toolName,
       argumentsDigest: input.argumentsDigest,
@@ -129,6 +133,7 @@ export async function consumeToolGatewayApproval(
           eq(schema.toolGatewayApprovalCapabilities.subjectId, input.subjectId),
           eq(schema.toolGatewayApprovalCapabilities.operationId, input.operationId),
           eq(schema.toolGatewayApprovalCapabilities.catalogDigest, input.catalogDigest),
+          eq(schema.toolGatewayApprovalCapabilities.bindingVersion, 1),
           eq(schema.toolGatewayApprovalCapabilities.serverId, input.identity.serverId),
           eq(schema.toolGatewayApprovalCapabilities.toolName, input.identity.toolName),
           eq(schema.toolGatewayApprovalCapabilities.argumentsDigest, input.argumentsDigest),
@@ -139,6 +144,61 @@ export async function consumeToolGatewayApproval(
       )
       .returning({ tokenHash: schema.toolGatewayApprovalCapabilities.tokenHash });
     return consumed !== undefined;
+  });
+}
+
+/** Check provenance even for an Allow decision. No row + Allow is not idempotency. */
+export async function beginTargetToolGatewayCall(
+  db: Database,
+  input: {
+    tokenHash?: string;
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    operationId: string;
+    targetBindingDigest: string;
+    identity: ToolGatewayIdentity;
+    argumentsDigest: string;
+    approvalAuthorityDigest: string;
+    approvalRequired: boolean;
+  },
+): Promise<boolean> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    await lockApprovalOperation(tx, input.workspaceId, input.subjectId, input.operationId);
+    const [row] = await tx
+      .select()
+      .from(schema.toolGatewayApprovalCapabilities)
+      .where(
+        and(
+          eq(schema.toolGatewayApprovalCapabilities.workspaceId, input.workspaceId),
+          eq(schema.toolGatewayApprovalCapabilities.subjectId, input.subjectId),
+          eq(schema.toolGatewayApprovalCapabilities.operationId, input.operationId),
+        ),
+      )
+      .limit(1);
+    if (row?.consumedAt)
+      throw new ToolGatewayApprovalOperationStartedError(
+        "The tool operation has already consumed its approval",
+      );
+    if (!row) return !input.approvalRequired && input.tokenHash === undefined;
+    if (
+      row.bindingVersion !== 2 ||
+      row.accountId !== input.accountId ||
+      row.targetBindingDigest !== input.targetBindingDigest ||
+      row.serverId !== input.identity.serverId ||
+      row.toolName !== input.identity.toolName ||
+      row.argumentsDigest !== input.argumentsDigest ||
+      row.authorityDigest !== input.approvalAuthorityDigest ||
+      row.expiresAt.getTime() <= Date.now() ||
+      (input.tokenHash !== undefined && row.tokenHash !== input.tokenHash) ||
+      (input.approvalRequired && input.tokenHash === undefined)
+    )
+      return false;
+    await tx
+      .update(schema.toolGatewayApprovalCapabilities)
+      .set({ consumedAt: new Date() })
+      .where(eq(schema.toolGatewayApprovalCapabilities.tokenHash, row.tokenHash));
+    return true;
   });
 }
 

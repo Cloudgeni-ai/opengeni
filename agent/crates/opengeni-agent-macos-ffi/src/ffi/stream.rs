@@ -5,7 +5,7 @@
 //! publishes only the newest tightly-packed RGBA frame into a bounded slot.
 //! Consumers therefore cannot build an unbounded decode/copy queue.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -34,6 +34,12 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 const FRAME_TIMEOUT: Duration = Duration::from_secs(3);
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 const LIVE_FRAMES_PER_SECOND: i32 = 12;
+
+static CLEANUP_UNSETTLED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn capture_cleanup_is_settled() -> bool {
+    !CLEANUP_UNSETTLED.load(Ordering::Acquire)
+}
 
 #[derive(Clone, Copy)]
 enum CaptureSource {
@@ -158,6 +164,7 @@ struct StreamRuntime {
     queue: DispatchRetained<DispatchQueue>,
     start_requested: bool,
     start_completion: Arc<StartCompletion>,
+    cleanup_result: Option<Result<(), String>>,
 }
 
 /// The second event owns teardown: completion after abandonment, or normal
@@ -176,13 +183,20 @@ impl StartCompletion {
     }
 }
 
-impl Drop for StreamRuntime {
-    fn drop(&mut self) {
+impl StreamRuntime {
+    fn stop_checked(&mut self) -> Result<(), String> {
+        if let Some(result) = &self.cleanup_result {
+            return result.clone();
+        }
         // Keep the native resources in the completion block until a pending
         // start finishes. That callback then owns the final stop and detach.
         if self.start_requested && !self.start_completion.abandon() {
-            return;
+            CLEANUP_UNSETTLED.store(true, Ordering::Release);
+            let result = Err("ScreenCaptureKit start completion remains pending".to_string());
+            self.cleanup_result = Some(result.clone());
+            return result;
         }
+        let mut failure = None;
         if self.start_requested {
             let (stopped_tx, stopped_rx) = mpsc::channel();
             let stopped = block2::RcBlock::new(move |error: *mut NSError| {
@@ -193,15 +207,34 @@ impl Drop for StreamRuntime {
                 self.stream
                     .stopCaptureWithCompletionHandler(Some(&*stopped));
             }
-            let _ = stopped_rx.recv_timeout(STOP_TIMEOUT);
+            failure = match stopped_rx.recv_timeout(STOP_TIMEOUT) {
+                Ok(None) => None,
+                Ok(Some(error)) => Some(format!("stop ScreenCaptureKit stream: {error}")),
+                Err(_) => Some("ScreenCaptureKit stop completion remains pending".to_string()),
+            };
         }
         let output: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*self.output);
         // SAFETY: remove the exact output registered during construction. If
         // discovery completed after its receiver expired, capture never started.
-        let _ = unsafe {
+        let detached = unsafe {
             self.stream
                 .removeStreamOutput_type_error(output, SCStreamOutputType::Screen)
         };
+        if let Err(error) = detached {
+            failure.get_or_insert_with(|| format!("detach ScreenCaptureKit output: {error}"));
+        }
+        let result = failure.map_or(Ok(()), Err);
+        if result.is_err() {
+            CLEANUP_UNSETTLED.store(true, Ordering::Release);
+        }
+        self.cleanup_result = Some(result.clone());
+        result
+    }
+}
+
+impl Drop for StreamRuntime {
+    fn drop(&mut self) {
+        let _ = self.stop_checked();
     }
 }
 
@@ -211,15 +244,22 @@ fn stop_abandoned_start(
     queue: DispatchRetained<DispatchQueue>,
 ) {
     let stopped_stream = stream.clone();
-    let stopped = block2::RcBlock::new(move |_error: *mut NSError| {
+    let stopped = block2::RcBlock::new(move |error: *mut NSError| {
+        if !error.is_null() {
+            CLEANUP_UNSETTLED.store(true, Ordering::Release);
+        }
         crate::with_autorelease_pool(|| {
             let _keep_queue_alive = &queue;
             let output: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*output);
             // SAFETY: the worker relinquished this exact stream while startup
             // was pending; only this late-completion path now owns teardown.
-            let _ = unsafe {
+            if unsafe {
                 stopped_stream.removeStreamOutput_type_error(output, SCStreamOutputType::Screen)
-            };
+            }
+            .is_err()
+            {
+                CLEANUP_UNSETTLED.store(true, Ordering::Release);
+            }
         });
     });
     // Do not block ScreenCaptureKit's completion queue waiting on itself.
@@ -244,7 +284,12 @@ unsafe impl Send for OwnedRuntime {}
 pub(crate) struct CaptureStream {
     slot: Arc<FrameSlot>,
     stop: mpsc::Sender<()>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    completion: Mutex<CaptureCompletion>,
+}
+
+struct CaptureCompletion {
+    worker: Option<JoinHandle<Result<(), String>>>,
+    result: Option<Result<(), String>>,
 }
 
 impl CaptureStream {
@@ -278,8 +323,8 @@ impl CaptureStream {
             .name("opengeni-sck-stream".to_string())
             .spawn(move || {
                 crate::with_autorelease_pool(|| {
-                    run_stream(source, max_size, &worker_slot, &ready_tx, &stop_rx);
-                });
+                    run_stream(source, max_size, &worker_slot, &ready_tx, &stop_rx)
+                })
             })
             .map_err(|error| MacFfiError::Ffi(format!("start capture worker: {error}")))?;
 
@@ -287,16 +332,23 @@ impl CaptureStream {
             Ok(Ok(())) => Ok(Self {
                 slot,
                 stop: stop_tx,
-                worker: Mutex::new(Some(worker)),
+                completion: Mutex::new(CaptureCompletion {
+                    worker: Some(worker),
+                    result: None,
+                }),
             }),
             Ok(Err(error)) => {
                 let _ = stop_tx.send(());
-                let _ = worker.join();
+                if !matches!(worker.join(), Ok(Ok(()))) {
+                    CLEANUP_UNSETTLED.store(true, Ordering::Release);
+                }
                 Err(classify_start_error(error))
             }
             Err(_) => {
                 let _ = stop_tx.send(());
-                let _ = worker.join();
+                if !matches!(worker.join(), Ok(Ok(()))) {
+                    CLEANUP_UNSETTLED.store(true, Ordering::Release);
+                }
                 Err(MacFfiError::TimedOut(
                     "ScreenCaptureKit stream startup timed out".to_string(),
                 ))
@@ -338,18 +390,31 @@ impl CaptureStream {
         Ok(frame)
     }
 
-    pub(crate) fn stop(&self) {
+    pub(crate) fn stop(&self) -> Result<(), MacFfiError> {
         let _ = self.stop.send(());
-        let worker = self.worker.lock().ok().and_then(|mut worker| worker.take());
-        if let Some(worker) = worker {
-            let _ = worker.join();
+        let mut completion = self.completion.lock().map_err(|_| {
+            CLEANUP_UNSETTLED.store(true, Ordering::Release);
+            MacFfiError::Ffi("capture completion lock is poisoned".to_string())
+        })?;
+        if let Some(worker) = completion.worker.take() {
+            completion.result = Some(worker.join().unwrap_or_else(|_| {
+                CLEANUP_UNSETTLED.store(true, Ordering::Release);
+                Err("ScreenCaptureKit capture worker panicked".to_string())
+            }));
         }
+        completion
+            .result
+            .clone()
+            .unwrap_or_else(
+                || Err("ScreenCaptureKit capture completion is unavailable".to_string()),
+            )
+            .map_err(MacFfiError::Ffi)
     }
 }
 
 impl Drop for CaptureStream {
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop();
     }
 }
 
@@ -359,13 +424,13 @@ fn run_stream(
     slot: &Arc<FrameSlot>,
     ready: &mpsc::Sender<Result<(), String>>,
     stop: &mpsc::Receiver<()>,
-) {
+) -> Result<(), String> {
     let mut runtime = match discover_runtime(source, max_size, Arc::clone(slot)) {
         Ok(runtime) => runtime.0,
         Err(error) => {
             let _ = ready.send(Err(error));
             slot.stop();
-            return;
+            return Ok(());
         }
     };
 
@@ -397,18 +462,19 @@ fn run_stream(
         Ok(Some(error)) => {
             let _ = ready.send(Err(format!("start ScreenCaptureKit stream: {error}")));
             slot.stop();
-            return;
+            return runtime.stop_checked();
         }
         Err(_) => {
             let _ = ready.send(Err("start ScreenCaptureKit stream timed out".to_string()));
             slot.stop();
-            return;
+            return runtime.stop_checked();
         }
     }
 
     let _ = stop.recv();
-    drop(runtime);
+    let result = runtime.stop_checked();
     slot.stop();
+    result
 }
 
 fn discover_runtime(
@@ -580,6 +646,7 @@ fn build_runtime(
         queue,
         start_requested: false,
         start_completion: Arc::default(),
+        cleanup_result: None,
     })
 }
 

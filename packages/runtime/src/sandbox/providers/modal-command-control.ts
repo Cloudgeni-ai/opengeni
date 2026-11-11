@@ -1,10 +1,12 @@
 import { randomUUID, randomBytes } from "node:crypto";
 import { posix } from "node:path";
-import { shellQuote } from "@openai/agents-core/sandbox/internal";
+import { status } from "@grpc/grpc-js";
+import { setTimeout as delay } from "node:timers/promises";
+import { modalCommandArgv } from "./modal-command-argv";
 import {
   SandboxProviderCommand,
   CommandSupervisionReceipt,
-  type ModalRouterProviderCommand,
+  ModalRouterProviderCommand,
 } from "@opengeni/contracts";
 import type { ChannelAExecArgs } from "../channel-a";
 import type { ProviderCommandOutput } from "../provider-command-session";
@@ -13,20 +15,23 @@ import {
   markPendingCommandSupervised,
   reserveSupervisedLaunch,
   ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
 } from "../provider-command-session";
+import { isModalCommandObservationTransportError } from "./modal-command-observation-errors";
+import { ModalCommandStartOutcomeUnknownError } from "./modal-command-start-errors";
+import { classifyProviderSandboxFailure } from "../provider-errors";
+import { commandControlPlane } from "./modal-command-client";
 import {
-  ModalCommandControl as LegacyControl,
-  commandControlPlane,
-  decodePage,
-} from "./modal-legacy-command-control";
-import {
+  MODAL_ROUTER_READ_MAX_WAIT_MS,
+  MODAL_ROUTER_READ_PAGE_BYTES,
   ModalCommandRouterWire,
   ModalCommandStartPreDispatchUnavailableError,
   ModalCommandStartRejectedError,
   ModalCommandStartNotDispatchedError,
 } from "./modal-command-router-wire";
+import { collectModalRawOutputPage, type ModalRawOutputPage } from "./modal-command-raw-page";
 
-export { modalCommandAbortMiddleware } from "./modal-legacy-command-control";
+export { modalCommandAbortMiddleware } from "./modal-command-client";
 export type ModalProviderCommand = SandboxProviderCommand;
 export type ModalProviderOutputPage = ProviderCommandOutput;
 
@@ -37,13 +42,116 @@ type RouterEntry = {
   refreshAt: number;
   idle?: ReturnType<typeof setTimeout>;
 };
+type RouterLookup = { controller: AbortController; waiters: number; settled: boolean };
+/** A post-EOF exit re-poll may finish this long after the read deadline. */
+const REPOLL_GRACE_MS = 250;
+/** Allowance past a read's own window, granted by the outer read budget. */
+const READ_SETTLEMENT_ALLOWANCE_MS = 5_000;
+/**
+ * Once the router reports an exit, the rest of that command's output is finite
+ * and the router delivers it at its own latency. Finish reading it this long
+ * past the read's deadline (inside the settlement allowance) instead of
+ * returning the exited command as running.
+ */
+export const MODAL_EXITED_TAIL_READ_MS = 4_000;
+/** Exited commands whose tail read ended without EOF, most often because a
+ * background child still holds the pipe. Later reads skip the tail wait until
+ * this retry interval passes, so a router that is only slow still gets another
+ * full tail read while an open pipe costs the wait at most once per interval. */
+export const MODAL_OPEN_TAIL_RETRY_MS = 15_000;
+const OPEN_TAIL_MEMORY = 256;
+/** A degraded router is reported at most this often per control. */
+const SLOW_TAIL_REPORT_INTERVAL_MS = 60_000;
+type RawStreamPage = { bytes: Buffer; eof: boolean };
+type ControlObservation = { command: ModalRouterProviderCommand; output: string };
+type SupervisionControlResult = {
+  state: "idle" | "running" | "quiescent";
+  receipt?: CommandSupervisionReceipt;
+};
+type ControlHelper = ControlObservation & {
+  startPending: boolean;
+  startUnknown?: unknown;
+  inFlight?: Promise<SupervisionControlResult>;
+};
 
-/** New commands use replayable task-router byte offsets. Legacy identifiers
- * never cross that protocol boundary and are never used for new starts. */
+/** New bytes, a newly reached EOF, or the terminal exit of fully read streams. */
+function observedProgress(
+  command: ModalRouterProviderCommand,
+  page: ReturnType<typeof collectModalRawOutputPage>,
+): boolean {
+  return (
+    page.output.exitCode !== null ||
+    (["stdout", "stderr"] as const).some(
+      (stream) =>
+        page.raw.streams[stream].bytes.byteLength > 0 ||
+        (page.raw.streams[stream].eof && !command.streams[stream].eof),
+    )
+  );
+}
+
+/** Cancels this waiter, not the shared provider operation. The rejection
+ * handler remains attached even when an uncooperative provider settles late. */
+function awaitRouterAccess<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return pending;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    void pending.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+/** Modal's task command router answers an observation of an exec id it does
+ * not hold with FAILED_PRECONDITION and this fixed detail prefix (live text:
+ * "Failed to poll exec process: exec not found. If the exec already completed,
+ * its output and exit status were discarded; ..."). Exact code + anchored
+ * prefix only; other FAILED_PRECONDITION replies are not exec-state evidence. */
+const MODAL_ROUTER_EXEC_NOT_FOUND_DETAILS =
+  /^Failed to (?:poll|read) exec [a-z ]*: exec not found\b/;
+
+function isModalRouterExecNotFound(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const record = error as Error & { code?: unknown; details?: unknown };
+  return (
+    record.code === status.FAILED_PRECONDITION &&
+    typeof record.details === "string" &&
+    MODAL_ROUTER_EXEC_NOT_FOUND_DETAILS.test(record.details)
+  );
+}
+
+/**
+ * The fixed `/bin/true` readiness probe's exact exec identity is unknown to the
+ * box's command router: its Start never registered (a lost or timed-out Start
+ * reply) or the router lost its exec state. Either way the box has not proved
+ * command readiness. This is NOT replay authority for the probe; the caller
+ * discards the never-published box instead. The only retained cause is the
+ * router's observation reply: an ambiguous probe Start is contained to that
+ * discarded box and must not leak start-uncertainty into turn settlement.
+ */
+export class ModalExecReadinessProbeLostError extends Error {
+  readonly name = "ModalExecReadinessProbeLostError";
+
+  constructor(cause: Error) {
+    super("Modal command router no longer tracks the readiness probe exec", { cause });
+  }
+}
+
+/** Commands use replayable task-router byte offsets. */
 export class ModalCommandControl {
   private readonly routers = new Map<string, Promise<RouterEntry>>();
+  private readonly routerLookups = new Map<Promise<RouterEntry>, RouterLookup>();
+  /** A Modal sandbox runs exactly one task for its lifetime, so its task id is
+   * fixed. Resolving it per command added a control-plane round trip to every
+   * Start. A failed Start retires the entry so the next one re-resolves. */
+  private readonly taskIds = new Map<string, Promise<string>>();
+  private readonly controlHelpers = new Map<string, ControlHelper>();
+  /** Exited command key to the time its tail may be read again. */
+  private readonly openTails = new Map<string, number>();
+  private slowTailReportedAt = -Infinity;
   private readonly client: ReturnType<typeof commandControlPlane>;
-  private readonly legacy: LegacyControl;
   private closed = false;
 
   private constructor(
@@ -53,7 +161,6 @@ export class ModalCommandControl {
     private readonly environment: Record<string, string> | (() => Record<string, string>),
   ) {
     this.client = commandControlPlane(client);
-    this.legacy = LegacyControl.forSandbox(client, sandboxIdentity, root, environment);
   }
 
   static forSandbox(
@@ -83,10 +190,15 @@ export class ModalCommandControl {
     let pending = this.routers.get(taskId);
     const reused = Boolean(pending);
     if (!pending) {
+      const lookup: RouterLookup = {
+        controller: new AbortController(),
+        waiters: 0,
+        settled: false,
+      };
       pending = (async () => {
-        const access = await this.client.taskGetCommandRouterAccess(
-          { taskId },
-          signal ? { signal } : undefined,
+        const access = await awaitRouterAccess(
+          this.client.taskGetCommandRouterAccess({ taskId }, { signal: lookup.controller.signal }),
+          lookup.controller.signal,
         );
         let refreshAt = Date.now() + 60_000;
         try {
@@ -102,16 +214,39 @@ export class ModalCommandControl {
         return { router: new ModalCommandRouterWire(access), users: 0, refreshAt };
       })();
       this.routers.set(taskId, pending);
-      void pending.catch(() => {
+      this.routerLookups.set(pending, lookup);
+      const settled = () => {
+        lookup.settled = true;
+        this.routerLookups.delete(pending!);
+      };
+      void pending.then(settled, () => {
+        settled();
         if (this.routers.get(taskId) === pending) this.routers.delete(taskId);
       });
     }
-    const entry = await pending;
+    const lookup = this.routerLookups.get(pending);
+    if (lookup) lookup.waiters++;
+    let entry: RouterEntry;
+    try {
+      entry = await awaitRouterAccess(pending, signal);
+    } finally {
+      if (lookup && --lookup.waiters === 0 && !lookup.settled) {
+        // No interested callers remain. Never cancel a sibling's lookup, and
+        // retire only this exact promise if a replacement has already won.
+        if (this.routers.get(taskId) === pending) this.routers.delete(taskId);
+        lookup.controller.abort(new Error("Modal router access has no remaining waiters"));
+      }
+    }
     // Refresh credentials between operations, never close another active read.
     if (reused && !entry.users && Date.now() > entry.refreshAt) {
-      clearTimeout(entry.idle);
-      entry.router.close();
-      this.routers.delete(taskId);
+      // Another continuation may already have installed fresh access. Retire
+      // only the captured cache entry, then join its replacement rather than
+      // deleting or closing the newer transport.
+      if (this.routers.get(taskId) === pending) {
+        this.routers.delete(taskId);
+        clearTimeout(entry.idle);
+        entry.router.close();
+      }
       return await this.withRouter(taskId, signal, run);
     }
     clearTimeout(entry.idle);
@@ -135,6 +270,9 @@ export class ModalCommandControl {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.taskIds.clear();
+    for (const lookup of this.routerLookups.values())
+      lookup.controller.abort(new Error("Modal command control is closed"));
     const entries = await Promise.allSettled(this.routers.values());
     this.routers.clear();
     for (const entry of entries)
@@ -142,6 +280,27 @@ export class ModalCommandControl {
         clearTimeout(entry.value.idle);
         entry.value.router.close();
       }
+  }
+
+  /** Access lookup may retry safely, but once the callback enters the Start
+   * boundary only the wire's own dispatch proof can authorize recovery. */
+  private async withStartRouter<T>(
+    taskId: string,
+    signal: AbortSignal | undefined,
+    run: (router: ModalCommandRouterWire) => Promise<T>,
+  ): Promise<T> {
+    let entered = false;
+    try {
+      return await this.withRouter(taskId, signal, async (router) => {
+        entered = true;
+        return await run(router);
+      });
+    } catch (error) {
+      if (entered) throw error;
+      return await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(async () => {
+        throw error;
+      }, signal);
+    }
   }
 
   async start(args: ChannelAExecArgs, signal?: AbortSignal): Promise<ModalRouterProviderCommand> {
@@ -152,11 +311,48 @@ export class ModalCommandControl {
     const workdir = posix.resolve(this.root, args.workdir ?? this.root);
     if (workdir !== this.root && !workdir.startsWith(`${this.root.replace(/\/$/u, "")}/`))
       throw new Error("Command workdir is outside the sandbox workspace");
-    const task = await this.client.sandboxGetTaskId({ sandboxId }, signal ? { signal } : undefined);
-    if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
-    const taskId = task.taskId;
+    const taskLookup = this.startTaskId(sandboxId);
+    const taskId = await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(
+      () => awaitRouterAccess(taskLookup, signal),
+      signal,
+    );
     if (this.sandboxId !== sandboxId)
       throw new Error("Modal sandbox changed during command preparation");
+    try {
+      return await this.startOnTask(args, signal, supervised, sandboxId, workdir, taskId);
+    } catch (error) {
+      if (this.taskIds.get(sandboxId) === taskLookup) this.taskIds.delete(sandboxId);
+      throw error;
+    }
+  }
+
+  private startTaskId(sandboxId: string): Promise<string> {
+    let pending = this.taskIds.get(sandboxId);
+    if (pending) return pending;
+    // Shared by concurrent Starts, so it never inherits one caller's abort.
+    pending = (async () => {
+      const task = await this.client.sandboxGetTaskId(
+        { sandboxId },
+        { signal: AbortSignal.timeout(30_000) },
+      );
+      if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
+      return task.taskId;
+    })();
+    this.taskIds.set(sandboxId, pending);
+    void pending.catch(() => {
+      if (this.taskIds.get(sandboxId) === pending) this.taskIds.delete(sandboxId);
+    });
+    return pending;
+  }
+
+  private async startOnTask(
+    args: ChannelAExecArgs,
+    signal: AbortSignal | undefined,
+    supervised: boolean,
+    sandboxId: string,
+    workdir: string,
+    taskId: string,
+  ): Promise<ModalRouterProviderCommand> {
     const execId = randomUUID();
     // PTY and runAs retain their existing explicit unsupported supervision
     // semantics. Never attach a fabricated descriptor to either path.
@@ -169,20 +365,7 @@ export class ModalCommandControl {
           controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
         }
       : undefined;
-    let commandArgs = [
-      args.shell ?? "/bin/sh",
-      args.shell && (args.login ?? true) ? "-lc" : "-c",
-      args.cmd,
-    ];
-    if (args.runAs) {
-      const user = shellQuote(args.runAs),
-        invocation = commandArgs.map(shellQuote).join(" ");
-      commandArgs = [
-        "/bin/sh",
-        "-c",
-        `if [ "$(id -u)" = ${user} ] || [ "$(id -un 2>/dev/null)" = ${user} ]; then exec ${invocation}; elif [ "$(id -u)" = 0 ]; then exec su -s /bin/sh ${user} -c ${shellQuote(`exec ${invocation}`)}; else exec sudo -n -u ${user} -- ${invocation}; fi`,
-      ];
-    }
+    let commandArgs = modalCommandArgv(args);
     const env = typeof this.environment === "function" ? this.environment() : this.environment;
     if (supervision)
       commandArgs = [
@@ -212,7 +395,7 @@ export class ModalCommandControl {
     if (supervision) await reserveSupervisedLaunch(command);
     let startAttempted = false;
     try {
-      await this.withRouter(taskId, signal, async (router) => {
+      await this.withStartRouter(taskId, signal, async (router) => {
         startAttempted = true;
         await router.start(
           {
@@ -259,32 +442,62 @@ export class ModalCommandControl {
   async verifySupervisionCapability(): Promise<{ sandboxId: string; taskId: string }> {
     const sandboxId = this.sandboxId;
     const signal = AbortSignal.timeout(5_000);
-    const task = await this.client.sandboxGetTaskId({ sandboxId }, { signal });
+    const task = await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(
+      () => this.client.sandboxGetTaskId({ sandboxId }, { signal }),
+      signal,
+    );
     if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
-    await this.withRouter(task.taskId, signal, async (router) => {
+    await this.withStartRouter(task.taskId, signal, async (router) => {
       const identity = { taskId: task.taskId!, execId: randomUUID() };
-      await router.start(
-        {
+      const observation: ControlObservation = {
+        command: {
+          kind: "modal-router-v1",
+          sandboxId,
           ...identity,
-          commandArgs: ["/usr/local/bin/opengeni-command-supervisor", "capabilities"],
-          workdir: "/tmp",
-          env: {},
+          streams: {
+            stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+            stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          },
         },
-        signal,
-      );
-      let offset = 0;
-      let output = "";
-      let eof = false;
-      let exit: number | null = null;
-      while (!eof || exit === null) {
-        signal.throwIfAborted();
-        const page = await router.read(identity, "stdout", offset, 250, signal);
-        offset += page.bytes.length;
-        if (offset > 128) throw new Error("Modal supervision capability response exceeds bound");
-        output += page.bytes.toString("utf8");
-        eof = page.eof;
-        exit = await router.poll(identity, signal);
+        output: "",
+      };
+      let startUnknown: ModalCommandStartOutcomeUnknownError | undefined;
+      try {
+        await router.start(
+          {
+            ...identity,
+            commandArgs: ["/usr/local/bin/opengeni-command-supervisor", "capabilities"],
+            workdir: "/tmp",
+            env: {},
+          },
+          signal,
+        );
+      } catch (error) {
+        // A lost acknowledgement does not authorize another Start. This fixed
+        // read-only probe can still prove capability by observing its original
+        // invocation inside the same five-second budget.
+        if (!(error instanceof ModalCommandStartOutcomeUnknownError)) throw error;
+        if (error.taskId !== identity.taskId || error.execId !== identity.execId) throw error;
+        startUnknown = error;
       }
+      let result: { output: string; exit: number };
+      try {
+        result = await this.readControlOutput(identity, 128, signal, observation);
+      } catch (error) {
+        if (!startUnknown) throw error;
+        // Missing/denied observation cannot erase a genuine unknown Start or
+        // turn it into sandbox-loss or replay authority.
+        throw new ProviderCommandObservationUnavailableError(
+          structuredClone(observation.command),
+          new AggregateError(
+            [startUnknown, error],
+            "Original capability Start and observation remain uncertain",
+          ),
+          error instanceof ProviderCommandObservationUnavailableError && error.readRetryAllowed,
+        );
+      }
+      signal.throwIfAborted();
+      const { output, exit } = result;
       if (exit !== 0 || output !== "native-subreaper-v1")
         throw new Error(
           "Exact Modal instance lacks compatible native supervision; command not admitted",
@@ -295,56 +508,190 @@ export class ModalCommandControl {
     return { sandboxId, taskId: task.taskId };
   }
 
+  /** Fixed provider readiness probe. No shell, user environment, admission or
+   * SDK Start retries. Once Start may have been sent, only observe that exact
+   * invocation; DNS-shaped server replies never authorize another Start. */
+  async verifyExecReadiness(signal: AbortSignal): Promise<number> {
+    signal.throwIfAborted();
+    const sandboxId = this.sandboxId;
+    const task = await ModalCommandStartPreDispatchUnavailableError.beforeDispatch(
+      () => this.client.sandboxGetTaskId({ sandboxId }, { signal }),
+      signal,
+    );
+    if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
+    if (sandboxId !== this.sandboxId)
+      throw new Error("Modal sandbox changed during readiness preparation");
+    const identity = { taskId: task.taskId, execId: randomUUID() };
+    const transientObservation = (error: unknown) =>
+      [status.UNAVAILABLE, status.DEADLINE_EXCEEDED].includes(
+        (error as { code?: number } | null)?.code ?? -1,
+      );
+    const pause = () => delay(100, undefined, { signal });
+    return await this.withStartRouter(task.taskId, signal, async (router) => {
+      for (;;) {
+        signal.throwIfAborted();
+        try {
+          await router.start(
+            { ...identity, commandArgs: ["/bin/true"], workdir: "/tmp", env: {} },
+            signal,
+          );
+          break;
+        } catch (error) {
+          signal.throwIfAborted();
+          if (error instanceof ModalCommandStartPreDispatchUnavailableError) {
+            await pause();
+            continue;
+          }
+          // A lost Start acknowledgement is not replay permission. The probe
+          // may already exist, so keep this identity even if observation later
+          // exhausts the caller's readiness budget.
+          if (
+            error instanceof ModalCommandStartRejectedError ||
+            error instanceof ModalCommandStartNotDispatchedError
+          )
+            throw error;
+          break;
+        }
+      }
+      const streams = {
+        stdout: { offset: 0, eof: false },
+        stderr: { offset: 0, eof: false },
+      };
+      for (;;) {
+        signal.throwIfAborted();
+        try {
+          for (const stream of ["stdout", "stderr"] as const) {
+            const cursor = streams[stream];
+            if (cursor.eof) continue;
+            const page = await router.read(identity, stream, cursor.offset, 1_000, signal);
+            cursor.offset += page.bytes.length;
+            cursor.eof = page.eof;
+          }
+          const exit = await router.poll(identity, signal);
+          signal.throwIfAborted();
+          if (exit !== null && streams.stdout.eof && streams.stderr.eof) return exit;
+        } catch (error) {
+          signal.throwIfAborted();
+          if (isModalRouterExecNotFound(error))
+            throw new ModalExecReadinessProbeLostError(error as Error);
+          if (!transientObservation(error)) throw error;
+        }
+        await pause();
+      }
+    });
+  }
+
   /** Separate authenticated provider execution of the installed control helper.
    * User command streams are never inspected for control evidence. */
   async supervisionControl(
     command: ModalRouterProviderCommand,
     action: "release" | "cancel" | "status" | "ack",
     receiptId?: string,
-  ): Promise<{ state: "idle" | "running" | "quiescent"; receipt?: CommandSupervisionReceipt }> {
+  ): Promise<SupervisionControlResult> {
     SandboxProviderCommand.parse(command);
     const descriptor = command.supervision;
     if (!descriptor || command.sandboxId !== this.sandboxId)
       throw new Error("Supervised command identity is unavailable");
-    const identity = { taskId: command.taskId, execId: randomUUID() };
-    const signal = AbortSignal.timeout(5_000);
-    return await this.withRouter(command.taskId, signal, async (router) => {
-      await router.start(
-        {
-          ...identity,
-          commandArgs: [
-            "/usr/local/bin/opengeni-command-supervisor",
-            "control",
-            "--invocation",
-            descriptor.invocationId,
-            "--nonce",
-            descriptor.nonce,
-            "--socket",
-            descriptor.controlPath,
-            "--action",
-            action,
-            ...(receiptId ? ["--receipt", receiptId] : []),
-          ],
-          workdir: "/tmp",
-          env: {},
+    const key = JSON.stringify([
+      command.sandboxId,
+      command.taskId,
+      command.execId,
+      descriptor.invocationId,
+      descriptor.nonce,
+      descriptor.controlPath,
+      action,
+      receiptId ?? null,
+    ]);
+    let helper = this.controlHelpers.get(key);
+    if (!helper) {
+      helper = {
+        startPending: true,
+        output: "",
+        command: {
+          kind: "modal-router-v1",
+          sandboxId: command.sandboxId,
+          taskId: command.taskId,
+          execId: randomUUID(),
+          streams: {
+            stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+            stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          },
         },
-        signal,
-      );
-      const buffers: Buffer[] = [];
-      let offset = 0;
-      let eof = false;
-      let exit: number | null = null;
-      while (!eof || exit === null) {
-        signal.throwIfAborted();
-        const page = await router.read(identity, "stdout", offset, 250, signal);
-        offset += page.bytes.length;
-        if (offset > 4096) throw new Error("Supervisor control response exceeds its bound");
-        buffers.push(page.bytes);
-        eof = page.eof;
-        exit = await router.poll(identity, signal);
+      };
+      this.controlHelpers.set(key, helper);
+    }
+    const observation = helper;
+    const run = async (): Promise<SupervisionControlResult> => {
+      const signal = AbortSignal.timeout(5_000);
+      if (observation.startPending) {
+        try {
+          await this.withStartRouter(command.taskId, signal, async (router) => {
+            // Once the wire may dispatch, neither a failed acknowledgement nor
+            // a later drain may create another helper invocation.
+            observation.startPending = false;
+            await router.start(
+              {
+                taskId: observation.command.taskId,
+                execId: observation.command.execId,
+                commandArgs: [
+                  "/usr/local/bin/opengeni-command-supervisor",
+                  "control",
+                  "--invocation",
+                  descriptor.invocationId,
+                  "--nonce",
+                  descriptor.nonce,
+                  "--socket",
+                  descriptor.controlPath,
+                  "--action",
+                  action,
+                  ...(receiptId ? ["--receipt", receiptId] : []),
+                ],
+                workdir: "/tmp",
+                env: {},
+              },
+              signal,
+            );
+          });
+        } catch (error) {
+          if (
+            observation.startPending ||
+            error instanceof ModalCommandStartNotDispatchedError ||
+            error instanceof ModalCommandStartRejectedError ||
+            error instanceof ModalCommandStartPreDispatchUnavailableError
+          ) {
+            this.controlHelpers.delete(key);
+            throw error;
+          }
+          // Preserve the genuine original Start boundary. A later drain reads
+          // this same helper; it never repeats a possibly dispatched Start.
+          observation.startUnknown = error;
+          throw error;
+        }
       }
+      let response: { output: string; exit: number };
+      try {
+        response = await this.readControlOutput(observation.command, 4096, signal, observation);
+      } catch (error) {
+        if (
+          observation.startUnknown !== undefined &&
+          error instanceof ProviderCommandObservationUnavailableError
+        )
+          throw new ProviderCommandObservationUnavailableError(
+            error.command,
+            new AggregateError(
+              [observation.startUnknown, error],
+              "Original helper Start and observation remain uncertain",
+            ),
+            error.readRetryAllowed,
+          );
+        throw error;
+      }
+      const { output, exit } = response;
+      // Only a complete authenticated helper response retires its private
+      // cursor/output cache. Uncertainty keeps the same action and UUID.
+      this.controlHelpers.delete(key);
       if (exit !== 0) throw new Error("Supervisor control is unavailable");
-      const result = JSON.parse(Buffer.concat(buffers).toString("utf8"));
+      const result = JSON.parse(output);
       if (!result || !["idle", "running", "quiescent"].includes(result.state))
         throw new Error("Invalid supervisor control response");
       if (result.receipt !== undefined) {
@@ -355,7 +702,66 @@ export class ModalCommandControl {
       if ((result.state === "quiescent") !== Boolean(result.receipt))
         throw new Error("Supervisor quiescence response lacks its receipt");
       return result;
+    };
+    observation.inFlight ??= run().finally(() => {
+      delete observation.inFlight;
     });
+    return await observation.inFlight;
+  }
+
+  /** These fixed helpers already started once. Observe only their original
+   * invocation within the caller's existing five-second budget. */
+  private async readControlOutput(
+    identity: { taskId: string; execId: string },
+    limit: number,
+    signal: AbortSignal,
+    observation?: ControlObservation,
+  ): Promise<{ output: string; exit: number }> {
+    const state: ControlObservation = observation ?? {
+      command: {
+        kind: "modal-router-v1",
+        sandboxId: this.sandboxId,
+        ...identity,
+        streams: {
+          stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+        },
+      },
+      output: "",
+    };
+    for (;;) {
+      try {
+        signal.throwIfAborted();
+        const page = await this.read(state.command, 250, signal);
+        state.command = page.command as ModalRouterProviderCommand;
+        if (
+          state.command.streams.stdout.byteOffset + state.command.streams.stderr.byteOffset >
+          limit
+        )
+          throw new Error("Supervisor control response exceeds its bound");
+        state.output += page.chunks
+          .filter((chunk) => chunk.stream === "stdout")
+          .map((chunk) => chunk.text)
+          .join("");
+        if (page.exitCode !== null) return { output: state.output, exit: page.exitCode };
+      } catch (error) {
+        if (signal.aborted)
+          throw new ProviderCommandObservationUnavailableError(
+            structuredClone(state.command),
+            error,
+          );
+        if (
+          !(error instanceof ProviderCommandObservationUnavailableError) ||
+          !error.readRetryAllowed
+        )
+          throw error;
+      }
+      try {
+        await delay(100, undefined, { signal });
+      } catch (error) {
+        throw new ProviderCommandObservationUnavailableError(structuredClone(state.command), error);
+      }
+    }
   }
 
   async read(
@@ -366,14 +772,167 @@ export class ModalCommandControl {
     SandboxProviderCommand.parse(command);
     if (command.sandboxId !== this.sandboxId)
       throw new Error("Modal command does not belong to this sandbox");
-    if (command.kind === "modal-control-v1") return await this.legacy.read(command, waitMs, signal);
-    const next = structuredClone(command);
-    const cancellation = new AbortController();
-    const abort = () => cancellation.abort(signal?.reason);
+    return (await this.readNative(command, waitMs, signal)).output;
+  }
+
+  /** Native capture plumbing only. Raw bytes are acquired by the same joined
+   * read/poll path as read(); no new command is admitted. */
+  async readRaw(
+    command: ModalRouterProviderCommand,
+    waitMs: number,
+    signal?: AbortSignal,
+  ): Promise<ModalRawOutputPage> {
+    return (await this.readNative(command, waitMs, signal)).raw;
+  }
+
+  private async readNative(
+    input: ModalRouterProviderCommand,
+    waitMs: number,
+    signal?: AbortSignal,
+  ): Promise<ReturnType<typeof collectModalRawOutputPage>> {
+    const command = structuredClone(ModalRouterProviderCommand.parse(input));
+    if (command.sandboxId !== this.sandboxId)
+      throw new Error("Modal command does not belong to this sandbox");
+    if (!Number.isFinite(waitMs) || waitMs < 0 || waitMs > MODAL_ROUTER_READ_MAX_WAIT_MS)
+      throw new Error("Invalid Modal output read bounds");
+    signal?.throwIfAborted();
+    const stdout = command.streams.stdout;
+    const stderr = command.streams.stderr;
+    if (
+      stdout.eof &&
+      stderr.eof &&
+      stdout.utf8Remainder === "" &&
+      stderr.utf8Remainder === "" &&
+      stdout.exitCode !== null &&
+      stdout.exitCode === stderr.exitCode
+    ) {
+      // Both complete streams and their matching terminal observation were
+      // already captured. An expired provider handle cannot revoke that exact
+      // evidence; the session still atomically verifies the retained cursor.
+      return collectModalRawOutputPage(
+        command,
+        {
+          stdout: { bytes: Buffer.alloc(0), eof: true },
+          stderr: { bytes: Buffer.alloc(0), eof: true },
+        },
+        { source: "retained_terminal", code: stdout.exitCode },
+      );
+    }
+    const budget = new AbortController();
+    const abort = () => budget.abort(signal?.reason);
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
+    // The router deliberately ends a quiet stream at its read deadline with
+    // a partial page. Let that deadline settle before outer containment aborts
+    // the whole page, including bytes already read from the other stream.
+    // Caller cancellation still bounds this allowance independently.
+    const deadline = performance.now() + Math.max(1, waitMs);
+    const timeout = setTimeout(
+      () => budget.abort(new Error("Modal command read budget exhausted")),
+      Math.max(1, waitMs) + READ_SETTLEMENT_ALLOWANCE_MS,
+    );
+    let lastError: unknown;
     try {
-      return await this.withRouter(command.taskId, cancellation.signal, async (router) => {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        signal?.throwIfAborted();
+        if (attempt > 0 && performance.now() >= deadline) break;
+        let page: ReturnType<typeof collectModalRawOutputPage>;
+        try {
+          page = await this.readRouterPage(
+            command,
+            Math.min(Math.max(1, waitMs), Math.max(1, deadline - performance.now())),
+            budget.signal,
+            deadline,
+          );
+        } catch (error) {
+          signal?.throwIfAborted();
+          if (isModalRouterExecNotFound(error)) {
+            // The router has discarded this invocation's observation state.
+            // That is not proof its process group stopped, nor authority to
+            // replay Start. Keep the locator/cursors for ordinary retained
+            // ownership and lifecycle containment, without a hot read retry.
+            throw new ProviderCommandObservationUnavailableError(
+              structuredClone(command),
+              error,
+              false,
+            );
+          }
+          if (!budget.signal.aborted && !isModalCommandObservationTransportError(error)) {
+            // Containment is not retry permission. A structural provider fault
+            // dominates nested missing-handle prose, but mixed/unreadable
+            // graphs do not acquire the strict safe-read retry authority.
+            if (classifyProviderSandboxFailure("modal", error).kind === "transient_transport")
+              throw new ProviderCommandObservationUnavailableError(
+                structuredClone(command),
+                error,
+                false,
+              );
+            throw error;
+          }
+          lastError = error;
+          if (budget.signal.aborted || performance.now() >= deadline || attempt === 4) break;
+          try {
+            await delay(Math.min(100, Math.max(1, deadline - performance.now())), undefined, {
+              signal: budget.signal,
+            });
+          } catch {
+            signal?.throwIfAborted();
+            break;
+          }
+          continue;
+        }
+        // A quiet page is the router's normal answer when a healthy stream has
+        // nothing new before its deadline. After this read already failed, a
+        // retry that merely reached the remaining (possibly tiny) deadline
+        // proves nothing about the stream: the client gives up before a slow
+        // provider can answer either way. Only new bytes, EOF or a terminal
+        // exit show recovery; otherwise the earlier failure remains this
+        // read's outcome.
+        if (lastError === undefined || observedProgress(command, page)) return page;
+        break;
+      }
+      throw new ProviderCommandObservationUnavailableError(structuredClone(command), lastError);
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  private async readRouterPage(
+    command: ModalRouterProviderCommand,
+    waitMs: number,
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<ReturnType<typeof collectModalRawOutputPage>> {
+    const cancellation = new AbortController();
+    const lookupCancellation = new AbortController();
+    const abort = () => {
+      cancellation.abort(signal.reason);
+      lookupCancellation.abort(signal.reason);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    const lookupTimeout = setTimeout(
+      () =>
+        lookupCancellation.abort(
+          new ProviderCommandObservationUnavailableError(
+            structuredClone(command),
+            new Error("Modal command read access budget exhausted"),
+          ),
+        ),
+      Math.max(1, deadline - performance.now()),
+    );
+    try {
+      return await this.withRouter(command.taskId, lookupCancellation.signal, async (router) => {
+        clearTimeout(lookupTimeout);
+        lookupCancellation.signal.throwIfAborted();
+        signal.throwIfAborted();
+        if (performance.now() >= deadline)
+          throw new ProviderCommandObservationUnavailableError(
+            structuredClone(command),
+            new Error("Modal command read budget exhausted"),
+          );
+        const remainingWait = Math.max(1, Math.min(waitMs, deadline - performance.now()));
         const operations = [
           ...(["stdout", "stderr"] as const).map(async (stream) =>
             command.streams[stream].eof
@@ -382,7 +941,7 @@ export class ModalCommandControl {
                   command,
                   stream,
                   command.streams[stream].byteOffset,
-                  waitMs,
+                  remainingWait,
                   cancellation.signal,
                 ),
           ),
@@ -397,45 +956,166 @@ export class ModalCommandControl {
           ),
         );
         const failed = results.find((result) => result.status === "rejected");
-        if (failed?.status === "rejected") throw failed.reason;
+        // Abort-induced sibling rejections may sort before the failing poll.
+        // Preserve the first actual provider fault rather than array order.
+        if (failed?.status === "rejected") throw cancellation.signal.reason ?? failed.reason;
         const stdout = (results[0] as PromiseFulfilledResult<{ bytes: Buffer; eof: boolean }>)
           .value;
         const stderr = (results[1] as PromiseFulfilledResult<{ bytes: Buffer; eof: boolean }>)
           .value;
-        const exit = (results[2] as PromiseFulfilledResult<number | null>).value;
-        const chunks: ModalProviderOutputPage["chunks"] = [];
-        for (const [stream, page] of [
-          ["stdout", stdout],
-          ["stderr", stderr],
-        ] as const) {
-          const old = command.streams[stream];
-          const decoded = decodePage(old.utf8Remainder, [page.bytes], page.eof);
-          const byteOffset = old.byteOffset + page.bytes.length;
-          if (!Number.isSafeInteger(byteOffset)) throw new Error("Modal output offset exhausted");
-          next.streams[stream] = {
-            byteOffset,
-            utf8Remainder: decoded.remainder,
-            eof: page.eof,
-            exitCode: page.eof ? exit : null,
-          };
-          if (decoded.text)
-            chunks.push({
-              stream,
-              chunkId: `modal-router:${command.execId}:${stream}:${old.byteOffset}:${byteOffset}:${page.eof ? 1 : 0}`,
-              text: decoded.text,
-            });
-        }
-        return {
-          command: next,
-          expected: structuredClone(command),
-          chunks,
-          exitCode: next.streams.stdout.eof && next.streams.stderr.eof ? exit : null,
-          providerExited: exit !== null,
-          streamFidelity: command.pty ? "merged" : "separate",
-        };
+        let exit = (results[2] as PromiseFulfilledResult<number | null>).value;
+        if (exit === null && stdout.eof && stderr.eof)
+          exit = await this.pollAfterEof(router, command, cancellation.signal, deadline);
+        let streams = { stdout, stderr };
+        if (exit !== null && !(stdout.eof && stderr.eof))
+          streams = await this.readExitedTail(
+            router,
+            command,
+            streams,
+            cancellation.signal,
+            deadline,
+          );
+        return collectModalRawOutputPage(command, streams, { source: "router_poll", code: exit });
       });
     } finally {
+      clearTimeout(lookupTimeout);
       signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  /** The router answered the exit poll, but a stream's remaining bytes or EOF
+   * had not arrived by the read deadline. The caller's short slice is a
+   * polling cadence, not a bound on the router's own delivery latency: when
+   * that latency exceeds the slice, every page of an exited command would end
+   * before EOF and report it as running until a later, longer read happened to
+   * catch the tail. Finish the now finite tail within the settlement
+   * allowance instead. Bytes stay bounded by one page; a fault or a tail that
+   * stays open (a background child holding the pipe) keeps what was read and
+   * leaves the exit for a later page, and only caller cancellation
+   * propagates. A tail that stayed open is remembered so later reads of that
+   * command skip the wait until MODAL_OPEN_TAIL_RETRY_MS passes. */
+  private async readExitedTail(
+    router: ModalCommandRouterWire,
+    command: ModalRouterProviderCommand,
+    streams: { stdout: RawStreamPage; stderr: RawStreamPage },
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<{ stdout: RawStreamPage; stderr: RawStreamPage }> {
+    const key = `${command.taskId}:${command.execId}`;
+    const retryAt = this.openTails.get(key);
+    if (retryAt !== undefined) {
+      if (performance.now() < retryAt) return streams;
+      this.openTails.delete(key);
+    }
+    const started = performance.now();
+    const until = deadline + MODAL_EXITED_TAIL_READ_MS;
+    const drain = async (stream: "stdout" | "stderr"): Promise<RawStreamPage> => {
+      const page = streams[stream];
+      if (page.eof) return page;
+      const chunks = [page.bytes];
+      let length = page.bytes.length;
+      let eof = false;
+      while (length < MODAL_ROUTER_READ_PAGE_BYTES) {
+        signal.throwIfAborted();
+        const wait = Math.min(MODAL_ROUTER_READ_MAX_WAIT_MS, Math.floor(until - performance.now()));
+        if (wait <= 0) break;
+        let next: RawStreamPage;
+        try {
+          next = await router.read(
+            command,
+            stream,
+            command.streams[stream].byteOffset + length,
+            wait,
+            signal,
+          );
+        } catch {
+          signal.throwIfAborted();
+          break;
+        }
+        const part = next.bytes.subarray(0, MODAL_ROUTER_READ_PAGE_BYTES - length);
+        chunks.push(part);
+        length += part.length;
+        if (next.eof && part.length === next.bytes.length) {
+          eof = true;
+          break;
+        }
+        if (next.bytes.length === 0) break;
+      }
+      return { bytes: Buffer.concat(chunks, length), eof };
+    };
+    const [stdout, stderr] = await Promise.all([drain("stdout"), drain("stderr")]);
+    const settled = stdout.eof && stderr.eof;
+    // A full page is ordinary progress through a long tail, not an open pipe.
+    if (
+      [stdout, stderr].some((page) => !page.eof && page.bytes.length < MODAL_ROUTER_READ_PAGE_BYTES)
+    ) {
+      if (this.openTails.size >= OPEN_TAIL_MEMORY)
+        this.openTails.delete(this.openTails.keys().next().value!);
+      this.openTails.set(key, performance.now() + MODAL_OPEN_TAIL_RETRY_MS);
+    }
+    // The router answering slower than the caller's read window is what made
+    // exited commands look running. Keep that visible in operator logs.
+    const now = performance.now();
+    if (now - this.slowTailReportedAt >= SLOW_TAIL_REPORT_INTERVAL_MS) {
+      this.slowTailReportedAt = now;
+      try {
+        console.warn(
+          "Modal command router delivered an exited command's output after its read window",
+          {
+            sandboxId: command.sandboxId,
+            tailReadMs: Math.round(now - started),
+            outputSettled: settled,
+          },
+        );
+      } catch {
+        // Diagnostics never change the read result.
+      }
+    }
+    return { stdout, stderr };
+  }
+
+  /** TaskExecPoll is a point-in-time status, issued concurrently with stream
+   * reads that may wait for EOF. A poll answered before the command exited
+   * reports "running" even when both streams then finish, and callers that
+   * read once (internal Channel-A commands) would treat a finished command as
+   * still running. After both streams reach EOF, poll again within this read's
+   * existing budget. EOF is not exit proof: a re-poll fault or an exhausted
+   * budget keeps the observed bytes and reports the exit as still unknown, and
+   * only caller cancellation propagates. Re-poll faults are deliberately not
+   * classified here; the next page's concurrent poll classifies the same
+   * provider state. Each re-poll is bounded by the read deadline so a slow
+   * poll cannot exhaust the outer budget and discard the page. */
+  private async pollAfterEof(
+    router: ModalCommandRouterWire,
+    command: ModalRouterProviderCommand,
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<number | null> {
+    let pause = 10;
+    for (;;) {
+      signal.throwIfAborted();
+      const budget = deadline - performance.now();
+      if (budget <= 0) return null;
+      let exit: number | null;
+      try {
+        exit = await router.poll(
+          command,
+          AbortSignal.any([signal, AbortSignal.timeout(Math.ceil(budget) + REPOLL_GRACE_MS)]),
+        );
+      } catch {
+        signal.throwIfAborted();
+        return null;
+      }
+      if (exit !== null) return exit;
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return null;
+      try {
+        await delay(Math.min(pause, remaining), undefined, { signal });
+      } catch {
+        signal.throwIfAborted();
+        return null;
+      }
+      pause = Math.min(pause * 2, 250);
     }
   }
 
@@ -451,7 +1131,6 @@ export class ModalCommandControl {
     SandboxProviderCommand.parse(command);
     if (command.sandboxId !== this.sandboxId)
       throw new Error("Modal command does not belong to this sandbox");
-    if (command.kind === "modal-control-v1") return await this.legacy.write(command, chars, index);
     await this.withRouter(command.taskId, undefined, (router) =>
       router.write(command, index, Buffer.from(chars)),
     );

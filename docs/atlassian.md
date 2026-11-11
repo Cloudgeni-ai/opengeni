@@ -1,58 +1,75 @@
 # Atlassian integration
 
-OpenGeni's Atlassian integration is a read-only Jira Cloud and Confluence Cloud adapter. It has two independent data paths so fresh provider state remains available without making the knowledge index the source of truth.
+Jira, Confluence, Jira Service Management, Bitbucket, Loom and Compass use
+Atlassian's hosted MCP server. The curated connector uses Atlassian's v2 endpoint
+with its flat tool list, `https://mcp.atlassian.com/v2/mcp?tools=all`, so every
+tool has its own approval policy instead of shared discover and execute tools.
+That query string is the one reviewed exception to the catalog's no-query rule
+(`REVIEWED_QUERY_MCP_URLS` in `scripts/import-integrations-catalog.ts`).
 
-## Product behavior
+The earlier `https://mcp.atlassian.com/v1/mcp/authv2` row stays in the catalog as
+"Atlassian (v1)" so existing installations and connections keep working;
+connections are bound to their exact MCP URL and a v1 token can't call v2, so the
+two are separate resources and connecting v2 is a new connection. Atlassian
+switches v1 connections to v2 tools on 1 March 2027. Atlassian plugins keep their
+existing URLs. Users approve Atlassian access in the browser; Opengeni stores the
+resulting connection through its encrypted connection broker and applies normal
+tool permissions.
+Hosted tools follow the connected user's Atlassian access and provider controls.
+They do not use the former native project's or space's source selection.
 
-- A subject connects one Atlassian account with OAuth 2.0 (3LO). The callback discovers every Jira or Confluence Cloud site currently available to that account.
-- Capabilities shows one compact Atlassian card. **Manage** lists projects and spaces grouped by site, supports search, and lets the subject select sources.
-- Selected projects and spaces are immediately eligible for live agent reads. Knowledge synchronization is a separate, optional switch and is off by default.
-- V1 is read-only. It never creates, edits, comments on, transitions, or deletes Jira or Confluence content.
+Most Atlassian tools require a `cloudId`. Opengeni fills it in from the
+account's sites (`getAccessibleAtlassianResources`) through the generic account
+parameters mechanism (see "Account parameters" in
+[remote-mcp-credentials.md](remote-mcp-credentials.md)). With one site, models
+can leave it out; with several, a call without it lists the sites to choose from.
 
-## Live agent access
+## Organization admin: allow the Opengeni domain
 
-The first-party MCP catalog contains three explicit-only tools:
+Atlassian's Rovo MCP server only accepts OAuth connections from domains the
+customer's Atlassian organization allows. Atlassian-supported domains are
+allowed by default; Opengeni's domains are not on that list, so most
+organizations must add the deployment's public origin before anyone can connect.
+Without it, the Atlassian consent screen reports that an organization admin must
+authorize access from the domain, and no connection is created.
 
-- `atlassian_sources_list` discovers currently visible Jira projects and Confluence spaces and marks selected sources.
-- `atlassian_search` searches current Jira issues or Confluence pages inside selected projects and spaces.
-- `atlassian_get` opens a full issue or page, including comments, from a selected source.
+An Atlassian organization admin adds it once for the whole organization:
 
-These tools resolve the exact personal connection delegation frozen onto the accepted turn. Runtime use revalidates the connection owner, workspace membership, active state, provider, and credential kind. Tool arguments cannot choose a connection or expand the selected source boundary. Live reads call Atlassian directly and do not depend on synchronized Documents.
+1. Open Atlassian Administration at admin.atlassian.com and select the organization.
+2. Go to **Rovo**, then **Rovo MCP server** (older consoles: **Apps**, **AI settings**,
+   **Rovo MCP server**).
+3. Under **Allowed domains** (or **Domain settings**), select **Add domain** and enter
+   the deployment origin with a path wildcard, for example
+   `https://app.opengeni.ai/**`. Embedded and self-hosted deployments use their own
+   `OPENGENI_PUBLIC_BASE_URL` origin.
+4. Optionally restrict Read, Write and Search per product on the same page.
 
-## Optional knowledge synchronization
+If the error persists after saving, Atlassian's guidance is to remove the entry,
+add the identical entry again, and retry in a fresh private window. Organizations
+with an Atlassian IP allowlist must also allow Opengeni's egress addresses.
+Removing the domain blocks new connections for the organization; existing grants
+can be revoked from the organization's connected apps.
 
-When synchronization is enabled for a selected project or space, the existing provider-neutral `knowledge_source_sync` schedule and Temporal workflow own cadence, leases, buffering, retry truth, lifecycle generations, Documents authority, ACL eligibility, and indexing obligations.
+References: [Control Rovo MCP server settings](https://support.atlassian.com/rovo/docs/control-atlassian-rovo-mcp-server-settings/),
+[OAuth consent block](https://support.atlassian.com/rovo/kb/fix-oauth-consent-block-for-atlassian-rovo-mcp-server-in-atlassian-cloud/).
 
-The Atlassian driver supplies only provider behavior:
+The native read-only API/Knowledge-sync adapter was removed with integration
+Knowledge sync (see [Knowledge](knowledge.md)). Its OAuth start, callback,
+source browsing and selection are gone. The routes the public SDK still calls
+(`browseAtlassianSources`, `saveAtlassianSources`, `setAtlassianLifecycle`) and
+the `atlassian` Connect provider id answer 410 until the next SDK major. Hosted
+MCP OAuth is independent and unchanged. Existing native credentials are never
+converted into MCP grants; saved native connection rows are inert, are not
+shown, and can still be revoked through the generic connection DELETE route.
 
-- Jira inventory uses enhanced issue search; content fetch includes issue fields and paginated comments.
-- Confluence inventory uses the v2 pages endpoint scoped to the selected space; content fetch includes storage-format body content and paginated footer comments.
-- Stable identities bind the Atlassian cloud id, source kind, selected source, and external issue/page id.
-- Partial or failed inventories checkpoint and never infer deletion. Only a complete authoritative scan may tombstone an absent object.
+The three historical first-party tools (`atlassian_sources_list`,
+`atlassian_search`, `atlassian_get`) remain parseable in stored policies but are
+absent from active tool catalogs and cannot acquire native execution authority.
 
-Synchronized content becomes ordinary governed Documents/RAG evidence under the selected organization, workspace, or personal authority. It is not conversation history, Memory, policy, or automatic prompt content.
+Canonical implementation:
 
-## OAuth and lifecycle
-
-The server-side OAuth flow uses signed single-use callback state and an exact account/workspace/subject grant recheck. Reconnect must retain the same Atlassian account identity. Credentials are encrypted at rest; refresh requests use Atlassian's JSON token exchange and retain rotating refresh tokens. Pause, resume, reconnect, disconnect, source selection, and refresh all share the connection version boundary.
-
-Required deployment settings:
-
-- `OPENGENI_ATLASSIAN_CLIENT_ID`
-- `OPENGENI_ATLASSIAN_CLIENT_SECRET`
-- Callback: `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/atlassian/callback`
-
-The Atlassian developer app must register the exact callback and grant the read scopes declared by `ATLASSIAN_REQUIRED_SCOPES` in `packages/contracts/src/atlassian.ts`.
-
-This developer-app registration is deployment-wide operator setup. OpenGeni customers never create an Atlassian app or supply OAuth credentials: they click **Connect**, approve read access, then choose the Jira projects and Confluence spaces OpenGeni may use.
-
-## Canonical implementation
-
-- Wire contract: `packages/contracts/src/atlassian.ts`
-- Provider-neutral normalization: `packages/documents/src/atlassian.ts`
-- OAuth, browse, lifecycle, and live reads: `apps/api/src/integrations/atlassian.ts`
-- HTTP routes: `apps/api/src/routes/connections.ts`
-- Agent tools: `apps/api/src/mcp/server.ts`
-- Frozen personal authority: `packages/core/src/domain/personal-connection-delegations.ts`
-- Scheduled inventory/content driver: `apps/worker/src/activities/knowledge-source-sync.ts`
-- Capabilities UX: `apps/web/src/components/capabilities/use-atlassian-integration.tsx` (sheet adapter) and `apps/web/src/components/capabilities/atlassian-source-dialog.tsx`
+- Connect providers and accounts: `apps/api/src/routes/connect.ts`
+- Hosted OAuth: `apps/api/src/integrations/oauth-client.ts`
+- Active first-party catalog: `apps/api/src/mcp/server.ts`
+- Historical tool names: `packages/contracts/src/atlassian-native-retirement.ts`
+- Removed-route stubs: `apps/api/src/routes/connections.ts`

@@ -1,9 +1,10 @@
 // Run with: bun apps/web/test/artifact-library-browser.ts
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
-import { chromium } from "playwright";
+import { chromium, type Request } from "playwright";
 import AxeBuilder from "@axe-core/playwright";
-import { freePort, startProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess } from "@opengeni/testing/process";
 
 const port = await freePort();
 const baseUrl = `http://127.0.0.1:${port}`;
@@ -36,6 +37,20 @@ const browser = await chromium.launch({
   headless: true,
   executablePath: process.env.OPENGENI_TEST_CHROMIUM ?? "/usr/local/bin/chromium",
 });
+// The Site fixture's image points here, at another origin. A request from a
+// sandboxed still does not reach Playwright's request events (the frame has an
+// opaque origin in its own process), so the server's own log is the proof
+// that a still makes no network request.
+const outsideHits: string[] = [];
+const outsideServer = Bun.serve({
+  hostname: "127.0.0.1",
+  port: 0,
+  fetch(request) {
+    outsideHits.push(request.url);
+    return new Response(null, { status: 204 });
+  },
+});
+const outsideOrigin = `http://127.0.0.1:${outsideServer.port}`;
 try {
   for (const { width, height } of [
     { width: 1440, height: 950 },
@@ -55,18 +70,32 @@ try {
             siteHtml: string[];
           },
       );
+    // New artifact drafts its prompt in the new-chat composer (nothing is sent)
+    // and opens it; the test then returns to the library where it was.
+    const newArtifact = async (draft: string) => {
+      await page.getByRole("button", { name: "New artifact", exact: true }).click();
+      await page.getByRole("heading", { name: "New chat", exact: true }).waitFor();
+      assert.equal((await activity()).prompts.at(-1), draft);
+      await page.evaluate(() =>
+        (
+          Reflect.get(window, "artifactLibraryRouter") as { history: { back(): void } }
+        ).history.back(),
+      );
+      await page.getByRole("button", { name: "New artifact", exact: true }).waitFor();
+    };
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    const outside: string[] = [];
+    const outside: Request[] = [];
     page.on("request", (request) => {
-      if (/^https?:/.test(request.url()) && !request.url().startsWith(baseUrl))
-        outside.push(request.url());
+      if (/^https?:/.test(request.url()) && new URL(request.url()).origin !== baseUrl)
+        outside.push(request);
     });
-    await page.addInitScript(() => {
+    await page.addInitScript((origin) => {
+      Reflect.set(window, "artifactLibraryOutsideOrigin", origin);
       window.addEventListener("message", (event) => {
         if (event.data === "site-ran") Reflect.set(window, "siteRan", true);
       });
-    });
+    }, outsideOrigin);
     await page.goto(`${baseUrl}/test/artifact-library.html`, { waitUntil: "networkidle" });
     // The first load pays Vite's cold transforms, slow on a busy machine.
     await page
@@ -89,11 +118,7 @@ try {
     await page.locator('[data-slot="content-page"]').evaluate((element) => {
       element.scrollTop = 0;
     });
-    await page.getByRole("button", { name: "New artifact", exact: true }).click();
-    assert.equal(
-      (await activity()).prompts.at(-1),
-      "Help me create a workspace artifact. Ask what I want to make before creating it.",
-    );
+    await newArtifact("Create a workspace artifact: ");
     // The gallery (default) shows a Site as a still: sandboxed with no scripts, no network.
     // Activate this card's viewport gate explicitly, rather than relying on the
     // preceding image scroll to happen to bring a nearby Site into view too.
@@ -102,13 +127,33 @@ try {
     await still.contentFrame().getByText("Weekly active teams by plan.", { exact: true }).waitFor();
     assert.equal((await activity()).siteHtml.length, 1, "the visible Site fetches its HTML once");
     assert.equal(await still.getAttribute("sandbox"), "", "a Site still runs no code");
+    assert.match(
+      (await still.getAttribute("csp")) ?? "",
+      /^default-src 'none';/,
+      "the frame requires the no-network policy before the Site markup is parsed",
+    );
     assert.equal(
       await page.locator("iframe:not([sandbox=''])").count(),
       0,
       "catalog must not run a Site",
     );
     assert.equal(await page.evaluate(() => Reflect.get(window, "siteRan") ?? false), false);
-    assert.deepEqual(outside, [], "a Site still makes no network requests");
+    // Chromium can report the still's image as a request it then blocks for the
+    // policy (failure "csp") before anything leaves the browser. Only that exact
+    // blocked attempt is allowed; any other outside request fails the run.
+    await Promise.all(outside.map((request) => request.response().catch(() => null)));
+    assert.deepEqual(
+      outside
+        .filter(
+          (request) =>
+            request.failure()?.errorText !== "csp" ||
+            request.url() !== `${outsideOrigin}/pixel.png`,
+        )
+        .map((request) => request.url()),
+      [],
+      "a Site still makes no network requests",
+    );
+    assert.deepEqual(outsideHits, [], "a Site still's image never reaches its server");
     assert.equal(
       await page.getByRole("radio", { name: "Gallery", exact: true }).getAttribute("aria-checked"),
       "true",
@@ -127,14 +172,49 @@ try {
     assert.equal(await page.locator("iframe").count(), 0, "the list shows no Site stills");
     assert.equal(await page.locator("[data-slot=list-row]").count(), 7);
     await page.screenshot({ path: `${output}/list-${suffix}.png`, fullPage: true });
+    // Pin the oldest Site, not a conveniently already-first item. Its server
+    // mutation is simulated only by the fixture; these are the production UI.
+    await page
+      .getByRole("button", { name: "More actions for Product analytics", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+    await page
+      .locator('ul[aria-label="Artifacts"] > li')
+      .first()
+      .getByRole("link", { name: "Product analytics", exact: true })
+      .waitFor();
+    await page.screenshot({ path: `${output}/pinned-list-${suffix}.png`, fullPage: true });
+    await page.getByRole("radio", { name: "Gallery", exact: true }).click();
+    assert.equal(
+      await page
+        .locator('ul[aria-label="Artifacts"] > li')
+        .first()
+        .locator('[title="Pinned"]')
+        .count(),
+      1,
+    );
+    await page.screenshot({ path: `${output}/pinned-gallery-${suffix}.png`, fullPage: true });
+    await page.reload({ waitUntil: "networkidle" });
+    await page
+      .locator('ul[aria-label="Artifacts"] > li')
+      .first()
+      .getByRole("link", { name: "Product analytics", exact: true })
+      .waitFor();
+    await page
+      .getByRole("button", { name: "More actions for Product analytics", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Unpin", exact: true }).waitFor();
+    await page.screenshot({ path: `${output}/unpin-menu-${suffix}.png`, fullPage: true });
+    await page.getByRole("menuitem", { name: "Unpin", exact: true }).click();
+    await page
+      .locator('ul[aria-label="Artifacts"] > li')
+      .first()
+      .getByRole("link", { name: "Research export.csv", exact: true })
+      .waitFor();
     await page.getByRole("radio", { name: "Gallery", exact: true }).click();
     await page.getByRole("tab", { name: "Images", exact: true }).click();
     assert.equal(await page.locator("ul[aria-label=Artifacts] > li").count(), 2);
-    await page.getByRole("button", { name: "New artifact", exact: true }).click();
-    assert.equal(
-      (await activity()).prompts.at(-1),
-      "Help me create a workspace image. Ask what it should contain before creating it.",
-    );
+    await newArtifact("Create a workspace image: ");
     await page.getByRole("link", { name: "Project mark", exact: true }).click();
     await page.getByRole("button", { name: "Expand Project mark.svg", exact: true }).waitFor();
     const imageBounds = await page
@@ -155,6 +235,11 @@ try {
     await page.getByRole("button", { name: "Download", exact: true }).click();
     assert.equal((await download).suggestedFilename(), "Project mark.svg");
     await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    assert.equal(
+      await page.getByRole("tab", { name: "Images", exact: true }).getAttribute("aria-selected"),
+      "true",
+      "Artifacts returns to the Images tab",
+    );
     await page.getByRole("link", { name: "Generated cover", exact: true }).click();
     await page.getByRole("button", { name: "Expand Generated cover.svg", exact: true }).waitFor();
     assert.match(
@@ -164,6 +249,7 @@ try {
       /\/test\/artifact-library-image\.svg$/,
     );
     await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    await page.getByRole("tab", { name: "All", exact: true }).click();
     await page.getByRole("link", { name: "Research export.csv", exact: true }).click();
     await page
       .getByText("Preview is not available for this file. Download it to open it.")
@@ -191,10 +277,54 @@ try {
     await page.goto(`${baseUrl}/test/artifact-library.html?session=1`, {
       waitUntil: "networkidle",
     });
+    // An image opens the large viewer, which steps through the panel's list.
     await page.getByRole("button", { name: "Project mark", exact: true }).click();
+    const viewer = page.getByRole("dialog", { name: "Project mark", exact: true });
+    await viewer.getByRole("img", { name: "Project mark", exact: true }).waitFor();
+    const viewerBox = await viewer.boundingBox();
+    assert.ok(viewerBox && viewerBox.width >= width - 1 && viewerBox.height >= height - 1);
+    const viewerPosition = viewer.locator("[data-artifact-viewer-position]");
+    const startPosition = (await viewerPosition.textContent()) ?? "";
+    assert.match(startPosition, /^\d+ of \d+$/);
+    await page.screenshot({ path: `${output}/viewer-${suffix}.png` });
+    // Ctrl + plus zooms the image itself, larger on screen, and Ctrl + 0 fits it again.
+    const viewerImage = viewer.locator("[data-zoom-pan-surface] img");
+    await viewerImage.and(page.locator("[data-zoom-scale]")).waitFor();
+    const fittedScale = Number(await viewerImage.getAttribute("data-zoom-scale"));
+    const fittedWidth = (await viewerImage.boundingBox())?.width ?? 0;
+    await page.keyboard.press("Control+Equal");
+    await page.waitForFunction(
+      (fitted) =>
+        Number(
+          document.querySelector("[data-zoom-pan-surface] img")?.getAttribute("data-zoom-scale"),
+        ) > fitted,
+      fittedScale,
+    );
+    assert.ok(((await viewerImage.boundingBox())?.width ?? 0) > fittedWidth);
+    await page.keyboard.press("Control+Digit0");
+    await page.waitForFunction(
+      (fitted) =>
+        Number(
+          document.querySelector("[data-zoom-pan-surface] img")?.getAttribute("data-zoom-scale"),
+        ) === fitted,
+      fittedScale,
+    );
+    await page.keyboard.press("ArrowRight");
+    await page.waitForFunction(
+      (previous) =>
+        document.querySelector("[data-artifact-viewer-position]")?.textContent !== previous,
+      startPosition,
+    );
+    await page.keyboard.press("ArrowLeft");
+    await page.getByRole("dialog", { name: "Project mark", exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+    await page.locator("[data-artifact-viewer]").waitFor({ state: "detached" });
+    // Its menu's Open still shows it in the panel.
+    await page.getByRole("button", { name: "More actions for Project mark", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Open", exact: true }).click();
     await page.getByRole("button", { name: "Expand Project mark.svg", exact: true }).waitFor();
     assert.equal(await page.getByRole("link", { name: "Artifacts", exact: true }).count(), 0);
-    assert.equal(await page.getByRole("button", { name: "Browse session artifacts" }).count(), 1);
+    assert.equal(await page.getByRole("button", { name: "Back to session artifacts" }).count(), 1);
     const embeddedScroll = await page.locator('[data-slot="content-page"]').evaluate((element) => {
       const bottom = element.getBoundingClientRect().bottom;
       const overflows = element.scrollHeight > element.clientHeight;
@@ -212,9 +342,63 @@ try {
       assert.ok(embeddedScroll.scrollTop > 0, "bottom image and padding remain reachable");
     }
     await page.screenshot({ path: `${output}/embedded-${suffix}.png`, fullPage: true });
-    await page.getByRole("button", { name: "Browse session artifacts" }).click();
+    await page.getByRole("button", { name: "Back to session artifacts" }).click();
     await page.getByRole("heading", { name: "Session artifacts" }).waitFor();
+    await page
+      .getByRole("button", { name: "More actions for Product analytics", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+    await page
+      .locator('ul[aria-label="Artifacts"] > li')
+      .first()
+      .getByRole("button", { name: "Product analytics", exact: true })
+      .waitFor();
+    assert.equal(await page.locator('[title="Pinned"]').count(), 1);
     await page.screenshot({ path: `${output}/session-${suffix}.png`, fullPage: true });
+    await page
+      .getByRole("button", { name: "More actions for Product analytics", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Unpin", exact: true }).click();
+    for (const mode of ["readonly", "pin-error", "pin-pending"]) {
+      await page.goto(`${baseUrl}/test/artifact-library.html?${mode}=1`, {
+        waitUntil: "networkidle",
+      });
+      await page
+        .getByRole("button", { name: "More actions for Product analytics", exact: true })
+        .click();
+      if (mode === "readonly") {
+        assert.equal(await page.getByRole("menuitem", { name: "Pin", exact: true }).count(), 0);
+        await page.keyboard.press("Escape");
+        continue;
+      }
+      await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+      if (mode === "pin-error") {
+        await page
+          .getByRole("button", { name: "More actions for Product analytics", exact: true })
+          .click();
+        await page.getByRole("menuitem", { name: "Pin", exact: true }).waitFor();
+        assert.equal(
+          await page.locator('[title="Pinned"]').count(),
+          0,
+          "failed saves do not mark an artifact pinned",
+        );
+      } else {
+        await page
+          .getByRole("button", { name: "More actions for Product analytics", exact: true })
+          .click();
+        assert.equal(
+          await page
+            .getByRole("menuitem", { name: "Saving…", exact: true })
+            .getAttribute("aria-disabled"),
+          "true",
+        );
+        assert.equal(
+          (await page.evaluate(() => Reflect.get(window, "artifactLibraryFixture").pins)).length,
+          1,
+        );
+      }
+      await page.keyboard.press("Escape");
+    }
     for (const state of ["loading", "empty", "error"]) {
       await page.goto(`${baseUrl}/test/artifact-library.html?state=${state}`, {
         waitUntil: "networkidle",
@@ -254,12 +438,111 @@ try {
       const scrolled = await activity();
       assert.ok(scrolled.metadata.includes(lastId));
       assert.ok(scrolled.downloads.includes(lastId));
+      const beforeOpen = await page
+        .locator('[data-slot="content-page"]')
+        .evaluate((element) => element.scrollTop);
+      await page.getByRole("link", { name: "Gallery image 60", exact: true }).click();
+      await page.getByRole("heading", { name: "Gallery image 60.svg", exact: true }).waitFor();
+      await page.screenshot({ path: `${output}/browse-${view}-${suffix}.png`, fullPage: true });
+      await page.keyboard.press("ArrowLeft");
+      await page.getByRole("heading", { name: "Gallery image 59.svg", exact: true }).waitFor();
+      await page.keyboard.press("ArrowRight");
+      await page.getByRole("heading", { name: "Gallery image 60.svg", exact: true }).waitFor();
+      await page.getByRole("button", { name: "Expand Gallery image 60.svg", exact: true }).click();
+      await page.getByRole("dialog").waitFor();
+      const viewerPath = await page.evaluate(
+        () => Reflect.get(window, "artifactLibraryRouter").state.location.pathname,
+      );
+      await page.keyboard.press("ArrowLeft");
+      assert.equal(
+        await page.evaluate(
+          () => Reflect.get(window, "artifactLibraryRouter").state.location.pathname,
+        ),
+        viewerPath,
+        "lightbox arrows do not navigate the page behind it",
+      );
+      await page.keyboard.press("Escape");
+      // Sibling changes replace the viewer, so one browser Back reaches the list.
+      await page.evaluate(() => Reflect.get(window, "artifactLibraryRouter").history.back());
+      await page.getByRole("link", { name: "Gallery image 60", exact: true }).waitFor();
+      assert.ok(
+        Math.abs(
+          (await page
+            .locator('[data-slot="content-page"]')
+            .evaluate((element) => element.scrollTop)) - beforeOpen,
+        ) <= 1,
+        `${view} browser Back restores scroll position`,
+      );
       console.log(
         `${suffix}/${view}: ${initial.downloads.length} initial downloads for 60 images; offscreen last image loaded after scroll.`,
       );
     }
+    await page.goto(`${baseUrl}/test/artifact-library.html?many=1&pages=1`, {
+      waitUntil: "networkidle",
+    });
+    await page.getByRole("tab", { name: "Images", exact: true }).click();
+    await page.getByRole("searchbox", { name: "Search artifacts by title" }).fill("Gallery");
+    await page.getByRole("button", { name: "Load more", exact: true }).click();
+    await page.getByRole("link", { name: "Gallery image 40", exact: true }).waitFor();
+    await page
+      .getByRole("link", { name: "Gallery image 40", exact: true })
+      .scrollIntoViewIfNeeded();
+    const loadedTop = await page
+      .locator('[data-slot="content-page"]')
+      .evaluate((element) => element.scrollTop);
+    await page.getByRole("link", { name: "Gallery image 40", exact: true }).click();
+    await page.getByRole("heading", { name: "Gallery image 40.svg", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Next artifact", exact: true }).click();
+    await page.getByRole("heading", { name: "Gallery image 41.svg", exact: true }).waitFor();
+    await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    await page.getByRole("link", { name: "Gallery image 40", exact: true }).waitFor();
+    assert.equal(
+      await page.getByRole("tab", { name: "Images", exact: true }).getAttribute("aria-selected"),
+      "true",
+    );
+    assert.equal(
+      await page.getByRole("searchbox", { name: "Search artifacts by title" }).inputValue(),
+      "Gallery",
+    );
+    assert.equal(
+      await page.locator('ul[aria-label="Search results"] > li').count(),
+      60,
+      "Next's loaded page is retained on return",
+    );
+    assert.ok(
+      Math.abs(
+        (await page
+          .locator('[data-slot="content-page"]')
+          .evaluate((element) => element.scrollTop)) - loadedTop,
+      ) <= 1,
+      "paginated filtered query restores its place",
+    );
+    await page.screenshot({ path: `${output}/restored-${suffix}.png`, fullPage: true });
+    // A viewer can repopulate an invalidated catalog with fewer pages than the
+    // library retained. Back must wait for all retained rows before scrolling.
+    await page.getByRole("link", { name: "Gallery image 40", exact: true }).click();
+    await page.getByRole("heading", { name: "Gallery image 40.svg", exact: true }).waitFor();
+    await page.evaluate(async () => {
+      const router = Reflect.get(window, "artifactLibraryRouter");
+      const search = router.state.location.search;
+      await router.navigate({ search: { ...search, browse: undefined }, replace: true });
+      Reflect.get(window, "resetArtifactLibraryCatalog")();
+      await router.navigate({ search, replace: true });
+    });
+    await page.getByRole("status").filter({ hasText: "40 of 40 loaded" }).waitFor();
+    await page.getByRole("link", { name: "Artifacts", exact: true }).click();
+    await page.getByRole("link", { name: "Gallery image 60", exact: true }).waitFor();
+    assert.ok(
+      Math.abs(
+        (await page
+          .locator('[data-slot="content-page"]')
+          .evaluate((element) => element.scrollTop)) - loadedTop,
+      ) <= 1,
+      "a partial viewer cache does not consume the retained library scroll position",
+    );
     assert.deepEqual(errors, []);
     await context.close();
+    assert.deepEqual(outsideHits, [], "no Site still reached the network during the run");
     console.log(
       `Artifact library ${suffix}: gallery with Site stills, list toggle, CTA, type tabs, viewport-gated thumbnails, search, filters, image/lightbox/download, session scrolling, empty/error/loading, accessibility passed.`,
     );
@@ -267,4 +550,5 @@ try {
 } finally {
   await browser.close();
   await web.stop();
+  outsideServer.stop(true);
 }

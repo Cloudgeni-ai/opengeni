@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { AgentBrowserJsonRunner, EphemeralChromiumContextPool } from "../src";
+import { ManagedBrowserRunner, EphemeralChromiumContextPool } from "../src";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 e2e(
@@ -42,13 +42,8 @@ e2e(
     const pool = new EphemeralChromiumContextPool({
       authorityKey: authority,
       launch: () =>
-        AgentBrowserJsonRunner.create({
-          namespace: `c${randomUUID().slice(0, 6)}`,
-          sessionName: "s",
-          socketDirectory: join(directory, "socket"),
+        ManagedBrowserRunner.create({
           profileDirectory: join(directory, "profile"),
-          downloadDirectory: join(directory, "downloads"),
-          screenshotDirectory: join(directory, "screenshots"),
           headed: false,
           ...(process.env.OPENGENI_BROWSER_EXECUTABLE
             ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }

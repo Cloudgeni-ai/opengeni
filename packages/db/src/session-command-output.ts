@@ -18,6 +18,35 @@ export type SessionCommandOutputInput = {
   chunk: string;
 };
 
+/** Every output chunk of a command carries a client event id with this prefix.
+ * Readers bound their scan by it (byte order), so it must never change. */
+export function commandOutputClientEventIdPrefix(commandId: string) {
+  return `command-output:${commandId}:`;
+}
+
+/** One provider-frame identity scheme for attached reads, push and reconciliation. */
+export function createConnectedCommandOutputCapture(
+  db: Database,
+  ids: { accountId: string; workspaceId: string; sessionId: string },
+  publish?: (events: SessionEvent[]) => Promise<void>,
+) {
+  return async (
+    commandId: string,
+    frames: Array<{ sequence: string; stream: "stdout" | "stderr"; chunk: string }>,
+  ) => {
+    for (const frame of frames) {
+      const events = await appendSessionCommandOutput(db, {
+        ...ids,
+        commandId,
+        chunkId: `op-frame:${frame.sequence}`,
+        stream: frame.stream,
+        chunk: frame.chunk,
+      });
+      if (events.length) await publish?.(events).catch(() => undefined);
+    }
+  };
+}
+
 /** Capture is independent of terminal observation and remains valid after the
  * launching attempt ends. Only an exact retained process/background command in
  * this session is eligible; this helper never creates command authority. */
@@ -72,7 +101,7 @@ export async function appendSessionCommandOutput(
       let end = Math.min(offset + 16_384, input.chunk.length);
       if (end < input.chunk.length && /[\uD800-\uDBFF]/u.test(input.chunk[end - 1]!)) end -= 1;
       parts.push({
-        clientEventId: `command-output:${input.commandId}:${input.chunkId}:${input.stream}:${part}`,
+        clientEventId: `${commandOutputClientEventIdPrefix(input.commandId)}${input.chunkId}:${input.stream}:${part}`,
         chunk: input.chunk.slice(offset, end),
       });
       offset = end;

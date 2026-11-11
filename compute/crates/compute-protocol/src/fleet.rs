@@ -1,0 +1,770 @@
+//! The control service's host API, and the envelope on the service's
+//! requests to hosts
+//! ([ADR 18](../../docs/adr/0018-the-control-service-leases-and-fences.md)).
+//!
+//! A host sends JSON over HTTPS to the service: it registers
+//! ([`Register`]), renews its lease ([`Renew`]) and, between renewals,
+//! reports what it can take on ([`Report`]). The service sends the host
+//! agent's own requests ([`crate::host::Request`]) over mutual TLS, each
+//! wrapped in an [`Envelope`] naming the registration, the latest renewal
+//! and the owner epoch it was sent under, so a host refuses one that is
+//! too old or meant for an earlier registration or owner. The host answers
+//! each with an [`Answer`] saying when it answered, so the service can
+//! order two answers about one sandbox that arrive out of order.
+
+use serde::{Deserialize, Serialize};
+
+use crate::host::{Id, Reply, Request};
+
+mod pointers;
+
+pub use pointers::{
+    KeptPointer, POINTER_READ_PATH, POINTER_WRITE_PATH, PointerFound, PointerRead, PointerWrite,
+    PointerWritten, READS_PACKS_HEADER,
+};
+
+/// Where the service's host API lives: registrations, renewals and reports
+/// are posted under it.
+pub const REGISTER_PATH: &str = "/v1/hosts/register";
+/// See [`REGISTER_PATH`].
+pub const RENEW_PATH: &str = "/v1/hosts/renew";
+/// See [`REGISTER_PATH`].
+pub const REPORT_PATH: &str = "/v1/hosts/report";
+/// See [`REGISTER_PATH`]: where a host asks for its agent-link tokens
+/// ([`LinkTokensAsked`]).
+pub const LINK_TOKENS_PATH: &str = "/v1/hosts/link-tokens";
+/// See [`REGISTER_PATH`]: where a host gets its certificate
+/// ([`CertificateAsked`]), the one route a caller without a certificate
+/// may use.
+pub const CERTIFICATE_PATH: &str = "/v1/hosts/certificate";
+/// See [`REGISTER_PATH`]: where a host posts its metrics, an OTLP/HTTP
+/// metrics export in JSON whose resource names the host (`host.name`),
+/// for the service to pass on to its metrics store.
+pub const METRICS_PATH: &str = "/v1/hosts/metrics";
+
+/// How long a lease lasts and how often it is renewed, as the service
+/// tells a host when it registers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Terms {
+    /// How long VMs may run after the host sent a renewal the service
+    /// accepted.
+    pub term_ms: u64,
+    /// How much longer than the term the service waits before it gives up
+    /// on a host.
+    pub margin_ms: u64,
+    /// How often the host renews.
+    pub renew_every_ms: u64,
+    /// How often a host without a registration tries to register.
+    pub register_every_ms: u64,
+    /// How many renewals old a request may be before the host refuses it.
+    pub request_window: u64,
+    /// How long after the guard last fed it the kernel watchdog stops the
+    /// machine, on the host's clock: whole seconds.
+    pub watchdog_ms: u64,
+    /// How long the machine takes, at most, from the watchdog firing to no
+    /// VM running.
+    pub stop_ms: u64,
+    /// How far, in parts per million, the host's clock may run fast or
+    /// slow: the margin covers this much on both ends.
+    pub rate_error_ppm: u32,
+}
+
+/// What a host is. It registers with it, and tells it again with what it
+/// can take on ([`Capacity::info`]), since an agent restarted or upgraded
+/// in place keeps its registration while what it is configured with (its
+/// address, memory, processors, disk or offers) may have changed: the
+/// service takes all of that, keeping the name and boot the host
+/// registered with ([`HostInfo::told_again`]). Fields it does not know are
+/// ignored, so hosts can describe more than an older service reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostInfo {
+    /// Its name, unique in the fleet, such as its instance name: the
+    /// service finds a host that comes back by it.
+    pub name: String,
+    /// Where the service reaches its API (`host:port`, mutual TLS).
+    pub address: String,
+    /// Its failure zone; placement spreads sandboxes over zones.
+    pub zone: String,
+    /// How it backs guest memory (`bare_metal` or `nested`): a memory
+    /// image restores only on a host with the same profile and CPU
+    /// template.
+    pub profile: String,
+    /// The CPU model its guests see.
+    pub cpu_template: String,
+    /// Memory it gives sandboxes, in MiB.
+    pub memory_mib: u64,
+    /// Processor time it guarantees sandboxes at once, in millicores, as
+    /// its agent started. What it guarantees now is
+    /// [`Capacity::cpu_millis`].
+    pub cpu_millis: u64,
+    /// State filesystem size at agent startup, in MiB. Restart the agent
+    /// after resizing the filesystem to refresh this description.
+    pub disk_mib: u64,
+    /// What it offers sandboxes that ask to reach it
+    /// ([`crate::host::SandboxConfig::reach`]), by name, sorted: placement
+    /// puts such a sandbox only on a host that offers all it asks for.
+    /// Missing from what a host of an earlier release sends: none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub offers: Vec<String>,
+    /// The boot of its machine it registers from. A restart ends every VM
+    /// on the machine: once this registration has lapsed, a machine its
+    /// cloud says runs a later boot (on Compute Engine, the instance's
+    /// `compute/boot` guest attribute, which the host writes as it
+    /// starts) runs nothing of it, so the service gives up on it without
+    /// fencing it or waiting for it. A host names only a boot its cloud
+    /// took. `None` from a host that did not tell, which is fenced as
+    /// before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot: Option<Boot>,
+}
+
+impl HostInfo {
+    /// This description, told again by a host that registered with
+    /// `registered`: all of it but the name, which identifies the host,
+    /// and the boot, which the service compares with what the host's cloud
+    /// says ran since it registered.
+    #[must_use]
+    pub fn told_again(&self, registered: &HostInfo) -> HostInfo {
+        HostInfo {
+            name: registered.name.clone(),
+            boot: registered.boot.clone(),
+            ..self.clone()
+        }
+    }
+}
+
+/// One boot of a host's machine, as its cloud was told of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Boot {
+    /// What the kernel names it (Linux `/proc/sys/kernel/random/boot_id`),
+    /// which no other boot shares.
+    pub id: String,
+    /// Which of the machine's boots it is, as its host counted them: one
+    /// more than the boot its cloud named when the host first told it of
+    /// this one, or 1 if it named none. Counted, not timed, so that no
+    /// clock set back can make an earlier boot look later.
+    pub nth: u64,
+}
+
+impl Boot {
+    /// Whether this boot came after `earlier` on the same machine: another
+    /// one, counted later. Telling the order matters: a cloud may answer
+    /// with an earlier boot than a registration's, written before it (or
+    /// still there, if the host could not write its own), and that machine
+    /// may still run what it registered. A host names a boot only once its
+    /// cloud took it, and counts each boot on from what its cloud then
+    /// named, so while that boot runs its cloud names no other one counted
+    /// later; one counted lower or the same proves nothing.
+    #[must_use]
+    pub fn follows(&self, earlier: &Boot) -> bool {
+        self.id != earlier.id && self.nth > earlier.nth
+    }
+}
+
+/// Ready clones a host holds of one image and shape (see the host's ready
+/// pool). Two images of the same shape are two entries: a create gets a
+/// clone only of the image it asks for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyClones {
+    /// The image the clones start from, by the name the fleet gives it.
+    pub image: String,
+    pub vcpus: u32,
+    pub memory_mib: u32,
+    pub count: u32,
+}
+
+/// What a host can take on now. Fields it does not know are ignored, so
+/// hosts can report more than an older service reads.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capacity {
+    /// Memory free for sandboxes above the host's buffer, in MiB.
+    pub memory_free_mib: u64,
+    /// Memory in MiB beyond [`Capacity::memory_free_mib`] that a new
+    /// sandbox could take now by the host ending idle VM processes whose
+    /// state is saved, as its admission counts it (ADR 4). Placement and
+    /// scaling count it as free. Missing from what a host or the service of
+    /// an earlier release wrote, which then counts none.
+    #[serde(default)]
+    pub memory_reclaimable_mib: u64,
+    /// Processor time it guarantees sandboxes at once now, in
+    /// millicores: less than [`HostInfo::cpu_millis`] while what else runs
+    /// on the host takes more of its processors than it keeps back.
+    pub cpu_millis: u64,
+    /// Processor time a wake can still reserve, in millicores.
+    pub cpu_free_millis: u64,
+    /// Unbooked disk headroom after worst-case writes and reserve, in MiB.
+    /// This is not filesystem free space. The wire name is retained for
+    /// hosts and services of earlier releases.
+    pub disk_free_mib: u64,
+    /// Actual filesystem space available at the host's last reading, in
+    /// MiB, before bookings and reserve. Missing from older hosts or when
+    /// no disk reading is available; absence is unknown, not zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_available_mib: Option<u64>,
+    /// Disk in MiB beyond [`Capacity::disk_free_mib`] that a new sandbox
+    /// could take now by the host freeing what it keeps without losing
+    /// anything, as its admission counts it (ADR 30). Placement counts it
+    /// as free. Missing from what a host or the service of an earlier
+    /// release wrote, which then counts none.
+    #[serde(default)]
+    pub disk_reclaimable_mib: u64,
+    /// Its ready clones, per shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ready: Vec<ReadyClones>,
+    /// Sandboxes whose VM runs.
+    pub awake: u32,
+    /// Sandboxes it holds.
+    pub sandboxes: u32,
+    /// The digest of the guest programs it builds sandbox images with now
+    /// (`sha256:<hex>`, what its bundle's base image is named by): the
+    /// service builds each release's images with the programs most live
+    /// hosts say. Told with what it can take on rather than in
+    /// [`HostInfo`], since an agent upgraded in place keeps its
+    /// registration. `None` from a host that builds none, or of an earlier
+    /// release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<String>,
+    /// Whether it keeps the pointers to its stored copies in the service
+    /// ([`PointerRead`], ADR 25) rather than in the object store itself.
+    /// Once the service holds a fleet's pointers it refuses a host that
+    /// does not, whose writes it would never see. Told here for the same
+    /// reason as [`Capacity::guest`]; `false` from a host of an earlier
+    /// release.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pointers_in_service: bool,
+    /// Whether it reads copies whose chunks are in packs (ADR 31). Hosts
+    /// write them only once every live host does. Told here for the same
+    /// reason as [`Capacity::guest`]; `false` from a host of an earlier
+    /// release.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reads_packs: bool,
+    /// Whether it sets aside, rather than drops, a copy the service rules
+    /// [`Verdict::SetAside`]. Told here for the same reason as
+    /// [`Capacity::guest`]; `false` from a host of an earlier release,
+    /// which is told to drop such a copy instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sets_aside: bool,
+    /// What the host is now, as it would register: told here for the same
+    /// reason as [`Capacity::guest`], so that a host whose configuration
+    /// changed under a kept registration is placed on what it is. The
+    /// service keeps it with the host's description
+    /// ([`Capacity::split`]). `None` from a host of an earlier release,
+    /// whose registration then stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<HostInfo>,
+}
+
+impl Capacity {
+    /// What it can take on, without the description it carries, and that
+    /// description: the service keeps the one with the host's description,
+    /// the other with what it can take on.
+    #[must_use]
+    pub fn split(&self) -> (Capacity, Option<HostInfo>) {
+        let mut capacity = self.clone();
+        let info = capacity.info.take();
+        (capacity, info)
+    }
+}
+
+/// A sandbox a registering host still has, under the owner epoch its
+/// record holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Held {
+    pub id: Id,
+    pub owner_epoch: u64,
+}
+
+/// A host registers: when it starts without a registration, and again
+/// whenever the service no longer knows the one it held.
+///
+/// Every copy of one attempt is the same request: it is sent again,
+/// unchanged, until it is answered, and the service answers every copy of
+/// it with the answer it stored for the first, so a lost answer never
+/// starts the registration over. Only what it lists may shrink between
+/// attempts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Register {
+    /// The host id it had, if it registered before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<u64>,
+    /// The attempt's number, which no earlier run of the agent used (each
+    /// run numbers its attempts on from a random start).
+    pub attempt: u64,
+    pub info: HostInfo,
+    pub capacity: Capacity,
+    /// Every sandbox it still has.
+    pub held: Vec<Held>,
+}
+
+/// What a host does with a sandbox it listed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "verdict", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Verdict {
+    /// Keep the local copy and run it under `owner_epoch` from now on.
+    Keep { owner_epoch: u64 },
+    /// It is still this host's, but its copy is older than the latest
+    /// archive: drop the copy and adopt the archive under `owner_epoch`,
+    /// restoring its memory only with `whole`, as
+    /// [`Request::Adopt`](crate::host::Request::Adopt) does.
+    Refetch {
+        owner_epoch: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        whole: bool,
+    },
+    /// Drop the local copy: it belongs to someone else, or no longer
+    /// exists.
+    Drop,
+    /// Keep the local copy's files aside, out of the fleet's way, and
+    /// forget the sandbox: the host was declared gone while it owned it,
+    /// and the sandbox went on since from an older stored copy, so the
+    /// local copy may be the newer one. Sent only to a host that says it
+    /// can ([`Capacity::sets_aside`]).
+    SetAside,
+}
+
+/// The service's verdict on one listed sandbox. (Serde cannot refuse
+/// unknown fields next to a flattened one; [`Verdict`] refuses its own.)
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ruling {
+    pub id: Id,
+    #[serde(flatten)]
+    pub verdict: Verdict,
+    /// For a sandbox it keeps or refetches that runs Opengeni's agent, the
+    /// agent link for the owner epoch it names: a new epoch is a new
+    /// ticket ([ADR 21](../../docs/adr/0021-opengeni-runs-natively-its-agent-behind-the-hosts-link.md)).
+    /// `None` for any other, whose copy then runs with no link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<crate::link::AgentLink>,
+}
+
+/// The answer to a [`Register`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Registered {
+    /// Registered under `epoch`. The host drops, and confirms gone, every
+    /// listed sandbox the rulings do not keep, records the new owner
+    /// epochs of the rest, and only then lets them run again.
+    Registered {
+        host: u64,
+        epoch: u64,
+        terms: Terms,
+        rulings: Vec<Ruling>,
+    },
+    /// The host's previous registration may still be running VMs: it
+    /// registers again once that one lapses.
+    StillLive { retry_after_ms: u64 },
+}
+
+/// A host renews the registration it holds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Renew {
+    pub host: u64,
+    pub epoch: u64,
+    /// Its number under the registration, from 1. The service stamps its
+    /// requests to the host with the highest it accepted.
+    pub seq: u64,
+    /// What the host can take on; `None` while its agent is still taking
+    /// back the sandboxes an earlier run left, when the service keeps what
+    /// it last heard. A restarted agent renews the lease it holds from the
+    /// moment it starts, since taking them back can outlast the term.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<Capacity>,
+}
+
+/// The answer to a [`Renew`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Renewed {
+    /// Accepted: the host may run its VMs until the time it sent this
+    /// renewal plus the term.
+    Renewed { epoch: u64, seq: u64 },
+    /// The service does not know this registration (the host was given up
+    /// on): the host registers again.
+    Unknown,
+}
+
+/// What a host can take on, reported between renewals when it changes (at
+/// most once a second). It extends nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Report {
+    pub host: u64,
+    pub epoch: u64,
+    pub capacity: Capacity,
+}
+
+/// What the service's request to a host was sent under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sent {
+    /// The registration it is for.
+    pub host_epoch: u64,
+    /// The highest renewal number the service had accepted from the host.
+    pub stamp: u64,
+    /// The sandbox's owner epoch, for a request about one sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_epoch: Option<u64>,
+}
+
+/// One request from the service to a host: one JSON line.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Envelope {
+    pub sent: Sent,
+    pub request: Request,
+}
+
+/// When a host answered: under which registration, and the number of the
+/// last renewal it had sent under it. The host stores that number before
+/// it sends the renewal, so it never goes back, and it is at least the
+/// last one the service accepted. Of two answers about one sandbox, one
+/// under a later registration, or after a later renewal of the same one,
+/// was given later; two between the same renewals do not order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Answered {
+    /// The registration, if the host held one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_epoch: Option<u64>,
+    /// The last renewal sent under it.
+    pub seq: u64,
+}
+
+impl Answered {
+    /// Whether `self` was given after `than`.
+    #[must_use]
+    pub fn later_than(self, than: Self) -> bool {
+        match (self.host_epoch, than.host_epoch) {
+            (Some(epoch), Some(than_epoch)) if epoch != than_epoch => epoch > than_epoch,
+            (Some(_), None) => true,
+            (None, _) => false,
+            _ => self.seq > than.seq,
+        }
+    }
+}
+
+/// A host's answer to one [`Envelope`]: one JSON line.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Answer {
+    pub answered: Answered,
+    pub reply: Reply,
+}
+
+/// A host asks for a token to present to each of `gateways` for its agent
+/// links ([`crate::link`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkTokensAsked {
+    /// The host's name, which its certificate must hold.
+    pub name: String,
+    pub gateways: Vec<String>,
+}
+
+/// The answer to [`LinkTokensAsked`]: one token per gateway asked for, in
+/// the same order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkTokens {
+    pub tokens: Vec<LinkToken>,
+}
+
+/// A host's token for one gateway.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkToken {
+    pub gateway: String,
+    pub token: String,
+    /// When it stops being valid, in milliseconds since the Unix epoch.
+    pub expires_at_ms: u64,
+}
+
+impl std::fmt::Debug for LinkToken {
+    /// Never shows the token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkToken")
+            .field("gateway", &self.gateway)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A host asks for a certificate: the service issues one for the name the
+/// proof shows, for the key that signed `csr`, whatever `csr` names.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertificateAsked {
+    /// A PKCS#10 certificate request, PEM; only its public key is used.
+    pub csr: String,
+    pub proof: Proof,
+}
+
+impl std::fmt::Debug for CertificateAsked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CertificateAsked")
+            .field("proof", &self.proof)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What shows which host is asking.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Proof {
+    /// A Google Compute Engine instance identity token for the service's
+    /// host URL, `format=full`: it names the instance.
+    GceIdentity { token: String },
+    /// The client certificate the request came with, current and of the
+    /// hosts' authority: it names the host.
+    Certificate,
+}
+
+impl std::fmt::Debug for Proof {
+    /// Never shows the token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GceIdentity { .. } => f.write_str("GceIdentity"),
+            Self::Certificate => f.write_str("Certificate"),
+        }
+    }
+}
+
+/// The answer to [`CertificateAsked`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostCertificate {
+    /// The name it is for, its common name and only DNS name.
+    pub name: String,
+    /// The certificate, PEM.
+    pub certificate: String,
+    /// The authorities the service trusts for hosts, PEM: what the host
+    /// trusts the service by.
+    pub authorities: String,
+    /// When it stops being valid, in milliseconds since the Unix epoch.
+    pub not_after_ms: u64,
+    /// Its serial number in hexadecimal, as `openssl x509 -serial` prints
+    /// it.
+    pub serial: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host from before the boot was named describes itself without it,
+    /// and one that knows its boot sends it under `boot`.
+    #[test]
+    fn a_host_names_its_boot_only_when_it_knows_it() {
+        let older = r#"{"name":"h","address":"h:1","zone":"z","profile":"nested",
+            "cpu_template":"none","memory_mib":1,"cpu_millis":1,"disk_mib":1}"#;
+        let info: HostInfo = serde_json::from_str(older).unwrap();
+        assert_eq!(info.boot, None);
+        assert!(!serde_json::to_string(&info).unwrap().contains("boot"));
+        let named = HostInfo {
+            boot: Some(Boot {
+                id: "8c5f0e9e-4f4b-4b5e-9a49-1c0b7d0b6a11".into(),
+                nth: 7,
+            }),
+            ..info
+        };
+        let wire = serde_json::to_value(&named).unwrap();
+        assert_eq!(
+            wire["boot"],
+            serde_json::json!({"id": "8c5f0e9e-4f4b-4b5e-9a49-1c0b7d0b6a11", "nth": 7})
+        );
+        assert_eq!(serde_json::from_value::<HostInfo>(wire).unwrap(), named);
+    }
+
+    /// A boot follows another only if it is another, counted later: the
+    /// same one, or one counted earlier or the same, does not.
+    #[test]
+    fn a_boot_follows_only_an_earlier_other_boot() {
+        let boot = |id: &str, nth| Boot { id: id.into(), nth };
+        let first = boot("a", 3);
+        assert!(boot("b", 4).follows(&first));
+        assert!(!first.follows(&first));
+        assert!(!first.follows(&boot("b", 4)));
+        assert!(!boot("b", 3).follows(&first), "not counted later");
+        assert!(!boot("b", 1).follows(&first), "counted earlier");
+        assert!(!boot("a", 4).follows(&first), "the same boot");
+    }
+
+    /// A host tells what it is with what it can take on, which a service
+    /// of an earlier release ignores and one of this release keeps apart,
+    /// under the name and boot the host registered with; a host of an
+    /// earlier release tells nothing.
+    #[test]
+    fn a_host_tells_what_it_is_now_with_what_it_can_take_on() {
+        let older = r#"{"memory_free_mib":1,"cpu_millis":1,"cpu_free_millis":1,
+            "disk_free_mib":1,"awake":0,"sandboxes":0}"#;
+        let capacity: Capacity = serde_json::from_str(older).unwrap();
+        assert_eq!(capacity.disk_available_mib, None);
+        assert!(
+            serde_json::to_value(&capacity)
+                .unwrap()
+                .get("disk_available_mib")
+                .is_none()
+        );
+        assert_eq!(capacity.split(), (capacity.clone(), None));
+        let registered: HostInfo = serde_json::from_str(
+            r#"{"name":"h","address":"h:1","zone":"z","profile":"nested",
+            "cpu_template":"none","memory_mib":1,"cpu_millis":1,"disk_mib":1,
+            "boot":{"id":"b","nth":2}}"#,
+        )
+        .unwrap();
+        let now = HostInfo {
+            name: "renamed".into(),
+            address: "h:2".into(),
+            memory_mib: 2,
+            offers: vec!["previews".into()],
+            boot: None,
+            ..registered.clone()
+        };
+        let told = Capacity {
+            info: Some(now.clone()),
+            ..capacity.clone()
+        };
+        let wire = serde_json::to_value(&told).unwrap();
+        assert_eq!(wire["info"]["memory_mib"], 2);
+        assert_eq!(serde_json::from_value::<Capacity>(wire).unwrap(), told);
+        assert_eq!(told.split(), (capacity, Some(now.clone())));
+        assert_eq!(
+            now.told_again(&registered),
+            HostInfo {
+                name: "h".into(),
+                boot: registered.boot.clone(),
+                ..now
+            }
+        );
+    }
+
+    #[test]
+    fn filesystem_space_is_distinct_from_booking_headroom_on_the_wire() {
+        for available in [0, 95_000] {
+            let capacity = Capacity {
+                disk_free_mib: 1,
+                disk_available_mib: Some(available),
+                ..Capacity::default()
+            };
+            let wire = serde_json::to_value(&capacity).unwrap();
+            assert_eq!(wire["disk_free_mib"], 1);
+            assert_eq!(wire["disk_available_mib"], available);
+            assert_eq!(serde_json::from_value::<Capacity>(wire).unwrap(), capacity);
+        }
+    }
+
+    #[test]
+    fn a_certificate_request_names_its_proof() {
+        let asked: CertificateAsked = serde_json::from_str(
+            r#"{"csr":"PEM","proof":{"kind":"gce_identity","token":"a.b.c"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            asked.proof,
+            Proof::GceIdentity {
+                token: "a.b.c".into()
+            }
+        );
+        let renewal: CertificateAsked =
+            serde_json::from_str(r#"{"csr":"PEM","proof":{"kind":"certificate"}}"#).unwrap();
+        assert_eq!(renewal.proof, Proof::Certificate);
+        for bad in [
+            r#"{"csr":"PEM","proof":{"kind":"password","token":"x"}}"#,
+            r#"{"csr":"PEM","proof":{"kind":"certificate"},"name":"other"}"#,
+            r#"{"csr":"PEM"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<CertificateAsked>(bad).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(!format!("{asked:?}").contains("a.b.c"), "no token in logs");
+    }
+
+    #[test]
+    fn wire_forms_are_stable() {
+        let ruling: Ruling = serde_json::from_str(
+            r#"{"id":"0193f3c27a1b7cde8f00112233445566","verdict":"keep","owner_epoch":4}"#,
+        )
+        .unwrap();
+        assert_eq!(ruling.verdict, Verdict::Keep { owner_epoch: 4 });
+        let renewed: Renewed = serde_json::from_str(r#"{"result":"unknown"}"#).unwrap();
+        assert_eq!(renewed, Renewed::Unknown);
+        let envelope: Envelope = serde_json::from_str(
+            r#"{"sent":{"host_epoch":3,"stamp":9,"owner_epoch":2},"request":{"op":"status"}}"#,
+        )
+        .unwrap();
+        assert_eq!(envelope.sent.owner_epoch, Some(2));
+        assert!(matches!(envelope.request, Request::Status));
+        let starting: Renew = serde_json::from_str(r#"{"host":1,"epoch":1,"seq":1}"#).unwrap();
+        assert_eq!(
+            starting.capacity, None,
+            "a starting agent renews before it can say what it can take on"
+        );
+        assert_eq!(
+            serde_json::to_string(&starting).unwrap(),
+            r#"{"host":1,"epoch":1,"seq":1}"#
+        );
+        let register: Register = serde_json::from_str(
+            r#"{"attempt":7,"info":{"name":"h","address":"h:1","zone":"z","profile":"nested","cpu_template":"t","memory_mib":1,"disk_mib":1,"cpu_millis":1000},"capacity":{"memory_free_mib":1,"disk_free_mib":1,"cpu_millis":1000,"cpu_free_millis":1000,"awake":0,"sandboxes":0},"held":[]}"#,
+        )
+        .unwrap();
+        assert_eq!((register.host, register.attempt), (None, 7));
+        assert!(
+            serde_json::from_str::<Register>(
+                r#"{"attempt":7,"info":{"name":"h","address":"h:1","zone":"z","profile":"nested","cpu_template":"t","memory_mib":1,"disk_mib":1},"capacity":{"memory_free_mib":1,"disk_free_mib":1,"awake":0,"sandboxes":0},"held":[]}"#,
+            )
+            .is_err(),
+            "a registration says what processor time the host has"
+        );
+    }
+
+    #[test]
+    fn ready_clones_of_two_images_of_one_shape_stay_apart() {
+        let capacity: Capacity = serde_json::from_str(
+            r#"{"memory_free_mib":1,"disk_free_mib":1,"cpu_millis":1000,"cpu_free_millis":1000,"ready":[{"image":"python","vcpus":2,"memory_mib":1024,"count":3},{"image":"node","vcpus":2,"memory_mib":1024,"count":1}],"awake":0,"sandboxes":0}"#,
+        )
+        .unwrap();
+        let images: Vec<(&str, u32)> = capacity
+            .ready
+            .iter()
+            .map(|ready| (ready.image.as_str(), ready.count))
+            .collect();
+        assert_eq!(images, [("python", 3), ("node", 1)]);
+        let again: Capacity =
+            serde_json::from_str(&serde_json::to_string(&capacity).unwrap()).unwrap();
+        assert_eq!(again, capacity);
+        assert!(
+            serde_json::from_str::<ReadyClones>(r#"{"vcpus":2,"memory_mib":1024,"count":3}"#)
+                .is_err(),
+            "a report names its image"
+        );
+    }
+
+    #[test]
+    fn answers_order_by_registration_then_renewal() {
+        let at = |host_epoch, seq| Answered { host_epoch, seq };
+        assert!(at(Some(2), 1).later_than(at(Some(1), 9)));
+        assert!(!at(Some(1), 9).later_than(at(Some(2), 1)));
+        assert!(at(Some(1), 4).later_than(at(Some(1), 3)));
+        assert!(
+            !at(Some(1), 3).later_than(at(Some(1), 3)),
+            "between the same renewals"
+        );
+        assert!(at(Some(1), 0).later_than(at(None, 5)));
+        assert!(
+            !at(None, 5).later_than(at(None, 1)),
+            "unregistered answers never order"
+        );
+        let answer: Answer = serde_json::from_str(
+            r#"{"answered":{"host_epoch":3,"seq":4},"reply":{"result":"done"}}"#,
+        )
+        .unwrap();
+        assert_eq!(answer.answered, at(Some(3), 4));
+    }
+}

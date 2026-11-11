@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, readFile } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import { fakeCapabilities } from "../../packages/react/test/sandbox-fixtures";
 
@@ -40,8 +41,6 @@ describe("production session conditional loading", () => {
   let browser: Browser;
   let baseUrl: string;
   let panelAsset: string;
-  let attachmentAsset: string;
-  let variableSetAsset: string;
   let workspaceFilesAsset: string;
   const evidenceDir = `${repoRoot}/.agent/evidence/session-lazy-panels`;
 
@@ -57,11 +56,10 @@ describe("production session conditional loading", () => {
     const manifest = JSON.parse(
       await readFile(`${repoRoot}/apps/web/dist/.vite/manifest.json`, "utf8"),
     ) as Record<string, { file: string; name?: string; imports?: string[]; isEntry?: boolean }>;
-    panelAsset = Object.values(manifest).find(
-      (entry) => entry.name === "session-conditional-panels",
-    )!.file;
-    attachmentAsset = manifest["src/components/session/message-resource-attachments.tsx"]!.file;
-    variableSetAsset = manifest["src/components/session/session-variable-set-picker.tsx"]!.file;
+    const panelKey = Object.keys(manifest).find(
+      (key) => manifest[key]?.name === "session-conditional-panels",
+    )!;
+    panelAsset = manifest[panelKey]!.file;
     const filesKey = "../../packages/react/src/components/sandbox-files.tsx";
     workspaceFilesAsset = manifest[filesKey]!.file;
     const eager = new Set<string>();
@@ -71,13 +69,30 @@ describe("production session conditional loading", () => {
       for (const dependency of manifest[key]?.imports ?? []) visit(dependency);
     };
     for (const [key, entry] of Object.entries(manifest))
-      if (entry.isEntry || key === "src/routes/session.tsx") visit(key);
+      if (entry.isEntry || key === "src/routes/session-route.tsx") visit(key);
     expect(eager.has(filesKey)).toBe(false);
-    // The Variable Set editor is its own chunk, outside the session's static graph.
-    expect(eager.has("src/components/session/session-variable-set-picker.tsx")).toBe(false);
+    // Shared conversation state must not pull the embedded view's optional
+    // question/command implementations into the direct session's static graph.
+    expect(eager.has(panelKey)).toBe(false);
+    // The mobile menu is shared with settings; its icon must not bring the
+    // lazy payment and organization-identity glyphs into a direct session.
+    const eagerSource = (
+      await Promise.all(
+        [...eager].map((key) =>
+          readFile(`${repoRoot}/apps/web/dist/${manifest[key]!.file}`, "utf8"),
+        ),
+      )
+    ).join("\n");
+    expect(eagerSource).not.toMatch(/["'`]credit-card["'`]/u);
+    expect(eagerSource).not.toMatch(/["'`]fingerprint-pattern["'`]/u);
+    // The composer's Plus glyph shares the existing primitives request.
+    const sharedGlyphs = Object.values(manifest).find(
+      (entry) => entry.name === "session-shared-primitives",
+    )!;
+    expect(await readFile(`${repoRoot}/apps/web/dist/${sharedGlyphs.file}`, "utf8")).toMatch(
+      /["'`]plus["'`]/u,
+    );
     expect(panelAsset).toBeTruthy();
-    expect(attachmentAsset).toBeTruthy();
-    expect(variableSetAsset).toBeTruthy();
     const port = await freePort();
     baseUrl = `http://127.0.0.1:${port}`;
     web = await startProcess(
@@ -180,7 +195,60 @@ describe("production session conditional loading", () => {
   }
 
   for (const width of [320, 1280]) {
-    for (const mode of ["questions", "commands", "attachments"] as const) {
+    // A sent file shows above its message, as it looked in the composer, and
+    // its image opens larger.
+    test(`a sent message shows its attached image at ${width}px`, async () => {
+      const context = await browser.newContext({
+        viewport: { width, height: 900 },
+        reducedMotion: "reduce",
+      });
+      const page = await context.newPage();
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.stack ?? error.message));
+      const state: State = {
+        mode: "attachments",
+        answers: [],
+        stops: 0,
+        commandReads: 0,
+        fileReads: 0,
+      };
+      await installApi(page, baseUrl, state);
+      try {
+        await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
+        const transcript = page
+          .locator('[data-testid="timeline-user"]')
+          .getByText("Keep this message visible.", { exact: true });
+        await transcript.waitFor({ timeout: 20_000 });
+        const preview = page.getByRole("button", { name: "Preview fixture.svg", exact: true });
+        await preview.waitFor();
+        await page.waitForFunction(() => {
+          const image = document.querySelector(
+            "[data-og-message-attachments] img",
+          ) as HTMLImageElement | null;
+          return Boolean(image?.complete && image.naturalWidth > 0);
+        });
+        expect(state.fileReads).toBe(1);
+        await page.screenshot({ path: `${evidenceDir}/attachments-${width}.png`, fullPage: true });
+        await preview.click();
+        await page.getByRole("dialog").waitFor();
+        await page.keyboard.press("Escape");
+        await page.getByRole("dialog").waitFor({ state: "hidden" });
+        expect(await transcript.isVisible()).toBe(true);
+        expect(
+          await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+        ).toBeLessThanOrEqual(1);
+        expect(errors).toEqual([]);
+      } catch (error) {
+        throw new Error(
+          `attachments/${width}: ${JSON.stringify(errors)}\n${await page.locator("body").innerText()}`,
+          { cause: error },
+        );
+      } finally {
+        await context.close();
+      }
+    }, 45_000);
+
+    for (const mode of ["questions", "commands"] as const) {
       test(`${mode} remains usable across its production lazy boundary at ${width}px`, async () => {
         const context = await browser.newContext({
           viewport: { width, height: 900 },
@@ -211,7 +279,7 @@ describe("production session conditional loading", () => {
         const blocked = new Promise<void>((resolve) => {
           release = resolve;
         });
-        const blockedAsset = mode === "attachments" ? attachmentAsset : panelAsset;
+        const blockedAsset = panelAsset;
         await page.route(`${baseUrl}/${blockedAsset}`, async (route) => {
           await blocked;
           await route.continue();
@@ -237,13 +305,8 @@ describe("production session conditional loading", () => {
             await page.getByRole("button", { name: "Session activity", exact: true }).click();
             await page.getByRole("button", { name: "1 command", exact: true }).waitFor();
             await page.getByText("Loading commands…", { exact: true }).waitFor();
-          } else if (mode === "questions") {
-            await page.getByText("Loading questions…", { exact: true }).waitFor();
           } else {
-            expect(state.fileReads).toBe(0);
-            expect(await page.locator('[data-testid="timeline-user"] .animate-pulse').count()).toBe(
-              1,
-            );
+            await page.getByText("Loading questions…", { exact: true }).waitFor();
           }
           expect(await transcript.isVisible()).toBe(true);
           await page.screenshot({
@@ -261,7 +324,7 @@ describe("production session conditional loading", () => {
             });
             await choice.focus();
             await page.keyboard.press("Space");
-            await page.getByRole("button", { name: "Send answers", exact: true }).focus();
+            await page.getByRole("button", { name: "Send answer", exact: true }).focus();
             await page.keyboard.press("Enter");
             await page.waitForFunction(() => !document.querySelector("[data-human-input-surface]"));
             expect(state.answers).toEqual([
@@ -270,7 +333,7 @@ describe("production session conditional loading", () => {
                 answers: [{ questionId: "environment", values: ["staging"] }],
               },
             ]);
-          } else if (mode === "commands") {
+          } else {
             const stop = page.getByRole("button", { name: "Stop bun run verify", exact: true });
             await stop.waitFor();
             await page.screenshot({
@@ -282,23 +345,6 @@ describe("production session conditional loading", () => {
             await page.getByText("Stopping…", { exact: true }).waitFor();
             expect(state.stops).toBe(1);
             expect(state.commandReads).toBeGreaterThanOrEqual(2);
-          } else {
-            const preview = page.getByRole("button", { name: "Open fixture.svg", exact: true });
-            await preview.waitFor();
-            await page.waitForFunction(() => {
-              const image = document.querySelector(
-                '[data-testid="timeline-user"] img',
-              ) as HTMLImageElement | null;
-              return Boolean(image?.complete && image.naturalWidth > 0);
-            });
-            expect(state.fileReads).toBe(1);
-            await page.screenshot({
-              path: `${evidenceDir}/${mode}-${width}-loaded.png`,
-              fullPage: true,
-            });
-            await preview.click();
-            await page.getByRole("dialog").waitFor();
-            await page.keyboard.press("Escape");
           }
           expect(await transcript.isVisible()).toBe(true);
           expect(assets.some((url) => url.endsWith(blockedAsset))).toBe(true);
@@ -323,101 +369,6 @@ describe("production session conditional loading", () => {
         }
       }, 45_000);
     }
-  }
-
-  for (const [width, outcome] of [
-    [320, "loaded"],
-    [1280, "loaded"],
-    [1280, "failed"],
-  ] as const) {
-    test(`the composer Variable Set editor is ${outcome} on demand at ${width}px`, async () => {
-      const context = await browser.newContext({
-        viewport: { width, height: 900 },
-        reducedMotion: "reduce",
-      });
-      const page = await context.newPage();
-      const errors: string[] = [];
-      const assets: string[] = [];
-      page.on("pageerror", (error) => errors.push(error.stack ?? error.message));
-      page.on("request", (request) => {
-        if (request.url().includes("/assets/")) assets.push(request.url());
-      });
-      let release!: () => void;
-      const blocked = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      await page.route(`${baseUrl}/${variableSetAsset}`, async (route) => {
-        if (outcome === "failed") return route.abort("failed");
-        await blocked;
-        await route.continue();
-      });
-      await installApi(page, baseUrl, {
-        mode: "variables",
-        answers: [],
-        stops: 0,
-        commandReads: 0,
-        fileReads: 0,
-      });
-      if (outcome === "failed") {
-        // Preload recovery has already spent its one reload for this build, so
-        // the failed import reaches React instead of reloading the page. Mark it
-        // before the composer's idle preload can fail.
-        await page.addInitScript(() =>
-          document.addEventListener("DOMContentLoaded", () =>
-            sessionStorage.setItem(
-              "opengeni:vite-preload-recovery-build",
-              Array.from(document.querySelectorAll<HTMLScriptElement>('script[type="module"][src]'))
-                .map((script) => script.src)
-                .join("|") || document.baseURI,
-            ),
-          ),
-        );
-      }
-      try {
-        await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
-        const transcript = page
-          .locator('[data-testid="timeline-user"]')
-          .getByText("Keep this message visible.", { exact: true });
-        await transcript.waitFor({ timeout: 20_000 });
-        // The editor is outside the session's static graph (checked on the
-        // manifest above). The composer preloads it once idle or when "+" is
-        // hovered, so it may already be requested here; held until release().
-        await page.getByRole("button", { name: "More composer actions", exact: true }).click();
-        await page.getByRole("menuitem", { name: /Variable sets/ }).click();
-        const menu = page.getByRole("menu");
-        if (outcome === "loaded") {
-          // A cold open shows skeleton rows at the final height, never a sentence.
-          await menu.getByRole("status", { name: "Loading variable sets", exact: true }).waitFor();
-          await menu.getByRole("menuitem", { name: "Back", exact: true }).waitFor();
-          await page.screenshot({ path: `${evidenceDir}/variables-${width}-loading.png` });
-          release();
-          await menu.getByRole("button", { name: "Save", exact: true }).waitFor();
-        } else {
-          // The failure stays inside the menu instead of replacing the route.
-          await menu.getByRole("alert").getByText("Variable sets could not be loaded.").waitFor();
-          expect(await menu.getByRole("button", { name: "Reload", exact: true }).isVisible()).toBe(
-            true,
-          );
-        }
-        expect(assets.some((url) => url.endsWith(variableSetAsset))).toBe(true);
-        expect(await transcript.isVisible()).toBe(true);
-        await page.screenshot({ path: `${evidenceDir}/variables-${width}-${outcome}.png` });
-        await menu.getByRole("menuitem", { name: "Back", exact: true }).click();
-        await menu.getByRole("menuitem", { name: /Variable sets/ }).waitFor();
-        expect(
-          await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
-        ).toBeLessThanOrEqual(1);
-        expect(errors).toEqual([]);
-      } catch (error) {
-        throw new Error(
-          `variables/${outcome}/${width}: ${JSON.stringify({ errors })}\n${await page.locator("body").innerText()}`,
-          { cause: error },
-        );
-      } finally {
-        release();
-        await context.close();
-      }
-    }, 45_000);
   }
 });
 
@@ -469,9 +420,6 @@ async function installApi(page: Page, baseUrl: string, state: State) {
     activeSandboxId: null,
     activeEpoch: 0,
     workingDir: null,
-    variableSetIds: [],
-    variableSetId: null,
-    environmentId: null,
     rigId: null,
     rigVersionId: null,
     channelId: null,
@@ -573,8 +521,52 @@ async function installApi(page: Page, baseUrl: string, state: State) {
       });
     if (path === "/v1/workspaces") return json([workspace]);
     if (path === `/v1/workspaces/${workspaceId}`) return json(workspace);
-    if (path === `/v1/workspaces/${workspaceId}/sessions`)
-      return json({ sessions: [session], pinned: [], pinnedTruncated: false, nextCursor: null });
+    if (path === `/v1/workspaces/${workspaceId}/sessions`) {
+      const params = new URL(request.url()).searchParams;
+      const archived = params.get("archiveStatus") === "archived";
+      const pinsOnly = params.get("pinsOnly") === "true";
+      const attention = session.status === "requires_action";
+      const filtered = params.get("needsYouOnly") === "true" && !attention;
+      return json({
+        sessions:
+          pinsOnly ||
+          archived ||
+          filtered ||
+          (params.has("parentSessionId") && params.get("parentSessionId") !== "null")
+            ? []
+            : [session],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: params.get("sortBy") ?? "updatedAt",
+        archiveStatus: params.get("archiveStatus") ?? "active",
+        ...(params.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(params.get("includeTotals") === "true"
+          ? {
+              totals: {
+                needsYouCount: archived && !pinsOnly ? 0 : Number(attention),
+                groups:
+                  (archived || filtered) && !pinsOnly
+                    ? []
+                    : [
+                        {
+                          channelId: null,
+                          total: 1,
+                          attention: Number(attention),
+                          attentionSince: null,
+                          failed: 0,
+                          active: 0,
+                          queued: 0,
+                          unread: 0,
+                          activeWork: 0,
+                        },
+                      ],
+              },
+            }
+          : {}),
+      });
+    }
     if (path === `/v1/workspaces/${workspaceId}/sessions/${sessionId}`) return json(session);
     if (path.endsWith("/events/stream"))
       return route.fulfill({

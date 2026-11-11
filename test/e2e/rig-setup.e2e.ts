@@ -4,14 +4,16 @@ import { createDb, createRig, type DbClient } from "@opengeni/db";
 import {
   buildSandboxImage,
   freePort,
+  startTestServices,
+  type TestServices,
+} from "@opengeni/testing/compose";
+import {
   startE2eWorkerTopology,
   startProcess,
-  startTestServices,
   type StartedE2eWorkerTopology,
   type StartedProcess,
-  type TestServices,
   waitFor,
-} from "@opengeni/testing";
+} from "@opengeni/testing/process";
 
 // M3 rig-setup hook, driven end-to-end through the REAL turn path (API ->
 // Temporal worker -> lease -> real Docker box establishment -> rig-setup

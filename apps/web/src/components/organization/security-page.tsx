@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   getOrganizationPrivateSessionSettings,
   updateOrganizationPrivateSessionSettings,
@@ -6,23 +7,26 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { RowButton } from "@/components/ui/page-actions";
+import { RowButton } from "@opengeni/react/ui/page-actions";
 import { OrganizationRecoverySection } from "@/components/organization-recovery";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SelectMenu } from "@/components/ui/select-menu";
-import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
-import { Switch } from "@/components/ui/switch";
-import { useAppContext } from "@/context";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SelectMenu } from "@opengeni/react/ui/select-menu";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@opengeni/react/ui/setting-row";
+import { Switch } from "@opengeni/react/ui/switch";
+import { useOptionalBrowserAccounts } from "@opengeni/react/accounts";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
+  apiErrorFacts,
   apiErrorDetails,
   isPermissionDenied,
   userErrorText,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
+} from "@opengeni/react/ui/api-error";
 import {
   beginOrganizationAdminOperation,
   isOrganizationConflict,
@@ -33,27 +37,65 @@ import {
   type OrganizationAdminOperation,
   type OrganizationAdminOperationLane,
   type OrganizationAdminResource,
-} from "@/lib/organization-admin";
-import type { OrganizationPrivateSessionSettings, OrganizationRetentionPolicy } from "@/types";
+} from "@opengeni/react/app/lib/organization-admin";
+import type {
+  OrganizationInferenceResidency,
+  OrganizationPrivacySettings,
+  OrganizationPrivateSessionSettings,
+  OrganizationRetentionPolicy,
+} from "@opengeni/react/app/types";
 
 import { useOrganizationDirectory } from "./organization-directory";
+import {
+  useBrowserAccountSignInAgain,
+  useSignOutSignInAgain,
+  type SignInAgain,
+} from "./sign-in-again";
 
 /* ----------------------------------------------------------------------------
-   Organization settings > Security & data: Only me chats, how long a removed
-   person's data is kept, and recovery (owners, managed sign-in only).
+   Organization settings > Security & data: EU-only inference, Only me chats and
+   automations, full access for agent sessions, whether members connect their
+   own machines, how long a removed person's data is kept, and recovery
+   (owners, managed sign-in only).
    -------------------------------------------------------------------------- */
 
 export function OrganizationSecurityPage() {
   const directory = useOrganizationDirectory();
-  const client = useAppContext().client;
+  const appContext = useAppContext();
+  const client = appContext.client;
   const managedPeople = directory.managedSession && !directory.singleUser;
-  // Members see only Recovery: they may be recovery contacts.
+  // Members see Data residency and Recovery: they may be recovery contacts.
   const administrator = directory.canAdminister;
   return (
     <SectionStack>
+      {managedPeople ? (
+        // Every member sees it: it decides which models and features they can use.
+        <Section title="Data residency">
+          <ResidencyRowForThisBrowser
+            client={client}
+            identity={directory.identity}
+            canTurnOn={administrator}
+            onChanged={appContext.refreshWorkspaceConfig}
+          />
+        </Section>
+      ) : null}
       {managedPeople && administrator ? (
-        <Section title="Chats">
-          <PrivateChatsRow client={client} identity={directory.identity} />
+        <Section title="Chats and automations">
+          <PrivateChatsRow
+            client={client}
+            identity={directory.identity}
+            onAccessChanged={appContext.revalidatePrincipalAccess}
+          />
+        </Section>
+      ) : null}
+      {administrator ? (
+        <Section title="Agents">
+          <AgentAdminAccessRow client={client} identity={directory.identity} />
+        </Section>
+      ) : null}
+      {managedPeople && administrator ? (
+        <Section title="Machines">
+          <OwnMachinesRow client={client} identity={directory.identity} />
         </Section>
       ) : null}
       {administrator ? (
@@ -164,26 +206,78 @@ function RowLoadFailure({
   );
 }
 
-/* ------------------------------------------------------------ Only me chats */
+/* ------------------------------------------------------- EU-only inference */
 
-function PrivateChatsRow({
+const RESIDENCY_DESCRIPTION = "Models and features run only in the EU. Others are switched off.";
+
+type ResidencyRowProps = {
+  client: Pick<
+    ChatClient<OpenGeniBrowserClient>,
+    "getOrganizationInferenceResidency" | "updateOrganizationInferenceResidency"
+  >;
+  identity: OrganizationAdminIdentity;
+  canTurnOn: boolean;
+  /** After a change: the open workspace's models and features change with it. */
+  onChanged?: (() => void) | undefined;
+};
+
+/** The row with this browser's way of signing in again (browser accounts or sign-out). */
+function ResidencyRowForThisBrowser(props: ResidencyRowProps) {
+  return useOptionalBrowserAccounts() ? (
+    <BrowserAccountResidencyRow {...props} />
+  ) : (
+    <SignOutResidencyRow {...props} />
+  );
+}
+
+function BrowserAccountResidencyRow(props: ResidencyRowProps) {
+  return <InferenceResidencyRow {...props} signInAgain={useBrowserAccountSignInAgain()} />;
+}
+
+function SignOutResidencyRow(props: ResidencyRowProps) {
+  return <InferenceResidencyRow {...props} signInAgain={useSignOutSignInAgain()} />;
+}
+
+/** Turning EU-only off needs a sign-in from the last few minutes. */
+function reauthenticationRequired(error: unknown): boolean {
+  const details = (error as { details?: { code?: unknown } } | null)?.details;
+  return (
+    apiErrorFacts(error).status === 403 &&
+    details?.code === "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED"
+  );
+}
+
+/**
+ * EU-only inference, organization-wide. Any member sees it; owners and admins
+ * turn it on; it is offered off only when the server says so (`canTurnOff`:
+ * an owner or admin in a browser), behind a confirmation. Without a recent
+ * sign-in the confirmation says so and offers signing in again.
+ */
+export function InferenceResidencyRow({
   client,
   identity,
-}: {
-  client: OpenGeniBrowserClient;
-  identity: OrganizationAdminIdentity;
+  canTurnOn,
+  onChanged,
+  signInAgain,
+}: ResidencyRowProps & {
+  /** Signs in again when turning off needs a recent sign-in. */
+  signInAgain: SignInAgain;
 }) {
-  const { claim, owns } = useOwnedOperations(identity, "private-sessions");
-  const [settings, setSettings] = useState<OrganizationPrivateSessionSettings | null>(null);
+  const { claim, owns } = useOwnedOperations(identity, "inference-residency");
+  const [value, setValue] = useState<OrganizationInferenceResidency | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [pending, setPending] = useState<boolean | null>(null);
+  const [confirmOff, setConfirmOff] = useState(false);
+  /** The server's reason when turning off needs a recent sign-in, shown in the confirmation. */
+  const [signInNeeded, setSignInNeeded] = useState<string | null>(null);
+  const [signInError, setSignInError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const operation = claim("read");
     setError(null);
     try {
-      const value = await getOrganizationPrivateSessionSettings(client, identity.organizationId);
-      if (owns(operation)) setSettings(value);
+      const next = await client.getOrganizationInferenceResidency(identity.organizationId);
+      if (owns(operation)) setValue(next);
     } catch (loadError) {
       if (owns(operation))
         setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
@@ -194,60 +288,580 @@ function PrivateChatsRow({
     void load();
   }, [load]);
 
-  if (error && !settings) {
+  /**
+   * "saved", "failed" (the toast says why) or "sign_in" (turning off needs a
+   * recent sign-in; the confirmation says so).
+   */
+  const save = useCallback(
+    async (
+      current: OrganizationInferenceResidency,
+      euOnly: boolean,
+    ): Promise<"saved" | "failed" | "sign_in"> => {
+      const operation = claim("mutation");
+      setPending(euOnly);
+      try {
+        const saved = await client.updateOrganizationInferenceResidency(identity.organizationId, {
+          euOnly,
+          expectedVersion: current.version,
+          operationId: crypto.randomUUID(),
+        });
+        if (!owns(operation)) return "failed";
+        setValue(saved);
+        onChanged?.();
+        toast.success(euOnly ? "EU-only inference is on" : "EU-only inference is off");
+        return "saved";
+      } catch (saveError) {
+        if (!owns(operation)) return "failed";
+        if (reauthenticationRequired(saveError)) {
+          setSignInNeeded(
+            apiErrorFacts(saveError).serverMessage ?? "Sign in again to turn EU-only off.",
+          );
+          return "sign_in";
+        }
+        // Stale version, or a mode where it can't change: show what's true now.
+        if (isOrganizationConflict(saveError)) await load();
+        toast.error("Couldn't change EU-only inference", {
+          description: residencyChangeErrorText(saveError),
+        });
+        return "failed";
+      } finally {
+        if (owns(operation)) setPending(null);
+      }
+    },
+    [claim, client, identity.organizationId, load, onChanged, owns],
+  );
+
+  if (error && value === null) {
     return (
       <RowLoadFailure
-        title="Couldn't load the Only me chats setting."
+        title="Couldn't load EU-only inference."
         error={error}
         onRetry={() => void load()}
       />
     );
   }
-  if (!settings) return <SettingRowSkeleton />;
+  if (value === null) return <SettingRowSkeleton />;
 
-  const unavailable = !settings.available && !settings.enabled;
+  const euOnly = pending ?? value.euOnly;
+  const changeable = value.euOnly ? value.canTurnOff : canTurnOn;
   return (
     <SettingRowGroup>
       <SettingRow
-        label="Only me chats"
-        description="Lets people start chats only they can see in shared workspaces. Personal workspaces are always private."
+        label="EU-only inference"
+        description={RESIDENCY_DESCRIPTION}
         control={
           <Switch
-            aria-label="Only me chats"
-            checked={pending ?? settings.enabled}
+            aria-label="EU-only inference"
+            checked={euOnly}
             pending={pending !== null}
-            disabled={unavailable}
+            disabled={!changeable}
             disabledReason={
-              unavailable
-                ? "Private chats aren't turned on for this installation. Ask whoever runs your Opengeni to enable them."
-                : undefined
+              value.euOnly
+                ? "Only an owner or admin can turn this off, in a browser."
+                : "Only owners and admins can change this."
             }
-            onCheckedChange={async (enabled) => {
+            onCheckedChange={(next) => {
+              if (next) void save(value, true);
+              else {
+                setSignInNeeded(null);
+                setSignInError(null);
+                setConfirmOff(true);
+              }
+            }}
+          />
+        }
+      />
+      <FormDialog
+        open={confirmOff}
+        onOpenChange={setConfirmOff}
+        size="sm"
+        title="Turn off EU-only inference?"
+        description="Models and features outside the EU become available again."
+        error={signInError ?? undefined}
+        submitLabel={signInNeeded ? "Sign in again" : "Turn off"}
+        pendingLabel="Turning off…"
+        tone={signInNeeded ? "default" : "destructive"}
+        initialFocus="cancel"
+        onSubmit={async () => {
+          if (signInNeeded) {
+            // From the click itself, so the sign-in window may open. Once
+            // signed in, Turn off is offered again.
+            setSignInError(null);
+            signInAgain(
+              () => setSignInNeeded(null),
+              (message) => setSignInError(message),
+            );
+            return false;
+          }
+          return (await save(value, false)) !== "sign_in";
+        }}
+        onSubmitted={() => setConfirmOff(false)}
+      >
+        {/* A step to take, not a failure. */}
+        {signInNeeded && !signInError ? <Notice tone="info">{signInNeeded}</Notice> : null}
+      </FormDialog>
+    </SettingRowGroup>
+  );
+}
+
+/** 503: the deployment doesn't take changes yet. Otherwise the usual advice. */
+function residencyChangeErrorText(error: unknown): string {
+  const status = (error as { status?: unknown } | null)?.status;
+  return status === 503 ? "It can't be changed yet." : userErrorText(error);
+}
+
+/* ----------------------------------------------- Only me chats and automations */
+
+type PrivacyChoice = Partial<
+  Pick<
+    OrganizationPrivacySettings,
+    "defaultVisibility" | "adminsSeePrivateSchedules" | "personalWorkspaces"
+  >
+>;
+
+/** What a row says when this app fixes the choice for every organization. */
+const LOCKED_FOR_APP = "This is set for everyone using this app.";
+
+export function PrivateChatsRow({
+  client,
+  identity,
+  onAccessChanged,
+}: {
+  client: ChatClient<OpenGeniBrowserClient>;
+  identity: OrganizationAdminIdentity;
+  /** Reloads which workspaces the person can see after Personal workspaces change. */
+  onAccessChanged?: () => void;
+}) {
+  const { claim, owns } = useOwnedOperations(identity, "private-sessions");
+  const { claim: claimPrivacy, owns: ownsPrivacy } = useOwnedOperations(identity, "privacy");
+  const [settings, setSettings] = useState<OrganizationPrivateSessionSettings | null>(null);
+  const [privacy, setPrivacy] = useState<OrganizationPrivacySettings | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const [pending, setPending] = useState<boolean | null>(null);
+  const [privacyPending, setPrivacyPending] = useState<PrivacyChoice | null>(null);
+
+  const load = useCallback(async () => {
+    const operation = claim("read");
+    const privacyOperation = claimPrivacy("read");
+    setError(null);
+    try {
+      const [value, privacyValue] = await Promise.all([
+        getOrganizationPrivateSessionSettings(client, identity.organizationId),
+        client.getOrganizationPrivacySettings(identity.organizationId),
+      ]);
+      if (owns(operation)) setSettings(value);
+      if (ownsPrivacy(privacyOperation)) setPrivacy(privacyValue);
+    } catch (loadError) {
+      if (owns(operation))
+        setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
+    }
+  }, [claim, claimPrivacy, client, identity.organizationId, owns, ownsPrivacy]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const savePrivacy = useCallback(
+    async (change: PrivacyChoice, success: string) => {
+      const operation = claimPrivacy("mutation");
+      setPrivacyPending(change);
+      try {
+        const value = await client.updateOrganizationPrivacySettings(
+          identity.organizationId,
+          change,
+        );
+        if (!ownsPrivacy(operation)) return;
+        setPrivacy(value);
+        toast.success(success);
+        // The workspace switcher and landing follow the new Personal choice.
+        if (change.personalWorkspaces !== undefined) onAccessChanged?.();
+      } catch (saveError) {
+        if (!ownsPrivacy(operation)) return;
+        toast.error("Couldn't change this setting", { description: userErrorText(saveError) });
+      } finally {
+        if (ownsPrivacy(operation)) setPrivacyPending(null);
+      }
+    },
+    [claimPrivacy, client, identity.organizationId, ownsPrivacy, onAccessChanged],
+  );
+
+  if (error && (!settings || !privacy)) {
+    return (
+      <RowLoadFailure
+        title="Couldn't load these settings."
+        error={error}
+        onRetry={() => void load()}
+      />
+    );
+  }
+  if (!settings || !privacy) return <SettingRowSkeleton />;
+
+  const available = settings.available && privacy.limits.onlyMeAllowed;
+  const enabled = available && (pending ?? settings.enabled);
+  const defaultVisibility = privacyPending?.defaultVisibility ?? privacy.defaultVisibility;
+  const adminsSee = privacyPending?.adminsSeePrivateSchedules ?? privacy.adminsSeePrivateSchedules;
+  const personalWorkspaces = privacyPending?.personalWorkspaces ?? privacy.personalWorkspaces;
+
+  return (
+    <SettingRowGroup>
+      <SettingRow
+        label="Personal workspaces"
+        description={
+          personalWorkspaces
+            ? "Everyone has a private workspace of their own, next to the shared ones."
+            : "Hidden for everyone. People work in shared workspaces, where their own machines, browsers and vaults keep working. Chats already in a Personal workspace stay reachable from a link."
+        }
+        control={
+          <Switch
+            aria-label="Personal workspaces"
+            checked={personalWorkspaces}
+            pending={privacyPending?.personalWorkspaces !== undefined}
+            onCheckedChange={(next) =>
+              void savePrivacy(
+                { personalWorkspaces: next },
+                next ? "Personal workspaces are back" : "Personal workspaces are hidden",
+              )
+            }
+          />
+        }
+      />
+      <SettingRow
+        label="Only me chats and automations"
+        description={
+          available
+            ? personalWorkspaces
+              ? "Lets people start chats and automations only they can see in shared workspaces. Personal workspaces are always private."
+              : "Lets people start chats and automations only they can see in shared workspaces."
+            : `Only me is off. ${LOCKED_FOR_APP}`
+        }
+        control={
+          <Switch
+            aria-label="Only me chats and automations"
+            checked={enabled}
+            pending={pending !== null}
+            disabled={!available}
+            onCheckedChange={async (next) => {
               const operation = claim("mutation");
-              setPending(enabled);
+              setPending(next);
               try {
                 const value = await updateOrganizationPrivateSessionSettings(
                   client,
                   identity.organizationId,
-                  { enabled, expectedVersion: settings.version, operationId: crypto.randomUUID() },
+                  {
+                    enabled: next,
+                    expectedVersion: settings.version,
+                    operationId: crypto.randomUUID(),
+                  },
                 );
                 if (!owns(operation)) return;
                 setSettings(value);
                 toast.success(
-                  enabled
-                    ? "People can start Only me chats"
-                    : "Only me chats are off for new chats",
+                  next
+                    ? "People can start Only me chats and automations"
+                    : "Only me is off for new chats and automations",
                 );
               } catch (saveError) {
                 if (!owns(operation)) return;
                 if (isOrganizationConflict(saveError)) await load();
-                toast.error("Couldn't change Only me chats", {
+                toast.error("Couldn't change Only me", {
                   description: userErrorText(saveError),
                 });
               } finally {
                 if (owns(operation)) setPending(null);
               }
             }}
+          />
+        }
+      >
+        {enabled ? (
+          <SettingRow
+            label="New chats and automations"
+            description={
+              privacy.limits.defaultVisibilityLocked
+                ? `Start as Workspace. ${LOCKED_FOR_APP}`
+                : "Who can see them, unless the person picks otherwise."
+            }
+            controlWidth="auto"
+            control={
+              <SegmentedControl<"workspace" | "private">
+                size="sm"
+                aria-label="Who can see new chats and automations"
+                value={defaultVisibility}
+                onValueChange={(next) => {
+                  if (next === defaultVisibility) return;
+                  void savePrivacy(
+                    { defaultVisibility: next },
+                    next === "private"
+                      ? "New chats and automations start as Only me"
+                      : "New chats and automations start as Workspace",
+                  );
+                }}
+                options={[
+                  { value: "workspace", label: "Workspace" },
+                  { value: "private", label: "Only me" },
+                ].map((option) => ({
+                  ...(option as { value: "workspace" | "private"; label: string }),
+                  disabled: privacyPending !== null || privacy.limits.defaultVisibilityLocked,
+                  ...(privacy.limits.defaultVisibilityLocked
+                    ? { disabledReason: LOCKED_FOR_APP }
+                    : {}),
+                }))}
+              />
+            }
+          />
+        ) : null}
+      </SettingRow>
+      <SettingRow
+        label="Admins see Only me automations"
+        description={
+          privacy.limits.adminsSeePrivateSchedulesLocked
+            ? `Admins see who owns each one, how often it runs and what it costs, and can pause it. ${LOCKED_FOR_APP}`
+            : adminsSee
+              ? "Admins see who owns each one, how often it runs and what it costs, and can pause it. Never its name, message or chats."
+              : "Admins can't see other people's Only me automations at all, like Only me chats."
+        }
+        control={
+          <Switch
+            aria-label="Admins see Only me automations"
+            checked={adminsSee}
+            pending={privacyPending?.adminsSeePrivateSchedules !== undefined}
+            disabled={privacy.limits.adminsSeePrivateSchedulesLocked}
+            onCheckedChange={(next) =>
+              void savePrivacy(
+                { adminsSeePrivateSchedules: next },
+                next
+                  ? "Admins see that Only me automations exist"
+                  : "Only me automations are hidden from admins",
+              )
+            }
+          />
+        }
+      />
+    </SettingRowGroup>
+  );
+}
+
+/* -------------------------------------------------- What agents may do */
+
+type AgentAccessChoice = "sessionAdminAccessAllowed" | "chatActionsAllowed";
+
+function AgentAdminAccessRow({
+  client,
+  identity,
+}: {
+  client: ChatClient<OpenGeniBrowserClient>;
+  identity: OrganizationAdminIdentity;
+}) {
+  const { claim, owns } = useOwnedOperations(identity, "agent-admin-access");
+  const [value, setValue] = useState<Record<AgentAccessChoice, boolean> | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const [pending, setPending] = useState<{ choice: AgentAccessChoice; next: boolean } | null>(null);
+  const [confirmOff, setConfirmOff] = useState(false);
+
+  const load = useCallback(async () => {
+    const operation = claim("read");
+    setError(null);
+    try {
+      const next = await client.getOrganizationAgentAdminAccess(identity.organizationId);
+      if (owns(operation))
+        setValue({
+          sessionAdminAccessAllowed: next.sessionAdminAccessAllowed,
+          chatActionsAllowed: next.chatActionsAllowed,
+        });
+    } catch (loadError) {
+      if (owns(operation))
+        setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
+    }
+  }, [claim, client, identity.organizationId, owns]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = useCallback(
+    async (choice: AgentAccessChoice, next: boolean) => {
+      const operation = claim("mutation");
+      setPending({ choice, next });
+      try {
+        const saved = await client.updateOrganizationAgentAdminAccess(identity.organizationId, {
+          [choice]: next,
+        });
+        if (!owns(operation)) return;
+        setValue({
+          sessionAdminAccessAllowed: saved.sessionAdminAccessAllowed,
+          chatActionsAllowed: saved.chatActionsAllowed,
+        });
+        toast.success(
+          choice === "chatActionsAllowed"
+            ? next
+              ? "Agents can do things in the app for people, asking before each change"
+              : "Agents no longer do things in the app from a chat"
+            : next
+              ? "Members can give their own sessions full access"
+              : "Full access is off for every session",
+        );
+      } catch (saveError) {
+        if (!owns(operation)) return;
+        toast.error(
+          choice === "chatActionsAllowed"
+            ? "Couldn't change actions in chat"
+            : "Couldn't change full access for agents",
+          { description: userErrorText(saveError) },
+        );
+      } finally {
+        if (owns(operation)) setPending(null);
+      }
+    },
+    [claim, client, identity.organizationId, owns],
+  );
+
+  if (error && value === null) {
+    return (
+      <RowLoadFailure
+        title="Couldn't load what agents may do."
+        error={error}
+        onRetry={() => void load()}
+      />
+    );
+  }
+  if (value === null) return <SettingRowSkeleton />;
+  const shown = (choice: AgentAccessChoice) =>
+    pending?.choice === choice ? pending.next : value[choice];
+
+  return (
+    <SettingRowGroup>
+      <SettingRow
+        label="Actions in chat"
+        description="In a chat someone started, the agent can do what that person could do in the app's pages and settings, such as inviting people, sharing the chat or checking usage. It asks them in the chat before each change and never does more than they can."
+        control={
+          <Switch
+            aria-label="Actions in chat"
+            checked={shown("chatActionsAllowed")}
+            pending={pending?.choice === "chatActionsAllowed"}
+            onCheckedChange={(next) => void save("chatActionsAllowed", next)}
+          />
+        }
+      />
+      <SettingRow
+        label="Full access for agent sessions"
+        description="Lets each member give a session they started their own access. Its agent can then do what that person can in the app without asking first, and never more: a member's workspaces and settings, or everything an owner or admin manages."
+        control={
+          <Switch
+            aria-label="Full access for agent sessions"
+            checked={shown("sessionAdminAccessAllowed")}
+            pending={pending?.choice === "sessionAdminAccessAllowed"}
+            onCheckedChange={(next) => {
+              if (next) void save("sessionAdminAccessAllowed", true);
+              else setConfirmOff(true);
+            }}
+          />
+        }
+      />
+      <FormDialog
+        open={confirmOff}
+        onOpenChange={setConfirmOff}
+        size="sm"
+        title="Turn off full access for agents?"
+        description="Every session that has full access loses it right away. Turning this on again doesn't give it back."
+        submitLabel="Turn off"
+        pendingLabel="Turning off…"
+        tone="destructive"
+        initialFocus="cancel"
+        onSubmit={async () => {
+          await save("sessionAdminAccessAllowed", false);
+        }}
+        onSubmitted={() => setConfirmOff(false)}
+      />
+    </SettingRowGroup>
+  );
+}
+
+/* ---------------------------------------------------------------- Machines */
+
+/**
+ * Whether members connect machines of their own. Owners and admins always
+ * can; off stops new ones, and machines already connected keep working.
+ */
+export function OwnMachinesRow({
+  client,
+  identity,
+}: {
+  client: ChatClient<OpenGeniBrowserClient>;
+  identity: OrganizationAdminIdentity;
+}) {
+  const { claim, owns } = useOwnedOperations(identity, "own-machines");
+  const [value, setValue] = useState<boolean | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const [pending, setPending] = useState<boolean | null>(null);
+
+  const load = useCallback(async () => {
+    const operation = claim("read");
+    setError(null);
+    try {
+      const privacy = await client.getOrganizationPrivacySettings(identity.organizationId);
+      if (owns(operation)) setValue(privacy.membersConnectOwnMachines !== false);
+    } catch (loadError) {
+      if (owns(operation))
+        setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
+    }
+  }, [claim, client, identity.organizationId, owns]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = useCallback(
+    async (next: boolean) => {
+      const operation = claim("mutation");
+      setPending(next);
+      try {
+        const privacy = await client.updateOrganizationPrivacySettings(identity.organizationId, {
+          membersConnectOwnMachines: next,
+        });
+        if (!owns(operation)) return;
+        setValue(privacy.membersConnectOwnMachines !== false);
+        toast.success(
+          next
+            ? "Members can connect their own machines"
+            : "Only owners and admins can connect their own machines now",
+        );
+      } catch (saveError) {
+        if (!owns(operation)) return;
+        toast.error("Couldn't change this setting", { description: userErrorText(saveError) });
+      } finally {
+        if (owns(operation)) setPending(null);
+      }
+    },
+    [claim, client, identity.organizationId, owns],
+  );
+
+  if (error && value === null) {
+    return (
+      <RowLoadFailure
+        title="Couldn't load this setting."
+        error={error}
+        onRetry={() => void load()}
+      />
+    );
+  }
+  if (value === null) return <SettingRowSkeleton />;
+  const shown = pending ?? value;
+
+  return (
+    <SettingRowGroup>
+      <SettingRow
+        label="Members connect their own machines"
+        description={
+          shown
+            ? "Members can connect their own computers and servers for agents to work on, as Only me or in their Personal workspace. Owners and admins always can."
+            : "Only owners and admins can connect machines of their own, including in Personal workspaces. Workspace admins still connect machines for their shared workspaces. Machines already connected keep working until they're removed or need connecting again."
+        }
+        control={
+          <Switch
+            aria-label="Members connect their own machines"
+            checked={shown}
+            pending={pending !== null}
+            onCheckedChange={(next) => void save(next)}
           />
         }
       />
@@ -274,7 +888,7 @@ function RetentionRow({
   identity,
   canEdit,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   identity: OrganizationAdminIdentity;
   canEdit: boolean;
 }) {

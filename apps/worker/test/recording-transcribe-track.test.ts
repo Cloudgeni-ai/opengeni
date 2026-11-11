@@ -1,0 +1,312 @@
+import { beforeAll, describe, expect, test } from "bun:test";
+import type { RecordingTranscriptionProvider } from "@opengeni/core";
+import { pcmWavPiece } from "../src/activities/dictation-pieces";
+import { transcribeTrack } from "../src/activities/recordings";
+import { ffmpegPath, hasFfmpeg, opusWebm } from "./recording-audio-fixtures";
+
+const capabilities = {
+  batch: true,
+  live: false,
+  diarization: false,
+  liveDiarization: false,
+  multichannel: false,
+  maxSpeakers: null,
+  wordTimestamps: true,
+  languages: [],
+  languageDetection: true,
+  keyterms: false,
+  speakerLibrary: false,
+  maxDurationSeconds: null as number | null,
+  maxFileBytes: null as number | null,
+};
+
+/** A model that hears one word per second of whatever it is sent. */
+function countingProvider(sent: Array<{ mimeType: string; fileName: string; head: string }>) {
+  return {
+    id: "fake",
+    name: "Fake",
+    models: [],
+    async transcribe(input) {
+      sent.push({
+        mimeType: input.audio.mimeType,
+        fileName: input.audio.fileName,
+        head: new TextDecoder().decode(input.audio.bytes.slice(0, 4)),
+      });
+      const seconds = await probeSeconds(input.audio.bytes, input.audio.fileName);
+      return {
+        languages: ["en"],
+        audioMilliseconds: Math.round(seconds * 1_000),
+        diarized: false,
+        words: Array.from({ length: Math.floor(seconds) }, (_, index) => ({
+          text: `w`,
+          startMilliseconds: index * 1_000 + 100,
+          endMilliseconds: index * 1_000 + 400,
+          speaker: null,
+          spaceBefore: index > 0,
+        })),
+      };
+    },
+  } satisfies RecordingTranscriptionProvider;
+}
+
+async function probeSeconds(bytes: Uint8Array, fileName: string): Promise<number> {
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  const directory = await mkdtemp(join(tmpdir(), "transcribe-track-test-"));
+  try {
+    const path = join(directory, fileName);
+    await writeFile(path, bytes);
+    const result = spawnSync(ffmpegPath, ["-nostdin", "-i", path, "-f", "null", "-"], {
+      encoding: "utf8",
+    });
+    const matches = [...String(result.stderr).matchAll(/time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/gu)];
+    const last = matches.at(-1)!;
+    return Number(last[1]) * 3600 + Number(last[2]) * 60 + Number(last[3]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+describe.skipIf(!hasFfmpeg)("transcribeTrack", () => {
+  // A skipped describe still runs its body, so the tone is made only when the tests run.
+  const audio = {
+    bytes: new Uint8Array(),
+    mimeType: "audio/webm",
+    fileName: "track-1.webm",
+    extension: "webm",
+  };
+  beforeAll(() => {
+    audio.bytes = opusWebm(25);
+  });
+  const request = { model: "m", diarize: false };
+
+  test("sends a track the model takes as it is, untouched", async () => {
+    const sent: Array<{ mimeType: string; fileName: string; head: string }> = [];
+    const result = await transcribeTrack({
+      provider: countingProvider(sent),
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null },
+      audio,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+    });
+    expect(sent).toEqual([
+      { mimeType: "audio/webm", fileName: "track-1.webm", head: "\u001aE\u07e3" },
+    ]);
+    expect(result.words).toHaveLength(25);
+  });
+
+  test("converts to the model's format and sends a long track in overlapping pieces", async () => {
+    const sent: Array<{ mimeType: string; fileName: string; head: string }> = [];
+    const pieces: number[] = [];
+    const result = await transcribeTrack({
+      provider: countingProvider(sent),
+      spec: {
+        model: "m",
+        name: "M",
+        capabilities: { ...capabilities, maxDurationSeconds: 12 },
+        usdPerHour: null,
+        audioFormats: ["flac", "mp3"],
+      },
+      audio,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      onPiece: (index) => pieces.push(index),
+    });
+    // 12 s pieces with 3 s overlap: windows of 6 s.
+    expect(pieces).toEqual([0, 1, 2, 3, 4]);
+    expect(sent.every((item) => item.mimeType === "audio/flac" && item.head === "fLaC")).toBe(true);
+    // Pieces are sent a few at once, so in any order.
+    expect(sent.map((item) => item.fileName).sort()).toEqual([
+      "track-1-0.flac",
+      "track-1-1.flac",
+      "track-1-2.flac",
+      "track-1-3.flac",
+      "track-1-4.flac",
+    ]);
+    // One word a second, each kept once on the track's own timeline.
+    expect(result.words.map((word) => Math.round(word.startMilliseconds / 1_000))).toEqual(
+      Array.from({ length: 25 }, (_, index) => index),
+    );
+  });
+
+  test("each piece of a long track is its own request, which a provider sends once", async () => {
+    const sent: Array<{ mimeType: string; fileName: string; head: string }> = [];
+    const counting = countingProvider(sent);
+    const identities: string[] = [];
+    // Like a subscription provider, which refuses a request identity it has sent.
+    const provider = {
+      ...counting,
+      async transcribe(input, credentials) {
+        const identity = input.scope!.requestId;
+        if (identities.includes(identity)) throw new Error(`already sent ${identity}`);
+        identities.push(identity);
+        return await counting.transcribe(input, credentials);
+      },
+    } satisfies RecordingTranscriptionProvider;
+    const scope = {
+      accountId: "account",
+      workspaceId: "workspace",
+      subjectId: "subject",
+      requestId: "version:a1:0",
+    };
+    const long = await transcribeTrack({
+      provider,
+      spec: {
+        model: "m",
+        name: "M",
+        capabilities: { ...capabilities, maxDurationSeconds: 12 },
+        usdPerHour: null,
+      },
+      audio,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: null,
+      request: { ...request, scope },
+    });
+    expect(long.words.length).toBeGreaterThan(0);
+    expect(identities.sort()).toEqual([0, 1, 2, 3, 4].map((index) => `version:a1:0:p${index}`));
+    // A track sent whole keeps the attempt's identity.
+    await transcribeTrack({
+      provider,
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null },
+      audio,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: null,
+      request: { ...request, scope: { ...scope, requestId: "version:a2:0" } },
+    });
+    expect(identities.at(-1)).toBe("version:a2:0");
+  });
+
+  test("sends only the stretches with sound, and nothing for a silent track", async () => {
+    const sent: Array<{ mimeType: string; fileName: string; head: string }> = [];
+    const heard: number[] = [];
+    const result = await transcribeTrack({
+      provider: countingProvider(sent),
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null },
+      audio,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound: [
+        { startMilliseconds: 2_000, endMilliseconds: 6_000 },
+        { startMilliseconds: 15_000, endMilliseconds: 20_000 },
+      ],
+      onSent: (milliseconds) => heard.push(milliseconds),
+    });
+    // Pieces are sent a few at once, so in any order.
+    expect(sent.map((item) => item.fileName).sort()).toEqual(["track-1-0.webm", "track-1-1.webm"]);
+    expect(heard.sort((left, right) => left - right)).toEqual([4_000, 5_000]);
+    // Words land on the track's timeline, and the track keeps its length.
+    const seconds = result.words.map((word) => Math.floor(word.startMilliseconds / 1_000));
+    expect(
+      seconds.every((second) => (second >= 2 && second < 6) || (second >= 15 && second < 20)),
+    ).toBe(true);
+    expect(seconds).toContain(2);
+    expect(seconds).toContain(15);
+    expect(result.audioMilliseconds).toBe(25_000);
+
+    const silent: typeof sent = [];
+    const nothing = await transcribeTrack({
+      provider: countingProvider(silent),
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null },
+      audio,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound: [],
+    });
+    expect(silent).toEqual([]);
+    expect(nothing).toEqual({
+      languages: [],
+      audioMilliseconds: 25_000,
+      diarized: false,
+      words: [],
+    });
+  });
+
+  test("a speech PCM track is cut from its samples, sent as FLAC to a model that takes it", async () => {
+    // 25 s of a 440 Hz tone at 16 kHz.
+    const samples = new Int16Array(25 * 16_000);
+    for (let index = 0; index < samples.length; index += 1) {
+      samples[index] = Math.round(Math.sin((index / 16_000) * 2 * Math.PI * 440) * 8_000);
+    }
+    const wav = pcmWavPiece(
+      { sampleRate: 16_000, data: new Uint8Array(samples.buffer) },
+      0,
+      samples.length,
+    );
+    const track = { bytes: wav, mimeType: "audio/wav", fileName: "track-1.wav", extension: "wav" };
+    const sound = [
+      { startMilliseconds: 2_000, endMilliseconds: 6_000 },
+      { startMilliseconds: 15_000, endMilliseconds: 20_000 },
+    ];
+    const flac: Array<{ mimeType: string; fileName: string; head: string }> = [];
+    await transcribeTrack({
+      provider: countingProvider(flac),
+      spec: {
+        model: "m",
+        name: "M",
+        capabilities,
+        usdPerHour: null,
+        audioFormats: ["wav", "flac"],
+      },
+      audio: track,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound,
+    });
+    expect(flac.map((item) => [item.fileName, item.mimeType, item.head]).sort()).toEqual([
+      ["track-1-0.flac", "audio/flac", "fLaC"],
+      ["track-1-1.flac", "audio/flac", "fLaC"],
+    ]);
+    // A model that names no formats gets the same lossless FLAC.
+    const pcm: typeof flac = [];
+    const heard: number[] = [];
+    const result = await transcribeTrack({
+      provider: countingProvider(pcm),
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null },
+      audio: track,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound,
+      onSent: (milliseconds) => heard.push(milliseconds),
+    });
+    expect(pcm.map((item) => [item.fileName, item.head]).sort()).toEqual([
+      ["track-1-0.flac", "fLaC"],
+      ["track-1-1.flac", "fLaC"],
+    ]);
+    expect(heard.sort((left, right) => left - right)).toEqual([4_000, 5_000]);
+    const seconds = result.words.map((word) => Math.floor(word.startMilliseconds / 1_000));
+    expect(seconds).toContain(2);
+    expect(seconds).toContain(15);
+    // A model that takes only WAV gets the samples as they are.
+    const wavOnly: typeof flac = [];
+    await transcribeTrack({
+      provider: countingProvider(wavOnly),
+      spec: { model: "m", name: "M", capabilities, usdPerHour: null, audioFormats: ["wav"] },
+      audio: track,
+      durationMilliseconds: 25_000,
+      ffmpegPath,
+      credentials: { apiKey: "k" },
+      request,
+      sound,
+    });
+    expect(wavOnly.map((item) => [item.fileName, item.head]).sort()).toEqual([
+      ["track-1-0.wav", "RIFF"],
+      ["track-1-1.wav", "RIFF"],
+    ]);
+  });
+});

@@ -1,0 +1,2318 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import {
+  TranscriptionBillingRefusedError,
+  TranscriptionServiceError,
+  type SessionWorkflowClient,
+  type TranscriptionService,
+} from "@opengeni/core";
+import {
+  applyCreditLedgerEntry,
+  createConnection,
+  createDb,
+  createOrganizationApiKey,
+  createWorkspace,
+  encryptEnvironmentValue,
+  ensureExternalIdentity,
+  getWorkspaceUsage,
+  setWorkspaceAllowance,
+  withBillingOriginOverride,
+  type DbClient,
+} from "@opengeni/db";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { createSpeechToTextDeployment } from "@opengeni/core/transcription-service";
+import { createVoiceInputBilling } from "@opengeni/core";
+import { createApp, type AppDependencies } from "../src/app";
+import { meetingKeyterms, meetingLanguage } from "../src/routes/recordings";
+
+let shared: SharedTestDatabase;
+let db: DbClient;
+beforeAll(async () => {
+  const acquired = await acquireSharedTestDatabase("recordings-routes");
+  if (!acquired) throw new Error("Recording route tests require real PostgreSQL");
+  shared = acquired;
+  db = createDb(shared.appUrl);
+}, 180_000);
+// Releasing the shared database can take longer than the default hook timeout
+// on a busy machine.
+afterAll(async () => {
+  await db?.close();
+  await shared?.release();
+}, 60_000);
+
+const noop = async () => undefined;
+const encryptionKey = Buffer.alloc(32, 7);
+const memberPermissions = ["workspace:read", "sessions:read", "sessions:create"];
+type Started = Parameters<NonNullable<SessionWorkflowClient["startRecordingWorkflow"]>>[0];
+
+async function fixture(
+  options: {
+    transcription?: TranscriptionService;
+    settings?: Parameters<typeof testSettings>[0];
+    /** What the deployment's speech providers call, such as Azure sign-in. */
+    speechFetch?: typeof fetch;
+    /** What the owner's calendar answers when a meeting starts unnamed. */
+    meetingCalendarFetch?: typeof fetch;
+  } = {},
+) {
+  const [account] =
+    await shared.admin`insert into managed_accounts (name) values ('Recording fixture') returning id`;
+  const accountId = String(account!.id);
+  const workspace = await createWorkspace(db.db, { accountId, name: "Team workspace" });
+  const token = crypto.randomUUID();
+  const serviceKey = await createOrganizationApiKey(db.db, {
+    accountId,
+    name: "Service fixture",
+    prefix: "test",
+    keyHash: createHash("sha256").update(token).digest("hex"),
+    permissions: [
+      "workspace:read",
+      "workspace:admin",
+      "members:manage",
+      "sessions:read",
+      "sessions:create",
+      "account:admin",
+      "api_keys:manage",
+    ],
+  });
+  const objects = new Map<string, Uint8Array>();
+  const objectStorage = {
+    createPutUrl: async (args: { key: string; contentType: string; sha256?: string | null }) => ({
+      url: `https://storage.example/${args.key}?signed=put`,
+      requiredHeaders: { "content-type": args.contentType },
+      expiresAt: new Date(Date.now() + 900_000),
+    }),
+    createGetUrl: async (args: { key: string }) => ({
+      url: `https://storage.example/${args.key}?signed=get`,
+      expiresAt: new Date(Date.now() + 3_600_000),
+    }),
+    headObject: async (key: string) => {
+      const bytes = objects.get(key);
+      return bytes ? { ContentLength: bytes.byteLength } : null;
+    },
+    getObjectBytes: async (key: string) => {
+      const bytes = objects.get(key);
+      return bytes ? { bytes } : null;
+    },
+  };
+  const started: Started[] = [];
+  const speakerScans: string[] = [];
+  const settings = testSettings({
+    productAccessMode: "configured",
+    sandboxBackend: "none",
+    publicBaseUrl: "https://opengeni.example",
+    environmentsEncryptionKey: encryptionKey.toString("base64"),
+    ...options.settings,
+  });
+  const app = createApp({
+    db: db.db,
+    bus: new MemoryEventBus(),
+    settings,
+    ...(options.speechFetch
+      ? {
+          speechToText: createSpeechToTextDeployment(
+            { settings, db: db.db },
+            { fetch: options.speechFetch },
+          ),
+        }
+      : {}),
+    objectStorage,
+    ...(options.meetingCalendarFetch ? { meetingCalendarFetch: options.meetingCalendarFetch } : {}),
+    ...(options.transcription ? { transcription: options.transcription } : {}),
+    workflowClient: {
+      signalUserMessage: noop,
+      wakeSessionWorkflow: noop,
+      requestSessionWorkflowWakeDispatch: noop,
+      signalApprovalDecision: noop,
+      signalSessionControl: noop,
+      syncScheduledTask: noop,
+      deleteScheduledTaskSchedule: noop,
+      triggerScheduledTask: noop,
+      startRecordingWorkflow: async (input: Started) => {
+        started.push(input);
+      },
+      startRecordingSpeakerScan: async (input: { recordingId: string }) => {
+        speakerScans.push(input.recordingId);
+      },
+    } as unknown as SessionWorkflowClient,
+    managedAuth: null,
+  } as unknown as AppDependencies);
+  const source = "example:instance";
+  const service = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+  const person = async () => {
+    const identity = await ensureExternalIdentity(db.db, {
+      accountId,
+      source,
+      externalId: crypto.randomUUID(),
+    });
+    const added = await app.request(`/v1/workspaces/${workspace.id}/external-members`, {
+      method: "POST",
+      headers: service,
+      body: JSON.stringify({
+        identity: { source, externalId: identity.externalId },
+        permissions: memberPermissions,
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(added.status).toBe(200);
+    const headers = {
+      ...service,
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { source, externalId: identity.externalId } }),
+      ),
+    };
+    const callIn = async (workspaceId: string, method: string, path: string, body?: unknown) => {
+      const response = await app.request(`/v1/workspaces/${workspaceId}${path}`, {
+        method,
+        headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      const text = await response.text();
+      return { status: response.status, body: text ? JSON.parse(text) : null };
+    };
+    const call = (method: string, path: string, body?: unknown) =>
+      callIn(workspace.id, method, path, body);
+    /** Makes this person a member of another workspace of the organization too. */
+    const join = async (workspaceId: string) => {
+      const joined = await app.request(`/v1/workspaces/${workspaceId}/external-members`, {
+        method: "POST",
+        headers: service,
+        body: JSON.stringify({
+          identity: { source, externalId: identity.externalId },
+          permissions: memberPermissions,
+          operationId: crypto.randomUUID(),
+        }),
+      });
+      expect(joined.status).toBe(200);
+    };
+    return { subjectId: identity.subjectId, call, callIn, join };
+  };
+  const admin = async (method: string, path: string, body?: unknown) => {
+    const response = await app.request(`/v1/workspaces/${workspace.id}${path}`, {
+      method,
+      headers: service,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const text = await response.text();
+    return { status: response.status, body: text ? JSON.parse(text) : null };
+  };
+  return {
+    accountId,
+    workspaceId: workspace.id,
+    /** Another workspace of the same organization. */
+    otherWorkspace: async (name: string) => await createWorkspace(db.db, { accountId, name }),
+    serviceSubjectId: `api_key:${serviceKey.id}`,
+    objects,
+    started,
+    speakerScans,
+    admin,
+    owner: await person(),
+    other: await person(),
+  };
+}
+
+const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+/** Uploads one chunk to a new one-microphone recording, ready to finalize. */
+async function capturedRecording(
+  scope: Awaited<ReturnType<typeof fixture>>,
+  transcription?: Record<string, unknown>,
+): Promise<string> {
+  const recordingId = crypto.randomUUID();
+  const created = await scope.owner.call("POST", "/recordings", {
+    recordingId,
+    tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    ...(transcription ? { transcription } : {}),
+  });
+  expect(created.status).toBe(201);
+  const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1]);
+  const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+    trackNumber: 0,
+    chunks: [
+      {
+        chunkNumber: 0,
+        byteLength: bytes.byteLength,
+        sha256: sha(bytes),
+        startMilliseconds: 0,
+        durationMilliseconds: 1_000,
+      },
+    ],
+  });
+  scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+  const complete = await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+    trackNumber: 0,
+    chunkNumbers: [0],
+  });
+  expect(complete.body).toEqual({ uploaded: [0], missing: [] });
+  return recordingId;
+}
+
+describe("recording routes", () => {
+  test("embedded recordings skip a saved subscription default and refuse an explicit subscription", async () => {
+    const scope = await fixture({
+      settings: {
+        billingMode: "stripe",
+        subscriptionPlansEnabled: true,
+        codexSubscriptionEnabled: true,
+        voiceInputProviderOrder: "codex-subscription,openai",
+        recordingWordAlignment: true,
+        voiceInputOpenaiModel: "gpt-transcribe",
+        recordingTranscriptionDefault: "openai/gpt-transcribe",
+      },
+    });
+    await shared.admin`update workspaces set settings = settings ||
+      '{"recordings":{"transcription":{"providerId":"codex-subscription","model":"chatgpt-dictation"}}}'::jsonb
+      where id = ${scope.workspaceId}::uuid`;
+    await applyCreditLedgerEntry(db.db, {
+      accountId: scope.accountId,
+      amountMicros: 1_000_000,
+      type: "grant",
+      idempotencyKey: `recording-fallback:${scope.accountId}`,
+    });
+    for (const origin of ["api", "app"] as const) {
+      const catalog = await withBillingOriginOverride(origin, () =>
+        scope.owner.call("GET", "/recording-models"),
+      );
+      expect(catalog.status).toBe(200);
+      expect(catalog.body.default).toEqual({ providerId: "openai", model: "gpt-transcribe" });
+      expect(
+        catalog.body.models.find(
+          (model: { providerId: string }) => model.providerId === "codex-subscription",
+        ).available,
+      ).toBe(false);
+    }
+    const id = await capturedRecording(scope);
+    const result = await scope.owner.call("POST", `/recordings/${id}/finalize`, {
+      tracks: [{ trackNumber: 0, chunkCount: 1 }],
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.transcript).toMatchObject({
+      providerId: "openai",
+      model: "gpt-transcribe",
+      state: "queued",
+    });
+    const refused = await scope.owner.call("POST", `/recordings/${id}/transcripts`, {
+      transcription: { providerId: "codex-subscription", model: "chatgpt-dictation" },
+    });
+    expect(refused).toMatchObject({
+      status: 403,
+      body: { error: { details: { code: "subscription_api_unavailable" } } },
+    });
+  });
+  test("a payer without credits still ends capture: a failed transcript says why, or a free model runs", async () => {
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      selectProvider: () => "openai",
+      transcribe: async () => {
+        throw new Error("the worker transcribes meetings");
+      },
+      admit: async () => {
+        throw new TranscriptionBillingRefusedError({
+          code: "insufficient_credits",
+          message: "No credits.",
+        });
+      },
+    };
+    // Credits are charged for the deployment's text-only model, its default
+    // here even once the workspace has its own key for another provider.
+    const scope = await fixture({
+      transcription,
+      settings: {
+        recordingWordAlignment: true,
+        usageLimitsMode: "managed",
+        recordingTranscriptionDefault: "openai/gpt-transcribe",
+      },
+    });
+    const finalize = async (recordingId: string) =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      });
+
+    // Chosen for this recording, the refused model isn't swapped for another.
+    const chosen = await capturedRecording(scope, {
+      providerId: "openai",
+      model: "gpt-transcribe",
+    });
+    const failed = await finalize(chosen);
+    expect(failed.status).toBe(200);
+    expect(failed.body.recording.state).toBe("failed");
+    expect(failed.body.transcript).toMatchObject({
+      providerId: "openai",
+      model: "gpt-transcribe",
+      state: "failed",
+      errorCode: "insufficient_credits",
+    });
+    expect(scope.started).toEqual([]);
+    const events = await shared.admin`
+      select type from recording_events where recording_id = ${chosen}`;
+    expect(events.map((row) => row.type)).toContain("recording.transcript.failed");
+    // Finalizing again (an uploader resuming) returns the same failed version.
+    const again = await finalize(chosen);
+    expect(again.body.transcript.id).toBe(failed.body.transcript.id);
+    expect(scope.started).toEqual([]);
+    // Transcribing again with a model that still needs credits is refused as before.
+    const refused = await scope.owner.call("POST", `/recordings/${chosen}/transcripts`, {});
+    expect(refused).toMatchObject({
+      status: 402,
+      body: { error: { details: { code: "insufficient_credits" } } },
+    });
+
+    // Once the workspace has its own ElevenLabs key, a recording nobody chose
+    // a model for runs on it instead of the refused default, since it costs
+    // the payer no credits.
+    await createConnection(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: null,
+      providerDomain: "api.elevenlabs.io",
+      kind: "api_key",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ apiKey: "workspace-eleven-key" }),
+      ),
+      metadata: { credentialRole: "elevenlabs", credentialLabel: "ElevenLabs" },
+      createdBySubjectId: scope.owner.subjectId,
+    });
+    expect((await scope.owner.call("GET", "/recording-models")).body.default).toEqual({
+      providerId: "openai",
+      model: "gpt-transcribe",
+    });
+    const automatic = await capturedRecording(scope);
+    const ran = await finalize(automatic);
+    expect(ran.body.recording.state).toBe("processing");
+    expect(ran.body.transcript).toMatchObject({
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      state: "queued",
+    });
+    expect(scope.started.map((started) => started.recordingId)).toEqual([automatic]);
+    // The failed meeting is fixed by transcribing it with the free model.
+    const retried = await scope.owner.call("POST", `/recordings/${chosen}/transcripts`, {
+      transcription: { providerId: "elevenlabs", model: "scribe_v2" },
+    });
+    expect(retried.status).toBe(202);
+    expect(retried.body).toMatchObject({ state: "queued", providerId: "elevenlabs" });
+
+    // An allowance that counts free work at list price, used up during the
+    // meeting: the free model is not a way around it, so the transcript
+    // fails saying so.
+    const capped = await capturedRecording(scope);
+    await setWorkspaceAllowance(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      actorSubjectId: scope.serviceSubjectId,
+      includedCredits: 0,
+      period: "monthly",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    const cappedRun = await finalize(capped);
+    expect(cappedRun.body.transcript).toMatchObject({
+      state: "failed",
+      errorCode: "allowance_exhausted",
+    });
+    expect(scope.started.map((started) => started.recordingId)).toEqual([automatic, chosen]);
+  });
+
+  test("a used-up usage allowance refuses new recordings and re-runs", async () => {
+    const scope = await fixture();
+    const recordingId = crypto.randomUUID();
+    const tracks = [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }];
+    expect((await scope.owner.call("POST", "/recordings", { recordingId, tracks })).status).toBe(
+      201,
+    );
+    await setWorkspaceAllowance(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      actorSubjectId: scope.serviceSubjectId,
+      includedCredits: 0,
+      period: "monthly",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    const refused = await scope.owner.call("POST", "/recordings", {
+      recordingId: crypto.randomUUID(),
+      tracks,
+    });
+    expect(refused).toMatchObject({
+      status: 402,
+      body: { error: { code: "allowance_exhausted", details: { scope: "workspace" } } },
+    });
+    expect(
+      (await scope.owner.call("POST", `/recordings/${recordingId}/transcripts`, {})).status,
+    ).toBe(402);
+    expect(
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+          trackNumber: 0,
+        })
+      ).status,
+    ).toBe(402);
+  });
+
+  test("capture, upload, finalize and re-run start the worker; private stays Only me", async () => {
+    const scope = await fixture();
+    const recordingId = crypto.randomUUID();
+    const created = await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      title: "Design review",
+      tracks: [
+        { trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" },
+        { trackNumber: 1, source: "system", mimeType: "audio/webm;codecs=opus" },
+      ],
+    });
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({
+      id: recordingId,
+      visibility: "private",
+      state: "capturing",
+    });
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId,
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+        })
+      ).status,
+    ).toBe(200);
+    expect((await scope.other.call("GET", `/recordings/${recordingId}`)).status).toBe(404);
+    expect((await scope.other.call("GET", "/recordings")).body.recordings).toEqual([]);
+
+    const audio = [new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1]), new Uint8Array([2, 3, 4])];
+    for (const trackNumber of [0, 1]) {
+      const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+        trackNumber,
+        chunks: audio.map((bytes, chunkNumber) => ({
+          chunkNumber,
+          byteLength: bytes.byteLength,
+          sha256: sha(bytes),
+          startMilliseconds: chunkNumber * 1_000,
+          durationMilliseconds: 1_000,
+        })),
+      });
+      expect(uploads.status).toBe(200);
+      expect(uploads.body.uploads).toHaveLength(2);
+      expect(uploads.body.uploads[0]).toMatchObject({
+        uploaded: false,
+        method: "PUT",
+        headers: { "content-type": "audio/webm" },
+      });
+      const key = (url: string) => new URL(url).pathname.slice(1);
+      scope.objects.set(key(uploads.body.uploads[0].url), audio[0]!);
+      const partial = await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+        trackNumber,
+        chunkNumbers: [0, 1],
+      });
+      expect(partial.body).toEqual({ uploaded: [0], missing: [1] });
+      scope.objects.set(key(uploads.body.uploads[1].url), audio[1]!);
+      const complete = await scope.owner.call(
+        "POST",
+        `/recordings/${recordingId}/chunks/complete`,
+        {
+          trackNumber,
+          chunkNumbers: [1],
+        },
+      );
+      expect(complete.body).toEqual({ uploaded: [1], missing: [] });
+    }
+    // Its first audio starts telling the speakers apart while it records.
+    expect([...new Set(scope.speakerScans)]).toEqual([recordingId]);
+    expect(
+      (await scope.other.call("POST", `/recordings/${recordingId}/finalize`, { tracks: [] }))
+        .status,
+    ).toBe(400);
+    const finalized = await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+      tracks: [
+        { trackNumber: 0, chunkCount: 2 },
+        { trackNumber: 1, chunkCount: 2 },
+      ],
+    });
+    expect(finalized.status).toBe(200);
+    expect(finalized.body.recording.state).toBe("processing");
+    expect(finalized.body.transcript).toMatchObject({
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      state: "queued",
+    });
+    expect(scope.started).toEqual([
+      {
+        kind: "transcript",
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        recordingId,
+        versionId: finalized.body.transcript.id,
+        ownerSubjectId: scope.owner.subjectId,
+      },
+    ]);
+    // Finalizing again returns the same version and restarts a lost start.
+    const again = await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+      tracks: [
+        { trackNumber: 0, chunkCount: 2 },
+        { trackNumber: 1, chunkCount: 2 },
+      ],
+    });
+    expect(again.body.transcript.id).toBe(finalized.body.transcript.id);
+    const rerun = await scope.owner.call("POST", `/recordings/${recordingId}/transcripts`, {});
+    expect(rerun).toMatchObject({
+      status: 409,
+      body: { error: { details: { code: "transcript_pending" } } },
+    });
+    expect(
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/transcripts`, {
+          transcription: { providerId: "elevenlabs", model: "nope" },
+        })
+      ).body.error.details.code,
+    ).toBe("unknown_model");
+    const audioLink = await scope.owner.call("GET", `/recordings/${recordingId}/tracks/0/audio`);
+    expect(audioLink).toMatchObject({
+      status: 409,
+      body: { error: { details: { code: "audio_not_ready" } } },
+    });
+    const versions = await scope.owner.call("GET", `/recordings/${recordingId}/transcripts`);
+    expect(versions.body.versions).toHaveLength(1);
+    // A waiting list holds while the version is pending and answers the
+    // moment it settles, rather than the client checking every second.
+    const versionId = finalized.body.transcript.id as string;
+    expect(
+      (await scope.owner.call("GET", `/recordings/${recordingId}/transcripts?waitSeconds=26`))
+        .status,
+    ).toBe(400);
+    let started = Date.now();
+    const held = await scope.owner.call(
+      "GET",
+      `/recordings/${recordingId}/transcripts?waitSeconds=0.4&waitFor=${versionId}`,
+    );
+    expect(Date.now() - started).toBeGreaterThanOrEqual(350);
+    expect(held.body.versions[0]).toMatchObject({ id: versionId, state: "queued" });
+    started = Date.now();
+    const waiting = scope.owner.call(
+      "GET",
+      `/recordings/${recordingId}/transcripts?waitSeconds=20&waitFor=${versionId}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await shared.admin`
+      update recording_transcript_versions
+      set state = 'failed', error_code = 'provider_error', completed_at = now()
+      where id = ${versionId}`;
+    const settled = await waiting;
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(settled.body.versions[0]).toMatchObject({ id: versionId, state: "failed" });
+    // Each issued upload URL is a recorded audit fact; the URL and object key never are.
+    const audits = await shared.admin`
+      select action, metadata from audit_events
+      where account_id = ${scope.accountId} and target_id = ${recordingId}`;
+    const issued = audits.filter((row) => row.action === "recording.signed_upload.issued");
+    expect(issued.length).toBeGreaterThan(0);
+    expect(JSON.stringify(issued)).not.toContain("storage.example");
+    expect(JSON.stringify(issued)).not.toContain("workspaces/");
+  });
+
+  test("an app's own user's Only me meetings stay in the workspace that stores them", async () => {
+    // A product may give each of its tenants a workspace of one organization;
+    // its users' meetings never move between them.
+    const scope = await fixture();
+    const sales = await scope.otherWorkspace("Sales");
+    await scope.owner.join(sales.id);
+    const recordingId = crypto.randomUUID();
+    const created = await scope.owner.callIn(sales.id, "POST", "/recordings", {
+      recordingId,
+      title: "Pipeline review",
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(created.status).toBe(201);
+    const listed = await scope.owner.call("GET", "/recordings");
+    expect(listed.status).toBe(200);
+    expect(JSON.stringify(listed.body)).not.toContain("Pipeline review");
+    expect((await scope.owner.call("GET", `/recordings/${recordingId}`)).status).toBe(404);
+    expect(
+      (await scope.owner.callIn(sales.id, "GET", `/recordings/${recordingId}`)).body,
+    ).toMatchObject({ id: recordingId, workspaceId: sales.id });
+  });
+
+  test("a workspace default shares new recordings; only the owner deletes", async () => {
+    const scope = await fixture();
+    await shared.admin`
+      update workspaces set settings = settings || '{"recordings":{"defaultVisibility":"workspace"}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const seen = await scope.other.call("GET", `/recordings/${recordingId}`);
+    expect(seen).toMatchObject({ status: 200, body: { visibility: "workspace" } });
+    const renamed = await scope.other.call("PATCH", `/recordings/${recordingId}`, {
+      title: "Kickoff",
+    });
+    expect(renamed).toMatchObject({ status: 200, body: { title: "Kickoff" } });
+    expect(
+      (await scope.other.call("PATCH", `/recordings/${recordingId}`, { visibility: "private" }))
+        .status,
+    ).toBe(403);
+    expect((await scope.other.call("DELETE", `/recordings/${recordingId}`)).status).toBe(403);
+    expect((await scope.owner.call("DELETE", `/recordings/${recordingId}`)).status).toBe(204);
+    expect(scope.started.at(-1)).toMatchObject({ kind: "deletion", recordingId, versionId: null });
+    expect((await scope.owner.call("GET", `/recordings/${recordingId}`)).status).toBe(404);
+  });
+
+  test("an unnamed meeting takes its name from the owner's calendar event; a typed name never asks", async () => {
+    const asked: string[] = [];
+    const scope = await fixture({
+      settings: { googleCalendarEnabled: true },
+      meetingCalendarFetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        asked.push(`${url.origin}${url.pathname}`);
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer calendar-token");
+        return Response.json({
+          items: [
+            {
+              summary: "Lunch",
+              start: { dateTime: "2026-10-30T11:00:00Z" },
+              end: { dateTime: "2026-10-30T12:00:00Z" },
+            },
+            {
+              summary: "Quarterly planning with Acme",
+              start: { dateTime: "2026-10-30T13:30:00Z" },
+              end: { dateTime: "2026-10-30T14:30:00Z" },
+            },
+          ],
+        });
+      }) as typeof fetch,
+    });
+    await createConnection(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: scope.owner.subjectId,
+      providerDomain: "calendarmcp.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ access_token: "calendar-token", token_type: "Bearer" }),
+      ),
+      metadata: { mcpUrl: "https://calendarmcp.googleapis.com/mcp/v1" },
+      createdBySubjectId: scope.owner.subjectId,
+    });
+    const create = async (naming: Record<string, unknown>) => {
+      const recordingId = crypto.randomUUID();
+      const created = await scope.owner.call("POST", "/recordings", {
+        recordingId,
+        startedAt: "2026-10-30T13:51:00Z",
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+        ...naming,
+      });
+      expect(created.status).toBe(201);
+      return created.body.recording ?? created.body;
+    };
+    expect(await create({})).toMatchObject({
+      title: "Quarterly planning with Acme",
+      titleSource: "calendar",
+    });
+    expect(asked).toEqual(["https://www.googleapis.com/calendar/v3/calendars/primary/events"]);
+    // A guess by the recording app is improved on too.
+    expect(await create({ title: "Zoom meeting", titleSource: "app" })).toMatchObject({
+      title: "Quarterly planning with Acme",
+      titleSource: "calendar",
+    });
+    expect(await create({ title: "Board prep" })).toMatchObject({
+      title: "Board prep",
+      titleSource: "person",
+    });
+    expect(asked).toHaveLength(2);
+    // Someone else's calendar never names the owner's meeting.
+    const theirs = await scope.other.call("POST", "/recordings", {
+      recordingId: crypto.randomUUID(),
+      startedAt: "2026-10-30T13:51:00Z",
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(theirs.status).toBe(201);
+    expect(theirs.body.recording ?? theirs.body).toMatchObject({ titleSource: "default" });
+    expect(asked).toHaveLength(2);
+  });
+
+  test("upcoming meetings: the caller's own calendar, with join links; a chosen event names the meeting", async () => {
+    const soon = new Date(Date.now() + 60_000);
+    const later = new Date(Date.now() + 31 * 60_000);
+    const asked: string[] = [];
+    const scope = await fixture({
+      settings: { googleCalendarEnabled: true },
+      meetingCalendarFetch: (async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        asked.push(url.searchParams.get("fields") ?? "");
+        return Response.json({
+          items: [
+            {
+              id: "evt-sync",
+              summary: "Weekly sync",
+              hangoutLink: "https://meet.google.com/abc-defg-hij",
+              start: { dateTime: soon.toISOString() },
+              end: { dateTime: later.toISOString() },
+            },
+            {
+              id: "evt-now",
+              summary: "Running over",
+              start: { dateTime: new Date(Date.now() - 30 * 60_000).toISOString() },
+              end: { dateTime: new Date(Date.now() + 5 * 60_000).toISOString() },
+            },
+            {
+              id: "evt-room",
+              summary: "Lunch in the canteen",
+              start: { dateTime: soon.toISOString() },
+              end: { dateTime: later.toISOString() },
+            },
+          ],
+        });
+      }) as typeof fetch,
+    });
+    // No calendar yet.
+    expect(await scope.owner.call("GET", "/upcoming-meetings")).toEqual({
+      status: 200,
+      body: { calendar: "none", complete: true, meetings: [] },
+    });
+    expect(asked).toHaveLength(0);
+    await createConnection(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: scope.owner.subjectId,
+      providerDomain: "calendarmcp.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ access_token: "calendar-token", token_type: "Bearer" }),
+      ),
+      metadata: { mcpUrl: "https://calendarmcp.googleapis.com/mcp/v1" },
+      createdBySubjectId: scope.owner.subjectId,
+    });
+    const upcoming = await scope.owner.call("GET", "/upcoming-meetings");
+    expect(upcoming).toMatchObject({
+      status: 200,
+      body: {
+        calendar: "connected",
+        complete: true,
+        meetings: [
+          {
+            id: "evt-sync",
+            provider: "google",
+            title: "Weekly sync",
+            joinUrl: "https://meet.google.com/abc-defg-hij",
+            service: "Google Meet",
+            private: false,
+            unanswered: false,
+          },
+        ],
+      },
+    });
+    expect(upcoming.body.meetings).toHaveLength(1);
+    expect(asked.at(-1)).toContain("hangoutLink");
+    // Someone else in the workspace never sees the owner's calendar.
+    expect(await scope.other.call("GET", "/upcoming-meetings")).toMatchObject({
+      status: 200,
+      body: { calendar: "none", meetings: [] },
+    });
+    // Joined from the reminder: named after that event, not the one running over.
+    const recordingId = crypto.randomUUID();
+    const created = await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      title: "Google Meet",
+      titleSource: "app",
+      calendarEvent: { provider: "google", id: "evt-sync" },
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.recording ?? created.body).toMatchObject({
+      title: "Weekly sync",
+      titleSource: "calendar",
+      metadata: { calendarEvent: { provider: "google", id: "evt-sync" } },
+    });
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          calendarEvent: { provider: "yahoo", id: "x" },
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  test("a meeting whose calendar can't be read still starts, named for when it began", async () => {
+    const scope = await fixture({
+      settings: { googleCalendarEnabled: true },
+      meetingCalendarFetch: (async () => {
+        throw new Error("calendar down");
+      }) as typeof fetch,
+    });
+    await createConnection(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: scope.owner.subjectId,
+      providerDomain: "calendarmcp.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ access_token: "calendar-token", token_type: "Bearer" }),
+      ),
+      createdBySubjectId: scope.owner.subjectId,
+    });
+    const created = await scope.owner.call("POST", "/recordings", {
+      recordingId: crypto.randomUUID(),
+      startedAt: "2026-10-30T13:51:00Z",
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.recording ?? created.body).toMatchObject({
+      title: "Recording 2026-10-30 13:51 UTC",
+      titleSource: "default",
+    });
+  });
+
+  test("notes: anyone who can see the meeting saves them; a stale revision is a 409", async () => {
+    const scope = await fixture();
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const path = `/recordings/${recordingId}/notes`;
+    expect(await scope.owner.call("GET", path)).toEqual({ status: 200, body: { notes: [] } });
+    const saved = await scope.owner.call("PUT", `${path}/notes`, {
+      body: "## Decisions\n\n- Ship it",
+      expectedRevision: 0,
+    });
+    expect(saved).toMatchObject({
+      status: 200,
+      body: { kind: "notes", revision: 1, updatedBy: { subjectId: scope.owner.subjectId } },
+    });
+    expect(
+      await scope.owner.call("PUT", `${path}/notes`, { body: "older", expectedRevision: 0 }),
+    ).toMatchObject({ status: 409, body: { error: { details: { code: "notes_changed" } } } });
+    expect((await scope.owner.call("PUT", `${path}/agenda`, { body: "x" })).status).toBe(404);
+    expect(
+      (await scope.owner.call("PUT", `${path}/notepad`, { body: "x".repeat(262_145) })).status,
+    ).toBe(400);
+    // A private meeting's notes are as hidden as the meeting.
+    expect((await scope.other.call("GET", path)).status).toBe(404);
+    expect((await scope.other.call("PUT", `${path}/notes`, { body: "mine now" })).status).toBe(404);
+  });
+
+  test("a dictation is private, one microphone, heard by voice input and never listed", async () => {
+    const selected: Array<Record<string, unknown>> = [];
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      selectProvider: (context) => {
+        selected.push({ ...context });
+        return "openai";
+      },
+      transcribe: async () => {
+        throw new Error("the worker transcribes dictations");
+      },
+    };
+    const scope = await fixture({ transcription });
+    await shared.admin`
+      update workspaces set settings = settings
+        || '{"voiceInput":{"enabled":true,"preferredProvider":"openai","fallbackEnabled":false}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    const mic = [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }];
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          purpose: "dictation",
+          tracks: [...mic, { trackNumber: 1, source: "system", mimeType: "audio/webm" }],
+        })
+      ).status,
+    ).toBe(400);
+    // A dictation may name its model, but not how speakers are told apart.
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          purpose: "dictation",
+          tracks: mic,
+          transcription: { providerId: "elevenlabs", model: "scribe_v2", diarizer: "ours" },
+        })
+      ).status,
+    ).toBe(400);
+    const recordingId = crypto.randomUUID();
+    const created = await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      purpose: "dictation",
+      visibility: "workspace",
+      tracks: mic,
+    });
+    expect(created).toMatchObject({
+      status: 201,
+      body: { purpose: "dictation", visibility: "private", title: "Dictation" },
+    });
+    // The same id as a meeting is refused, not quietly turned into one.
+    expect(
+      (await scope.owner.call("POST", "/recordings", { recordingId, tracks: mic })).body,
+    ).toMatchObject({ error: { details: { code: "purpose_mismatch" } } });
+    expect((await scope.owner.call("GET", "/recordings")).body.recordings).toEqual([]);
+    expect(
+      (await scope.owner.call("GET", "/recordings?purpose=dictation")).body.recordings.map(
+        (item: { id: string }) => item.id,
+      ),
+    ).toEqual([recordingId]);
+    expect(
+      (await scope.other.call("GET", "/recordings?purpose=dictation")).body.recordings,
+    ).toEqual([]);
+    expect((await scope.owner.call("GET", "/recordings?purpose=browser")).status).toBe(400);
+    expect((await scope.other.call("GET", `/recordings/${recordingId}`)).status).toBe(404);
+    expect(
+      (await scope.owner.call("PATCH", `/recordings/${recordingId}`, { visibility: "workspace" }))
+        .status,
+    ).toBe(409);
+    expect(
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+          trackNumber: 0,
+        })
+      ).status,
+    ).toBe(409);
+
+    const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3]);
+    const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+      trackNumber: 0,
+      chunks: [
+        {
+          chunkNumber: 0,
+          byteLength: bytes.byteLength,
+          sha256: sha(bytes),
+          startMilliseconds: 0,
+          durationMilliseconds: 2_000,
+        },
+      ],
+    });
+    scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+    await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+      trackNumber: 0,
+      chunkNumbers: [0],
+    });
+    const finalized = await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+      tracks: [{ trackNumber: 0, chunkCount: 1 }],
+    });
+    expect(finalized.status).toBe(200);
+    expect(finalized.body.transcript).toMatchObject({
+      providerId: "openai",
+      model: "gpt-transcribe",
+      state: "queued",
+    });
+    expect(selected.at(-1)).toMatchObject({ preferredProvider: "openai", fallbackEnabled: false });
+    expect(scope.started.at(-1)).toMatchObject({ kind: "transcript", recordingId });
+    // A dictation never reaches webhooks or automations.
+    const [{ count }] = await shared.admin`
+      select count(*)::int as count from recording_events where recording_id = ${recordingId}`;
+    expect(count).toBe(0);
+    const [{ credit_attribution: attribution }] = await shared.admin`
+      select credit_attribution from recording_transcript_versions where recording_id = ${recordingId}`;
+    expect(attribution).toMatchObject({ kind: "human" });
+
+    // Voice input turned off: no new dictations.
+    await shared.admin`
+      update workspaces set settings = settings || '{"voiceInput":{"enabled":false}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    const refused = await scope.owner.call("POST", "/recordings", {
+      recordingId: crypto.randomUUID(),
+      purpose: "dictation",
+      tracks: mic,
+    });
+    expect(refused).toMatchObject({
+      status: 403,
+      body: { error: { details: { code: "policy_blocked" } } },
+    });
+  });
+
+  test("a dictation is heard in the language it names, else detected, never the meeting language", async () => {
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      selectProvider: () => "openai",
+      transcribe: async () => {
+        throw new Error("the worker transcribes dictations");
+      },
+    };
+    const scope = await fixture({ transcription });
+    await shared.admin`
+      update workspaces set settings = settings
+        || '{"voiceInput":{"enabled":true},"recordings":{"language":"sv"}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    const mic = [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }];
+    // Only the language and keyterms: the workspace's voice input still picks the model.
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          purpose: "dictation",
+          tracks: mic,
+          transcription: { language: "nb", model: "scribe_v2" },
+        })
+      ).status,
+    ).toBe(400);
+    const heard = async (transcriptionRequest?: Record<string, unknown>) => {
+      const recordingId = crypto.randomUUID();
+      const created = await scope.owner.call("POST", "/recordings", {
+        recordingId,
+        purpose: "dictation",
+        tracks: mic,
+        ...(transcriptionRequest ? { transcription: transcriptionRequest } : {}),
+      });
+      expect(created.status).toBe(201);
+      const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3]);
+      const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+        trackNumber: 0,
+        chunks: [
+          {
+            chunkNumber: 0,
+            byteLength: bytes.byteLength,
+            sha256: sha(bytes),
+            startMilliseconds: 0,
+            durationMilliseconds: 2_000,
+          },
+        ],
+      });
+      scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+      await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+        trackNumber: 0,
+        chunkNumbers: [0],
+      });
+      const finalized = await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      });
+      expect(finalized.status).toBe(200);
+      const [{ options }] = await shared.admin`
+        select options from recording_transcript_versions where recording_id = ${recordingId}`;
+      return options;
+    };
+    expect(await heard({ language: "nb" })).toEqual({ language: "nb" });
+    // People dictate in more languages than they meet in: no language detects it.
+    expect(await heard()).toEqual({});
+    expect(await heard({ language: null })).toEqual({});
+    // The person's vocabulary goes with it, for a model that takes one.
+    expect(await heard({ keyterms: ["Kubernetes", "Ada Lovelace"] })).toEqual({
+      keyterms: ["Kubernetes", "Ada Lovelace"],
+    });
+    expect(await heard({ language: "en", keyterms: ["Kubernetes"] })).toEqual({
+      language: "en",
+      keyterms: ["Kubernetes"],
+    });
+  });
+
+  test("a dictation that names its provider and model is heard by exactly that one", async () => {
+    let ready = ["openai"];
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      availableProviderIds: async () => ready,
+      // The workspace's voice input would pick another provider.
+      selectProvider: () => "elevenlabs",
+      transcribe: async () => {
+        throw new Error("the worker transcribes dictations");
+      },
+    };
+    const scope = await fixture({ transcription });
+    await shared.admin`
+      update workspaces set settings = settings || '{"voiceInput":{"enabled":true}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    const mic = [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }];
+    const create = (transcriptionRequest: Record<string, unknown>) =>
+      scope.owner.call("POST", "/recordings", {
+        recordingId: crypto.randomUUID(),
+        purpose: "dictation",
+        tracks: mic,
+        transcription: transcriptionRequest,
+      });
+    // A model the deployment doesn't offer for dictation, or one without its provider.
+    expect((await create({ providerId: "openai", model: "no-such-model" })).status).toBe(400);
+    expect((await create({ model: "gpt-transcribe" })).status).toBe(400);
+    // Speakers and the like are still the workspace's to choose.
+    expect((await create({ providerId: "openai", speakers: 2 })).status).toBe(400);
+    const finalize = async (transcriptionRequest: Record<string, unknown>) => {
+      const created = await create(transcriptionRequest);
+      expect(created.status).toBe(201);
+      const recordingId = created.body.id as string;
+      const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3]);
+      const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+        trackNumber: 0,
+        chunks: [
+          {
+            chunkNumber: 0,
+            byteLength: bytes.byteLength,
+            sha256: sha(bytes),
+            startMilliseconds: 0,
+            durationMilliseconds: 2_000,
+          },
+        ],
+      });
+      scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+      await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+        trackNumber: 0,
+        chunkNumbers: [0],
+      });
+      const finalized = await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      });
+      const versions = await shared.admin`
+        select provider_id, model, options from recording_transcript_versions
+        where recording_id = ${recordingId}`;
+      return { status: finalized.status, versions };
+    };
+    const named = await finalize({ providerId: "openai", model: "gpt-transcribe", language: "en" });
+    expect(named.status).toBe(200);
+    expect(named.versions).toEqual([
+      { provider_id: "openai", model: "gpt-transcribe", options: { language: "en" } },
+    ]);
+    // Naming only the provider takes its dictation model.
+    expect((await finalize({ providerId: "openai" })).versions).toMatchObject([
+      { provider_id: "openai", model: "gpt-transcribe" },
+    ]);
+    // Its provider isn't ready: refused rather than heard by another.
+    ready = [];
+    const refused = await finalize({ providerId: "openai", model: "gpt-transcribe" });
+    expect(refused.status).toBe(503);
+    expect(refused.versions).toEqual([]);
+  });
+
+  test("the workspace's meeting language, unless a recording names one or asks to detect", async () => {
+    const scope = await fixture();
+    expect((await scope.owner.call("GET", "/recording-models")).body.language).toBeNull();
+    await shared.admin`
+      update workspaces set settings = settings || '{"recordings":{"language":"no"}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    // Recorders show it before the meeting starts.
+    expect((await scope.owner.call("GET", "/recording-models")).body.language).toBe("no");
+    // So does whether they start with the live transcript on.
+    expect((await scope.owner.call("GET", "/recording-models")).body.liveTranscript).toBe(false);
+    await shared.admin`
+      update workspaces set settings = jsonb_set(settings, '{recordings,liveTranscript}', 'true')
+      where id = ${scope.workspaceId}`;
+    expect((await scope.owner.call("GET", "/recording-models")).body.liveTranscript).toBe(true);
+    const create = async (transcription?: { language?: string | null }) => {
+      const recordingId = crypto.randomUUID();
+      const created = await scope.owner.call("POST", "/recordings", {
+        recordingId,
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+        ...(transcription ? { transcription } : {}),
+      });
+      expect(created.status).toBe(201);
+      return created.body as { id: string; transcription: { language?: string | null } };
+    };
+    // None named: the workspace's, settled at the start for the live transcript.
+    expect((await create()).transcription.language).toBe("no");
+    expect((await create({})).transcription.language).toBe("no");
+    expect((await create({ language: "en" })).transcription.language).toBe("en");
+    // Null detects it, even though the workspace names one.
+    expect((await create({ language: null })).transcription.language).toBeUndefined();
+    const settings = { language: "no" };
+    expect(meetingLanguage(null, settings)).toBeUndefined();
+    expect(meetingLanguage(undefined, settings)).toBe("no");
+    expect(meetingLanguage("en", settings)).toBe("en");
+    expect(meetingLanguage(undefined, {})).toBeUndefined();
+  });
+
+  test("every meeting listens for the workspace's words, after its own", async () => {
+    const scope = await fixture();
+    await shared.admin`
+      update workspaces set settings = settings
+        || '{"recordings":{"keyterms":["Tripletex","Vatra"]}}'::jsonb
+      where id = ${scope.workspaceId}`;
+    const listened = async (keyterms?: string[]) => {
+      const recordingId = crypto.randomUUID();
+      await scope.owner.call("POST", "/recordings", {
+        recordingId,
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" }],
+        ...(keyterms ? { transcription: { keyterms } } : {}),
+      });
+      const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1]);
+      const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+        trackNumber: 0,
+        chunks: [
+          {
+            chunkNumber: 0,
+            byteLength: bytes.byteLength,
+            sha256: sha(bytes),
+            startMilliseconds: 0,
+            durationMilliseconds: 1_000,
+          },
+        ],
+      });
+      scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+      await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+        trackNumber: 0,
+        chunkNumbers: [0],
+      });
+      const finalized = await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      });
+      expect(finalized.status).toBe(200);
+      const [{ options }] = await shared.admin`
+        select options from recording_transcript_versions where recording_id = ${recordingId}`;
+      return options.keyterms;
+    };
+    // Every meeting listens for the workspace's words.
+    expect(await listened()).toEqual(["Tripletex", "Vatra"]);
+    // A meeting's own come first, and a word is listened for once.
+    expect(await listened(["Pelle", "vatra"])).toEqual(["Pelle", "vatra", "Tripletex"]);
+  });
+
+  test("the words a meeting listens for stop at what one request takes", () => {
+    const many = Array.from({ length: 100 }, (_, index) => `word ${index}`);
+    expect(meetingKeyterms(["Pelle"], many)).toHaveLength(100);
+    expect(meetingKeyterms(["Pelle"], many)[0]).toBe("Pelle");
+    expect(meetingKeyterms(undefined, undefined)).toEqual([]);
+  });
+
+  test("remembering a voice needs recognition on and the person's agreement", async () => {
+    const scope = await fixture();
+    const outsider = await scope.owner.call("POST", "/recording-people", { displayName: "Ingrid" });
+    const member = await scope.owner.call("POST", "/recording-people", {
+      displayName: "Owner",
+      memberSubjectId: scope.owner.subjectId,
+    });
+    const voice = (id: string) => `/recording-people/${id}/voice`;
+    expect(
+      await scope.owner.call("PUT", voice(outsider.body.id), { consent: "attested" }),
+    ).toMatchObject({
+      status: 409,
+      body: { error: { details: { code: "voice_recognition_off" } } },
+    });
+
+    expect(
+      (await scope.admin("PATCH", "/settings", { recordings: { voiceprints: true } })).status,
+    ).toBe(200);
+    expect(
+      await scope.owner.call("PUT", voice(outsider.body.id), { consent: "attested" }),
+    ).toMatchObject({ status: 200, body: { voice: { consent: "attested", learned: false } } });
+    expect((await scope.other.call("PUT", voice(member.body.id), { consent: "self" })).status).toBe(
+      403,
+    );
+    expect(await scope.owner.call("PUT", voice(member.body.id), { consent: "self" })).toMatchObject(
+      { status: 200, body: { voice: { consent: "self" } } },
+    );
+    expect((await scope.other.call("DELETE", voice(member.body.id))).status).toBe(403);
+    expect(await scope.other.call("DELETE", voice(outsider.body.id))).toMatchObject({
+      status: 200,
+      body: { voice: null },
+    });
+
+    // Turning recognition off withdraws every agreement.
+    expect((await scope.admin("PATCH", "/settings", { recordings: {} })).status).toBe(200);
+    const people = (await scope.owner.call("GET", "/recording-people")).body.people;
+    expect(people.map((person: { voice: unknown }) => person.voice)).toEqual([null, null]);
+  });
+
+  test("the built-in meeting summary is a workspace setting that admins can turn off", async () => {
+    const scope = await fixture();
+    expect(
+      (await scope.admin("PATCH", "/settings", { recordings: { autoSummary: "off" } })).status,
+    ).toBe(400);
+    const off = await scope.admin("PATCH", "/settings", { recordings: { autoSummary: false } });
+    expect(off.status).toBe(200);
+    expect(off.body.settings.recordings).toEqual({ autoSummary: false });
+    const on = await scope.admin("PATCH", "/settings", { recordings: { autoSummary: true } });
+    expect(on.body.settings.recordings).toEqual({ autoSummary: true });
+  });
+
+  test("people and models", async () => {
+    const scope = await fixture();
+    const personId = crypto.randomUUID();
+    const created = await scope.owner.call("POST", "/recording-people", {
+      personId,
+      displayName: "Kari Nordmann",
+    });
+    expect(created).toMatchObject({
+      status: 201,
+      body: { id: personId, displayName: "Kari Nordmann" },
+    });
+    expect(
+      (await scope.other.call("GET", "/recording-people?query=kari")).body.people,
+    ).toHaveLength(1);
+    const models = await scope.owner.call("GET", "/recording-models");
+    expect(models.body.default).toEqual({ providerId: "elevenlabs", model: "scribe_v2" });
+    expect(
+      models.body.models.find((model: { model: string }) => model.model === "scribe_v2"),
+    ).toMatchObject({
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+      available: false,
+      funding: "workspace_key",
+    });
+    // The deployment's voice input models return only text, so they serve
+    // dictation and are not offered for meetings.
+    expect(
+      models.body.models.find((model: { providerId: string }) => model.providerId === "openai"),
+    ).toBeUndefined();
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+          transcription: { providerId: "openai", model: "gpt-transcribe" },
+        })
+      ).status,
+    ).toBe(400);
+    expect(models.body).toMatchObject({ dictationDefault: null, pinned: false });
+    expect(
+      models.body.models.find((model: { model: string }) => model.model === "scribe_v2_realtime")
+        .capabilities,
+    ).toMatchObject({ batch: false, live: true });
+    // A live-only model cannot make a transcript.
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+          transcription: { providerId: "elevenlabs", model: "scribe_v2_realtime" },
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  test("an app's own user with computer audio is named by the app; Opengeni's name stays first", async () => {
+    const scope = await fixture();
+    const tracks = [
+      { trackNumber: 0, source: "microphone", mimeType: "audio/webm" },
+      { trackNumber: 1, source: "system", mimeType: "audio/webm" },
+    ];
+    const peopleFor = async (subjectId: string) =>
+      (
+        (await scope.owner.call("GET", "/recording-people")).body.people as {
+          displayName: string;
+          memberSubjectId: string | null;
+        }[]
+      ).filter((person) => person.memberSubjectId === subjectId);
+    // A microphone alone may hear a whole room, so it names no one.
+    expect(
+      (
+        await scope.other.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks: [tracks[0]],
+          ownerName: "Per Hansen",
+        })
+      ).status,
+    ).toBe(201);
+    expect(await peopleFor(scope.other.subjectId)).toEqual([]);
+    // Beside computer audio the microphone is theirs: Opengeni has no name
+    // for the app's user, so the app's is used.
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks,
+          ownerName: "  Ola Nordmann ",
+        })
+      ).status,
+    ).toBe(201);
+    expect(await peopleFor(scope.owner.subjectId)).toMatchObject([
+      { displayName: "Ola Nordmann", memberSubjectId: scope.owner.subjectId },
+    ]);
+    // Once they are in the directory, a later name changes nothing there.
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks,
+          ownerName: "Someone Else",
+        })
+      ).status,
+    ).toBe(201);
+    expect((await peopleFor(scope.owner.subjectId)).map((person) => person.displayName)).toEqual([
+      "Ola Nordmann",
+    ]);
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks,
+          ownerName: "x".repeat(201),
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  test("a deployment's own Azure Speech account is available to every workspace and is the default", async () => {
+    const scope = await fixture({
+      settings: {
+        recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
+        recordingAzureSpeechApiKey: "deployment-key",
+      },
+    });
+    const models = await scope.owner.call("GET", "/recording-models");
+    expect(models.body.default).toEqual({ providerId: "azure-speech", model: "MAI-Transcribe-2" });
+    expect(
+      models.body.models.find(
+        (model: { providerId: string }) => model.providerId === "azure-speech",
+      ),
+    ).toMatchObject({
+      providerName: "Azure Speech",
+      model: "MAI-Transcribe-2",
+      available: true,
+      // The deployment covers it and charges no credits, so it costs this
+      // workspace nothing per hour.
+      usdPerHour: null,
+      capabilities: { batch: true, live: false, diarization: false, wordTimestamps: true },
+    });
+    // Without a workspace key, ElevenLabs stays unavailable; on its own key
+    // the workspace pays the list price.
+    const scribe = models.body.models.find(
+      (model: { model: string }) => model.model === "scribe_v2",
+    );
+    expect(scribe.available).toBe(false);
+    expect(scribe.usdPerHour).toBeGreaterThan(0);
+  });
+
+  test("a deployment's model shows a price where its use is charged in credits", async () => {
+    const settings = { recordingWordAlignment: true } as const;
+    const free = await fixture({ settings });
+    const charged = await fixture({ settings: { ...settings, usageLimitsMode: "managed" } });
+    const openai = async (scope: Awaited<ReturnType<typeof fixture>>) =>
+      (await scope.owner.call("GET", "/recording-models")).body.models.find(
+        (model: { providerId: string }) => model.providerId === "openai",
+      );
+    expect(await openai(free)).toMatchObject({ usdPerHour: null, chargedInCredits: false });
+    const priced = await openai(charged);
+    expect(priced.usdPerHour).toBeGreaterThan(0);
+    expect(priced.chargedInCredits).toBe(true);
+  });
+
+  test("a deployment that aligns words itself offers text-only models for meetings", async () => {
+    const scope = await fixture({ settings: { recordingWordAlignment: true } });
+    const models = await scope.owner.call("GET", "/recording-models");
+    expect(
+      models.body.models.find((model: { providerId: string }) => model.providerId === "openai"),
+    ).toMatchObject({ model: "gpt-transcribe", capabilities: { wordTimestamps: false } });
+    // With no ElevenLabs key here, meetings default to the model this
+    // workspace can use rather than one that would fail.
+    expect(models.body.default).toEqual({ providerId: "openai", model: "gpt-transcribe" });
+    expect(
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+          transcription: { providerId: "openai", model: "gpt-transcribe" },
+        })
+      ).status,
+    ).toBe(201);
+  });
+
+  test("a pinned deployment offers its one model for everything and refuses any other", async () => {
+    const scope = await fixture({
+      settings: {
+        recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
+        recordingAzureSpeechApiKey: "deployment-key",
+        speechToTextPinned: "azure-speech/MAI-Transcribe-2",
+      },
+    });
+    const pin = { providerId: "azure-speech", model: "MAI-Transcribe-2" };
+    const models = await scope.owner.call("GET", "/recording-models");
+    expect(models.body).toMatchObject({ default: pin, dictationDefault: pin, pinned: true });
+    expect(
+      models.body.models.map((model: { providerId: string; model: string }) => ({
+        providerId: model.providerId,
+        model: model.model,
+      })),
+    ).toEqual([pin]);
+    const create = async (transcription: { providerId: string; model: string }) =>
+      (
+        await scope.owner.call("POST", "/recordings", {
+          recordingId: crypto.randomUUID(),
+          tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+          transcription,
+        })
+      ).status;
+    expect(await create({ providerId: "elevenlabs", model: "scribe_v2" })).toBe(400);
+    expect(await create(pin)).toBe(201);
+  });
+
+  test("a pinned deployment streams the live preview to the Azure OpenAI deployment its operator names", async () => {
+    const minted: { url: string; authorization: string | null }[] = [];
+    const scope = await fixture({
+      settings: {
+        recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
+        recordingAzureSpeechApiKey: "deployment-key",
+        speechToTextPinned: "azure-speech/MAI-Transcribe-2",
+        recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: "https://ai.example.cognitiveservices.azure.com",
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+        azureTenantId: "tenant",
+        azureClientId: "client",
+        azureClientSecret: "secret",
+      },
+      speechFetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        if (request.url.includes("/oauth2/")) {
+          return Response.json({ access_token: "entra", expires_in: 3_600 });
+        }
+        minted.push({ url: request.url, authorization: request.headers.get("authorization") });
+        return Response.json({
+          value: "ek_live",
+          expires_at: Math.floor(Date.now() / 1_000) + 600,
+        });
+      }) as typeof fetch,
+    });
+    const models = await scope.owner.call("GET", "/recording-models");
+    // Meetings still use only the pin; the live model is offered for the preview only.
+    expect(
+      models.body.models.map(
+        (model: {
+          providerId: string;
+          model: string;
+          capabilities: { batch: boolean; live: boolean };
+        }) => ({
+          providerId: model.providerId,
+          model: model.model,
+          batch: model.capabilities.batch,
+          live: model.capabilities.live,
+        }),
+      ),
+    ).toEqual([
+      { providerId: "azure-speech", model: "MAI-Transcribe-2", batch: true, live: false },
+      { providerId: "azure-openai", model: "gpt-4o-transcribe", batch: false, live: true },
+    ]);
+    expect(models.body).toMatchObject({
+      default: { providerId: "azure-speech", model: "MAI-Transcribe-2" },
+      pinned: true,
+    });
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    // Deployment-funded, so no workspace key is needed.
+    const granted = await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+      trackNumber: 0,
+    });
+    expect(granted).toMatchObject({
+      status: 201,
+      body: {
+        providerId: "azure-openai",
+        model: "gpt-4o-transcribe",
+        protocol: "openai.realtime",
+        url: "wss://ai.example.cognitiveservices.azure.com/openai/v1/realtime?intent=transcription",
+        token: "ek_live",
+        webrtcUrl: "https://ai.example.cognitiveservices.azure.com/openai/v1/realtime/calls",
+        audio: { encoding: "pcm_s16le", sampleRate: 24_000 },
+      },
+    });
+    expect(minted).toEqual([
+      {
+        url: "https://ai.example.cognitiveservices.azure.com/openai/v1/realtime/client_secrets",
+        authorization: "Bearer entra",
+      },
+    ]);
+    // Audio still never goes anywhere else.
+    expect(
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+          trackNumber: 0,
+          providerId: "elevenlabs",
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  test("a live transcript the deployment pays for is admitted against credits and charged for the audio it streamed, once", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    const real = createVoiceInputBilling({
+      db: db.db,
+      settings: testSettings({ usageLimitsMode: "managed" }),
+    });
+    let credits = false;
+    /** Where the next charge fails: its receipt (in the save), or its debit after. */
+    let failNext: "receipt" | "debit" | null = null;
+    let holdDebit: Promise<void> | null = null;
+    let debitEntered: (() => void) | null = null;
+    const admitted: unknown[] = [];
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      transcribe: async () => {
+        throw new Error("the live transcript never transcribes through the API");
+      },
+      billing: {
+        admit: async (input) => {
+          admitted.push(input.feature);
+          if (credits) return;
+          throw new TranscriptionBillingRefusedError({
+            code: "insufficient_credits",
+            message: "No credits.",
+          });
+        },
+        recordReceipt: async (tx, input) => {
+          if (failNext === "receipt") {
+            failNext = null;
+            throw new Error("the ledger is unavailable");
+          }
+          return await real.recordReceipt!(tx, input);
+        },
+        settle: async (input) => {
+          debitEntered?.();
+          if (holdDebit) await holdDebit;
+          if (failNext === "debit") {
+            failNext = null;
+            throw new Error("the ledger is unavailable");
+          }
+          return await real.settle(input);
+        },
+        reconcile: async (input) => await real.reconcile!(input),
+      },
+    };
+    const minted: string[] = [];
+    const scope = await fixture({
+      transcription,
+      settings: {
+        usageLimitsMode: "managed",
+        recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: AI,
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+        voiceInputAzureApiKey: "az-key",
+      },
+      speechFetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        minted.push(new Request(input, init).url);
+        return Response.json({ value: "ek_live", expires_at: Date.now() / 1_000 + 600 });
+      }) as typeof fetch,
+    });
+    // A usage allowance that prices unbilled use at list price.
+    await setWorkspaceAllowance(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      actorSubjectId: scope.serviceSubjectId,
+      includedCredits: 1_000_000_000,
+      period: "monthly",
+      unbilledUsage: "list_price",
+      expectedVersion: 0,
+    });
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const start = async () =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+        trackNumber: 0,
+      });
+    // Without credits no secret is minted, so no audio reaches the model.
+    expect(await start()).toMatchObject({
+      status: 402,
+      body: { error: { code: "payment_required", details: { code: "insufficient_credits" } } },
+    });
+    expect(minted).toEqual([]);
+    // The refusal is worded for the live transcript.
+    expect(admitted).toEqual(["live_transcript"]);
+    credits = true;
+    expect(await start()).toMatchObject({ status: 201, body: { providerId: "azure-openai" } });
+    const append = async (streamedMilliseconds: number, segments: unknown[] = []) =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/live-segments`, {
+        trackNumber: 0,
+        streamedMilliseconds,
+        segments,
+      });
+    const range = (source: string) => source.slice(`${recordingId}:live:0:`.length);
+    const receipts = async () =>
+      (
+        await shared.admin<{ source: string }[]>`
+          select source_resource_id as source from usage_events
+          where workspace_id = ${scope.workspaceId} and source_resource_type = 'voice_transcription'
+          order by occurred_at, source_resource_id`
+      ).map((row) => range(row.source));
+    const debits = async () =>
+      await shared.admin<{ source: string; amount: string; basis: string }[]>`
+        select source_id as source, amount_micros::text as amount, metadata->>'basis' as basis
+        from credit_ledger_entries
+        where workspace_id = ${scope.workspaceId} and type = 'voice_transcription_debit'
+        order by created_at, source_id`;
+    expect(await append(30_000)).toMatchObject({ status: 200, body: { saved: 0, ended: false } });
+    // A retry and an older total add no audio; only what is new is charged, once.
+    expect((await append(30_000)).status).toBe(200);
+    expect((await append(20_000)).status).toBe(200);
+    // Overlapping saves (a retry after a lost response): the second save
+    // waits for nothing but the first's transaction, and charges only the
+    // audio after it, even while the first's debit is still in flight.
+    let release: () => void = () => undefined;
+    holdDebit = new Promise((done) => (release = done));
+    const inDebit = new Promise<void>((done) => (debitEntered = done));
+    const first = append(45_000);
+    await inDebit;
+    debitEntered = null;
+    holdDebit = null;
+    expect((await append(50_000)).status).toBe(200);
+    release();
+    expect((await first).status).toBe(200);
+    expect(await receipts()).toEqual(["0-30000", "30000-45000", "45000-50000"]);
+    // A debit that fails leaves its receipt, so the audio isn't charged again;
+    // finalizing the meeting applies the debit from it.
+    failNext = "debit";
+    expect((await append(60_000)).status).toBe(200);
+    expect((await append(70_000)).status).toBe(200);
+    // A receipt that fails fails the save: nothing of it is kept, and the
+    // recorder's retry charges the audio once.
+    failNext = "receipt";
+    const line = { segmentNumber: 0, startMilliseconds: 0, endMilliseconds: 900, text: "Hi." };
+    expect((await append(80_000, [line])).status).toBe(500);
+    expect(
+      (await scope.owner.call("GET", `/recordings/${recordingId}`)).body.tracks[0].live,
+    ).toMatchObject({ streamedMilliseconds: 70_000 });
+    expect(await append(80_000, [line])).toMatchObject({ status: 200, body: { saved: 1 } });
+    const charged = [
+      "0-30000",
+      "30000-45000",
+      "45000-50000",
+      "50000-60000",
+      "60000-70000",
+      "70000-80000",
+    ];
+    expect([...(await receipts())].sort()).toEqual([...charged].sort());
+    expect((await debits()).map((row) => range(row.source)).sort()).toEqual(
+      charged.filter((source) => source !== "50000-60000").sort(),
+    );
+    const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 1]);
+    const uploads = await scope.owner.call("POST", `/recordings/${recordingId}/uploads`, {
+      trackNumber: 0,
+      chunks: [
+        {
+          chunkNumber: 0,
+          byteLength: bytes.byteLength,
+          sha256: sha(bytes),
+          startMilliseconds: 0,
+          durationMilliseconds: 1_000,
+        },
+      ],
+    });
+    scope.objects.set(new URL(uploads.body.uploads[0].url).pathname.slice(1), bytes);
+    await scope.owner.call("POST", `/recordings/${recordingId}/chunks/complete`, {
+      trackNumber: 0,
+      chunkNumbers: [0],
+    });
+    expect(
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+          tracks: [{ trackNumber: 0, chunkCount: 1 }],
+        })
+      ).status,
+    ).toBe(200);
+    const settled = await debits();
+    expect(settled.map((row) => range(row.source)).sort()).toEqual([...charged].sort());
+    // The duration is the recorder's, and the ledger says so.
+    expect(settled.find((row) => range(row.source) === "0-30000")?.basis).toBe(
+      "client_reported_duration",
+    );
+    // The allowance counts the credits once, never the list price as well.
+    const usage = await getWorkspaceUsage(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+    });
+    expect(usage.workspace.used).toBe(
+      settled.reduce((total, row) => total - Number(row.amount), 0),
+    );
+    expect(usage.workspace.used).toBeGreaterThan(0);
+  });
+
+  test("an unpriced meeting model the deployment pays for isn't served while credits are billed, except on legacy billing", async () => {
+    const legacy: string[] = [];
+    const scope = await fixture({
+      settings: {
+        usageLimitsMode: "managed",
+        billingLegacyAccountIds: legacy,
+        recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
+        recordingAzureSpeechApiKey: "deployment-key",
+        speechToTextPinned: "azure-speech/MAI-Transcribe-2",
+      },
+    });
+    const finalize = async (recordingId: string) =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/finalize`, {
+        tracks: [{ trackNumber: 0, chunkCount: 1 }],
+      });
+    // No voice input MAI price: the meeting would be transcribed free, so it
+    // fails saying the model isn't available (which the app words and offers
+    // another model for) and nothing reaches the worker.
+    const refused = await finalize(await capturedRecording(scope));
+    expect(refused.body.transcript).toMatchObject({
+      providerId: "azure-speech",
+      state: "failed",
+      errorCode: "model_unavailable",
+    });
+    expect(scope.started).toEqual([]);
+    // CloudGeni's legacy account keeps today's behaviour.
+    legacy.push(scope.accountId);
+    const kept = await capturedRecording(scope);
+    const ran = await finalize(kept);
+    expect(ran.body.transcript).toMatchObject({ providerId: "azure-speech", state: "queued" });
+    expect(scope.started.map((started) => started.recordingId)).toEqual([kept]);
+  });
+
+  test("a legacy billing account's live transcript is neither admitted against credits nor charged", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    const calls: string[] = [];
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      transcribe: async () => {
+        throw new Error("the live transcript never transcribes through the API");
+      },
+      billing: {
+        admit: async () => {
+          calls.push("admit");
+          throw new TranscriptionBillingRefusedError({
+            code: "insufficient_credits",
+            message: "No credits.",
+          });
+        },
+        settle: async () => {
+          calls.push("settle");
+          return { creditCostMicros: 1 };
+        },
+      },
+    };
+    const legacy: string[] = [];
+    const scope = await fixture({
+      transcription,
+      settings: {
+        usageLimitsMode: "managed",
+        billingLegacyAccountIds: legacy,
+        recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: AI,
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+        voiceInputAzureApiKey: "az-key",
+      },
+      speechFetch: (async () =>
+        Response.json({ value: "ek_live", expires_at: Date.now() / 1_000 + 600 })) as typeof fetch,
+    });
+    legacy.push(scope.accountId);
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(
+      await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, { trackNumber: 0 }),
+    ).toMatchObject({ status: 201, body: { providerId: "azure-openai" } });
+    expect(
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/live-segments`, {
+          trackNumber: 0,
+          streamedMilliseconds: 30_000,
+          segments: [],
+        })
+      ).status,
+    ).toBe(200);
+    expect(calls).toEqual([]);
+  });
+
+  test("a live transcript charged in credits gets no more sessions while its recorder doesn't report the audio they stream", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    let mintFails = false;
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      transcribe: async () => {
+        throw new Error("the live transcript never transcribes through the API");
+      },
+      billing: {
+        admit: async () => undefined,
+        settle: async () => ({ creditCostMicros: 1 }),
+        recordReceipt: async () => ({ creditCostMicros: 1 }),
+      },
+    };
+    const scope = await fixture({
+      transcription,
+      settings: {
+        usageLimitsMode: "managed",
+        recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: AI,
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+        voiceInputAzureApiKey: "az-key",
+      },
+      speechFetch: (async () =>
+        mintFails
+          ? new Response("busy", { status: 503 })
+          : Response.json({
+              value: "ek_live",
+              expires_at: Date.now() / 1_000 + 600,
+            })) as typeof fetch,
+    });
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const start = async () =>
+      await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+        trackNumber: 0,
+      });
+    for (let session = 0; session < 3; session++) expect((await start()).status).toBe(201);
+    // A session the provider never started doesn't count.
+    mintFails = true;
+    expect((await start()).status).toBeGreaterThanOrEqual(500);
+    mintFails = false;
+    expect((await start()).status).toBe(201);
+    // Four sessions and no audio reported: the recorder gets no more, and
+    // treats the 409 as final. The recording itself carries on.
+    expect(await start()).toMatchObject({
+      status: 409,
+      body: {
+        error: {
+          code: "conflict",
+          message:
+            "The live transcript stopped for this track. The recording continues and is transcribed when it ends.",
+          retryable: false,
+          details: { code: "live_grant_limit" },
+        },
+      },
+    });
+  });
+
+  test("credits turned off, or a payer that can't be identified, is a final 403 policy refusal, not a retryable 500", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    const policyBlocked = () =>
+      new TranscriptionServiceError({
+        code: "policy_blocked",
+        status: 403,
+        fallbackSafe: true,
+        message: "Credits are turned off in this workspace.",
+      });
+    const transcription: TranscriptionService = {
+      limits: () => ({ maxDurationSeconds: 600, maxSizeBytes: 25_000_000, acceptedMimeTypes: [] }),
+      available: () => true,
+      transcribe: async () => {
+        throw new Error("the worker transcribes meetings");
+      },
+      admit: async () => {
+        throw policyBlocked();
+      },
+      billing: {
+        admit: async () => {
+          throw policyBlocked();
+        },
+        settle: async () => ({ creditCostMicros: 1 }),
+        recordReceipt: async () => ({ creditCostMicros: 1 }),
+      },
+    };
+    const scope = await fixture({
+      transcription,
+      settings: {
+        usageLimitsMode: "managed",
+        recordingWordAlignment: true,
+        recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: AI,
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+        voiceInputAzureApiKey: "az-key",
+      },
+      speechFetch: (async () =>
+        Response.json({ value: "ek_live", expires_at: Date.now() / 1_000 + 600 })) as typeof fetch,
+    });
+    const blocked = {
+      status: 403,
+      body: {
+        error: {
+          code: "forbidden",
+          message: "Credits are turned off in this workspace.",
+          retryable: false,
+          details: { code: "policy_blocked" },
+        },
+      },
+    };
+    // The live transcript: the recorder treats a 403 as final and stops asking.
+    const live = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId: live,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    expect(
+      await scope.owner.call("POST", `/recordings/${live}/live-session`, { trackNumber: 0 }),
+    ).toMatchObject(blocked);
+    // A meeting on a chosen deployment model: capture still ends, and the
+    // failed transcript says why; transcribing again is refused the same way.
+    const chosen = await capturedRecording(scope, {
+      providerId: "azure-openai",
+      model: "gpt-4o-transcribe",
+    });
+    const finalized = await scope.owner.call("POST", `/recordings/${chosen}/finalize`, {
+      tracks: [{ trackNumber: 0, chunkCount: 1 }],
+    });
+    expect(finalized.status).toBe(200);
+    expect(finalized.body.transcript).toMatchObject({
+      providerId: "azure-openai",
+      state: "failed",
+      errorCode: "policy_blocked",
+    });
+    expect(scope.started).toEqual([]);
+    expect(await scope.owner.call("POST", `/recordings/${chosen}/transcripts`, {})).toMatchObject(
+      blocked,
+    );
+  });
+
+  test("an unpriced deployment model is listed unavailable and the default moves to one that can run", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    const legacy: string[] = [];
+    const settings = (wordAlignment: boolean) => ({
+      usageLimitsMode: "managed" as const,
+      billingLegacyAccountIds: legacy,
+      recordingWordAlignment: wordAlignment,
+      // The deployment's Azure Speech account has no voice input MAI price.
+      recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
+      recordingAzureSpeechApiKey: "deployment-key",
+      recordingTranscriptionDefault: "azure-speech/MAI-Transcribe-2",
+      voiceInputProviderOrder: "azure-openai",
+      recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+      voiceInputAzureEndpoint: AI,
+      voiceInputAzureDeployment: "gpt-4o-transcribe",
+      voiceInputAzureApiKey: "az-key",
+    });
+    const scope = await fixture({ settings: settings(true) });
+    // Without word alignment the Realtime model only streams the live transcript.
+    const liveOnlyScope = await fixture({ settings: settings(false) });
+    const listed = async (on = scope) => (await on.owner.call("GET", "/recording-models")).body;
+    const entry = (body: { models: { providerId: string; model: string }[] }, id: string) =>
+      body.models.find((model) => `${model.providerId}/${model.model}` === id);
+    let models = await listed();
+    // The default is the deployment model with a price, not the unpriced one.
+    expect(models.default).toEqual({ providerId: "azure-openai", model: "gpt-4o-transcribe" });
+    expect(entry(models, "azure-openai/gpt-4o-transcribe")).toMatchObject({
+      funding: "deployment",
+      available: true,
+      chargedInCredits: true,
+    });
+    expect(entry(models, "azure-speech/MAI-Transcribe-2")).toMatchObject({
+      available: false,
+      unavailableReason: "unpriced",
+      chargedInCredits: false,
+    });
+    // A live-only model is charged in credits, with its price.
+    const liveOnly = entry(await listed(liveOnlyScope), "azure-openai/gpt-4o-transcribe");
+    expect(liveOnly).toMatchObject({
+      capabilities: { batch: false, live: true },
+      available: true,
+      chargedInCredits: true,
+    });
+    expect(typeof (liveOnly as { usdPerHour: unknown }).usdPerHour).toBe("number");
+
+    // CloudGeni's legacy account keeps today's behaviour: the default runs,
+    // and its live transcript is neither charged nor priced.
+    legacy.push(scope.accountId, liveOnlyScope.accountId);
+    models = await listed();
+    expect(models.default).toEqual({ providerId: "azure-speech", model: "MAI-Transcribe-2" });
+    expect(entry(models, "azure-speech/MAI-Transcribe-2")).toMatchObject({ available: true });
+    expect(entry(models, "azure-speech/MAI-Transcribe-2")).not.toHaveProperty("unavailableReason");
+    expect(entry(await listed(liveOnlyScope), "azure-openai/gpt-4o-transcribe")).toMatchObject({
+      chargedInCredits: false,
+      usdPerHour: null,
+    });
+  });
+
+  test("EU-only: a live secret is minted only for a Realtime endpoint declared EU", async () => {
+    const AI = "https://ai.example.cognitiveservices.azure.com";
+    const residency = {
+      geography: "eu",
+      deploymentType: "azure_data_zone",
+      regions: ["swedencentral"],
+      evidence: {
+        source: "operator_declaration",
+        reference: "Operator-declared EU deployment",
+        verifiedAt: "2026-10-26",
+      },
+    };
+    const live = async (declarations: Record<string, unknown>) => {
+      const minted: string[] = [];
+      const scope = await fixture({
+        settings: {
+          requiredModelGeography: "eu",
+          sideFeatureResidencyJson: JSON.stringify(declarations),
+          recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
+          recordingAzureSpeechApiKey: "deployment-key",
+          speechToTextPinned: "azure-speech/MAI-Transcribe-2",
+          recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+          voiceInputProviderOrder: "azure-openai",
+          voiceInputAzureEndpoint: AI,
+          voiceInputAzureDeployment: "gpt-4o-transcribe",
+          voiceInputAzureApiKey: "az-key",
+        },
+        speechFetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          minted.push(new Request(input, init).url);
+          return Response.json({ value: "ek_live", expires_at: Date.now() / 1_000 + 600 });
+        }) as typeof fetch,
+      });
+      // The workspace asks recorders to start with the live transcript on.
+      await shared.admin`
+        update workspaces set settings = settings || '{"recordings":{"liveTranscript":true}}'::jsonb
+        where id = ${scope.workspaceId}`;
+      const recordingId = crypto.randomUUID();
+      await scope.owner.call("POST", "/recordings", {
+        recordingId,
+        tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+      });
+      const models = await scope.owner.call("GET", "/recording-models");
+      const granted = await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+        trackNumber: 0,
+      });
+      const entry = models.body.models.find(
+        (model: { providerId: string }) => model.providerId === "azure-openai",
+      );
+      return { minted, granted, entry, liveTranscript: models.body.liveTranscript };
+    };
+    // Meetings are declared EU; the live transcript's own route is not.
+    const speech = {
+      "transcription.azure-speech": {
+        endpoint: "https://speech.example.cognitiveservices.azure.com",
+        residency,
+      },
+      "transcription.azure-openai": { endpoint: AI, deployment: "gpt-4o-transcribe", residency },
+    };
+    const refused = await live(speech);
+    expect(refused.granted).toMatchObject({
+      status: 422,
+      body: { error: { details: { code: "region_restricted" } } },
+    });
+    expect(refused.minted).toEqual([]);
+    expect(refused.entry).toMatchObject({
+      available: false,
+      unavailableReason: "region_restricted",
+    });
+    // Recorders don't start a live transcript that can't run here.
+    expect(refused.liveTranscript).toBe(false);
+    // A Realtime declaration for another deployment on the same resource
+    // (an EU one beside the configured global one) mints nothing either.
+    const otherDeployment = await live({
+      ...speech,
+      "transcription.azure-openai-realtime": {
+        endpoint: AI,
+        deployment: "gpt-4o-transcribe-eu",
+        residency,
+      },
+    });
+    expect(otherDeployment.granted).toMatchObject({
+      status: 422,
+      body: { error: { details: { code: "region_restricted" } } },
+    });
+    expect(otherDeployment.minted).toEqual([]);
+    const admitted = await live({
+      ...speech,
+      "transcription.azure-openai-realtime": {
+        endpoint: AI,
+        deployment: "gpt-4o-transcribe",
+        residency,
+      },
+    });
+    expect(admitted.granted).toMatchObject({ status: 201, body: { providerId: "azure-openai" } });
+    expect(admitted.minted).toEqual([`${AI}/openai/v1/realtime/client_secrets`]);
+    expect(admitted.entry).toMatchObject({ available: true, capabilities: { live: true } });
+    expect(admitted.entry.unavailableReason).toBeUndefined();
+    expect(admitted.liveTranscript).toBe(true);
+  });
+
+  test("the live preview: a single-use grant for the recorder, text for everyone who can see it", async () => {
+    const tokenRequests: { url: string; key: string | null }[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      tokenRequests.push({ url: request.url, key: request.headers.get("xi-api-key") });
+      return Response.json({ token: "sutkn_live" });
+    }) as typeof fetch;
+    let scope: Awaited<ReturnType<typeof fixture>>;
+    try {
+      scope = await fixture();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      visibility: "workspace",
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    const noKey = await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+      trackNumber: 0,
+    });
+    expect(noKey).toMatchObject({
+      status: 409,
+      body: { error: { details: { code: "credential_unavailable" } } },
+    });
+    await createConnection(db.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      subjectId: null,
+      providerDomain: "api.elevenlabs.io",
+      kind: "api_key",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ apiKey: "workspace-eleven-key" }),
+      ),
+      metadata: { credentialRole: "elevenlabs", credentialLabel: "ElevenLabs" },
+      createdBySubjectId: scope.owner.subjectId,
+    });
+    expect(
+      (
+        await scope.other.call("POST", `/recordings/${recordingId}/live-session`, {
+          trackNumber: 0,
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+          trackNumber: 0,
+          model: "scribe_v2",
+        })
+      ).status,
+    ).toBe(400);
+    const granted = await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+      trackNumber: 0,
+    });
+    expect(granted.status).toBe(201);
+    expect(granted.body).toMatchObject({
+      providerId: "elevenlabs",
+      model: "scribe_v2_realtime",
+      protocol: "elevenlabs.scribe_realtime",
+      audio: { encoding: "pcm_s16le", sampleRate: 16_000 },
+    });
+    expect(granted.body.url).toContain("token=sutkn_live");
+    expect(JSON.stringify(granted.body)).not.toContain("workspace-eleven-key");
+    expect(tokenRequests).toEqual([
+      {
+        url: "https://api.elevenlabs.io/v1/single-use-token/realtime_scribe",
+        key: "workspace-eleven-key",
+      },
+    ]);
+
+    const saved = await scope.owner.call("POST", `/recordings/${recordingId}/live-segments`, {
+      trackNumber: 0,
+      streamedMilliseconds: 1_800_000,
+      segments: [{ segmentNumber: 0, startMilliseconds: 0, endMilliseconds: 1_200, text: "Hei." }],
+    });
+    expect(saved).toMatchObject({ status: 200, body: { saved: 1, ended: false } });
+    expect(
+      (
+        await scope.other.call("POST", `/recordings/${recordingId}/live-segments`, {
+          trackNumber: 0,
+          streamedMilliseconds: 0,
+          segments: [],
+        })
+      ).status,
+    ).toBe(403);
+    const read = await scope.other.call("GET", `/recordings/${recordingId}/live-segments?after=0`);
+    expect(read.body).toMatchObject({ ended: false, segments: [{ trackNumber: 0, text: "Hei." }] });
+    expect(
+      (
+        await scope.other.call(
+          "GET",
+          `/recordings/${recordingId}/live-segments?after=${read.body.after}`,
+        )
+      ).body.segments,
+    ).toEqual([]);
+    const recording = await scope.other.call("GET", `/recordings/${recordingId}`);
+    expect(recording.body.tracks[0].live).toEqual({
+      providerId: "elevenlabs",
+      model: "scribe_v2_realtime",
+      streamedMilliseconds: 1_800_000,
+      costUsd: 0.195,
+    });
+  });
+});

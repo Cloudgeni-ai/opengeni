@@ -1,4 +1,5 @@
 import { ConnectAccounts } from "./connect-accounts";
+import type { ChatClient } from "@opengeni/sdk";
 import { ConnectChooser } from "./connect-chooser";
 import { ConnectSetup, type ConnectSetupProps } from "./connect-setup";
 import { useConnect } from "./hooks/use-connect";
@@ -6,6 +7,8 @@ import type { OpenGeniClient } from "@opengeni/sdk";
 import { useState } from "react";
 import { connectionServicePresentation } from "./connection-service-presentation";
 import { ConnectionDiscovery } from "./connection-discovery";
+import { useOpenGeniText } from "./messages/runtime";
+import { useNobodyToShareWith } from "./workspace-sharing";
 
 export type ConnectPanelProps = ConnectSetupProps & {
   returnUrl: string;
@@ -17,7 +20,7 @@ export type ConnectPanelProps = ConnectSetupProps & {
   /** Include ready, non-custom adapters from the host's Connect catalogue. */
   showProviderConnections?: boolean;
   presentation?: "select" | "catalog";
-  client?: OpenGeniClient | undefined;
+  client?: ChatClient<OpenGeniClient> | undefined;
 };
 
 /** Optional composition over the same unstyled surfaces. Import
@@ -25,7 +28,7 @@ export type ConnectPanelProps = ConnectSetupProps & {
  * transport, actor admission, and controller lifetime. */
 export function ConnectPanel({
   returnUrl,
-  title = "Connections",
+  title: titleProp,
   showAccounts = true,
   showCustomConnections = true,
   showProviderConnections = false,
@@ -34,14 +37,17 @@ export function ConnectPanel({
   client,
   ...setup
 }: ConnectPanelProps) {
+  const t = useOpenGeniText();
+  const title = titleProp === undefined ? t("connectPanel.connections") : titleProp;
   const { attempt } = useConnect(setup.controller);
   const [inventoryRevision, setInventoryRevision] = useState(0);
+  const alone = useNobodyToShareWith(client, setup.controller.workspaceId);
   // Unknown/failed outcomes still need reconciliation or cancellation, not a
   // competing new acquisition. Unmounting observers never cancels controller work.
   const activeSetup =
     attempt !== null && !["complete", "cancelled", "expired"].includes(attempt.state);
   const serviceName = attempt
-    ? connectionServicePresentation({ id: attempt.providerId, label: "" }).name
+    ? connectionServicePresentation({ id: attempt.providerId, label: "" }, t).name
     : "";
   return (
     <div className={["og-connect", className].filter(Boolean).join(" ")}>
@@ -68,12 +74,13 @@ export function ConnectPanel({
             />
             {showCustomConnections && (
               <details className="og-connect-secondary">
-                <summary>Custom connection</summary>
+                <summary>{t("connectPanel.customConnection")}</summary>
                 <ConnectChooser
                   customOnly
                   presentation={presentation}
                   controller={setup.controller}
                   returnUrl={returnUrl}
+                  personalOnly={alone}
                 />
               </details>
             )}
@@ -83,14 +90,18 @@ export function ConnectPanel({
             presentation={presentation}
             controller={setup.controller}
             returnUrl={returnUrl}
+            personalOnly={alone}
           />
         ))}
       {activeSetup && (
         <ConnectSetup
           {...setup}
+          serviceName={setup.serviceName ?? (serviceName || undefined)}
           authorizeLabel={
             setup.authorizeLabel ??
-            (serviceName ? `Continue to ${serviceName}` : "Authorize connection")
+            (serviceName
+              ? t("connectPanel.continueToServicename", { serviceName })
+              : t("connectPanel.authorizeConnection"))
           }
         />
       )}

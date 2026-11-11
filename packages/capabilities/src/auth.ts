@@ -73,7 +73,10 @@ function placementValue(placement: IntegrationCredentialPlacement): string {
   return `${placement.prefix ?? ""}${placement.value}`;
 }
 
-function validateCredentialPlacements(placements: readonly IntegrationCredentialPlacement[]): void {
+/** Throws unless every placement is a safe, distinct header, query or cookie destination. */
+export function validateCredentialPlacements(
+  placements: readonly IntegrationCredentialPlacement[],
+): void {
   if (placements.length === 0 || placements.length > MAX_CREDENTIAL_PLACEMENTS) {
     throw new IntegrationInvocationError(
       "credential_placement_invalid",

@@ -2,17 +2,33 @@ import {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
+  UpdateOrganizationApiKeyRequest,
+  normalizeOrganizationAccessPolicy,
+  type OrganizationAccessPolicy,
+  DEVELOPER_SETUP_API_KEY_PRESET,
   Permission,
   type AccessContext,
   type ApiKey,
   type OrganizationApiKeyAccess,
+  serviceAccountAllowsPermission,
+  OWNER_LEVEL_API_KEY_MESSAGE,
+  workspaceAdminDelegates,
+  workspaceKeyLiteralRefusal,
 } from "@opengeni/contracts";
+import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import {
   createApiKey,
   createOrganizationApiKey as createOrganizationApiKeyRecord,
+  effectiveKeyPermissions,
+  getOrganizationServiceAccount,
   listApiKeys,
   listOrganizationApiKeys,
+  getOrganizationApiKey,
+  updateOrganizationApiKey,
+  OrganizationApiKeyWorkspaceScopeError,
   OrganizationApiKeyLimitExceededError,
+  OrganizationServiceAccountNotFoundError,
+  OrganizationServiceAccountRoleError,
   revokeApiKey,
   revokeOrganizationApiKey,
 } from "@opengeni/db";
@@ -24,12 +40,18 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   accountScopedApiKeyWorkspaceAuthority,
   organizationApiKeyAccess,
+  hasPermission,
+  holdsOrganizationAdministration,
+  organizationWorkspaceInScope,
   requireAccessContext,
-  requireAccessGrant,
   requireAccessGrantAuthorization,
+  requireApiKeyManagementContext,
+  requireExplicitPermissionDelegation,
   type AccessGrantAuthorization,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 export { organizationApiKeyAccess } from "@opengeni/core";
 
@@ -58,19 +80,43 @@ export const organizationReadApiKeyPermissions: Permission[] = [
 export function organizationApiKeyPermissionsForAccess(
   access: OrganizationApiKeyAccess,
 ): Permission[] {
-  return access === "read"
-    ? [...organizationReadApiKeyPermissions]
-    : [...organizationApiKeyPermissions];
+  return access === "developer_setup"
+    ? [...DEVELOPER_SETUP_API_KEY_PRESET.permissions]
+    : access === "read"
+      ? [...organizationReadApiKeyPermissions]
+      : [...organizationApiKeyPermissions];
+}
+
+/** Existing callers retain their expiry; setup keys default to one day. */
+export function organizationApiKeyExpiryDate(
+  request: Pick<CreateOrganizationApiKeyRequest, "preset" | "expiresAt"> &
+    Partial<Pick<CreateOrganizationApiKeyRequest, "access">>,
+  now: Date = new Date(),
+): Date | null {
+  if (request.expiresAt !== undefined) return new Date(request.expiresAt);
+  return request.preset === "developer_setup" || request.access === "developer_setup"
+    ? new Date(now.getTime() + DEVELOPER_SETUP_API_KEY_PRESET.defaultExpiryHours * 60 * 60 * 1000)
+    : null;
 }
 
 function withOrganizationApiKeyAccess(apiKey: ApiKey): ApiKey {
-  return { ...apiKey, access: organizationApiKeyAccess(apiKey.permissions) };
+  const workspaceScope = apiKey.workspaceScope ?? { kind: "all" as const };
+  return {
+    ...apiKey,
+    access: organizationApiKeyAccess(apiKey.permissions),
+    workspaceScope,
+    policy: normalizeOrganizationAccessPolicy({
+      preset: "custom",
+      permissions: apiKey.permissions,
+      workspaceScope,
+    }),
+  };
 }
 
 export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/api-keys", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "api_keys:manage");
+    await requireWorkspaceApiKeyControl(c, deps, workspaceId);
     return c.json({ apiKeys: await listApiKeys(deps.db, workspaceId) });
   });
 
@@ -79,12 +125,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     zValidator("json", CreateApiKeyRequest.omit({ workspaceId: true })),
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const authorization = await requireAccessGrantAuthorization(
-        c,
-        deps,
-        workspaceId,
-        "api_keys:manage",
-      );
+      const authorization = await requireWorkspaceApiKeyControl(c, deps, workspaceId);
       const grant = authorization.grant;
       const body = c.req.valid("json");
       const permissions: Permission[] =
@@ -114,7 +155,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/api-keys/:apiKeyId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "api_keys:manage");
+    await requireWorkspaceApiKeyControl(c, deps, workspaceId);
     return c.json(await revokeApiKey(deps.db, workspaceId, c.req.param("apiKeyId")));
   });
 
@@ -135,9 +176,33 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       const organizationId = c.req.param("organizationId");
       const context = await requireAccessContext(c, deps);
-      requireOrganizationApiKeyControlPermission(context, organizationId);
+      const control = requireOrganizationApiKeyControlPermission(context, organizationId);
       const body = c.req.valid("json");
+      const rawBody: Record<string, unknown> = await c.req.json();
+      if (body.policy && (rawBody.access !== undefined || rawBody.preset !== undefined))
+        throw new HTTPException(400, {
+          message: "Choose either a policy or a legacy access tier/preset",
+        });
       const token = generateApiKeyToken();
+      const permissions =
+        body.policy?.permissions ??
+        (body.preset === "developer_setup"
+          ? [...DEVELOPER_SETUP_API_KEY_PRESET.permissions]
+          : organizationApiKeyPermissionsForAccess(body.access));
+      ensureOrganizationPolicyDelegable(
+        context,
+        body.policy ?? {
+          preset: "custom",
+          permissions,
+          workspaceScope: { kind: "all" },
+        },
+        !body.policy,
+      );
+      await requireMemberLevelKeyCreation(deps, control, organizationId, {
+        permissions,
+        explicit: Boolean(body.policy),
+        serviceAccountId: body.serviceAccountId,
+      });
       try {
         const apiKey = await createOrganizationApiKeyRecord(deps.db, {
           accountId: organizationId,
@@ -145,10 +210,13 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
           description: body.description ?? null,
           prefix: token.slice(0, 14),
           keyHash: await sha256Hex(token),
-          permissions: organizationApiKeyPermissionsForAccess(body.access),
-          expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
+          permissions,
+          ...(body.policy ? { policy: body.policy } : {}),
+          expiresAt: organizationApiKeyExpiryDate(body),
           maxActiveKeys: organizationApiKeyLimit(deps),
           rotationSourceApiKeyId: authenticatedApiKeyId(context),
+          serviceAccountId: body.serviceAccountId ?? null,
+          createdBySubjectId: context.subjectId,
         });
         return c.json(
           CreateApiKeyResponse.parse({ apiKey: withOrganizationApiKeyAccess(apiKey), token }),
@@ -158,6 +226,63 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
         if (error instanceof OrganizationApiKeyLimitExceededError) {
           throw new HTTPException(429, { message: error.message });
         }
+        if (error instanceof OrganizationApiKeyWorkspaceScopeError)
+          throw new HTTPException(400, { message: error.message });
+        throwServiceAccountError(error);
+        throw error;
+      }
+    },
+  );
+
+  app.get("/v1/organizations/:organizationId/api-keys/:apiKeyId", async (c) => {
+    const organizationId = c.req.param("organizationId");
+    requireOrganizationApiKeyControlPermission(await requireAccessContext(c, deps), organizationId);
+    const apiKey = await getOrganizationApiKey(deps.db, organizationId, c.req.param("apiKeyId"));
+    if (!apiKey) throw new HTTPException(404, { message: "API key not found" });
+    return c.json(withOrganizationApiKeyAccess(apiKey));
+  });
+
+  app.patch(
+    "/v1/organizations/:organizationId/api-keys/:apiKeyId",
+    zValidator("json", UpdateOrganizationApiKeyRequest),
+    async (c) => {
+      const organizationId = c.req.param("organizationId");
+      const context = await requireAccessContext(c, deps);
+      const control = requireOrganizationApiKeyControlPermission(context, organizationId);
+      const body = c.req.valid("json");
+      if (body.policy) ensureOrganizationPolicyDelegable(context, body.policy);
+      if (control === "member_level") {
+        const existing = await getOrganizationApiKey(
+          deps.db,
+          organizationId,
+          c.req.param("apiKeyId"),
+        );
+        if (!existing) throw new HTTPException(404, { message: "API key not found" });
+        requireMemberLevelKey(control, existing);
+        if (
+          body.policy &&
+          !isMemberLevel(
+            effectiveKeyPermissions({
+              permissions: body.policy.permissions,
+              permissionMode: "explicit",
+            }),
+          )
+        )
+          throw new HTTPException(403, { message: OWNER_LEVEL_API_KEY_MESSAGE });
+      }
+      try {
+        const apiKey = await updateOrganizationApiKey(
+          deps.db,
+          organizationId,
+          c.req.param("apiKeyId"),
+          body,
+        );
+        if (!apiKey) throw new HTTPException(404, { message: "API key not found" });
+        return c.json(withOrganizationApiKeyAccess(apiKey));
+      } catch (error) {
+        if (error instanceof OrganizationApiKeyWorkspaceScopeError)
+          throw new HTTPException(400, { message: error.message });
+        throwServiceAccountError(error);
         throw error;
       }
     },
@@ -166,13 +291,30 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/organizations/:organizationId/api-keys/:apiKeyId", async (c) => {
     const organizationId = c.req.param("organizationId");
     const context = await requireAccessContext(c, deps);
-    requireOrganizationApiKeyControlPermission(context, organizationId);
+    const control = requireOrganizationApiKeyControlPermission(context, organizationId);
+    if (control === "member_level") {
+      const existing = await getOrganizationApiKey(
+        deps.db,
+        organizationId,
+        c.req.param("apiKeyId"),
+      );
+      if (!existing) throw new HTTPException(404, { message: "API key not found" });
+      requireMemberLevelKey(control, existing);
+    }
     const apiKey = await revokeOrganizationApiKey(deps.db, organizationId, c.req.param("apiKeyId"));
     if (!apiKey) {
       throw new HTTPException(404, { message: "API key not found" });
     }
     return c.json(withOrganizationApiKeyAccess(apiKey));
   });
+}
+
+/** Service account problems read as the person would expect. */
+export function throwServiceAccountError(error: unknown): void {
+  if (error instanceof OrganizationServiceAccountNotFoundError)
+    throw new HTTPException(404, { message: error.message });
+  if (error instanceof OrganizationServiceAccountRoleError)
+    throw new HTTPException(400, { message: error.message });
 }
 
 function requireAccountPermission(
@@ -185,7 +327,7 @@ function requireAccountPermission(
     !grant ||
     (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))
   ) {
-    throw new HTTPException(403, { message: `missing permission: ${permission}` });
+    throw new MissingPermissionRefusal(permission);
   }
 }
 
@@ -193,28 +335,28 @@ function ensureDelegablePermissions(
   authorization: AccessGrantAuthorization,
   requested: Permission[],
 ): void {
+  requireExplicitPermissionDelegation(authorization.grant, requested);
   const grantPermissions = authorization.grant.permissions;
-  if (grantPermissions.includes("workspace:admin")) {
-    const accountLiteralPermissions = new Set<Permission>([
-      "account:read",
-      "account:admin",
-      "workspace:create",
-      "billing:read",
-      "billing:manage",
-    ]);
-    const workspaceLiteralPermissions = new Set<Permission>(["members:manage", "secrets:read"]);
+  if (
+    grantPermissions.includes("workspace:admin") &&
+    authorization.grant.permissionMode !== "explicit"
+  ) {
     const highTrustMissing = requested.filter(
       (permission) =>
-        (accountLiteralPermissions.has(permission) &&
-          !authorization.accountGrant?.permissions.includes(permission)) ||
-        (workspaceLiteralPermissions.has(permission) && !grantPermissions.includes(permission)),
+        !workspaceAdminDelegates(
+          grantPermissions,
+          authorization.accountGrant?.permissions ?? [],
+          permission,
+        ),
     );
     if (highTrustMissing.length === 0) return;
     throw new HTTPException(403, {
-      message: `cannot delegate missing literal permissions: ${highTrustMissing.join(", ")}`,
+      message: workspaceKeyLiteralRefusal(highTrustMissing, requested),
     });
   }
-  const missing = requested.filter((permission) => !grantPermissions.includes(permission));
+  const missing = requested.filter(
+    (permission) => !permissionSetCovers(grantPermissions, permission),
+  );
   if (missing.length > 0) {
     throw new HTTPException(403, {
       message: `cannot delegate missing permissions: ${missing.join(", ")}`,
@@ -222,20 +364,133 @@ function ensureDelegablePermissions(
   }
 }
 
+/** Key management is not a way for a policy credential to amplify itself. */
+function ensureOrganizationPolicyDelegable(
+  context: AccessContext,
+  policy: OrganizationAccessPolicy,
+  legacy = false,
+): void {
+  const authority = accountScopedApiKeyWorkspaceAuthority(context);
+  const source = context.credential?.policy;
+  if (!authority || authority.permissionMode !== "explicit" || !source) return;
+  const requested = legacy
+    ? Permission.options.filter((permission) => hasPermission(policy.permissions, permission))
+    : policy.permissions;
+  // A source policy stored before `connections:personal` existed covers it
+  // through `connections:write`.
+  if (requested.some((permission) => !permissionSetCovers(source.permissions, permission)))
+    throw new HTTPException(403, {
+      message: "cannot delegate permissions beyond organization key policy",
+    });
+  if (
+    source.workspaceScope.kind === "selected" &&
+    (policy.workspaceScope.kind === "all" ||
+      policy.workspaceScope.workspaceIds.some(
+        (id) => !organizationWorkspaceInScope(source.workspaceScope, id),
+      ))
+  )
+    throw new HTTPException(403, {
+      message: "cannot delegate workspaces beyond organization key scope",
+    });
+}
+
+/**
+ * How far a caller manages the organization's API keys and service accounts.
+ * `full`: a literal `api_keys:manage` or `account:admin` (the owner, an
+ * administering organization key). `member_level`: an organization admin
+ * signed in as themselves, who manages only member-level keys and service
+ * accounts, so nothing they mint or change can hold people, key or billing
+ * administration, which stay the owner's.
+ */
+export type OrganizationApiKeyControl = "full" | "member_level";
+
 export function requireOrganizationApiKeyControlPermission(
   context: AccessContext,
   organizationId: string,
-): void {
+): OrganizationApiKeyControl {
+  requireApiKeyManagementContext(context);
+  const accountGrant = context.accountGrants.find(
+    (candidate) => candidate.accountId === organizationId,
+  );
+  if (
+    accountGrant &&
+    !accountGrant.permissions.includes("api_keys:manage") &&
+    !accountGrant.permissions.includes("account:admin") &&
+    !context.subjectId.startsWith("api_key:") &&
+    holdsOrganizationAdministration(context, organizationId)
+  )
+    return "member_level";
   requireAccountPermission(context, organizationId, "api_keys:manage");
-  if (!context.subjectId.startsWith("api_key:")) return;
+  if (!context.subjectId.startsWith("api_key:")) return "full";
   const authority = accountScopedApiKeyWorkspaceAuthority(context);
   if (
     !authority ||
     authority.accountId !== organizationId ||
-    !authority.permissions.includes("api_keys:manage")
+    (!authority.permissions.includes("api_keys:manage") &&
+      !context.accountGrants.some(
+        (grant) =>
+          grant.accountId === organizationId && grant.permissions.includes("account:admin"),
+      ))
   ) {
     throw new HTTPException(403, { message: "organization API key authority required" });
   }
+  return "full";
+}
+
+/** What only the owner's keys may hold: people, key and billing administration. */
+function isMemberLevel(permissions: readonly Permission[]): boolean {
+  return permissions.every((permission) => serviceAccountAllowsPermission("member", permission));
+}
+
+/** An organization admin creates only member-level keys, held by member service accounts. */
+async function requireMemberLevelKeyCreation(
+  deps: ApiRouteDeps,
+  control: OrganizationApiKeyControl,
+  organizationId: string,
+  input: { permissions: Permission[]; explicit: boolean; serviceAccountId?: string | undefined },
+): Promise<void> {
+  if (control === "full") return;
+  const effective = effectiveKeyPermissions({
+    permissions: input.permissions,
+    permissionMode: input.explicit ? "explicit" : "legacy",
+  });
+  if (!isMemberLevel(effective))
+    throw new HTTPException(403, { message: OWNER_LEVEL_API_KEY_MESSAGE });
+  if (input.serviceAccountId)
+    await requireMemberServiceAccount(deps, control, organizationId, input.serviceAccountId);
+}
+
+/** An organization admin changes or revokes only member-level keys. */
+function requireMemberLevelKey(control: OrganizationApiKeyControl, apiKey: ApiKey): void {
+  if (control === "full") return;
+  const effective = effectiveKeyPermissions({
+    permissions: apiKey.permissions,
+    permissionMode: apiKey.permissionMode ?? "legacy",
+  });
+  if (apiKey.serviceAccount?.role === "admin" || !isMemberLevel(effective))
+    throw new HTTPException(403, { message: OWNER_LEVEL_API_KEY_MESSAGE });
+}
+
+/** An organization admin manages only member service accounts. Missing ones read as not found later. */
+export async function requireMemberServiceAccount(
+  deps: ApiRouteDeps,
+  control: OrganizationApiKeyControl,
+  organizationId: string,
+  serviceAccountId: string,
+): Promise<void> {
+  if (control === "full") return;
+  const found = await getOrganizationServiceAccount(deps.db, organizationId, serviceAccountId);
+  if (found?.role === "admin")
+    throw new HTTPException(403, { message: OWNER_LEVEL_API_KEY_MESSAGE });
+}
+
+async function requireWorkspaceApiKeyControl(
+  c: Parameters<typeof requireAccessContext>[0],
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<AccessGrantAuthorization> {
+  requireApiKeyManagementContext(await requireAccessContext(c, deps));
+  return await requireAccessGrantAuthorization(c, deps, workspaceId, "api_keys:manage");
 }
 
 function authenticatedApiKeyId(context: AccessContext): string | null {
@@ -258,11 +513,4 @@ function generateApiKeyToken(): string {
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
   return `ogk_${secret}`;
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }

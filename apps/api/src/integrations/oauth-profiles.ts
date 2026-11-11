@@ -1,7 +1,23 @@
+import {
+  normalizeSlackScopes,
+  OPENGENI_SLACK_REST_USER_SCOPES,
+  slackRestMcpToolsForScopes,
+} from "@opengeni/contracts/slack-rest-mcp";
 import { OPENGENI_PERSONAL_SLACK_MCP_URL, type ConnectionOwnership } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import {
+  GMAIL_REST_MCP_TOOLS,
+  gmailToolAvailableOnDeployment,
+  gmailToolSupportsScopes,
+} from "@opengeni/runtime/gmail-rest-mcp";
+import {
+  GOOGLE_CALENDAR_REQUESTED_SCOPES,
+  GOOGLE_CALENDAR_REST_MCP_TOOLS,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL as RUNTIME_GOOGLE_CALENDAR_MCP_URL,
+  googleCalendarToolSupportsScopes,
+} from "@opengeni/runtime/google-calendar-rest-mcp";
 import { canonicalProviderDomain } from "./provider-domain";
 
 /**
@@ -27,11 +43,34 @@ import { canonicalProviderDomain } from "./provider-domain";
 
 export const OFFICIAL_SLACK_MCP_URL = OPENGENI_PERSONAL_SLACK_MCP_URL;
 export const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
-export const OFFICIAL_GMAIL_MCP_SCOPES = [
+/** A first Gmail connection asks only to read mail. */
+export const OFFICIAL_GMAIL_MCP_BASE_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
+] as const;
+/** Asked for later, in the chat, when a tool call needs it. */
+export const OFFICIAL_GMAIL_MCP_INCREMENTAL_SCOPES = [
   "https://www.googleapis.com/auth/gmail.compose",
   "https://www.googleapis.com/auth/gmail.modify",
 ] as const;
+/** Every Gmail scope the reviewed bridge can ever hold. */
+export const OFFICIAL_GMAIL_MCP_SCOPES = [
+  ...OFFICIAL_GMAIL_MCP_BASE_SCOPES,
+  ...OFFICIAL_GMAIL_MCP_INCREMENTAL_SCOPES,
+] as const;
+
+export const OFFICIAL_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
+export const OFFICIAL_DRIVE_MCP_SCOPES = [
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/drive.file",
+] as const;
+
+/** Identity of the hosted Calendar MCP; it only selects the local REST bridge. */
+export const OFFICIAL_GOOGLE_CALENDAR_MCP_URL = RUNTIME_GOOGLE_CALENDAR_MCP_URL;
+/** Calendar list (read), events (read and write) and free/busy; never the broad `calendar` scope. */
+export const OFFICIAL_GOOGLE_CALENDAR_MCP_SCOPES: readonly string[] =
+  GOOGLE_CALENDAR_REQUESTED_SCOPES;
+
+const GOOGLE_OAUTH_ONLY_FOR = `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}, ${OFFICIAL_DRIVE_MCP_URL} or ${OFFICIAL_GOOGLE_CALENDAR_MCP_URL}`;
 
 const SLACK_OAUTH_ORIGIN = "https://slack.com";
 const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
@@ -80,12 +119,13 @@ export type OAuthProviderProfile = {
   requireExactMcpUrl?: { url: string; message: string };
   /** Deployment-managed client credentials must be configured (503 otherwise). */
   requireDeploymentClient?: { key: DeploymentManagedClientKey; message: string };
-  /** Suggested ownership; an explicit user choice always wins. */
+  /** Suggested ownership; explicit choices remain subject to requiredOwnership. */
   defaultOwnership?: ConnectionOwnership;
-  /** Bind reconnect/dedupe to the exact mcpUrl, not just the provider domain. */
-  exactMcpBinding: boolean;
-  /** How an existing connection is chosen for reconnect coalescing. */
-  connectionSelection: "canonical_personal" | "first_active";
+  /** Built-in-only ownership restriction, including old reconnect/callback state. */
+  requiredOwnership?: { ownership: ConnectionOwnership; message: string };
+  /** Verified metadata tuple identifying an account, including tenant when applicable.
+   * Produced only by the authenticated verification adapter, never display names. */
+  accountIdentityMetadataKeys?: readonly string[];
   /** Post-discovery authorization-server origin pins. */
   authorizationServer?: AuthorizationServerPins;
   /**
@@ -105,18 +145,51 @@ export type OAuthProviderProfile = {
   extraAuthorizeParams?: Readonly<Record<string, string>>;
   /** Exact scope override; the caller can never widen past it. */
   requestedScopes?: readonly string[];
+  /**
+   * Incremental consent. A first connection asks only for `requestedScopes`.
+   * Reconnecting an existing account asks for `requestedScopes`, the account's
+   * current grants and the additional access the reconnect requested, each
+   * bounded by this list. The provider must accept a scope list that includes
+   * scopes already granted (Google and Microsoft both do).
+   */
+  incrementalScopes?: readonly string[];
+  /** Reviewed local bridge grant normalization and token verification. Catalog profiles cannot supply code. */
+  normalizeGrantedScopes?: (scopes: readonly string[] | string) => string[];
+  reportedScopesRequired?: boolean;
+  /** Built-in durable API bridges may refuse a new grant without offline access. */
+  freshRefreshTokenRequired?: boolean;
+  /** The reviewed bridge exposes one tool contract, not a partial-scope variant. */
+  fullRequestedScopesRequired?: boolean;
+  /** Built-in web OAuth clients must use a configured secret and provider-supported authentication. */
+  confidentialClientRequired?: boolean;
+  /** Built-in API bridge discovery; catalog metadata cannot redirect this seam. */
+  providerOAuthDiscovery?: { issuer: string; metadataUrl: string };
+  /** Built-in read-only remote proof; discovery alone may be publicly accessible. */
+  remoteToolVerification?: { toolName: string; arguments: Record<string, unknown> };
+  localToolVerification?: {
+    url: string;
+    method?: "GET" | "POST";
+    /** An API bridge may require a verified account before accepting a grant. */
+    required?: boolean;
+    /** Distinguish a rejected OAuth grant from a temporary verification failure. */
+    isRejectedGrant?: (payload: Record<string, unknown>) => boolean;
+    validateIdentity: (payload: Record<string, unknown>) => Record<string, string>;
+    toolsForScopes: (
+      scopes: readonly string[],
+      deployment: { gmailWatchTopicName?: string | undefined },
+    ) => Array<{ name: string; description?: string }>;
+  };
 };
 
 export const DEFAULT_OAUTH_PROFILE: OAuthProviderProfile = {
   key: "default",
   match: {},
-  exactMcpBinding: false,
-  connectionSelection: "first_active",
   sendResourceParameter: true,
 };
 
 const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
   key: "hosted-slack-mcp",
+  accountIdentityMetadataKeys: ["slackTeamId", "slackUserId"],
   match: { mcpUrls: [OFFICIAL_SLACK_MCP_URL], providerDomains: ["slack.com"] },
   canonicalProviderDomain: "slack.com",
   rejectCallerOAuthClient: {
@@ -134,8 +207,6 @@ const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
     key: "slack",
     message: "Slack MCP OAuth requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
   },
-  exactMcpBinding: true,
-  connectionSelection: "canonical_personal",
   authorizationServer: {
     issuerOrigins: [SLACK_OAUTH_ORIGIN, SLACK_MCP_ORIGIN],
     authorizationEndpointOrigins: [SLACK_OAUTH_ORIGIN],
@@ -144,14 +215,52 @@ const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
     skipInLocalTest: true,
   },
   sendResourceParameter: true,
+  requestedScopes: OPENGENI_SLACK_REST_USER_SCOPES,
+  normalizeGrantedScopes: normalizeSlackScopes,
+  reportedScopesRequired: true,
+  localToolVerification: {
+    url: "https://slack.com/api/auth.test",
+    isRejectedGrant: (payload) =>
+      payload.ok === false &&
+      ["invalid_auth", "not_authed", "token_revoked", "account_inactive", "token_expired"].includes(
+        typeof payload.error === "string" ? payload.error : "",
+      ),
+    validateIdentity: (payload) => {
+      if (
+        payload.ok !== true ||
+        typeof payload.team_id !== "string" ||
+        !payload.team_id ||
+        typeof payload.user_id !== "string" ||
+        !payload.user_id ||
+        payload.bot_id
+      ) {
+        throw new Error("Slack account verification failed");
+      }
+      return {
+        slackTeamId: payload.team_id,
+        slackUserId: payload.user_id,
+        ...(typeof payload.team === "string" && payload.team.trim()
+          ? { slackTeamName: payload.team }
+          : {}),
+        ...(typeof payload.user === "string" && payload.user.trim()
+          ? { slackUserName: payload.user }
+          : {}),
+      };
+    },
+    toolsForScopes: slackRestMcpToolsForScopes,
+  },
 };
 
 const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   key: "official-gmail",
+  accountIdentityMetadataKeys: ["gmailEmail"],
   match: { mcpUrls: [OFFICIAL_GMAIL_MCP_URL] },
+  requireExactMcpUrl: {
+    url: OFFICIAL_GMAIL_MCP_URL,
+    message: `Gmail OAuth must use ${OFFICIAL_GMAIL_MCP_URL}`,
+  },
   defaultOwnership: "personal",
-  exactMcpBinding: true,
-  connectionSelection: "first_active",
+  requiredOwnership: { ownership: "personal", message: "Gmail connections must be personal-owned" },
   authorizationServer: {
     issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
     authorizationEndpointOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
@@ -161,7 +270,7 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   },
   postDiscoveryProviderDomain: {
     domain: "gmailmcp.googleapis.com",
-    message: `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}`,
+    message: GOOGLE_OAUTH_ONLY_FOR,
   },
   // Google's OAuth endpoints do not implement RFC 8707's `resource` parameter.
   sendResourceParameter: false,
@@ -174,14 +283,412 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
     prompt: "consent",
   },
   // The Gmail PRM advertises broader grants, including full-mail access. The
-  // reviewed connector never lets a caller widen the capability contract.
-  requestedScopes: OFFICIAL_GMAIL_MCP_SCOPES,
+  // reviewed connector never lets a caller widen the capability contract: a
+  // first connection asks only to read mail, and drafting, sending or
+  // organizing mail is asked for in the chat when a tool call needs it.
+  requestedScopes: OFFICIAL_GMAIL_MCP_BASE_SCOPES,
+  incrementalScopes: OFFICIAL_GMAIL_MCP_INCREMENTAL_SCOPES,
+  reportedScopesRequired: true,
+  freshRefreshTokenRequired: true,
+  fullRequestedScopesRequired: true,
+  confidentialClientRequired: true,
+  providerOAuthDiscovery: {
+    issuer: GOOGLE_OAUTH_ISSUER_ORIGIN,
+    metadataUrl: `${GOOGLE_OAUTH_ISSUER_ORIGIN}/.well-known/openid-configuration`,
+  },
+  localToolVerification: {
+    url: "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+    method: "GET",
+    required: true,
+    validateIdentity: (payload) => {
+      if (
+        typeof payload.emailAddress !== "string" ||
+        !/^[^\s@]+@[^\s@]+$/u.test(payload.emailAddress)
+      ) {
+        throw new Error("Gmail account verification failed");
+      }
+      return { gmailEmail: payload.emailAddress };
+    },
+    toolsForScopes: (scopes, deployment) => {
+      return GMAIL_REST_MCP_TOOLS.filter(
+        (tool) =>
+          gmailToolSupportsScopes(tool.name, scopes) &&
+          gmailToolAvailableOnDeployment(tool.name, {
+            watchTopicName: deployment.gmailWatchTopicName,
+          }),
+      ).map(({ name, description }) => ({ name, ...(description ? { description } : {}) }));
+    },
+  },
+};
+
+/** Remote discovery remains authoritative; no synthetic Drive tool verification. */
+const OFFICIAL_DRIVE_PROFILE: OAuthProviderProfile = {
+  key: "official-drive",
+  match: { mcpUrls: [OFFICIAL_DRIVE_MCP_URL] },
+  canonicalProviderDomain: "drivemcp.googleapis.com",
+  requireExactMcpUrl: {
+    url: OFFICIAL_DRIVE_MCP_URL,
+    message: `Google Drive OAuth must use ${OFFICIAL_DRIVE_MCP_URL}`,
+  },
+  defaultOwnership: "personal",
+  requiredOwnership: {
+    ownership: "personal",
+    message: "Google Drive connections must be personal-owned",
+  },
+  authorizationServer: {
+    issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
+    authorizationEndpointOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
+    tokenEndpointOrigins: [GOOGLE_TOKEN_ORIGIN],
+    message: "Google Drive MCP authorization metadata did not remain bound to Google",
+    skipInLocalTest: false,
+  },
+  postDiscoveryProviderDomain: {
+    domain: "drivemcp.googleapis.com",
+    message: `Google Drive OAuth must use ${OFFICIAL_DRIVE_MCP_URL}`,
+  },
+  sendResourceParameter: false,
+  extraAuthorizeParams: { access_type: "offline", prompt: "consent" },
+  requestedScopes: OFFICIAL_DRIVE_MCP_SCOPES,
+  reportedScopesRequired: true,
+  freshRefreshTokenRequired: true,
+  fullRequestedScopesRequired: true,
+  confidentialClientRequired: true,
+  remoteToolVerification: {
+    toolName: "list_recent_files",
+    arguments: { pageSize: 1, excludeContentSnippets: true },
+  },
+  providerOAuthDiscovery: {
+    issuer: GOOGLE_OAUTH_ISSUER_ORIGIN,
+    metadataUrl: `${GOOGLE_OAUTH_ISSUER_ORIGIN}/.well-known/openid-configuration`,
+  },
+};
+
+/**
+ * Google Calendar runs through Opengeni's reviewed Calendar REST bridge, like
+ * Gmail: discovery reads Google's OAuth metadata directly and never contacts
+ * the hosted Calendar MCP identity. The grant is requested without
+ * `include_granted_scopes`, so a Calendar token never carries Gmail or Drive
+ * access the same person granted to this client earlier.
+ */
+const OFFICIAL_GOOGLE_CALENDAR_PROFILE: OAuthProviderProfile = {
+  key: "official-google-calendar",
+  accountIdentityMetadataKeys: ["googleCalendarEmail"],
+  match: { mcpUrls: [OFFICIAL_GOOGLE_CALENDAR_MCP_URL] },
+  canonicalProviderDomain: "calendarmcp.googleapis.com",
+  requireExactMcpUrl: {
+    url: OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
+    message: `Google Calendar OAuth must use ${OFFICIAL_GOOGLE_CALENDAR_MCP_URL}`,
+  },
+  defaultOwnership: "personal",
+  requiredOwnership: {
+    ownership: "personal",
+    message: "Google Calendar connections must be personal-owned",
+  },
+  authorizationServer: {
+    issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
+    authorizationEndpointOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
+    tokenEndpointOrigins: [GOOGLE_TOKEN_ORIGIN],
+    message: "Google Calendar authorization metadata did not remain bound to Google",
+    skipInLocalTest: false,
+  },
+  postDiscoveryProviderDomain: {
+    domain: "calendarmcp.googleapis.com",
+    message: GOOGLE_OAUTH_ONLY_FOR,
+  },
+  sendResourceParameter: false,
+  extraAuthorizeParams: { access_type: "offline", prompt: "consent" },
+  requestedScopes: OFFICIAL_GOOGLE_CALENDAR_MCP_SCOPES,
+  reportedScopesRequired: true,
+  freshRefreshTokenRequired: true,
+  fullRequestedScopesRequired: true,
+  confidentialClientRequired: true,
+  providerOAuthDiscovery: {
+    issuer: GOOGLE_OAUTH_ISSUER_ORIGIN,
+    metadataUrl: `${GOOGLE_OAUTH_ISSUER_ORIGIN}/.well-known/openid-configuration`,
+  },
+  localToolVerification: {
+    url: "https://www.googleapis.com/calendar/v3/users/me/calendarList/primary",
+    method: "GET",
+    required: true,
+    validateIdentity: (payload) => {
+      // The primary calendar's ID is the account's email address.
+      if (typeof payload.id !== "string" || !/^[^\s@]+@[^\s@]+$/u.test(payload.id)) {
+        throw new Error("Google Calendar account verification failed");
+      }
+      return { googleCalendarEmail: payload.id };
+    },
+    toolsForScopes: (scopes) =>
+      GOOGLE_CALENDAR_REST_MCP_TOOLS.filter((tool) =>
+        googleCalendarToolSupportsScopes(tool.name, scopes),
+      ).map(({ name, description }) => ({ name, ...(description ? { description } : {}) })),
+  },
 };
 
 const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [
   HOSTED_SLACK_PROFILE,
   OFFICIAL_GMAIL_PROFILE,
+  OFFICIAL_DRIVE_PROFILE,
+  OFFICIAL_GOOGLE_CALENDAR_PROFILE,
 ];
+
+/** What a verifier may read besides its own calls: the token endpoint's response,
+ * for providers that document identity fields there (Notion). */
+export type AccountIdentityContext = Readonly<{ tokenResponse: Record<string, unknown> }>;
+
+/** One read-only identity tool call. An optional call that is missing or fails
+ * contributes an empty payload instead of failing the whole check. */
+export type AccountIdentityToolCall = Readonly<{
+  toolName: string;
+  arguments: Record<string, unknown>;
+  optional?: boolean;
+}>;
+
+/**
+ * Authenticated account identity for MCP servers whose OAuth profile does not
+ * verify one itself. Without a verified identity, a second account for the same
+ * server is refused and a repeated connection cannot be recognised as the same
+ * account. Keyed by exact MCP URL so OAuth profile resolution is unchanged; the
+ * check only labels and de-duplicates connections, it never selects credentials.
+ */
+export type AccountIdentityVerifier = Readonly<{
+  /** Verified metadata tuple identifying the account (see accountIdentityMetadataKeys). */
+  identityKeys: readonly string[];
+  /** One payload per call (an HTTP verifier has exactly one). Throws a
+   * "... verification failed" error when the payloads prove no identity. */
+  validateIdentity: (
+    payloads: readonly Record<string, unknown>[],
+    context: AccountIdentityContext,
+  ) => Record<string, string>;
+}> &
+  (
+    | Readonly<{ kind: "http"; url: string }>
+    | Readonly<{ kind: "mcp_tool"; calls: readonly AccountIdentityToolCall[] }>
+  );
+
+const nonEmpty = (value: unknown): value is string =>
+  typeof value === "string" && value.trim().length > 0;
+
+const record = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+
+/** Optional display fields: kept only when they are non-empty strings. */
+function labels(fields: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(fields).filter((entry): entry is [string, string] => nonEmpty(entry[1])),
+  );
+}
+
+const GOOGLE_DRIVE_IDENTITY: AccountIdentityVerifier = {
+  kind: "http",
+  // About is readable with the Drive scopes the connector already requests.
+  url: "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
+  identityKeys: ["googleDriveEmail"],
+  validateIdentity: ([payload]) => {
+    const email = record(record(payload).user).emailAddress;
+    if (!nonEmpty(email) || !/^[^\s@]+@[^\s@]+$/u.test(email))
+      throw new Error("Google Drive account verification failed");
+    return { googleDriveEmail: email };
+  },
+};
+
+/**
+ * Atlassian's v1 Rovo MCP reports the signed-in account through its read-only
+ * atlassianUserInfo tool. The v2 server's tool answers `{ data: { accountId } }`
+ * without email or name; v1 connections switch to v2 tools on 1 March 2027, so
+ * both shapes are accepted.
+ */
+const ATLASSIAN_ROVO_IDENTITY: AccountIdentityVerifier = {
+  kind: "mcp_tool",
+  calls: [{ toolName: "atlassianUserInfo", arguments: {} }],
+  identityKeys: ["atlassianAccountId"],
+  validateIdentity: ([payload]) => {
+    const user = record(payload);
+    const accountId = nonEmpty(user.account_id) ? user.account_id : record(user.data).accountId;
+    if (!nonEmpty(accountId)) throw new Error("Atlassian account verification failed");
+    return {
+      atlassianAccountId: accountId,
+      ...labels({ atlassianEmail: user.email, atlassianName: user.name }),
+    };
+  },
+};
+
+/**
+ * Atlassian's v2 MCP token also reads the platform's own profile endpoint, which
+ * returns the same account id as atlassianUserInfo plus the email and name that
+ * the v2 tool leaves out. Same identity key as v1, so labels stay consistent.
+ */
+const ATLASSIAN_V2_IDENTITY: AccountIdentityVerifier = {
+  kind: "http",
+  url: "https://api.atlassian.com/me",
+  identityKeys: ["atlassianAccountId"],
+  validateIdentity: ([payload]) => {
+    const user = record(payload);
+    if (!nonEmpty(user.account_id)) throw new Error("Atlassian account verification failed");
+    return {
+      atlassianAccountId: user.account_id,
+      ...labels({ atlassianEmail: user.email, atlassianName: user.name }),
+    };
+  },
+};
+
+/** Atlassian's recommended MCP endpoint, with every tool listed flat so each one
+ * keeps its own approval policy (the default lists gateway execute tools). */
+export const ATLASSIAN_V2_MCP_URL = "https://mcp.atlassian.com/v2/mcp?tools=all";
+
+/**
+ * Linear's MCP reads the signed-in user with get_user "me" (id, name, email) and
+ * the organization with get_workspace. Linear user ids are unique across
+ * organizations, so the user id alone identifies the account; the workspace only
+ * names it.
+ */
+const LINEAR_IDENTITY: AccountIdentityVerifier = {
+  kind: "mcp_tool",
+  calls: [
+    { toolName: "get_user", arguments: { query: "me" } },
+    { toolName: "get_workspace", arguments: {}, optional: true },
+  ],
+  identityKeys: ["linearUserId"],
+  validateIdentity: ([user, workspace]) => {
+    const me = record(user);
+    if (!nonEmpty(me.id)) throw new Error("Linear account verification failed");
+    return {
+      linearUserId: me.id,
+      ...labels({
+        linearEmail: me.email,
+        linearName: nonEmpty(me.displayName) ? me.displayName : me.name,
+        linearWorkspaceName: record(workspace).name,
+      }),
+    };
+  },
+};
+
+/**
+ * Notion documents the connected user and workspace in the authorization-code
+ * token response (user_id, workspace_id) and through notion-get-self. A token
+ * acting as a workspace bot has no person in notion-get-self, so only the token
+ * fields identify who authorized it. One person can connect several workspaces.
+ */
+const NOTION_IDENTITY: AccountIdentityVerifier = {
+  kind: "mcp_tool",
+  calls: [{ toolName: "notion-get-self", arguments: {}, optional: true }],
+  identityKeys: ["notionWorkspaceId", "notionUserId"],
+  validateIdentity: ([self], { tokenResponse }) => {
+    const workspace = record(record(self).workspace);
+    const user = record(record(self).user);
+    const tokenPair = nonEmpty(tokenResponse.workspace_id) && nonEmpty(tokenResponse.user_id);
+    const workspaceId = tokenPair ? tokenResponse.workspace_id : workspace.id;
+    const userId = tokenPair ? tokenResponse.user_id : user.type === "person" ? user.id : undefined;
+    if (!nonEmpty(workspaceId) || !nonEmpty(userId))
+      throw new Error("Notion account verification failed");
+    // notion-get-self labels only describe the same workspace and person.
+    const sameWorkspace = workspace.id === workspaceId;
+    const samePerson = sameWorkspace && user.type === "person" && user.id === userId;
+    return {
+      notionWorkspaceId: workspaceId,
+      notionUserId: userId,
+      ...labels({
+        notionEmail: samePerson ? user.email : undefined,
+        notionName: samePerson ? user.name : undefined,
+        notionWorkspaceName:
+          sameWorkspace && nonEmpty(workspace.name) ? workspace.name : tokenResponse.workspace_name,
+      }),
+    };
+  },
+};
+
+/** Asana's V2 MCP get_me returns the authenticated user (gid, name, email). */
+const ASANA_IDENTITY: AccountIdentityVerifier = {
+  kind: "mcp_tool",
+  calls: [{ toolName: "get_me", arguments: {} }],
+  identityKeys: ["asanaUserId"],
+  validateIdentity: ([payload]) => {
+    const body = record(payload);
+    const user = nonEmpty(body.gid) ? body : record(body.data);
+    if (!nonEmpty(user.gid) || !/^\d{1,32}$/u.test(user.gid))
+      throw new Error("Asana account verification failed");
+    return {
+      asanaUserId: user.gid,
+      ...labels({ asanaEmail: user.email, asanaName: user.name }),
+    };
+  },
+};
+
+/** Stripe's MCP get_stripe_account_info returns the connected Account object. */
+const STRIPE_IDENTITY: AccountIdentityVerifier = {
+  kind: "mcp_tool",
+  calls: [{ toolName: "get_stripe_account_info", arguments: {} }],
+  identityKeys: ["stripeAccountId"],
+  validateIdentity: ([payload]) => {
+    const account = record(payload);
+    if (!nonEmpty(account.id) || !/^acct_[A-Za-z0-9]{1,64}$/u.test(account.id))
+      throw new Error("Stripe account verification failed");
+    const displayName = record(record(account.settings).dashboard).display_name;
+    return {
+      stripeAccountId: account.id,
+      ...labels({
+        stripeEmail: account.email,
+        stripeAccountName: nonEmpty(displayName)
+          ? displayName
+          : record(account.business_profile).name,
+      }),
+    };
+  },
+};
+
+const ACCOUNT_IDENTITY_VERIFIERS: ReadonlyMap<string, AccountIdentityVerifier> = new Map<
+  string,
+  AccountIdentityVerifier
+>([
+  [OFFICIAL_DRIVE_MCP_URL, GOOGLE_DRIVE_IDENTITY],
+  ["https://mcp.atlassian.com/v1/mcp/authv2", ATLASSIAN_ROVO_IDENTITY],
+  ["https://mcp.atlassian.com/v1/mcp", ATLASSIAN_ROVO_IDENTITY],
+  [ATLASSIAN_V2_MCP_URL, ATLASSIAN_V2_IDENTITY],
+  ["https://mcp.atlassian.com/v2/mcp", ATLASSIAN_V2_IDENTITY],
+  ["https://mcp.linear.app/mcp", LINEAR_IDENTITY],
+  ["https://mcp.notion.com/mcp", NOTION_IDENTITY],
+  ["https://mcp.asana.com/v2/mcp", ASANA_IDENTITY],
+  ["https://mcp.stripe.com/", STRIPE_IDENTITY],
+  ["https://mcp.stripe.com", STRIPE_IDENTITY],
+]);
+
+/** The reviewed identity check for an exact MCP URL, when its profile has none. */
+export function accountIdentityVerifierFor(mcpUrl: string): AccountIdentityVerifier | undefined {
+  return ACCOUNT_IDENTITY_VERIFIERS.get(mcpUrl);
+}
+
+/** Generic OpenID Connect identity: the issuer's stable subject. Used only when
+ * neither a profile nor a reviewed verifier identifies the account. */
+export const OIDC_IDENTITY_KEYS: readonly string[] = ["oidcSubject"];
+
+/** Identity keys for a connection: the profile's own, else the reviewed verifier's,
+ * else OpenID Connect when this connection's sign-in can use it. */
+export function accountIdentityKeysFor(
+  profile: OAuthProviderProfile | null | undefined,
+  mcpUrl: string,
+  oidc = false,
+): readonly string[] | undefined {
+  return (
+    profile?.accountIdentityMetadataKeys ??
+    accountIdentityVerifierFor(mcpUrl)?.identityKeys ??
+    (oidc ? OIDC_IDENTITY_KEYS : undefined)
+  );
+}
+
+/**
+ * MCP URLs that reach the same accounts. Connections of one account through any
+ * of them are the same account and share one owner bucket. Every other URL is
+ * its own group.
+ */
+const ACCOUNT_MCP_URL_GROUPS: readonly (readonly string[])[] = [
+  ["https://mcp.stripe.com/", "https://mcp.stripe.com"],
+];
+
+/** Stable key for the accounts an MCP URL reaches (see ACCOUNT_MCP_URL_GROUPS). */
+export function accountMcpUrlGroup(mcpUrl: string): string {
+  return ACCOUNT_MCP_URL_GROUPS.find((group) => group.includes(mcpUrl))?.[0] ?? mcpUrl;
+}
 
 /** Exact built-in profile by its stable key; throws on an unknown key. */
 export function builtInOAuthProfileByKey(key: string): OAuthProviderProfile {
@@ -193,18 +700,22 @@ export function builtInOAuthProfileByKey(key: string): OAuthProviderProfile {
 }
 
 /**
- * Authorization servers reserved for exactly one profile: discovering one of
+ * Authorization servers reserved for explicitly reviewed profiles: discovering one of
  * these identities on any other flow is rejected before registration.
  */
 const RESERVED_AUTHORIZATION_SERVERS: readonly {
   issuerOrigins: readonly string[];
-  allowedProfileKey: string;
+  allowedProfileKeys: readonly string[];
   message: string;
 }[] = [
   {
     issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
-    allowedProfileKey: OFFICIAL_GMAIL_PROFILE.key,
-    message: `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}`,
+    allowedProfileKeys: [
+      OFFICIAL_GMAIL_PROFILE.key,
+      OFFICIAL_DRIVE_PROFILE.key,
+      OFFICIAL_GOOGLE_CALENDAR_PROFILE.key,
+    ],
+    message: GOOGLE_OAUTH_ONLY_FOR,
   },
   {
     // A URL variant that dodges the hosted-Slack profile match (for example a
@@ -212,7 +723,7 @@ const RESERVED_AUTHORIZATION_SERVERS: readonly {
     // Slack's authorization server as a default-profile flow: that would mint
     // a workspace-ownable Slack identity with the deployment client.
     issuerOrigins: [SLACK_OAUTH_ORIGIN, SLACK_MCP_ORIGIN],
-    allowedProfileKey: HOSTED_SLACK_PROFILE.key,
+    allowedProfileKeys: [HOSTED_SLACK_PROFILE.key],
     message: `Slack OAuth is allowed only for ${OFFICIAL_SLACK_MCP_URL}`,
   },
 ];
@@ -309,7 +820,7 @@ export function assertAuthorizationServerNotReserved(
 ): void {
   const identities = [as.issuer, as.authorizationServer].map((value) => new URL(value).origin);
   for (const guard of RESERVED_AUTHORIZATION_SERVERS) {
-    if (profile.key === guard.allowedProfileKey) {
+    if (guard.allowedProfileKeys.includes(profile.key)) {
       continue;
     }
     if (identities.some((origin) => guard.issuerOrigins.includes(origin))) {
@@ -360,8 +871,6 @@ export const catalogOAuthProfileSchema = z
       ),
   })
   .strict();
-
-export type CatalogOAuthProfile = z.infer<typeof catalogOAuthProfileSchema>;
 
 function originOf(value: string): string {
   return new URL(value).origin;
@@ -423,7 +932,6 @@ export function oauthProfileFromCatalog(mcpUrl: string, raw: unknown): OAuthProv
     key: `catalog:${mcpUrl}`,
     match: { mcpUrls: [mcpUrl] },
     ...(data.defaultOwnership ? { defaultOwnership: data.defaultOwnership } : {}),
-    exactMcpBinding: Boolean(data.exactMcpUrl),
     ...(data.exactMcpUrl
       ? {
           requireExactMcpUrl: {
@@ -432,7 +940,6 @@ export function oauthProfileFromCatalog(mcpUrl: string, raw: unknown): OAuthProv
           },
         }
       : {}),
-    connectionSelection: "first_active",
     ...(pins ? { authorizationServer: pins } : {}),
     ...(data.clientSource ? { clientSource: data.clientSource } : {}),
     sendResourceParameter: data.sendResourceParameter ?? true,

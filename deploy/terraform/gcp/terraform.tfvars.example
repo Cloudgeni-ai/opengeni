@@ -1,8 +1,16 @@
 project_id       = "opengeni-project"
+
+# name_prefix also sets the runtime secret id ("<name_prefix>-runtime"); the
+# chart's externalSecret remote key must match the runtime_secret_id output,
+# because the runtime service account can read only that secret.
 name_prefix      = "opengeni-example"
 region           = "us-central1"
 zone             = "us-central1-a"
 deployment_phase = "bootstrap"
+
+# Extra Secret Manager secrets the runtime identity may read, each bound
+# individually (never project-wide):
+# runtime_readable_secret_ids = ["opengeni-example-database"]
 
 gke = {
   deletion_protection = false

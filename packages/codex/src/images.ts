@@ -1,5 +1,11 @@
 import { CODEX_CLIENT_VERSION, CODEX_ORIGINATOR, CODEX_RESPONSES_BASE } from "./constants";
-import type { CodexRequestContext, CodexTokenSnapshot } from "./request-context";
+import { randomUUID } from "node:crypto";
+import type {
+  CodexRequestContext,
+  CodexTokenSnapshot,
+  CodexProviderRequestIdentity,
+  CodexProviderRequestSettlement,
+} from "./request-context";
 import type { FetchLike } from "./fetch";
 import { pinnedFetch, readJsonBase64Field, readResponseTextBounded } from "@opengeni/network";
 
@@ -63,7 +69,12 @@ export async function generateCodexSubscriptionImage(input: {
   turnId: string;
   context: Pick<
     CodexRequestContext,
-    "clientVersion" | "getToken" | "refresh" | "beforeProviderDispatch"
+    | "clientVersion"
+    | "getToken"
+    | "refresh"
+    | "beforeProviderDispatch"
+    | "onProviderRequestSettled"
+    | "nextRequestId"
   >;
   abortSignal?: AbortSignal;
   fetch?: FetchLike;
@@ -92,47 +103,84 @@ export async function generateCodexSubscriptionImage(input: {
   const signal = input.abortSignal
     ? AbortSignal.any([input.abortSignal, deadline.signal])
     : deadline.signal;
+  const requestId = input.context.nextRequestId?.() ?? randomUUID();
+  let transportAttempt = 0;
+  let admitted: {
+    identity: CodexProviderRequestIdentity;
+    settlement: Promise<void> | null;
+  } | null = null;
+  const settleRequest = (outcome: CodexProviderRequestSettlement["outcome"]): Promise<void> => {
+    if (!admitted) return Promise.resolve();
+    if (!admitted.settlement) {
+      const identity = admitted.identity;
+      admitted.settlement = (async () => {
+        await input.context.onProviderRequestSettled?.({ ...identity, outcome });
+      })();
+      void admitted.settlement.catch(() => undefined);
+    }
+    return admitted.settlement;
+  };
   const request = async (auth: CodexTokenSnapshot): Promise<Response> => {
     const headers = codexImageHeaders(auth, input.context.clientVersion, input.turnId);
-    await input.context.beforeProviderDispatch?.();
+    const init: RequestInit = {
+      method: "POST",
+      redirect: "error",
+      headers,
+      body: JSON.stringify(
+        references.length > 0
+          ? {
+              images: references.map((reference) => ({
+                image_url: `data:${reference.mediaType};base64,${Buffer.from(reference.bytes).toString("base64")}`,
+              })),
+              prompt: input.prompt,
+              background: "auto",
+              model: CODEX_IMAGE_MODEL,
+              quality: "auto",
+              size: "auto",
+            }
+          : {
+              prompt: input.prompt,
+              background: "auto",
+              model: CODEX_IMAGE_MODEL,
+              quality: "auto",
+              size: "auto",
+            },
+      ),
+      signal,
+    };
+    signal.throwIfAborted();
+    const identity = { requestId, transportAttempt: ++transportAttempt };
+    // Body construction and all prechecks precede the one-shot native fence.
+    await input.context.beforeProviderDispatch?.(identity);
+    admitted = { identity, settlement: null };
+    if (signal.aborted) {
+      await settleRequest("refused"); // Proven not sent after admission.
+      signal.throwIfAborted();
+    }
     return await fetchImpl(
       `${CODEX_RESPONSES_BASE}/${references.length > 0 ? "images/edits" : "images/generations"}`,
-      {
-        method: "POST",
-        redirect: "error",
-        headers,
-        body: JSON.stringify(
-          references.length > 0
-            ? {
-                images: references.map((reference) => ({
-                  image_url: `data:${reference.mediaType};base64,${Buffer.from(reference.bytes).toString("base64")}`,
-                })),
-                prompt: input.prompt,
-                background: "auto",
-                model: CODEX_IMAGE_MODEL,
-                quality: "auto",
-                size: "auto",
-              }
-            : {
-                prompt: input.prompt,
-                background: "auto",
-                model: CODEX_IMAGE_MODEL,
-                quality: "auto",
-                size: "auto",
-              },
-        ),
-        signal,
-      },
+      init,
     );
   };
 
   const operation = (async (): Promise<CodexGeneratedImage> => {
     let response = await request(await input.context.getToken());
     if (response.status === 401) {
-      await response.body?.cancel().catch(() => undefined);
+      await settleRequest("refused");
+      // A definite refusal permits a new reservation; cancellation of its
+      // discarded error body must not hold a socket until an ignored producer exits.
+      void response.body?.cancel().catch(() => undefined);
       response = await request(await input.context.refresh());
     }
     if (!response.ok) {
+      await settleRequest(
+        response.status >= 400 &&
+          response.status < 500 &&
+          response.status !== 408 &&
+          response.status !== 409
+          ? "refused"
+          : "unknown",
+      );
       const detail = await readResponseTextBounded(
         response,
         CODEX_IMAGE_ERROR_MAX_BYTES,
@@ -147,19 +195,29 @@ export async function generateCodexSubscriptionImage(input: {
       );
     }
 
-    const bytes = await readJsonBase64Field(response, {
-      fieldName: "b64_json",
-      shape: "string",
-      maxResponseBytes: CODEX_IMAGE_RESPONSE_MAX_BYTES,
-      maxDecodedBytes: CODEX_IMAGE_MAX_BYTES,
-      label: "Codex image generation",
-      signal,
-    });
-    return { bytes, declaredMediaType: "image/png" };
+    const custody = imageResponseCustody(response, signal);
+    try {
+      const bytes = await readJsonBase64Field(custody.response, {
+        fieldName: "b64_json",
+        shape: "string",
+        maxResponseBytes: CODEX_IMAGE_RESPONSE_MAX_BYTES,
+        maxDecodedBytes: CODEX_IMAGE_MAX_BYTES,
+        label: "Codex image generation",
+        signal,
+      });
+      await custody.drain();
+      await settleRequest("response_received");
+      return { bytes, declaredMediaType: "image/png" };
+    } finally {
+      custody.close();
+    }
   })();
   let removeAbortListener = (): void => undefined;
   const aborted = new Promise<never>((_resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
+    const onAbort = () => {
+      void settleRequest("unknown").catch(() => undefined);
+      reject(signal.reason);
+    };
     if (signal.aborted) {
       onAbort();
       return;
@@ -172,10 +230,93 @@ export async function generateCodexSubscriptionImage(input: {
     // that do not observe AbortSignal. Promise.race attaches a rejection handler
     // to the losing operation, so it cannot become an unhandled rejection.
     return await Promise.race([operation, aborted]);
+  } catch (error) {
+    await settleRequest("unknown").catch(() => undefined);
+    throw error;
   } finally {
     removeAbortListener();
     clearTimeout(timer);
   }
+}
+
+/**
+ * The base64 parser cancels after its selected field. Keep the original body
+ * until bounded EOF instead of treating that cancellation as response proof.
+ * No tee or second JSON/base64 graph: only the normal one-chunk stream queue.
+ */
+function imageResponseCustody(response: Response, signal: AbortSignal) {
+  const reader = response.body?.getReader();
+  if (!reader) return { response, drain: async () => {}, close: () => {} };
+  type BodyChunk = Awaited<ReturnType<typeof reader.read>>;
+  let ended = false;
+  let stopped = false;
+  let received = 0;
+  let pending: Promise<BodyChunk> | null = null;
+  let draining: Promise<void> | null = null;
+  let failure: unknown;
+  const read = (): Promise<BodyChunk> => {
+    if (pending) return pending;
+    pending = (async () => {
+      signal.throwIfAborted();
+      const chunk = await new Promise<BodyChunk>((resolve, reject) => {
+        const abort = () => reject(signal.reason);
+        signal.addEventListener("abort", abort, { once: true });
+        void reader
+          .read()
+          .then(resolve, reject)
+          .finally(() => signal.removeEventListener("abort", abort));
+      });
+      if (chunk.done) ended = true;
+      else {
+        received += chunk.value.byteLength;
+        if (received > CODEX_IMAGE_RESPONSE_MAX_BYTES)
+          throw new Error("Codex image generation exceeded its response byte limit");
+      }
+      return chunk;
+    })()
+      .catch((error) => {
+        failure = error;
+        throw error;
+      })
+      .finally(() => {
+        pending = null;
+      });
+    return pending;
+  };
+  const drain = (): Promise<void> => {
+    stopped = true;
+    draining ??= (async () => {
+      if (failure) throw failure;
+      while (!ended) ended = (await read()).done === true;
+    })();
+    return draining;
+  };
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const chunk = await read();
+        if (stopped) return;
+        if (chunk.done) controller.close();
+        else controller.enqueue(chunk.value);
+      } catch (error) {
+        if (!stopped) controller.error(error);
+      }
+    },
+    cancel: drain,
+  });
+  return {
+    response: new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    }),
+    drain,
+    close: () => {
+      stopped = true;
+      if (!ended) void reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+    },
+  };
 }
 
 function codexImageHeaders(

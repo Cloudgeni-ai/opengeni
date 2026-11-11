@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 
-import { RailTrailingMetadata } from "@/components/rail/session-list";
-import type { RailAggregateStatus } from "@/lib/sessions-group";
+import { RailTrailingMetadata } from "@opengeni/react/app/components/rail/session-list";
+import type { RailAggregateStatus } from "@opengeni/react/app/lib/sessions-group";
 import { registerDom, renderComponent } from "../../../../../packages/react/test/render-hook";
 
 registerDom();
@@ -18,7 +18,7 @@ describe("production session rail delivery attention", () => {
     const rendered = await renderComponent(
       createElement(RailTrailingMetadata, {
         summary: failed,
-        scheduled: true,
+        automationWait: "schedule",
         relativeTime: "2m",
       }),
     );
@@ -35,7 +35,7 @@ describe("production session rail delivery attention", () => {
     await rendered.rerender(
       createElement(RailTrailingMetadata, {
         summary: sendFailed,
-        scheduled: true,
+        automationWait: "schedule",
         relativeTime: "2m",
       }),
     );

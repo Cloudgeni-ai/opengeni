@@ -15,12 +15,18 @@ export {
   SessionRealtimeControl,
   codexRealtimeAdmissionAllowed,
   codexRealtimeAdmissionBlocker,
+  prestartSessionRealtime,
+  realtimeAppLanguage,
+  realtimeConversationLanguage,
+  useRealtimeLanguagePreference,
   useRealtimeModelSelection,
   useSessionCodexRealtime,
   useSessionRealtime,
   useWorkspaceRealtimeModelSelection,
 } from "./realtime/realtime-control";
 export type {
+  MicrophoneAccess,
+  RealtimeLoadState,
   RealtimeModelOption,
   SessionRealtimeControllerFactory,
 } from "./realtime/realtime-control";

@@ -20,6 +20,8 @@ use crate::cli::{
 };
 use opengeni_agent_proto::v1::{self, ControlRequest, ExecRequest};
 
+mod connection_failure;
+
 const URL_ENV: &str = "OPENGENI_CODEMODE_URL";
 const TOKEN_ENV: &str = "OPENGENI_CODEMODE_TOKEN";
 const TOKEN_FILE_ENV: &str = "OPENGENI_CODEMODE_TOKEN_FILE";
@@ -33,6 +35,10 @@ pub const NATIVE_CLIENT_ENV: &str = "OPENGENI_CODEMODE_NATIVE_CLIENT";
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// A connection (TCP and TLS) that is not up by then is blocked or dropped;
+/// failing here names that instead of waiting out the whole request timeout
+/// and reporting a server that did not answer.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const QUEUED_RENOTIFY_INTERVAL: Duration = Duration::from_secs(2);
@@ -72,10 +78,16 @@ fn running_native_client_path() -> Option<PathBuf> {
 /// Connected Machine link carrying it. The control plane cannot safely infer
 /// this route: one runner may serve several deployments, while `localhost` has
 /// a different meaning on each host.
+///
+/// Only the origin comes from the link. The workspace stays the one the
+/// control plane addressed, because the attempt's token is minted for the
+/// chat's workspace: a personal machine serves its owner in every workspace
+/// they use, so that can differ from the workspace that enrolled the machine.
+/// The link's workspace is the fallback when the request names none.
 pub fn bind_connection_origin(
     request: &mut ControlRequest,
     api_base_url: &str,
-    workspace_id: &str,
+    link_workspace_id: &str,
 ) {
     let Some(exec) = request_exec_mut(request) else {
         return;
@@ -89,11 +101,34 @@ pub fn bind_connection_origin(
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return;
     }
+    let workspace_id = exec
+        .env
+        .get(URL_ENV)
+        .and_then(|requested| requested_workspace_id(requested))
+        .unwrap_or_else(|| link_workspace_id.to_string());
     let prefix = url.path().trim_end_matches('/');
     url.set_path(&format!("{prefix}/v1/workspaces/{workspace_id}/codemode"));
     url.set_query(None);
     url.set_fragment(None);
     exec.env.insert(URL_ENV.to_string(), url.to_string());
+}
+
+/// The workspace in a control-plane Codemode URL (`…/workspaces/<id>/codemode`).
+fn requested_workspace_id(requested: &str) -> Option<String> {
+    let url = Url::parse(requested).ok()?;
+    let segments: Vec<&str> = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let [.., workspaces, workspace_id, codemode] = segments.as_slice() else {
+        return None;
+    };
+    let valid = *workspaces == "workspaces"
+        && *codemode == "codemode"
+        && workspace_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    valid.then(|| (*workspace_id).to_string())
 }
 
 fn request_exec_mut(request: &mut ControlRequest) -> Option<&mut ExecRequest> {
@@ -114,6 +149,10 @@ pub enum CodemodeError {
     InvalidArguments(String),
     #[error("Codemode request failed: {0}")]
     Transport(String),
+    /// A request got no HTTP answer for a known network reason; the message
+    /// names it and what to check.
+    #[error("{0}")]
+    Unreachable(String),
     #[error("Codemode request failed with HTTP {status}: {message}")]
     Http { status: StatusCode, message: String },
     #[error("Codemode response was invalid: {0}")]
@@ -162,7 +201,7 @@ impl CodemodeError {
         };
         json!({ "error": { "operationId": operation_id, "state": state,
             "code": code, "message": self.to_string(),
-            "recovery": operation_id.map(|_| "Observe the existing operation only while its original agent attempt is active. If that attempt ended, inspect retained command output or session tool receipts instead; a new attempt cannot read the old operation. Do not automatically start another call.") } })
+            "recovery": operation_id.map(|_| "Read this operation with the current authorized attempt of the same turn. Approval resumes the stored operation. Do not automatically start another call.") } })
     }
 
     fn observing(self, operation_id: &str) -> Self {
@@ -211,10 +250,7 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
         CodemodeAction::Show(args) => {
             print!("{}", client.catalog().await?.show_output(&args.tool)?);
         }
-        CodemodeAction::Call(args) => {
-            let result = client.call(args).await?;
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
+        CodemodeAction::Call(args) => run_call(&client, args).await?,
         CodemodeAction::Read { operation_id } => {
             // A GET only. Neither catalog discovery nor submission is needed.
             let operation = client
@@ -234,6 +270,374 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
         }
     }
     Ok(())
+}
+
+/// IEEE-754 safe-integer bound shared with the JavaScript clients.
+const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+const MAX_SAFE_INTEGER_F64: f64 = 9_007_199_254_740_991.0;
+
+const TEMP_IMAGE_PREFIX: &str = "opengeni-codemode-image-";
+
+/// Exit status of a completed call whose image could not be saved; matches
+/// `ogtool call`.
+const IMAGE_SAVE_FAILED_EXIT_CODE: i32 = 4;
+
+/// `codemode call`: run the tool, then write any images to files. A failure
+/// to save an image after the call completed still prints the result, with
+/// `imageSaveError` and the operation ID, and exits with status 4.
+/// An error result (`isError`) with `--save-image` prints as the call's
+/// answer, saves no file and exits 0, so scripts check `isError`.
+async fn run_call(client: &CodemodeClient, args: CodemodeCallArgs) -> Result<(), CodemodeError> {
+    use std::io::Write as _;
+    let full = args.full;
+    let save_image = args.save_image.clone();
+    if let Some(path) = save_image.as_deref() {
+        preflight_image_path(path)?;
+    }
+    let operation_id = Uuid::new_v4().to_string();
+    let result = client.call_as(args, operation_id.clone()).await?;
+    // An error result has no image to save; print it as the call's answer
+    // rather than as a completed call whose image could not be saved.
+    let save_image = if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        None
+    } else {
+        save_image
+    };
+    let materialized = if full && save_image.is_none() {
+        Ok(result.clone())
+    } else {
+        materialize_images(result.clone(), save_image.as_deref(), !full)
+    };
+    let error = match materialized {
+        Ok(result) => {
+            let printed = if full {
+                result
+            } else {
+                omit_structured_content_text_duplicates(result)
+            };
+            println!("{}", serde_json::to_string_pretty(&printed)?);
+            return Ok(());
+        }
+        Err(error) => error,
+    };
+    let mut printed = if full {
+        result
+    } else {
+        omit_structured_content_text_duplicates(
+            materialize_images(result.clone(), None, true).unwrap_or(result),
+        )
+    };
+    if let Some(object) = printed.as_object_mut() {
+        object.insert(
+            "imageSaveError".to_string(),
+            json!({
+                "operationId": operation_id,
+                "message": error.to_string(),
+                "note": "The call completed; only saving its image failed. Do not repeat the call.",
+            }),
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&printed)?);
+    let _ = std::io::stdout().flush();
+    std::process::exit(IMAGE_SAVE_FAILED_EXIT_CODE);
+}
+
+/// Refuse a --save-image path before the tool runs when the file could not be
+/// written anyway, so nothing is called for a screenshot that cannot be kept.
+fn preflight_image_path(path: &std::path::Path) -> Result<(), CodemodeError> {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    if std::fs::symlink_metadata(&absolute).is_ok() {
+        return Err(CodemodeError::InvalidArguments(format!(
+            "--save-image {} already exists; choose a new path (nothing was called)",
+            absolute.display()
+        )));
+    }
+    if let Some(parent) = absolute
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            CodemodeError::InvalidArguments(format!(
+                "--save-image could not create {}: {error} (nothing was called)",
+                parent.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// Mirrors `materializeCodemodeImages` in `packages/codemode/src/images.ts`:
+/// write each image block (such as a browser screenshot) to a file and, when
+/// `replace` is set, print `{type, mimeType, path, sizeBytes}` in place of its
+/// base64 pixels so a script's output stays small. `save_to` names the file
+/// for a result with exactly one image and never overwrites; otherwise the
+/// images go to a new private temporary directory.
+fn materialize_images(
+    mut result: Value,
+    save_to: Option<&std::path::Path>,
+    replace: bool,
+) -> Result<Value, CodemodeError> {
+    use base64::Engine as _;
+    let local = |message: String| CodemodeError::InvalidArguments(message);
+    let Some(Value::Array(content)) = result.get_mut("content") else {
+        return match save_to {
+            Some(_) => Err(local("the result has no image to save".to_string())),
+            None => Ok(result),
+        };
+    };
+    let indexes: Vec<usize> = content
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| block.get("type").and_then(Value::as_str) == Some("image"))
+        .map(|(index, _)| index)
+        .collect();
+    if save_to.is_some() && indexes.len() != 1 {
+        return Err(local(format!(
+            "--save-image needs a result with exactly one image; this one has {}",
+            indexes.len()
+        )));
+    }
+    if indexes.is_empty() {
+        return Ok(result);
+    }
+    let directory = if save_to.is_none() {
+        // Same shape as the JavaScript client's mkdtemp directories, so either
+        // client's cleanup removes the other's expired images.
+        let suffix: String = Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(6)
+            .collect();
+        let root = std::env::temp_dir();
+        let directory = root.join(format!("{TEMP_IMAGE_PREFIX}{suffix}"));
+        create_private_directory(&directory)
+            .map_err(|error| local(format!("could not create an image directory: {error}")))?;
+        prune_expired_private_images(&root, &directory);
+        Some(directory)
+    } else {
+        None
+    };
+    for (position, index) in indexes.iter().enumerate() {
+        let block = &content[*index];
+        let mime_type = block
+            .get("mimeType")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let extension = match mime_type.as_str() {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            other => return Err(local(format!("unsupported image type {other:?}"))),
+        };
+        let data = block
+            .get("data")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .ok()
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(|| local("the image bytes are invalid".to_string()))?;
+        let path = match (save_to, &directory) {
+            (Some(path), _) => {
+                if let Some(parent) = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                {
+                    std::fs::create_dir_all(parent).map_err(|error| {
+                        local(format!("could not create {}: {error}", parent.display()))
+                    })?;
+                }
+                path.to_path_buf()
+            }
+            (None, Some(directory)) => directory.join(if indexes.len() == 1 {
+                format!("frame.{extension}")
+            } else {
+                format!("image-{}.{extension}", position + 1)
+            }),
+            (None, None) => unreachable!("a temporary directory exists without save_to"),
+        };
+        write_new_file(&path, &bytes)
+            .map_err(|error| local(format!("could not save {}: {error}", path.display())))?;
+        let absolute = std::path::absolute(&path).unwrap_or(path);
+        if replace {
+            content[*index] = json!({
+                "type": "image",
+                "mimeType": mime_type,
+                "path": absolute.to_string_lossy(),
+                "sizeBytes": bytes.len(),
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn create_private_directory(path: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+/// Best-effort removal of this client's temporary image directories in `root`
+/// (the temporary directory) older than a day. Only private (0700-style)
+/// directories owned by the same user as the directory just created are
+/// removed, as in the JavaScript client. Paths named with --save-image are
+/// never touched.
+#[cfg(unix)]
+fn prune_expired_private_images(root: &std::path::Path, own_directory: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt as _;
+    const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+    let Ok(owner) = std::fs::symlink_metadata(own_directory).map(|metadata| metadata.uid()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(TEMP_IMAGE_PREFIX))
+        else {
+            continue;
+        };
+        if suffix.len() != 6 || !suffix.chars().all(|c| c.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let path = entry.path();
+        if path == own_directory {
+            continue;
+        }
+        // lstat: a symlink with a matching name is never followed.
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let expired = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= MAX_AGE);
+        let private = metadata.mode().trailing_zeros() >= 6;
+        if metadata.is_dir()
+            && metadata.uid() == owner
+            && private
+            && expired
+            && std::fs::remove_dir_all(&path).is_ok()
+        {
+            removed += 1;
+            if removed >= 64 {
+                return;
+            }
+        }
+    }
+}
+
+/// Without Unix ownership and modes there is no safe way to tell this
+/// client's directories from anyone else's, so nothing is pruned.
+#[cfg(not(unix))]
+fn prune_expired_private_images(_root: &std::path::Path, _own_directory: &std::path::Path) {}
+
+fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Mirrors `omitStructuredContentTextDuplicates` in
+/// `packages/contracts/src/mcp-structured-content.ts` so `codemode call` and
+/// `ogtool call` print the same result. A plain `{type: "text", text}` block
+/// whose text parses as JSON equal to `structuredContent` (numbers compared by
+/// IEEE-754 value) is omitted. Prose, differing JSON, annotated text, other
+/// block types, and text carrying an integer outside the safe range stay.
+fn omit_structured_content_text_duplicates(mut result: Value) -> Value {
+    let Some(object) = result.as_object_mut() else {
+        return result;
+    };
+    let structured = match object.get("structuredContent") {
+        None | Some(Value::Null) => return result,
+        Some(value) => value.clone(),
+    };
+    if let Some(Value::Array(content)) = object.get_mut("content") {
+        content.retain(|entry| !text_block_duplicates_structured_content(entry, &structured));
+    }
+    result
+}
+
+fn text_block_duplicates_structured_content(entry: &Value, structured: &Value) -> bool {
+    let Some(block) = entry.as_object() else {
+        return false;
+    };
+    // Annotations or _meta are block-level facts the structured value lacks.
+    if block.len() != 2 || block.get("type").and_then(Value::as_str) != Some("text") {
+        return false;
+    }
+    let Some(text) = block.get("text").and_then(Value::as_str) else {
+        return false;
+    };
+    let trimmed = text.trim_start_matches([' ', '\t', '\n', '\r']);
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+        return false;
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    !contains_unsafe_integer(&parsed) && json_values_equal(&parsed, structured)
+}
+
+fn contains_unsafe_integer(value: &Value) -> bool {
+    match value {
+        Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                integer.unsigned_abs() > MAX_SAFE_INTEGER
+            } else if let Some(integer) = number.as_u64() {
+                integer > MAX_SAFE_INTEGER
+            } else {
+                number.as_f64().is_some_and(|float| {
+                    float.is_finite() && float.fract() == 0.0 && float.abs() > MAX_SAFE_INTEGER_F64
+                })
+            }
+        }
+        Value::Array(entries) => entries.iter().any(contains_unsafe_integer),
+        Value::Object(entries) => entries.values().any(contains_unsafe_integer),
+        _ => false,
+    }
+}
+
+fn json_values_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => left.as_f64() == right.as_f64(),
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| json_values_equal(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, left)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right| json_values_equal(left, right))
+                })
+        }
+        _ => left == right,
+    }
 }
 
 /// Mirrors openGeni.artifacts.ids.document: uint64 namespace, nonzero random
@@ -292,6 +696,7 @@ impl CodemodeClient {
                 reqwest::header::HeaderValue::from_static(API_CONTRACT_REVISION),
             )]))
             .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .user_agent(concat!("opengeni-agent/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| CodemodeError::Transport(error.to_string()))?;
@@ -313,14 +718,25 @@ impl CodemodeClient {
         decode_json_response(response).await
     }
 
+    #[cfg(test)]
     async fn call(&self, args: CodemodeCallArgs) -> Result<Value, CodemodeError> {
-        let arguments = parse_arguments(&args.arguments)?;
+        self.call_as(args, Uuid::new_v4().to_string()).await
+    }
+
+    /// Run one call under the caller-chosen operation ID, so the caller can
+    /// name the completed operation if printing its result fails afterwards.
+    async fn call_as(
+        &self,
+        args: CodemodeCallArgs,
+        operation_id: String,
+    ) -> Result<Value, CodemodeError> {
+        let arguments = read_arguments(&args.arguments).await?;
         let catalog = self.catalog().await?;
         let entry = catalog.resolve(&args.tool)?;
-        let operation_id = Uuid::new_v4().to_string();
         let request = CallRequest {
             operation_id: operation_id.clone(),
             catalog_digest: catalog.digest.clone(),
+            durable_approval: true,
             identity: entry.identity.clone(),
             arguments,
         };
@@ -357,6 +773,14 @@ impl CodemodeClient {
             };
 
             match next.state {
+                OperationState::WaitingForApproval => {
+                    return Err(CodemodeError::Operation {
+                        operation_id: operation_id.clone(),
+                        state: "waiting_for_approval".to_string(),
+                        code: Some("codemode_approval_pending".to_string()),
+                        message: "Waiting for review. The worker resumes this stored operation after approval; read this handle without submitting the arguments again.".to_string(),
+                    });
+                }
                 OperationState::Completed => {
                     return next.result.ok_or_else(|| {
                         CodemodeError::InvalidResponse(
@@ -367,7 +791,8 @@ impl CodemodeClient {
                 }
                 OperationState::Failed
                 | OperationState::Cancelled
-                | OperationState::OutcomeUnknown => {
+                | OperationState::OutcomeUnknown
+                | OperationState::Unknown => {
                     return Err(CodemodeError::Operation {
                         operation_id: operation_id.clone(),
                         state: serde_json::to_value(next.state)?
@@ -401,6 +826,7 @@ impl CodemodeClient {
         let response = self
             .http
             .get(self.url(&format!("calls/{operation_id}"))?)
+            .header("x-opengeni-codemode-capabilities", "durable-approval-v1")
             .bearer_auth(&self.token)
             .send()
             .await
@@ -440,11 +866,56 @@ fn nonempty(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+async fn read_arguments(source: &str) -> Result<Map<String, Value>, CodemodeError> {
+    let raw = if source == "-" {
+        use tokio::io::AsyncReadExt as _;
+        let mut input = String::new();
+        tokio::io::stdin()
+            .read_to_string(&mut input)
+            .await
+            .map_err(|_| {
+                CodemodeError::InvalidArguments(
+                    "tool arguments could not be read as UTF-8 from stdin".to_string(),
+                )
+            })?;
+        input
+    } else if let Some(path) = source.strip_prefix('@') {
+        if path.is_empty() {
+            return Err(CodemodeError::InvalidArguments(
+                "tool arguments file path is required after @".to_string(),
+            ));
+        }
+        tokio::fs::read_to_string(path).await.map_err(|_| {
+            CodemodeError::InvalidArguments(
+                "tool arguments file could not be read as UTF-8".to_string(),
+            )
+        })?
+    } else {
+        return parse_arguments(source);
+    };
+    parse_arguments(&raw)
+}
+
 fn parse_arguments(raw: &str) -> Result<Map<String, Value>, CodemodeError> {
-    match serde_json::from_str(raw) {
+    let parsed = serde_json::from_str(raw).or_else(|error| {
+        // `\{{secret:` inside a JSON string: an escaped reference whose
+        // backslash the agent doubled for JSON and the shell splice halved.
+        // `\{` is not a valid JSON escape, so the literal reading is unambiguous.
+        let repaired = unescape_secret_references(raw);
+        if repaired == raw {
+            Err(error)
+        } else {
+            serde_json::from_str(&repaired)
+        }
+    });
+    match parsed {
         Ok(Value::Object(value)) => Ok(value),
         Ok(_) => Err(CodemodeError::InvalidArguments(
             "tool arguments must be a JSON object".to_string(),
+        )),
+        Err(_) if raw.contains("{{secret") => Err(CodemodeError::InvalidArguments(
+            "tool arguments must be valid JSON; inside `codemode call` write a reference as \\{{secret:…}} with one backslash"
+                .to_string(),
         )),
         Err(_) => Err(CodemodeError::InvalidArguments(
             "tool arguments must be valid JSON".to_string(),
@@ -452,16 +923,52 @@ fn parse_arguments(raw: &str) -> Result<Map<String, Value>, CodemodeError> {
     }
 }
 
+/// Drop a lone backslash directly before `{{secret:` or `{{secretfile:`.
+fn unescape_secret_references(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut previous_backslash = false;
+    let mut rest = raw;
+    while let Some(ch) = rest.chars().next() {
+        let after = &rest[ch.len_utf8()..];
+        if ch == '\\'
+            && !previous_backslash
+            && (after.starts_with("{{secret:") || after.starts_with("{{secretfile:"))
+        {
+            previous_backslash = false;
+            rest = after;
+            continue;
+        }
+        previous_backslash = ch == '\\' && !previous_backslash;
+        out.push(ch);
+        rest = after;
+    }
+    out
+}
+
 fn transport_error(error: &reqwest::Error) -> CodemodeError {
+    transport_error_for(error, None)
+}
+
+/// `request_url` names the host when reqwest leaves the URL off the error,
+/// as it does for failures while reading a body.
+fn transport_error_for(error: &reqwest::Error, request_url: Option<&Url>) -> CodemodeError {
     // reqwest's display omits Authorization headers. The URL is non-secret; the
     // attempt bearer never becomes part of it.
-    CodemodeError::Transport(error.to_string())
+    match connection_failure::describe_connection_failure(
+        error,
+        request_url,
+        std::time::SystemTime::now(),
+    ) {
+        Some(message) => CodemodeError::Unreachable(message),
+        None => CodemodeError::Transport(error.to_string()),
+    }
 }
 
 async fn decode_json_response<T: for<'de> Deserialize<'de>>(
     mut response: Response,
 ) -> Result<T, CodemodeError> {
     let status = response.status();
+    let url = response.url().clone();
     let limit = if status.is_success() {
         MAX_RESPONSE_BYTES
     } else {
@@ -471,7 +978,7 @@ async fn decode_json_response<T: for<'de> Deserialize<'de>>(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| transport_error(&error))?
+        .map_err(|error| transport_error_for(&error, Some(&url)))?
     {
         if bytes.len().saturating_add(chunk.len()) > limit {
             return Err(CodemodeError::InvalidResponse(format!(
@@ -708,6 +1215,7 @@ fn short_description(entry: &CatalogEntry) -> String {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CallRequest {
+    durable_approval: bool,
     operation_id: String,
     catalog_digest: String,
     identity: ToolIdentity,
@@ -723,11 +1231,14 @@ struct Submission {
 #[serde(rename_all = "snake_case")]
 enum OperationState {
     Queued,
+    WaitingForApproval,
     Running,
     Completed,
     Failed,
     OutcomeUnknown,
     Cancelled,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -800,6 +1311,224 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn waiting_returns_a_compact_receipt_without_polling_or_resubmitting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("catalog");
+            read_request(&mut stream).await;
+            write_response(&mut stream, &json!({
+                "attemptId": "11111111-1111-4111-8111-111111111111", "digest": "b".repeat(64),
+                "entries": [{ "identity": { "serverId": "mail", "toolName": "change" },
+                    "modelName": "mail__change", "codemodePath": ["mail", "change"],
+                    "inputSchema": { "type": "object" }, "source": "mcp", "approval": "policy" }]
+            })).await;
+            let (mut stream, _) = listener.accept().await.expect("call");
+            let request = read_request(&mut stream).await;
+            write_response(
+                &mut stream,
+                &json!({"operation": {"state": "waiting_for_approval"}}),
+            )
+            .await;
+            request
+        });
+        let client = CodemodeClient::new(
+            &format!("http://{address}/codemode"),
+            "fixture-bearer".to_string(),
+        )
+        .expect("client");
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.call(CodemodeCallArgs {
+                tool: "mail.change".to_string(),
+                arguments: "{}".to_string(),
+                full: false,
+                save_image: None,
+            }),
+        )
+        .await
+        .expect("waiting must exit promptly")
+        .expect_err("pending receipt");
+        let receipt = error.receipt();
+        assert_eq!(receipt["error"]["state"], "waiting_for_approval");
+        assert_eq!(receipt["error"]["code"], "codemode_approval_pending");
+        assert!(!receipt.to_string().contains("\"arguments\":"));
+        let request = server.await.expect("server");
+        assert!(request.contains("\"durableApproval\":true"));
+    }
+
+    #[test]
+    fn images_are_written_to_files_instead_of_printed_as_base64() {
+        // A 1x1 PNG signature-prefixed payload; the client does not re-encode it.
+        let png = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3];
+        let data = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(png)
+        };
+        let screenshot = json!({
+            "content": [
+                { "type": "text", "text": "frame" },
+                { "type": "image", "data": data, "mimeType": "image/png" }
+            ],
+            "structuredContent": { "kind": "browser_screenshot" }
+        });
+
+        // Default: a private temporary file, and the printed block names it.
+        let printed = materialize_images(screenshot.clone(), None, true).expect("temp image");
+        let block = &printed["content"][1];
+        assert_eq!(block["sizeBytes"], json!(png.len()));
+        assert!(block.get("data").is_none());
+        let path = std::path::PathBuf::from(block["path"].as_str().expect("path"));
+        assert!(path.ends_with("frame.png"));
+        assert_eq!(std::fs::read(&path).expect("written"), png);
+        assert_eq!(
+            printed["content"][0],
+            json!({ "type": "text", "text": "frame" })
+        );
+        std::fs::remove_dir_all(path.parent().expect("dir")).expect("cleanup");
+
+        // --save-image: the exact path, parents created, never overwritten.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("shots").join("home.png");
+        let saved = materialize_images(screenshot.clone(), Some(&target), true).expect("saved");
+        assert_eq!(std::fs::read(&target).expect("saved file"), png);
+        assert_eq!(
+            saved["content"][1]["path"].as_str(),
+            Some(target.to_string_lossy().as_ref())
+        );
+        let again = materialize_images(screenshot.clone(), Some(&target), true);
+        assert!(again.is_err());
+
+        // --full with --save-image keeps the exact base64 and still saves.
+        let full_target = directory.path().join("full.png");
+        let full = materialize_images(screenshot.clone(), Some(&full_target), false).expect("full");
+        assert_eq!(full, screenshot);
+        assert!(full_target.exists());
+
+        // --save-image on a result without exactly one image is refused.
+        let text_only = json!({ "content": [{ "type": "text", "text": "no image" }] });
+        assert!(materialize_images(
+            text_only.clone(),
+            Some(&directory.path().join("x.png")),
+            true
+        )
+        .is_err());
+        assert_eq!(
+            materialize_images(text_only.clone(), None, true).expect("unchanged"),
+            text_only
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_pruning_removes_only_expired_private_directories() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // A root of its own: tests writing temporary images prune the shared
+        // temporary directory concurrently. One midway through removing this
+        // test's private directory has unlinked its file, which makes the
+        // directory look new, so this prune skips it and the assertion runs
+        // before that removal finishes.
+        let root = tempfile::Builder::new()
+            .prefix("opengeni-prune-root-")
+            .tempdir()
+            .expect("root");
+        let aged = |mode: u32| {
+            let suffix: String = Uuid::new_v4()
+                .simple()
+                .to_string()
+                .chars()
+                .take(6)
+                .collect();
+            let path = root.path().join(format!("{TEMP_IMAGE_PREFIX}{suffix}"));
+            std::fs::create_dir(&path).expect("create");
+            std::fs::write(path.join("frame.png"), b"x").expect("file");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("mode");
+            let old = std::time::SystemTime::now() - Duration::from_secs(25 * 60 * 60);
+            std::fs::File::open(&path)
+                .expect("open dir")
+                .set_modified(old)
+                .expect("age");
+            path
+        };
+        let shared = aged(0o755);
+        let private = aged(0o700);
+        let own = tempfile::Builder::new()
+            .prefix("opengeni-prune-owner-")
+            .tempdir_in(root.path())
+            .expect("own");
+        prune_expired_private_images(root.path(), own.path());
+        assert!(shared.exists(), "a non-private directory is never pruned");
+        assert!(!private.exists(), "an expired private directory is pruned");
+        std::fs::remove_dir_all(&shared).expect("cleanup");
+    }
+
+    #[test]
+    fn save_image_preflight_refuses_an_existing_path_before_calling() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let existing = directory.path().join("taken.png");
+        std::fs::write(&existing, b"x").expect("file");
+        let error = preflight_image_path(&existing).expect_err("refused");
+        assert!(error.to_string().contains("already exists"));
+        let nested = directory.path().join("a/b/new.png");
+        preflight_image_path(&nested).expect("allowed");
+        assert!(nested.parent().expect("parent").is_dir());
+        assert!(!nested.exists());
+    }
+
+    #[tokio::test]
+    async fn an_error_result_with_save_image_is_the_answer_not_an_image_save_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("catalog");
+            read_request(&mut stream).await;
+            write_response(&mut stream, &json!({
+                "attemptId": "11111111-1111-4111-8111-111111111111", "digest": "b".repeat(64),
+                "entries": [{ "identity": { "serverId": "interaction", "toolName": "browser_screenshot" },
+                    "modelName": "interaction__browser_screenshot",
+                    "codemodePath": ["interaction", "browser", "screenshot"],
+                    "inputSchema": { "type": "object" }, "source": "mcp", "approval": "policy" }]
+            })).await;
+            let (mut stream, _) = listener.accept().await.expect("call");
+            read_request(&mut stream).await;
+            write_response(
+                &mut stream,
+                &json!({"operation": {"state": "completed", "result": {
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "API 404: browser target does not exist" }]
+                }}}),
+            )
+            .await;
+        });
+        let client = CodemodeClient::new(
+            &format!("http://{address}/codemode"),
+            "fixture-bearer".to_string(),
+        )
+        .expect("client");
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = directory.path().join("shot.png");
+        // Before the fix this branch reported an image-save failure and exited
+        // the process with status 4.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_call(
+                &client,
+                CodemodeCallArgs {
+                    tool: "interaction.browser.screenshot".to_string(),
+                    arguments: "{}".to_string(),
+                    full: false,
+                    save_image: Some(target.clone()),
+                },
+            ),
+        )
+        .await
+        .expect("the call finishes")
+        .expect("an error result is printed as the answer");
+        assert!(!target.exists(), "an error result saves no image");
+        server.await.expect("server");
+    }
 
     #[test]
     fn document_ids_preserve_namespace_and_sdk_counter_contract() {
@@ -885,12 +1614,112 @@ mod tests {
     }
 
     #[test]
+    fn call_output_omits_only_exact_structured_content_text_duplicates() {
+        let structured = json!({ "items": [{ "id": 1, "title": "Bug \"quoted\"" }], "total": 1 });
+        let pretty = serde_json::to_string_pretty(&structured).expect("pretty");
+        let reordered = r#"{"total":1.0,"items":[{"title":"Bug \"quoted\"","id":1}]}"#;
+        let result = json!({
+            "content": [
+                { "type": "text", "text": pretty },
+                { "type": "text", "text": reordered },
+                { "type": "text", "text": "Found 1 issue." },
+                { "type": "text", "text": "{\"total\":2}" },
+                { "type": "text", "text": structured.to_string(), "annotations": { "audience": ["user"] } },
+                { "type": "image", "data": "/9j/2Q==", "mimeType": "image/jpeg" }
+            ],
+            "structuredContent": structured,
+            "isError": false
+        });
+        let printed = omit_structured_content_text_duplicates(result.clone());
+        assert_eq!(
+            printed["content"],
+            json!([
+                result["content"][2],
+                result["content"][3],
+                result["content"][4],
+                result["content"][5]
+            ])
+        );
+        assert_eq!(printed["structuredContent"], result["structuredContent"]);
+        assert_eq!(printed["isError"], false);
+
+        let unsafe_text = r#"{"id":12345678901234567000}"#;
+        let unsafe_result = json!({
+            "content": [{ "type": "text", "text": unsafe_text }],
+            "structuredContent": serde_json::from_str::<Value>(unsafe_text).expect("json")
+        });
+        assert_eq!(
+            omit_structured_content_text_duplicates(unsafe_result.clone()),
+            unsafe_result
+        );
+        let unstructured = json!({ "content": [{ "type": "text", "text": "{}" }] });
+        assert_eq!(
+            omit_structured_content_text_duplicates(unstructured.clone()),
+            unstructured
+        );
+    }
+
+    #[test]
     fn rejects_non_object_arguments() {
         assert!(matches!(
             parse_arguments("[]"),
             Err(CodemodeError::InvalidArguments(_))
         ));
         assert_eq!(parse_arguments(r#"{"x":1}"#).expect("object")["x"], 1);
+    }
+
+    #[tokio::test]
+    async fn reads_argument_files_with_the_existing_json_parser() {
+        let directory = tempfile::tempdir().expect("input directory");
+        let path = directory.path().join("arguments with spaces.json");
+        let source = format!("@{}", path.display());
+        let content = "UTF-8 ø🙂\n".repeat(100_000);
+        std::fs::write(&path, json!({ "content": content }).to_string()).expect("input file");
+        assert_eq!(
+            read_arguments(&source).await.expect("arguments")["content"],
+            content
+        );
+        for invalid in [
+            "[]",
+            "null",
+            "@another-file",
+            "synthetic-sensitive-content",
+            "",
+        ] {
+            std::fs::write(&path, invalid).expect("invalid input file");
+            let error = read_arguments(&source)
+                .await
+                .expect_err("invalid arguments");
+            assert!(matches!(error, CodemodeError::InvalidArguments(_)));
+            assert!(!error.to_string().contains("synthetic-sensitive-content"));
+        }
+        std::fs::write(&path, [0xff]).expect("invalid UTF-8");
+        assert_eq!(
+            read_arguments(&source).await.unwrap_err().to_string(),
+            "tool arguments file could not be read as UTF-8"
+        );
+        std::fs::remove_file(&path).expect("remove synthetic file");
+        assert_eq!(
+            read_arguments(&source).await.unwrap_err().to_string(),
+            "tool arguments file could not be read as UTF-8"
+        );
+        assert_eq!(
+            read_arguments("@").await.unwrap_err().to_string(),
+            "tool arguments file path is required after @"
+        );
+    }
+
+    #[test]
+    fn reads_a_halved_reference_escape_as_the_literal_reference() {
+        let parsed = parse_arguments(r#"{"token":"\{{secret:Linear/token}}"}"#).expect("object");
+        assert_eq!(parsed["token"], "{{secret:Linear/token}}");
+        // A valid escaped backslash stays a backslash.
+        let kept = parse_arguments(r#"{"token":"\\{{secret:X}}"}"#).expect("object");
+        assert_eq!(kept["token"], "\\{{secret:X}}");
+        assert!(matches!(
+            parse_arguments(r#"{"token":"\q{{secret:X}}"}"#),
+            Err(CodemodeError::InvalidArguments(message)) if message.contains("one backslash")
+        ));
     }
 
     #[test]
@@ -1354,6 +2183,60 @@ mod tests {
         );
     }
 
+    fn bind_on_link(requested_url: &str) -> Option<String> {
+        let mut exec = ExecRequest::default();
+        exec.env
+            .insert(TOKEN_ENV.to_string(), "attempt-secret".to_string());
+        exec.env
+            .insert(URL_ENV.to_string(), requested_url.to_string());
+        let mut request = ControlRequest {
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(exec)),
+                ..v1::OpStart::default()
+            })),
+            ..ControlRequest::default()
+        };
+        bind_connection_origin(
+            &mut request,
+            "https://machine.example.test/opengeni",
+            "home-workspace",
+        );
+        let Some(v1::control_request::Op::OpStart(start)) = request.op else {
+            panic!("op start request");
+        };
+        let Some(v1::op_start::Op::Exec(exec)) = start.op else {
+            panic!("streamed exec request");
+        };
+        exec.env.get(URL_ENV).cloned()
+    }
+
+    #[test]
+    fn personal_machine_keeps_the_chat_workspace_the_token_was_minted_for() {
+        // A personal machine enrolled in its owner's home workspace, used from
+        // a chat in another workspace: only the origin follows the link.
+        assert_eq!(
+            bind_on_link("https://public.example.test/v1/workspaces/chat-workspace/codemode")
+                .as_deref(),
+            Some("https://machine.example.test/opengeni/v1/workspaces/chat-workspace/codemode")
+        );
+    }
+
+    #[test]
+    fn unrecognised_codemode_routes_fall_back_to_the_link_workspace() {
+        for requested in [
+            "https://public.example.test/custom/codemode",
+            "https://public.example.test/v1/workspaces/a%2Fb/codemode",
+            "https://public.example.test/v1/workspaces/chat-workspace/mcp",
+            "not a url",
+        ] {
+            assert_eq!(
+                bind_on_link(requested).as_deref(),
+                Some("https://machine.example.test/opengeni/v1/workspaces/home-workspace/codemode"),
+                "{requested}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn native_client_calls_the_public_attempt_journal_once() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
@@ -1400,6 +2283,8 @@ mod tests {
             .call(CodemodeCallArgs {
                 tool: "demo.lookup".to_string(),
                 arguments: r#"{"query":"hello"}"#.to_string(),
+                full: false,
+                save_image: None,
             })
             .await
             .expect("call");
@@ -1501,6 +2386,8 @@ mod tests {
             .call(CodemodeCallArgs {
                 tool: "demo.mutate".to_string(),
                 arguments: "{}".to_string(),
+                full: false,
+                save_image: None,
             })
             .await
             .expect("recovered call");
@@ -1562,6 +2449,8 @@ mod tests {
                 .call(CodemodeCallArgs {
                     tool: "demo.write".into(),
                     arguments: "{}".into(),
+                    full: false,
+                    save_image: None,
                 })
                 .await
                 .unwrap_err();
@@ -1581,6 +2470,133 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("connection closed"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_connection_names_its_cause_instead_of_a_bare_send_error() {
+        // Keep the port reserved without a listener. Linux refuses the dial;
+        // macOS can leave it pending until the client's connect timeout.
+        let reserved = tokio::net::TcpSocket::new_v4().expect("socket");
+        reserved.bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+        let address = reserved.local_addr().expect("address");
+        let mut client =
+            CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into()).unwrap();
+        client.http = Client::builder()
+            .connect_timeout(Duration::from_millis(100))
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let message = client.catalog().await.unwrap_err().to_string();
+        drop(reserved);
+        assert!(
+            ["was refused", "timed out"].iter().any(|cause| message == format!(
+                "Can't reach Opengeni: the connection to {address} {cause}. Check this machine's network, firewall and proxy settings."
+            )),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_dns_lookup_names_the_host_and_the_resolver() {
+        let client = CodemodeClient::new(
+            "http://opengeni-codemode-test.invalid/codemode",
+            "fixture".into(),
+        )
+        .unwrap();
+        let message = client.catalog().await.unwrap_err().to_string();
+        assert!(
+            message.starts_with(
+                "Can't reach Opengeni: DNS lookup for opengeni-codemode-test.invalid failed"
+            ),
+            "{message}"
+        );
+        let hint = if cfg!(target_os = "linux") {
+            "Check /etc/resolv.conf."
+        } else {
+            "Check this machine's DNS settings."
+        };
+        assert!(message.ends_with(hint), "{message}");
+        assert!(!message.contains("fixture"));
+    }
+
+    #[tokio::test]
+    async fn a_call_that_loses_opengeni_after_the_catalog_names_the_cause_and_its_operation() {
+        // Keep one listener owning the port throughout. Sharing a port with a
+        // non-listening SO_REUSEPORT socket is platform-dependent and can keep
+        // the catalog from reaching this listener on macOS.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("catalog");
+            read_request(&mut stream).await;
+            write_response(
+                &mut stream,
+                &json!({
+                    "attemptId": "11111111-1111-4111-8111-111111111111",
+                    "digest": "d".repeat(64), "entries": [{
+                        "identity": {"serverId":"demo","toolName":"write"},
+                        "modelName":"demo__write", "codemodePath":["demo","write"],
+                        "inputSchema":{"type":"object"}, "source":"mcp", "approval":"none"
+                    }]
+                }),
+            )
+            .await;
+            drop(stream);
+            // Both submission and observation lose their response to a TCP
+            // reset. Unlike a graceful HTTP EOF, this has a named I/O cause.
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("failed request");
+                read_request(&mut stream).await;
+                // Zero linger deliberately sends RST on drop. The deprecation
+                // warns about blocking with positive linger, which is not used.
+                #[allow(deprecated)]
+                stream
+                    .set_linger(Some(Duration::ZERO))
+                    .expect("reset on drop");
+                drop(stream);
+            }
+        });
+        let client =
+            CodemodeClient::new(&format!("http://{address}/codemode"), "fixture".into()).unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.call_as(
+                CodemodeCallArgs {
+                    tool: "demo.write".into(),
+                    arguments: "{}".into(),
+                    full: false,
+                    save_image: None,
+                },
+                "operation-refused".to_string(),
+            ),
+        )
+        .await
+        .expect("connection loss is observed promptly")
+        .unwrap_err();
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("fixture served submission and observation")
+            .unwrap();
+        let message = error.to_string();
+        let prefix = format!(
+            "Codemode operation operation-refused: Can't reach Opengeni: the connection to {address} "
+        );
+        assert!(
+            [
+                "was refused. Check this machine's network, firewall and proxy settings.",
+                "closed unexpectedly. If it keeps happening, check this machine's network and proxy settings.",
+            ]
+            .iter()
+            .any(|cause| message == format!("{prefix}{cause}")),
+            "{message}"
+        );
+        let receipt = error.receipt();
+        assert_eq!(receipt["error"]["operationId"], "operation-refused");
+        assert!(receipt["error"]["state"].is_null());
+        assert!(receipt["error"]["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("Do not automatically start another call"));
     }
 
     async fn read_request(stream: &mut TcpStream) -> String {

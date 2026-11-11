@@ -10,6 +10,7 @@ import {
 } from "react";
 import { cn } from "../lib/cn";
 import { useTimelineSearchReveal } from "./timeline-search";
+import { useOpenGeniText } from "../messages/runtime";
 
 const FALLBACK_LINE_THRESHOLD = 12;
 const FALLBACK_TEXT_THRESHOLD = 900;
@@ -265,6 +266,7 @@ export function UserMessageBody({
   className,
   disclosureLabels,
 }: UserMessageBodyProps) {
+  const t = useOpenGeniText();
   const disclosure = useContext(UserMessageDisclosureContext);
   const [expanded, setExpanded] = useState(
     () => disclosure?.expandedByMessageId.get(messageId) ?? false,
@@ -478,8 +480,12 @@ export function UserMessageBody({
         onClick={(event) => toggle(event.currentTarget)}
       >
         {expanded
-          ? (disclosureLabels?.showLess ?? disclosure?.labels?.showLess ?? "Show less")
-          : (disclosureLabels?.showMore ?? disclosure?.labels?.showMore ?? "Show more")}
+          ? (disclosureLabels?.showLess ??
+            disclosure?.labels?.showLess ??
+            t("userMessageBody.showLess"))
+          : (disclosureLabels?.showMore ??
+            disclosure?.labels?.showMore ??
+            t("userMessageBody.showMore"))}
       </button>
     </div>
   );

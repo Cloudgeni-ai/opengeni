@@ -56,7 +56,7 @@ function botConnection(overrides: Partial<BotConnection> = {}): BotConnection {
       slackTeamName: "Test workspace",
       botUserId: "U_TEST",
       botId: "B_TEST",
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: now,
     },
     createdBySubjectId: "subject-a",
@@ -82,7 +82,7 @@ function scheduledSession(
   };
 }
 
-describe("OpenGeni Slack bot trust predicates", () => {
+describe("Opengeni Slack bot trust predicates", () => {
   test("requires the shared app role and required bot scopes", () => {
     expect(areOpenGeniSlackBotScopesAccepted(OPENGENI_SLACK_BOT_REQUIRED_SCOPES)).toBe(true);
     expect(
@@ -122,7 +122,6 @@ describe("OpenGeni Slack bot trust predicates", () => {
     ).toBe(false);
     for (const unsafe of [
       "reactions:write",
-      "chat:write.customize",
       "users:read.email",
       "admin",
       "admin.users:read",
@@ -210,6 +209,6 @@ describe("OpenGeni Slack bot trust predicates", () => {
     };
     await expect(
       validateOpenGeniSlackBotConnectionSelection({} as never, grant, workspaceId, connectionId),
-    ).rejects.toThrow("missing permission: connections:read");
+    ).rejects.toThrow("You don't have permission to view connections.");
   });
 });

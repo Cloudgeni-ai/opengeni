@@ -1,11 +1,12 @@
-import type { RoleOption, RoleValue } from "@/components/ui/role-select";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
+import type { RoleOption, RoleValue } from "@opengeni/react/ui/role-select";
 import type {
   OrganizationAdministrationOverview,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationMembershipRole,
   OrganizationWorkspaceAccessMember,
-} from "@/types";
+} from "@opengeni/react/app/types";
 
 import type { WorkspaceRoleId } from "./organization-directory";
 
@@ -71,8 +72,22 @@ export function withArticle(label: string): string {
   return `${/^[aeiou]/.test(lower) ? "an" : "a"} ${lower}`;
 }
 
+/** A member's email address to show, or null when the account has none. */
+export function memberEmail(member: { email?: string | null }): string | null {
+  return accountContactEmail(member.email);
+}
+
+/** The email to show next to a member's name, when it adds something. */
+export function memberEmailDetail(
+  member: { email?: string | null },
+  name: string,
+): string | undefined {
+  const email = memberEmail(member);
+  return email && email !== name ? email : undefined;
+}
+
 export function memberName(member: Pick<OrganizationMember, "name" | "email">): string {
-  return member.name?.trim() || member.email || "Unnamed person";
+  return member.name?.trim() || memberEmail(member) || "Unnamed person";
 }
 
 export function firstName(name: string): string {
@@ -93,7 +108,7 @@ export function workspaceMemberName(
   member: OrganizationWorkspaceAccessMember,
   you?: { subjectId: string; label: string | null | undefined },
 ): string {
-  const known = member.name ?? member.email ?? member.subjectLabel;
+  const known = member.name ?? memberEmail(member) ?? member.subjectLabel;
   if (known) return known;
   if (you && member.subjectId === you.subjectId && you.label) return you.label;
   return member.principalKind === "service" ? "Service account" : "Unnamed person";
@@ -172,4 +187,20 @@ export function invitationDeliveryOutcome(invitation: OrganizationInvitation): s
     default:
       return `Saved the invitation to ${invitation.targetEmail}. The email hasn't gone out yet.`;
   }
+}
+
+/**
+ * An organization can hold hundreds of shared workspaces (an embedding product
+ * provisions one per tenant), so lists longer than this offer a name search.
+ */
+export const WORKSPACE_SEARCH_THRESHOLD = 8;
+
+/** Case-insensitive name match; an empty query keeps every workspace. */
+export function filterWorkspacesByName<T extends { name: string }>(
+  workspaces: readonly T[],
+  query: string,
+): T[] {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return [...workspaces];
+  return workspaces.filter((workspace) => workspace.name.toLocaleLowerCase().includes(needle));
 }

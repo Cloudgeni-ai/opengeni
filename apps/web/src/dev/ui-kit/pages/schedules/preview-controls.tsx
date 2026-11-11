@@ -5,8 +5,8 @@
 import { useId, type ReactNode } from "react";
 import { RotateCcwIcon } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { Button } from "@opengeni/react/ui/button";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 
 export interface PreviewToggleOption<Value extends string> {
   value: Value;

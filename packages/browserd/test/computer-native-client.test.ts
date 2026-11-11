@@ -1,8 +1,96 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { ComputerNativeClient, NativeComputerError } from "../src";
+import { ComputerNativeClient, ComputerBackendError } from "../src";
 
 describe("ComputerNativeClient", () => {
+  test("negotiates click continuation explicitly and keeps older helpers unsupported", async () => {
+    for (const supported of [false, true]) {
+      const client = await ComputerNativeClient.open({
+        binaryPath: process.execPath,
+        arguments: [
+          resolve(import.meta.dir, "fixtures/computer-native-fixture.ts"),
+          ...(supported ? ["--click-continuation"] : []),
+        ],
+      });
+      try {
+        expect(client.initialCapabilities.pointerClickContinuation === true).toBe(supported);
+        expect((await client.capabilities()).pointerClickContinuation === true).toBe(supported);
+      } finally {
+        await client.close();
+      }
+    }
+  });
+
+  test("retains malformed startup and explicitly unconfirmed cleanup errors", async () => {
+    await expect(
+      ComputerNativeClient.open({
+        binaryPath: process.execPath,
+        arguments: [
+          resolve(import.meta.dir, "fixtures/computer-native-fixture.ts"),
+          "--malformed-click-continuation",
+          "--nonzero-eof",
+        ],
+      }),
+    ).rejects.toMatchObject({
+      name: "UnsettledCleanupError",
+      errors: expect.arrayContaining([
+        expect.objectContaining({
+          message: "native capability pointerClickContinuation is invalid",
+        }),
+        expect.objectContaining({
+          name: "UnsettledCleanupError",
+          message: "native computer helper cleanup was not confirmed",
+        }),
+      ]),
+    });
+  });
+
+  test("preserves the original startup error after confirmed cleanup", async () => {
+    const startup = ComputerNativeClient.open({
+      binaryPath: process.execPath,
+      arguments: [
+        resolve(import.meta.dir, "fixtures/computer-native-fixture.ts"),
+        "--handshake-error",
+      ],
+    });
+    await expect(startup).rejects.toBeInstanceOf(ComputerBackendError);
+    await expect(startup).rejects.toMatchObject({
+      name: "ComputerBackendError",
+      message: "fixture handshake rejected",
+      code: "driver_failed",
+      retryable: false,
+      dispatched: false,
+    });
+  });
+
+  test("retains the original startup error when cleanup is unconfirmed", async () => {
+    await expect(
+      ComputerNativeClient.open({
+        binaryPath: process.execPath,
+        arguments: [
+          resolve(import.meta.dir, "fixtures/computer-native-fixture.ts"),
+          "--handshake-error",
+          "--nonzero-eof",
+        ],
+      }),
+    ).rejects.toMatchObject({
+      name: "UnsettledCleanupError",
+      errors: expect.arrayContaining([
+        expect.objectContaining({
+          name: "ComputerBackendError",
+          message: "fixture handshake rejected",
+          code: "driver_failed",
+          retryable: false,
+          dispatched: false,
+        }),
+        expect.objectContaining({
+          name: "UnsettledCleanupError",
+          message: "native computer helper cleanup was not confirmed",
+        }),
+      ]),
+    });
+  });
+
   test("correlates out-of-order responses, binary captures, and typed adapter errors", async () => {
     const client = await ComputerNativeClient.open({
       binaryPath: process.execPath,
@@ -27,11 +115,11 @@ describe("ComputerNativeClient", () => {
       expect(new TextDecoder().decode(frame.data)).toBe("fixture-png");
       expect(frame).toMatchObject({ frameId: "frame-1", width: 10, height: 20 });
       await expect(client.observe("missing")).rejects.toMatchObject({
-        name: "NativeComputerError",
+        name: "ComputerBackendError",
         code: "target_not_found",
         retryable: false,
         dispatched: false,
-      } satisfies Partial<NativeComputerError>);
+      } satisfies Partial<ComputerBackendError>);
     } finally {
       await client.close();
     }
@@ -43,7 +131,8 @@ describe("ComputerNativeClient", () => {
       await expect(client.observe("malformed")).rejects.toThrow("native observation");
       await expect(client.targets()).rejects.toThrow("native observation");
     } finally {
-      await client.close();
+      await expect(client.close()).rejects.toThrow("cleanup was not confirmed");
+      await expect(client.close()).rejects.toThrow("cleanup was not confirmed");
     }
   });
 
@@ -53,15 +142,28 @@ describe("ComputerNativeClient", () => {
       await expect(client.capture("stalled")).rejects.toThrow("capture timed out");
       await expect(client.targets()).rejects.toThrow("attachment timed out");
     } finally {
-      await client.close();
+      await expect(client.close()).rejects.toThrow("cleanup was not confirmed");
     }
   });
+
+  test.each(["--nonzero-eof", "--ignore-eof"])(
+    "retains unconfirmed native process cleanup on repeat close (%s)",
+    async (flag) => {
+      const client = await ComputerNativeClient.open({
+        binaryPath: process.execPath,
+        arguments: [resolve(import.meta.dir, "fixtures/computer-native-fixture.ts"), flag],
+      });
+      await expect(client.close()).rejects.toMatchObject({ name: "UnsettledCleanupError" });
+      await expect(client.close()).rejects.toMatchObject({ name: "UnsettledCleanupError" });
+    },
+    12_000,
+  );
 });
 
 async function openFixture(options: { captureTimeoutMs?: number } = {}) {
   return await ComputerNativeClient.open({
     binaryPath: process.execPath,
-    arguments: [resolve(import.meta.dir, "fixtures/computer-native-fixture.ts")],
+    arguments: [resolve(import.meta.dir, "fixtures/computer-native-fixture.ts"), "--nonzero-eof"],
     ...options,
   });
 }

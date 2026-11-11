@@ -1,0 +1,442 @@
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { parseSync, type Node } from "oxc-parser";
+import { InitialModelWireDispatchClock } from "../src/activities/agent-turn/model-wire-dispatch";
+import { assertProviderOverloadRecoveryActive } from "../src/activities/agent-turn/errors";
+import { instrumentedModelFetch } from "../../../packages/runtime/src/model-provider-client";
+import { withModelTransportStartedObserver } from "../../../packages/runtime/src/model-preparation-diagnostics";
+import { createTurnEventLane } from "../src/activities/agent-turn/turn-event-lane";
+
+const identity = { provider: "azure", dispatchId: "dispatch-1" };
+const firstUnixMs = Date.parse("2026-10-03T15:00:00.000Z");
+const clock = { dispatchedAtUnixMs: firstUnixMs, monotonicTimeMs: 550 };
+const field = { initialWireDispatchedAt: "2026-10-03T15:00:00.000Z" };
+
+function nodes(root: Node): Node[] {
+  const result: Node[] = [];
+  const visit = (value: unknown) => {
+    if (value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (!("type" in value) || typeof value.type !== "string") return;
+    result.push(value as Node);
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(root);
+  return result;
+}
+
+function sourceAst(path: string) {
+  const source = readFileSync(new URL(path, import.meta.url), "utf8");
+  const parsed = parseSync(path, source);
+  expect(parsed.errors).toEqual([]);
+  return { source, nodes: nodes(parsed.program) };
+}
+
+test("an immediate append awaits durable publication without an extra timer", async () => {
+  const parsed = sourceAst("../src/activities/agent-turn/claim.ts");
+  const declaration = parsed.nodes.find(
+    (node) =>
+      node.type === "VariableDeclarator" &&
+      node.id.type === "Identifier" &&
+      node.id.name === "append",
+  );
+  if (declaration?.type !== "VariableDeclarator" || !declaration.init)
+    throw new Error("Missing append");
+  const source = `
+    const db = {}, bus = {}, input = { workspaceId: "workspace", sessionId: "session", attemptId: "attempt" };
+    const attempt = { turnId: "turn", executionGeneration: 1 }, producerId = "producer";
+    let producerSeq = 0;
+    const observability = {}, heartbeatDetails = {};
+    const recordCanonicalStartupMilestones = () => {};
+    const turnLifecycleMetricsFor = () => ({ progress: () => {} });
+    const recordSessionEventAppendLatency = () => {};
+    const recordSessionEventAppendPhase = () => {};
+    const recordSessionEventPublishLatency = () => {};
+    const TurnAttemptFencedError = Error;
+    return ${parsed.source.slice(declaration.init.start, declaration.init.end)};
+  `;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const receipt = { accepted: true, events: [], canonicalStartupMilestones: [] };
+  let heartbeat = false;
+  const append = new Function(
+    "appendAndPublishTurnEventsFenced",
+    "activityContext",
+    "setTimeout",
+    new Bun.Transpiler({ loader: "ts" }).transformSync(source),
+  )(
+    async () => {
+      await gate;
+      return receipt;
+    },
+    {
+      heartbeat: () => {
+        heartbeat = true;
+      },
+    },
+    () => {
+      throw new Error("durable publication must not wait on a timer");
+    },
+  ) as (
+    events: Array<{ type: string; payload: object }>,
+    immediate: boolean,
+  ) => Promise<typeof receipt>;
+  let settled = false;
+  const result = append([{ type: "agent.model.request", payload: {} }], true).then((value) => {
+    settled = true;
+    return value;
+  });
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  expect(heartbeat).toBe(false);
+  release();
+  expect(await result).toBe(receipt);
+  expect(heartbeat).toBe(true);
+});
+
+describe("attempt-local initial wire dispatch clock", () => {
+  test("generic transports publish all three lifecycle phases for every model request, but startup once", async () => {
+    const parsed = sourceAst("../src/activities/agent-turn/stream-attempt.ts");
+    const declaration = (name: string) => {
+      const node = parsed.nodes.find(
+        (candidate) =>
+          candidate.type === "VariableDeclarator" &&
+          candidate.id.type === "Identifier" &&
+          candidate.id.name === name,
+      );
+      if (node?.type !== "VariableDeclarator" || !node.init) throw new Error(`Missing ${name}`);
+      return parsed.source.slice(node.init.start, node.init.end);
+    };
+    const completed = parsed.nodes.find(
+      (node) =>
+        node.type === "IfStatement" &&
+        parsed.source.slice(node.test.start, node.test.end).replace(/\s+/g, " ") ===
+          "!providerPublishesNativeRequestEvents && fallbackProviderRequestLifecycleStartedAt !== null",
+    );
+    if (!completed) throw new Error("Missing completion publisher");
+    const source = `
+      const providerPublishesNativeRequestEvents = false;
+      const sandboxState = {};
+      const recordTurnStartupPhase = () => {};
+      const observability = {};
+      const turnExecutionPolicy = { providerId: "gateway" };
+      const activeSandboxBackend = "none";
+      const groupBoxBackend = "none";
+      const turnTools = [];
+      const streamProvider = "gateway";
+      const activeTurnId = "turn";
+      const input = { attemptId: "attempt" };
+      const dispatchId = "dispatch";
+      const attempt = { executionGeneration: 1, providerRecoveryPolicyCode: "provider_overloaded", providerRecoveryCount: 1, providerRecoveryStartedAt: 1000 };
+      const enterModelRequestStage = () => {};
+      const checkpointBeforeProviderDispatch = async () => {};
+      const providerTurn = {};
+      const subscriptionCoreTurnOf = () => null;
+      let fallbackProviderRequestStartedAt = null;
+      let fallbackProviderRequestLifecycleStartedAt = null;
+      let fallbackProviderRequestIsStartup = true;
+      const publishFallbackProviderEvents = ${declaration("publishFallbackProviderEvents")};
+      const fallbackProviderCompletionEvents = ${declaration("fallbackProviderCompletionEvents")};
+      const responseResult = { usageReported: false };
+      const next = { value: {} };
+      const start = ${declaration("recordFallbackProviderDispatchAtWire")};
+      const firstByte = ${declaration("settleFallbackProviderFirstByte")};
+      const complete = async () => { ${parsed.source.slice(completed.start, completed.end)} };
+      return { start, firstByte, complete };
+    `;
+    const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const lane = createTurnEventLane();
+    let recoveryNow = 1000;
+    let releaseAudit!: () => void;
+    let auditGate = Promise.resolve();
+    const append = async (events: typeof published) => {
+      await auditGate;
+      published.push(...events);
+    };
+    const callbacks = new Function(
+      "eventing",
+      "assertProviderOverloadRecoveryActive",
+      new Bun.Transpiler({ loader: "ts" }).transformSync(source),
+    )(
+      {
+        firstModelRequestPreparationRecorded: false,
+        firstModelRequestPreparationStartedAt: performance.now(),
+        initialModelWireDispatch: new InitialModelWireDispatchClock(),
+        publish: (events: typeof published) => lane.run(() => append(events)),
+        publishInBackground: (events: typeof published) =>
+          lane.runInBackground(() => append(events)),
+      },
+      (input: Parameters<typeof assertProviderOverloadRecoveryActive>[0]) =>
+        assertProviderOverloadRecoveryActive({ ...input, now: recoveryNow }),
+    ) as {
+      start: () => Promise<void>;
+      firstByte: () => Promise<void>;
+      complete: () => Promise<void>;
+    };
+    for (let i = 0; i < 3; i++) {
+      if (i === 1) {
+        // A completed response retired recovery. An expired historical window
+        // cannot reject later healthy calls, and their audit must not block fetch.
+        recoveryNow += 16 * 60_000;
+        auditGate = new Promise<void>((resolve) => {
+          releaseAudit = resolve;
+        });
+      }
+      await callbacks.start();
+      await callbacks.firstByte();
+      await callbacks.firstByte();
+      await callbacks.complete();
+      await callbacks.complete();
+      if (i === 1) {
+        expect(published.filter((event) => event.type === "agent.model.request")).toHaveLength(3);
+        releaseAudit();
+      }
+      await lane.backgroundSettled();
+    }
+    expect(
+      published
+        .filter((event) => event.type === "agent.model.request")
+        .map((event) => event.payload.phase),
+    ).toEqual(Array.from({ length: 3 }, () => ["started", "first_byte", "completed"]).flat());
+    expect(published.filter((event) => event.type === "turn.startup.phase.completed")).toHaveLength(
+      1,
+    );
+  });
+
+  test("the real pre-fetch publisher refuses overload recovery when its audit outlasts the window", async () => {
+    const parsed = sourceAst("../src/activities/agent-turn/stream-attempt.ts");
+    const declaration = parsed.nodes.find(
+      (node) =>
+        node.type === "VariableDeclarator" &&
+        node.id.type === "Identifier" &&
+        node.id.name === "recordFallbackProviderDispatchAtWire",
+    );
+    if (declaration?.type !== "VariableDeclarator" || !declaration.init)
+      throw new Error("Missing wire publisher");
+    const expression = parsed.source.slice(declaration.init.start, declaration.init.end);
+    const compiled = new Bun.Transpiler({ loader: "ts" }).transformSync(
+      `const publish = ${expression};`,
+    );
+    const startedAt = Date.parse("2026-01-01T00:00:00Z");
+    let now = startedAt + 15 * 60_000 - 10;
+    const attempt = {
+      providerRecoveryPolicyCode: "provider_overloaded",
+      providerRecoveryCount: 3,
+      providerRecoveryStartedAt: startedAt,
+      executionGeneration: 7,
+    };
+    const check = (input: Parameters<typeof assertProviderOverloadRecoveryActive>[0]) =>
+      assertProviderOverloadRecoveryActive({ ...input, now });
+    const callback = new Function(
+      "checkpointBeforeProviderDispatch",
+      "assertProviderOverloadRecoveryActive",
+      "eventing",
+      "attempt",
+      `
+      const providerPublishesNativeRequestEvents = false;
+      const sandboxState = {};
+      const performance = { now: () => 100 };
+      const recordTurnStartupPhase = () => {};
+      const observability = {};
+      const turnExecutionPolicy = { providerId: "anthropic" };
+      const activeSandboxBackend = "none";
+      const groupBoxBackend = "none";
+      const turnTools = [];
+      const streamProvider = "anthropic";
+      const activeTurnId = "turn";
+      const input = { attemptId: "attempt" };
+      const dispatchId = "dispatch";
+      const enterModelRequestStage = () => {};
+      let fallbackProviderRequestStartedAt = null;
+      let fallbackProviderRequestLifecycleStartedAt = null;
+      let fallbackProviderRequestIsStartup = true;
+      const publishFallbackProviderEvents = events => eventing.publish(events);
+      ${compiled}
+      return publish;
+    `,
+    )(
+      async () =>
+        check({
+          failureCode: "provider_overloaded",
+          providerRecoveryCount: 3,
+          recoveryStartedAt: startedAt,
+        }),
+      check,
+      {
+        firstModelRequestPreparationRecorded: false,
+        firstModelRequestPreparationStartedAt: 0,
+        publish: async () => {
+          now += 10;
+        },
+      },
+      attempt,
+    ) as () => Promise<void>;
+    let dispatches = 0;
+    const fetch = instrumentedModelFetch("anthropic", (async () => {
+      dispatches += 1;
+      return new Response("{}");
+    }) as typeof globalThis.fetch);
+    await expect(
+      withModelTransportStartedObserver(callback, () =>
+        fetch("https://provider.invalid/v1/messages", { method: "POST", body: "{}" }),
+      ),
+    ).rejects.toMatchObject({
+      name: "ProviderOverloadRecoveryExpiredError",
+      failure: {
+        retryable: false,
+        providerRecoveryExhaustedReason: "deadline",
+        providerRecoveryCount: 2,
+      },
+    });
+    expect(dispatches).toBe(0);
+  });
+  test("has no timestamp until an actual fetch-entry observation", () => {
+    expect(new InitialModelWireDispatchClock().payload(identity)).toEqual({});
+  });
+
+  test("keeps the first physical dispatch across retries and later model requests", () => {
+    const observation = new InitialModelWireDispatchClock();
+    observation.record(identity, clock);
+    observation.record(identity, { ...clock, dispatchedAtUnixMs: firstUnixMs + 1_000 });
+    observation.record(
+      { ...identity, dispatchId: "later-dispatch" },
+      {
+        ...clock,
+        dispatchedAtUnixMs: firstUnixMs + 2_000,
+      },
+    );
+    expect(observation.payload(identity)).toEqual(field);
+    expect(observation.payload({ ...identity, dispatchId: "later-dispatch" })).toEqual({});
+  });
+
+  test("never attaches the clock to another provider or dispatch", () => {
+    const observation = new InitialModelWireDispatchClock();
+    observation.record(identity, clock);
+    expect(observation.payload({ ...identity, provider: "other-provider" })).toEqual({});
+    expect(observation.payload({ ...identity, dispatchId: "other-attempt" })).toEqual({});
+    expect(observation.payload(identity)).toEqual(field);
+  });
+
+  test("separate attempts never reuse a prior attempt's clock", () => {
+    const first = new InitialModelWireDispatchClock();
+    const next = new InitialModelWireDispatchClock();
+    first.record(identity, clock);
+    expect(next.payload(identity)).toEqual({});
+    next.record(identity, { ...clock, dispatchedAtUnixMs: firstUnixMs + 5_000 });
+    expect(first.payload(identity)).toEqual(field);
+    expect(next.payload(identity)).toEqual({ initialWireDispatchedAt: "2026-10-03T15:00:05.000Z" });
+  });
+
+  test("invalid diagnostic clocks cannot populate event metadata", () => {
+    const observation = new InitialModelWireDispatchClock();
+    observation.record(identity, { ...clock, dispatchedAtUnixMs: NaN });
+    expect(observation.payload(identity)).toEqual({});
+    observation.record(identity, clock);
+    expect(observation.payload(identity)).toEqual(field);
+  });
+
+  test("the real first-byte publisher adds the field once without changing duration or publication count", async () => {
+    const parsed = sourceAst("../src/activities/agent-turn/stream-attempt.ts");
+    const declaration = parsed.nodes.find(
+      (node) =>
+        node.type === "VariableDeclarator" &&
+        node.id.type === "Identifier" &&
+        node.id.name === "settleFallbackProviderFirstByte",
+    );
+    if (declaration?.type !== "VariableDeclarator" || !declaration.init)
+      throw new Error("Missing first-byte publisher");
+    const expression = parsed.source.slice(declaration.init.start, declaration.init.end);
+    const compiled = new Bun.Transpiler({ loader: "ts" }).transformSync(
+      `const settle = ${expression};`,
+    );
+    const observation = new InitialModelWireDispatchClock();
+    const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const publisher = new Function(
+      "eventing",
+      `
+      let fallbackProviderRequestStartedAt = 500;
+      const performance = { now: () => 700 };
+      const streamProvider = "azure";
+      const activeTurnId = "turn-1";
+      const input = { attemptId: "attempt-1" };
+      const dispatchId = "dispatch-1";
+      const attempt = { executionGeneration: 7 };
+      const publishFallbackProviderEvents = events => eventing.publish(events);
+      ${compiled}
+      return settle;
+    `,
+    )({
+      initialModelWireDispatch: observation,
+      publish: async (events: typeof published) => {
+        published.push(...events);
+      },
+    }) as () => Promise<void>;
+    observation.record(identity, clock);
+    await publisher();
+    await publisher();
+    expect(published).toEqual([
+      {
+        type: "agent.model.request",
+        occurredAt: expect.any(Date),
+        payload: {
+          phase: "first_byte",
+          provider: "azure",
+          durationMs: 200,
+          turnId: "turn-1",
+          attemptId: "attempt-1",
+          dispatchId: "dispatch-1",
+          executionGeneration: 7,
+          ...field,
+        },
+      },
+    ]);
+  });
+
+  test("production wiring is synchronous, shared by native and generic routes, and bound in both runtime branches", () => {
+    const worker = sourceAst("../src/activities/agent-turn/stream-attempt.ts");
+    const conditional = worker.nodes.find(
+      (node) =>
+        node.type === "ConditionalExpression" &&
+        node.test.type === "UnaryExpression" &&
+        node.test.operator === "!" &&
+        node.test.argument.type === "Identifier" &&
+        node.test.argument.name === "providerPublishesNativeRequestEvents" &&
+        nodes(node.consequent).some(
+          (child) =>
+            child.type === "Property" &&
+            child.key.type === "Identifier" &&
+            child.key.name === "onModelTransportDispatched",
+        ),
+    );
+    expect(conditional).toBeUndefined();
+    const diagnostic = worker.nodes.find(
+      (node) =>
+        node.type === "Property" &&
+        node.key.type === "Identifier" &&
+        node.key.name === "onModelTransportDispatched",
+    );
+    if (diagnostic?.type !== "Property" || diagnostic.value.type !== "ArrowFunctionExpression")
+      throw new Error("Missing synchronous callback");
+    expect(diagnostic.value.async).toBe(false);
+    expect(nodes(diagnostic.value).some((node) => node.type === "AwaitExpression")).toBe(false);
+    const runtime = sourceAst("../../../packages/runtime/src/index.ts");
+    const bindings = runtime.nodes.filter(
+      (node) =>
+        node.type === "CallExpression" &&
+        node.callee.type === "Identifier" &&
+        node.callee.name === "withModelTransportStartedObserver",
+    );
+    expect(bindings).toHaveLength(2);
+    for (const binding of bindings) {
+      if (binding.type !== "CallExpression") throw new Error("Missing runtime binding");
+      expect(runtime.source.slice(binding.arguments[2]!.start, binding.arguments[2]!.end)).toBe(
+        "overrides.onModelTransportDispatched",
+      );
+    }
+  });
+});

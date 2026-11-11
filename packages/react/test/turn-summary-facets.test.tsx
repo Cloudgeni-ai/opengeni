@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ComponentProps } from "react";
 import {
   MessageTimeline,
   TurnSummary,
@@ -10,6 +11,9 @@ import {
 import type { MemoryItem } from "../src/timeline";
 import { formatElapsed } from "../src/timeline/turn-summary";
 import { flush, registerDom, renderComponent } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -114,7 +118,8 @@ describe("TurnSummary facets", () => {
       <TurnSummary items={[toolCall("1", "exec_command")]}>details</TurnSummary>,
     );
     expect(settled.container.querySelector(".animate-og-pulse")).toBeNull();
-    expect(summaryText(settled.container)).toContain("1 step");
+    // Steps are not counted (a turn's steps load on open); the row names them.
+    expect(summaryText(settled.container)).toBe("Steps");
     await settled.unmount();
   });
 
@@ -126,14 +131,14 @@ describe("TurnSummary facets", () => {
       </TurnSummary>,
     );
 
-    expect(summaryText(rendered.container)).toBe("2 steps · 1 command · 1 memory saved · 5s");
+    expect(summaryText(rendered.container)).toBe("1 memory saved · 5s");
     await rendered.unmount();
   });
 
   test("add appends custom facets without changing defaults", async () => {
     const rendered = await renderComponent(
       <TurnSummary
-        items={[toolCall("1", "exec_command")]}
+        items={[toolCall("1", "exec_command"), memory("2")]}
         outcome="complete"
         facets={{ add: [customFacet("records", "2 records")] }}
       >
@@ -141,7 +146,7 @@ describe("TurnSummary facets", () => {
       </TurnSummary>,
     );
 
-    expect(summaryText(rendered.container)).toBe("1 step · 1 command · 2 records");
+    expect(summaryText(rendered.container)).toBe("1 memory saved · 2 records");
     await rendered.unmount();
   });
 
@@ -150,13 +155,14 @@ describe("TurnSummary facets", () => {
       <TurnSummary
         items={[toolCall("1", "exec_command"), memory("2")]}
         outcome="complete"
+        durationMs={5_000}
         facets={{ remove: ["memories"] }}
       >
         details
       </TurnSummary>,
     );
 
-    expect(summaryText(rendered.container)).toBe("2 steps · 1 command");
+    expect(summaryText(rendered.container)).toBe("5s");
     await rendered.unmount();
   });
 
@@ -260,6 +266,7 @@ describe("TurnSummary facets", () => {
   test("MessageTimeline forwards one configuration to its collapsed turns", async () => {
     const items: TimelineItem[] = [
       toolCall("1", "exec_command"),
+      memory("2"),
       {
         kind: "turn-end",
         id: "end-1",
@@ -270,22 +277,55 @@ describe("TurnSummary facets", () => {
       },
     ];
     const rendered = await renderComponent(
-      <MessageTimeline items={items} turnSummary={{ facets: { remove: ["commands"] } }} />,
+      <MessageTimeline items={items} turnSummary={{ facets: { remove: ["duration"] } }} />,
     );
     await flush();
 
-    expect(summaryText(rendered.container)).toBe("1 step");
+    expect(summaryText(rendered.container)).toBe("1 memory saved");
     await rendered.unmount();
+  });
+
+  test("only agentSignals' turnDetail switch replaces the host's facets with the status", async () => {
+    const items: TimelineItem[] = [
+      toolCall("1", "exec_command"),
+      {
+        kind: "turn-end",
+        id: "end-1",
+        turnId: "turn-1",
+        outcome: "complete",
+        failureText: null,
+        occurredAt: new Date(1_500).toISOString(),
+      },
+    ];
+    const facets: TurnSummaryFacetConfiguration = {
+      replace: [customFacet("records", "2 records updated")],
+    };
+    const rowFor = async (agentSignals: ComponentProps<typeof MessageTimeline>["agentSignals"]) => {
+      const rendered = await renderComponent(
+        <MessageTimeline items={items} turnSummary={{ facets }} agentSignals={agentSignals} />,
+      );
+      await flush();
+      const text = summaryText(rendered.container);
+      await rendered.unmount();
+      return text;
+    };
+    expect(await rowFor(undefined)).toBe("2 records updated");
+    expect(await rowFor({ goal: false, agents: false, commands: false })).toBe("2 records updated");
+    expect(await rowFor({ turnDetail: false })).not.toContain("2 records updated");
+    expect(await rowFor(false)).not.toContain("2 records updated");
   });
 });
 
 describe("TurnSummary status line", () => {
   test("formats elapsed wall time with seconds below an hour", () => {
-    expect(formatElapsed(900)).toBe("0s");
-    expect(formatElapsed(14_000)).toBe("14s");
-    expect(formatElapsed(120_000)).toBe("2m");
-    expect(formatElapsed(134_000)).toBe("2m 14s");
-    expect(formatElapsed(3_900_000)).toBe("1h 05m");
+    expect(formatElapsed(englishText, 900)).toBe("0s");
+    expect(formatElapsed(englishText, 14_000)).toBe("14s");
+    expect(formatElapsed(englishText, 120_000)).toBe("2m");
+    expect(formatElapsed(englishText, 134_000)).toBe("2m 14s");
+    expect(formatElapsed(englishText, 3_900_000)).toBe("1h 05m");
+    expect(formatElapsed(englishText, 86_399_000)).toBe("23h 59m");
+    expect(formatElapsed(englishText, 86_400_000)).toBe("1d 00h");
+    expect(formatElapsed(englishText, 2_008_860_000)).toBe("23d 06h");
   });
 
   test("a settled exchange states its span once and reads as a separator", async () => {
@@ -299,7 +339,7 @@ describe("TurnSummary status line", () => {
         details
       </TurnSummary>,
     );
-    expect(summaryText(r.container)).toBe("Worked for 4m 10s · 2 steps · 2 commands");
+    expect(summaryText(r.container)).toBe("Worked for 4m 10s");
     expect(r.container.querySelector("button .h-px")).not.toBeNull();
     await r.unmount();
   });
@@ -307,14 +347,14 @@ describe("TurnSummary status line", () => {
   test("a sub-second settled span shows only the facets", async () => {
     const r = await renderComponent(
       <TurnSummary
-        items={[toolCall("1", "exec_command")]}
+        items={[toolCall("1", "exec_command"), memory("2")]}
         outcome="complete"
         status={{ kind: "worked", durationMs: 400 }}
       >
         details
       </TurnSummary>,
     );
-    expect(summaryText(r.container)).toBe("1 step · 1 command");
+    expect(summaryText(r.container)).toBe("1 memory saved");
     await r.unmount();
   });
 
@@ -331,7 +371,7 @@ describe("TurnSummary status line", () => {
         details
       </TurnSummary>,
     );
-    expect(summaryText(r.container)).toMatch(/^Working · 2m 1[3-5]s · 2 steps$/);
+    expect(summaryText(r.container)).toMatch(/^Working · 2m 1[3-5]s$/);
     expect(r.container.querySelector("[data-og-exchange-preview]")?.textContent).toBe(
       "Checking the second file.",
     );

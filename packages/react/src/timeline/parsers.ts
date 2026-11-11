@@ -6,6 +6,7 @@ import {
   type RetainedArtifactMetadata,
 } from "@opengeni/sdk";
 import { tryParseJson } from "../lib/format";
+import { isRecord } from "@opengeni/contracts/values";
 
 export type { GeneratedImageReceipt };
 
@@ -226,10 +227,6 @@ const UPDATE_FILE = "*** Update File: ";
 const MOVE_TO = "*** Move to: ";
 
 const APPLY_PATCH_OP_TYPES = new Set(["create_file", "update_file", "delete_file"]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 /** Freeform / `{ patch }` / command payloads — tolerate leading whitespace. */
 function freeformApplyPatchOps(rawPatch: string): ApplyPatchOperation[] {
@@ -582,6 +579,46 @@ export function retainedScreenshotMetadata(out: unknown): RetainedArtifactMetada
 /** Parse the closed permanent generated-image receipt from native/function tools. */
 export function generatedImageReceipt(out: unknown): GeneratedImageReceipt | null {
   return parseGeneratedImageReceipt(out);
+}
+
+/**
+ * Images a tool result returned that the platform retained, plus the result
+ * without them, so its text renders as usual. Any tool's result content can
+ * carry these receipts in place of its image blocks.
+ */
+export function retainedToolResultImages(out: unknown): {
+  images: Extract<RetainedArtifactMetadata, { available: true }>[];
+  output: unknown;
+} {
+  const parsed =
+    typeof out === "string" && (out.startsWith("{") || out.startsWith("["))
+      ? tryParseJson(out)
+      : out;
+  const split = (entries: unknown[]) => {
+    const images: Extract<RetainedArtifactMetadata, { available: true }>[] = [];
+    const rest = entries.filter((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return true;
+      const receipt = retainedScreenshotMetadata(entry);
+      if (!receipt?.available) return true;
+      images.push(receipt);
+      return false;
+    });
+    return { images, rest };
+  };
+  if (Array.isArray(parsed)) {
+    const { images, rest } = split(parsed);
+    return images.length ? { images, output: rest } : { images, output: out };
+  }
+  if (parsed && typeof parsed === "object") {
+    const record = parsed as Record<string, unknown>;
+    if (Array.isArray(record.content)) {
+      const { images, rest } = split(record.content);
+      return images.length
+        ? { images, output: { ...record, content: rest } }
+        : { images, output: out };
+    }
+  }
+  return { images: [], output: out };
 }
 
 export type TimelineMediaPreview = {

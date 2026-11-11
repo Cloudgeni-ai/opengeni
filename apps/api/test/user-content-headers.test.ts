@@ -25,9 +25,15 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     userContent: false,
     why: "operator-curated catalog asset; already sandboxed and embeddable by hosts",
   },
+  "chat-completions.ts": {
+    count: 1,
+    userContent: false,
+    why: "Chat Completions server-sent event stream of JSON chunks, never a rendered document",
+  },
   "company-brain.ts": { count: 1, userContent: true, why: "Company Brain export" },
   "computer-sessions.ts": { count: 1, userContent: true, why: "live computer frame" },
   "editable-artifacts.ts": { count: 1, userContent: true, why: "materialized export download" },
+  "feedback.ts": { count: 1, userContent: true, why: "the author's own feedback screenshot bytes" },
   "files.ts": { count: 1, userContent: true, why: "retained file and screenshot content" },
   "install.ts": { count: 2, userContent: false, why: "operator-built install script and assets" },
   "managed-auth-session-sets.ts": {
@@ -35,11 +41,33 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     userContent: false,
     why: "authentication provider response passthrough",
   },
+  "personal-github-gateway-policy.ts": {
+    count: 2,
+    userContent: false,
+    why: "git receive-pack results that refuse a push, read by git",
+  },
+  "personal-github-gateway.ts": {
+    count: 2,
+    userContent: false,
+    why: "GitHub API passthrough and JSON errors for gh, behind the session pass (sandboxed, nosniff)",
+  },
   "personal-github-git-broker.ts": {
     count: 2,
     userContent: false,
     why: "git smart-HTTP passthrough and plain-text broker errors",
   },
+  "session-avatar-image.ts": {
+    count: 1,
+    userContent: false,
+    why: "server-drawn PNG avatar for Slack; image avatars are re-encoded, never passed through",
+  },
+  "site-data.ts": { count: 1, userContent: true, why: "Site Data collection export download" },
+  "site-runtime.ts": {
+    count: 1,
+    userContent: true,
+    why: "published Site version HTML for the gateway (scripts sandboxed in an opaque origin)",
+  },
+  "site-sql.ts": { count: 1, userContent: true, why: "Site SQL export download (sql, csv, json)" },
   "workspace-artifacts.ts": { count: 1, userContent: true, why: "Site HTML (opaque origin)" },
   "workspace-state.ts": { count: 1, userContent: true, why: "workspace state export" },
 };
@@ -51,15 +79,20 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
  */
 const SIGNED_GET_URLS: Record<string, { calls: number; withUserContentOptions: number }> = {
   "mcp/files.ts": { calls: 1, withUserContentOptions: 1 },
-  // Browser-controller upload/download authorities and encrypted profile archives.
-  "routes/browser-sessions.ts": { calls: 3, withUserContentOptions: 0 },
+  // Browser-controller upload/download authorities, encrypted profile archives
+  // and the sandbox import of a saved browser recording.
+  "routes/browser-sessions.ts": { calls: 4, withUserContentOptions: 0 },
   "routes/documents.ts": { calls: 1, withUserContentOptions: 1 },
   "routes/files.ts": { calls: 2, withUserContentOptions: 2 },
   "routes/knowledge.ts": { calls: 1, withUserContentOptions: 1 },
+  // Playback links to a recording track's worker-prepared audio.
+  "routes/recordings.ts": { calls: 1, withUserContentOptions: 1 },
   // Capture manifests and file bodies are stored as JSON/octet-stream and fetched by the client.
   "routes/workspace-capture.ts": { calls: 2, withUserContentOptions: 0 },
   // Site HTML downloads; the JSON source bundle is never active markup.
   "site-uploads.ts": { calls: 2, withUserContentOptions: 1 },
+  // Site Data file downloads.
+  "site-data/operations.ts": { calls: 1, withUserContentOptions: 1 },
 };
 
 async function sourceFiles(directory: URL, prefix = ""): Promise<string[]> {
@@ -242,6 +275,9 @@ describe("user-content response headers", () => {
       "routes/workspace-state.ts",
       "routes/computer-sessions.ts",
       "routes/browser-sessions.ts",
+      "routes/site-data.ts",
+      "routes/site-runtime.ts",
+      "routes/site-sql.ts",
     ]) {
       expect({
         path,

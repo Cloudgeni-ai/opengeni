@@ -5,8 +5,8 @@ import {
   SegmentedControl,
   type SegmentedControlOption,
   type SegmentedControlProps,
-} from "@/components/ui/segmented-control";
-import { SettingRow } from "@/components/ui/setting-row";
+} from "@opengeni/react/ui/segmented-control";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
 import {
   codexProvider,
   learningModes,

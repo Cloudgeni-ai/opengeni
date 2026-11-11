@@ -18,24 +18,24 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { DetailPage, DetailPageBody, DetailPageHeader } from "@/components/ui/detail-page";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { showUndoToast } from "@/components/ui/destructive-confirm";
-import { Field, TextArea } from "@/components/ui/field";
-import { FormDialog, FormPage } from "@/components/ui/form-dialog";
-import { InAppHelpLink } from "@/components/in-app-help-link";
-import { HelpLink, InlineHelp } from "@/components/ui/inline-help";
-import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { MoreMenu, RowButton } from "@/components/ui/page-actions";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { RevisionHistory, type Revision } from "@/components/ui/revision-history";
-import { Skeleton } from "@/components/ui/skeleton";
-import { useAppContext } from "@/context";
-import { canManageWorkspaceSettings } from "@/lib/permissions";
+import { Button } from "@opengeni/react/ui/button";
+import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { showUndoToast } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { Field, TextArea } from "@opengeni/react/ui/field";
+import { FormDialog, FormPage } from "@opengeni/react/ui/form-dialog";
+import { InAppHelpLink } from "@opengeni/react/app/components/in-app-help-link";
+import { HelpLink, InlineHelp } from "@opengeni/react/ui/inline-help";
+import { ListRow, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { MoreMenu, RowButton } from "@opengeni/react/ui/page-actions";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { RevisionHistory, type Revision } from "@opengeni/react/ui/revision-history";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { canManageWorkspaceSettings } from "@opengeni/react/app/lib/permissions";
 import { createWorkspaceInstructionSave } from "@/lib/workspace-instruction-save";
 import { activeGlobalWorkspaceInstructionHead } from "@/lib/workspace-instructions";
 import { promptCopy, useAgentBrainPromptCatalog } from "@/routes/agent-brain-prompt";
@@ -71,7 +71,10 @@ export interface WorkspaceInstructions {
     WorkspaceInstructionPolicyHead,
     "revisionId" | "activationVersion" | "activatedAt"
   > | null;
-  /** Saves the complete text. Keeps one logical save across an uncertain outcome. */
+  /**
+   * Saves the complete text; empty text clears the instructions. Keeps one
+   * logical save across an uncertain outcome.
+   */
   save: (content: string) => Promise<void>;
   /** A rollback activated a new head. */
   accept: (head: WorkspaceInstructionPolicyHead) => void;
@@ -111,11 +114,15 @@ export function useWorkspaceInstructions(workspaceId: string): WorkspaceInstruct
     setContentError(null);
     void (async () => {
       try {
-        const next = revisionId
+        // A cleared (empty) version adds nothing, so an earlier-settings
+        // override applies again, exactly as when nothing was ever saved.
+        const saved = revisionId
           ? (await client.getWorkspaceInstructionPolicyRevision(workspaceId, revisionId)).content
-          : legacy
-            ? ((await client.getWorkspace(workspaceId)).agentInstructions ?? "")
-            : "";
+          : "";
+        const next =
+          saved || !legacy
+            ? saved
+            : ((await client.getWorkspace(workspaceId)).agentInstructions ?? "");
         if (!cancelled) setContent(next);
       } catch (reason) {
         if (!cancelled) setContentError(errorText(reason));
@@ -130,8 +137,8 @@ export function useWorkspaceInstructions(workspaceId: string): WorkspaceInstruct
 
   const save = useCallback(
     async (text: string) => {
-      if (!pending.current?.matches(client, workspaceId, text, head)) {
-        pending.current = createWorkspaceInstructionSave(client, workspaceId, text, head);
+      if (!pending.current?.matches(client, workspaceId, text, head, legacy)) {
+        pending.current = createWorkspaceInstructionSave(client, workspaceId, text, head, legacy);
       }
       try {
         const saved = await pending.current.run();
@@ -149,7 +156,7 @@ export function useWorkspaceInstructions(workspaceId: string): WorkspaceInstruct
         );
       }
     },
-    [client, workspaceId, head, inventory],
+    [client, workspaceId, head, legacy, inventory],
   );
 
   const accept = useCallback(
@@ -169,7 +176,8 @@ export function useWorkspaceInstructions(workspaceId: string): WorkspaceInstruct
       setRetry((value) => value + 1);
     },
     content,
-    configured: revisionId !== null || legacy,
+    // A cleared version is saved but empty: there are no instructions.
+    configured: content.trim().length > 0 || (revisionId === null && legacy),
     head,
     save,
     accept,
@@ -214,8 +222,7 @@ export function InstructionsTab({
   onOpenIdentity,
   onGoToLibrary,
 }: InstructionsTabProps) {
-  const { client, clientConfig } = useAppContext();
-  const agentSettings = clientConfig.agentConfig?.enabled === true;
+  const { client } = useAppContext();
   const identity = useCompanyProfileInventory(client, workspaceId);
   const profile = identity.response?.activeRevision?.profile ?? null;
   const { loading, error, content, configured, head } = instructions;
@@ -224,7 +231,7 @@ export function InstructionsTab({
   return (
     <div className="flex min-w-0 flex-col gap-4 pt-6">
       <RowList label="Always applied to every agent" columns={INSTRUCTION_COLUMNS} flush>
-        {agentSettings ? <AgentIdentityRow workspaceId={workspaceId} /> : null}
+        <AgentIdentityRow workspaceId={workspaceId} />
         <ListRow
           leading={<LogoTile icon={<ScrollTextIcon />} />}
           title={personal ? "Instructions for your Personal workspace" : "Workspace instructions"}
@@ -257,18 +264,15 @@ export function InstructionsTab({
           onOpen={onOpenIdentity}
         />
       </RowList>
-      {agentSettings ? (
-        <InlineHelp>
-          Every prompt in {workspaceName} starts with who the agent is, then your organization, then
-          these instructions, then anything set for one chat. Instructions take priority over
-          OpenGeni's default way of working, but never over its safety rules or how it runs tools.
-        </InlineHelp>
-      ) : null}
       <InlineHelp>
-        {agentSettings ? "These are" : "Both are"} added to every chat and schedule in{" "}
-        {workspaceName}, before anything agents look up. Facts go in the{" "}
-        <HelpLink onClick={onGoToLibrary}>Library</HelpLink>, and step-by-step procedures in Skills,
-        in{" "}
+        Every prompt in {workspaceName} starts with who the agent is, then your organization, then
+        these instructions, then anything set for one chat. Instructions take priority over
+        Opengeni's default way of working, but never over its safety rules or how it runs tools.
+      </InlineHelp>
+      <InlineHelp>
+        These are added to every chat and schedule in {workspaceName}, before anything agents look
+        up. Facts go in the <HelpLink onClick={onGoToLibrary}>Library</HelpLink>, and step-by-step
+        procedures in Skills, in{" "}
         <InAppHelpLink href={`/workspaces/${workspaceId}/plugins?section=skills`}>
           Capabilities
         </InAppHelpLink>
@@ -308,7 +312,7 @@ export function InstructionsPage({
         leading={<LogoTile icon={<ScrollTextIcon />} />}
         title={personal ? "Instructions for your Personal workspace" : "Workspace instructions"}
         meta={[
-          `Added to every chat and schedule in ${workspaceName}`,
+          `Added to every chat and automation in ${workspaceName}`,
           loading ? null : head ? (
             <span key="changed">
               changed <RelativeTime date={head.activatedAt} inSentence />
@@ -316,11 +320,9 @@ export function InstructionsPage({
           ) : configured ? (
             "set in earlier settings"
           ) : null,
-          !canEdit
-            ? personal
-              ? "Editing isn't available yet"
-              : "Only workspace admins can change these"
-            : null,
+          // In a Personal workspace only its owner reads this page, so a
+          // refusal note would only ever address the owner themself.
+          !canEdit && !personal ? "Only people who can start chats here can change these" : null,
         ]}
         actions={
           canEdit ? (
@@ -389,7 +391,7 @@ export function InstructionsPage({
                 ? "No instructions yet. Write how agents should work here, like review rules or the tone for pull requests."
                 : personal
                   ? "No personal instructions yet."
-                  : "No workspace instructions yet. A workspace admin can add them."}
+                  : "No workspace instructions yet."}
             </p>
           )}
         </DetailSection>
@@ -421,7 +423,7 @@ export function IdentityPage({
   const navigate = useNavigate();
   const identity = useCompanyProfileInventory(client, workspaceId);
   const profile = identity.response?.activeRevision?.profile ?? null;
-  const settings = `/workspaces/${workspaceId}/organization?section=knowledge`;
+  const settings = `/workspaces/${workspaceId}/organization?section=identity`;
   return (
     <DetailPage back={{ label: "Instructions", onClick: onBack }}>
       <DetailPageHeader
@@ -429,7 +431,7 @@ export function IdentityPage({
         title="Organization identity"
         meta={[
           "Who your organization is and why it exists",
-          canManageOrganization ? null : "Managed by your organization's owners",
+          canManageOrganization ? null : "Managed by your organization's owners and admins",
         ]}
         actions={
           canManageOrganization ? (
@@ -481,7 +483,7 @@ export function IdentityPage({
             <p className="text-sm leading-6 text-fg-muted">
               {canManageOrganization
                 ? "Say who your organization is in organization settings, and every agent starts with it."
-                : "Your organization's owners haven't described it yet."}
+                : "Your organization's owners and admins haven't described it yet."}
             </p>
           </DetailSection>
         )}
@@ -515,7 +517,7 @@ function AgentIdentityRow({ workspaceId }: { workspaceId: string }) {
       meta={[
         resolved.identity
           ? firstLine(resolved.identity)
-          : "OpenGeni's general assistant (the default)",
+          : "Opengeni's general assistant (the default)",
         resolved.source === "legacy_agent_instructions"
           ? "from this workspace's earlier custom persona"
           : null,
@@ -536,7 +538,7 @@ function AgentIdentityRow({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-/** "Ask OpenGeni…": starts a chat that proposes the change, on the workspace's model. */
+/** "Ask Opengeni…": starts a chat that proposes the change, on the workspace's model. */
 function AskOpenGeniDialog({
   open,
   onOpenChange,
@@ -664,23 +666,27 @@ export function InstructionsEditPage({
   const tooLong = value.length > WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS;
   const limit = WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS.toLocaleString("en-US");
   const unchanged = value.trim() === instructions.content.trim();
+  // Saving empty text clears the instructions.
+  const clearing = !value.trim();
   return (
     <FormPage
       title={
         instructions.configured ? "Edit workspace instructions" : "Write workspace instructions"
       }
-      description={`Added to every chat and schedule in ${personal ? "your Personal workspace" : workspaceName}. The old version stays in History.`}
+      description={`Added to every chat and automation in ${personal ? "your Personal workspace" : workspaceName}. The old version stays in History.`}
       back={{ label: "Instructions", onClick: onClose }}
-      submitLabel="Save instructions"
+      submitLabel={clearing ? "Clear instructions" : "Save instructions"}
       pendingLabel="Saving…"
       loading={draft === null}
       loadingFields={1}
-      submitDisabled={unchanged || !value.trim() || tooLong}
+      submitDisabled={unchanged || tooLong}
       // Cancel and Save show once something changed; until then the back link is the way out.
       className={unchanged ? "[&>form>footer]:hidden" : undefined}
       onCancel={onClose}
       onSubmitted={() => {
-        toast("Saved the instructions. New messages use them.");
+        toast(
+          clearing ? "Cleared the instructions." : "Saved the instructions. New messages use them.",
+        );
         onClose();
       }}
       onSubmit={async () => {
@@ -737,17 +743,19 @@ export function instructionRevisions(
             ? "Opengeni"
             : revision.provenance.source === "onboarding"
               ? "Workspace setup"
-              : "A workspace admin";
+              : "A teammate";
       const summary =
         event.type === "rollback"
           ? "Restored an earlier version"
-          : index === events.length - 1
-            ? "Created the instructions"
-            : agent
-              ? "Approved an agent's change"
-              : revision.provenance.source === "legacy_import"
-                ? "Brought over from earlier settings"
-                : "Edited the instructions";
+          : revision.content === ""
+            ? "Cleared the instructions"
+            : index === events.length - 1
+              ? "Created the instructions"
+              : agent
+                ? "Approved an agent's change"
+                : revision.provenance.source === "legacy_import"
+                  ? "Brought over from earlier settings"
+                  : "Edited the instructions";
       return [
         {
           id: event.id,
@@ -833,7 +841,7 @@ export function InstructionsHistoryPage({
             label="Workspace instructions history"
             restoreDisabledReason={
               !canEdit
-                ? "Only workspace admins can restore a version."
+                ? "Only people who can start chats here can restore a version."
                 : !head
                   ? "The instructions are turned off right now. Write new ones to start again."
                   : undefined

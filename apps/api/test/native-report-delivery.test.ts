@@ -1,9 +1,6 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,

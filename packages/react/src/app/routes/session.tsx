@@ -1,0 +1,4912 @@
+import { t } from "../lib/console-text";
+import { Fragment } from "react";
+import {
+  createSessionRetainedScreenshotLoader,
+  createWorkspaceRetainedArtifactLoader,
+  createWorkspaceRetainedVideoLoader,
+  timelineLivePause,
+} from "../../timeline";
+import { isModelUnavailableSubmissionError, type CreditRefusalKind } from "../../lib/format";
+import { inertProps } from "../../lib/inert";
+import { retainedImageId } from "../../components/markdown";
+import { LazyPart } from "../../components/lazy-part";
+import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
+import {
+  stopOwnLoginsHere,
+  turnOnOwnLoginsHere,
+} from "../components/capabilities/own-login-turned-on";
+import {
+  OwnLoginsSharedHeadsUp,
+  ownLoginsInUse,
+} from "../components/capabilities/own-logins-shared-heads-up";
+import { sessionAuthRecommendation } from "../../session-auth-recommendation";
+import { completeSessionCapabilityOAuth } from "../components/capabilities/attach-session-capability";
+import { finishMcpCapabilityOAuthReturn } from "./session-capability-oauth-return";
+import { loadSessionFeedback } from "../../session-feedback-model";
+import {
+  browserInteractiveAnswerStore,
+  InteractiveAnswerProvider,
+} from "../../interactive-answer-model";
+import { turnRatingsFromFeedback } from "../../session-feedback-model";
+import { PersonalResourceAttachmentSurface } from "../components/personal-resource-attachment-surface";
+import { useReadSessionInbox } from "../lib/inbox";
+import { useWorkspaceMachines } from "../lib/use-workspace-machines";
+import {
+  useSessionComposerDelivery,
+  useSessionSendGate,
+  type SessionSendState,
+} from "../lib/session-composer-readiness";
+import { isEditableArtifactKind } from "../lib/artifact-catalog";
+import type { NativeConnectRequest } from "../components/capabilities/native-connect-setup";
+import { FailureRecoveryBoundary } from "../components/session/failure-recovery-boundary";
+import { useMessageSenderRenderer } from "../components/session/message-senders";
+import {
+  createFailedSessionRetry,
+  type FailedSessionRetryInput,
+} from "../lib/failed-session-retry";
+import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
+import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
+import {
+  chatComposerPlaceholder,
+  detailBeyondHeadline,
+  failedSessionCopy,
+  failureFallbackReason,
+  MACHINE_ACCESS_REQUIRED_CODE,
+} from "../lib/failed-session-copy";
+import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import {
+  pickerPolicyRunnable,
+  ComposerSendBlockerNotice,
+  composerSendBlockerNotice,
+} from "../lib/composer-send-blocking";
+import { ChatPaymentPages } from "../components/chat-payment-pages";
+import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
+import { bannerFailureEventIds, timelineShowsFailure } from "../lib/timeline-failure-owner";
+import { sessionDisplayTitle } from "../lib/session-rename";
+import { canArchiveChat, requestSessionArchive } from "../lib/archive-session";
+import { notifySessionListChanged } from "../lib/session-list-invalidation";
+import { waitingDescendants } from "../lib/descendant-requests";
+import {
+  useDescendantRequestsRefresh,
+  useLineagePollInterval,
+} from "../lib/use-descendant-requests-refresh";
+import { useStreamHealthTelemetry } from "../lib/stream-health";
+import { markIntegrationConnectRedirect } from "../lib/integration-connect-redirect";
+import { noteTurnFailureAction } from "../lib/turn-failure-actions";
+import { observeSessionTurnEvents } from "../lib/analytics-observer";
+import { needsSandboxRecoveryCheck } from "../lib/sandbox-failure";
+import {
+  admissionRecheckControl,
+  admissionControlNeedsRefresh,
+  allowMachineForChat,
+  recheckSessionAdmission,
+  SessionAdmissionNotice,
+} from "../components/session/session-admission-notice";
+import {
+  sessionAdmissionNeedsDifferentMachine,
+  sessionAdmissionReason,
+} from "../../session-admission-model";
+import {
+  connectorSelectionUpdate,
+  followWorkspaceConnectorPolicy,
+  sessionConnectorPolicyIsCustomized,
+} from "../lib/composer-connectors";
+// The session view — live timeline plus one compact prompt queue above the
+// composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
+// honest (reason + retry history) and revivable from the same composer.
+import { LightboxProvider } from "../../timeline";
+import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
+import {
+  promptSendDestination,
+  sessionAdmissionBlocked,
+  sessionDisplayStatus,
+  sessionTurnKeepsRunControl,
+} from "../../session-status-model";
+import { useSessionSecrets } from "../../hooks/use-vaults";
+import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
+import type { WorkspaceTab } from "../../components/workspace-dock";
+import {
+  SessionSecretsMenuBody,
+  sessionSecretsSummary,
+} from "../components/secrets/session-secrets-panel";
+import { MACHINES_SESSION_POLL_MS } from "../../machines";
+import {
+  ApprovalSurface,
+  ToolActionReviewDetails,
+  MessageTimeline,
+  ToolReviewHistoryProvider,
+  SessionChrome,
+  KnowledgeActivityProvider,
+  LearningRefusalActionsProvider,
+  OpenGeniLinkProvider,
+  type LearningRefusalPlace,
+  type TimelineSearchTarget,
+} from "../../session-ui";
+import type { SessionSearchRoute } from "../lib/session-search-route";
+import { OPEN_CONVERSATION_FIND_EVENT } from "../lib/conversation-find-event";
+import {
+  OPEN_SESSION_USAGE_LIMIT_EVENT,
+  goalPausedAtUsageLimit,
+  lineageHasRunningSession,
+  sessionUsageLimitCapability,
+  usageLimitRefusalFromState,
+  useSessionUsageLimit,
+} from "../lib/session-usage-limit";
+import { SessionUsageLimitNotice } from "../../usage";
+import { isSessionUsageLimitSubmissionError } from "../../lib/format";
+import { OpenGeniApiError, OpenGeniSessionUsageLimitReachedError } from "@opengeni/sdk/browser";
+import { SESSION_USAGE_LIMIT_GOAL_PAUSED_REASON } from "@opengeni/sdk/session-usage-limits";
+import { expireArtifactCatalog } from "../lib/artifact-catalog-cache";
+import { useArtifactCatalogMutationInvalidation } from "../lib/use-artifact-catalog-mutation-invalidation";
+import {
+  creditExhaustedFromEvents,
+  creditRefusalFromEvents,
+  conversationTimeline,
+  approvalsDecidable,
+  projectPendingApprovals,
+  useComposer,
+  uploadScopeForSession,
+  useFileAttachments,
+  useGoal,
+  useHumanInputRequests,
+  useSession,
+  useSessionEvents,
+  useSessionLineage,
+  useTurnQueue,
+  type AgentMessageItem,
+  type AuthNeededItem,
+  type PendingApproval,
+  type OlderHistoryLoader,
+  type TimelineItem,
+  type UserMessageItem,
+} from "../../session";
+import { sessionAgentsSignal } from "../../session-agents-model";
+import { useNavigate, usePage, useRouterState } from "../lib/navigation";
+import {
+  BugIcon,
+  Loader2Icon,
+  MenuIcon,
+  MessagesSquareIcon,
+  PanelsTopLeftIcon,
+  SettingsIcon,
+} from "lucide-react";
+import {
+  createElement,
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { toast } from "../lib/toast";
+
+import { useAppApi } from "../lib/app-api";
+import { useSessionFailureToasts } from "../lib/session-failure-toasts";
+import { apiErrorFacts, userErrorText } from "../../ui/api-error";
+import { ConsoleComposer } from "../components/Composer";
+import { CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "../lib/allowance-labels";
+import { WorkspaceComposerPlus as ComposerMobilePlus } from "../components/workspace-composer-plus";
+import {
+  SessionRunsOnMenuBody,
+  SessionMachinePickerAction,
+  useSessionRunsOn,
+} from "../components/session/sandbox-switcher";
+import {
+  currentSessionMachineAccess,
+  SessionMachineAccessNotice,
+} from "../components/session/session-machine-access-notice";
+import { LoadingPanel, ProblemPanel } from "../components/common";
+import { useHostMessageContext, useReportSessionState } from "../lib/app-host";
+import { useSessionUiFeature } from "../lib/session-ui-features";
+import { useSessionOpening } from "../lib/session-opening";
+import { creationHandoffReconciled } from "../lib/session-creation-handoff";
+import { FollowUpRepositoryMenuBody } from "../components/follow-up-repository-picker";
+import { MarkdownText } from "../components/markdown";
+import { ModelPicker, type SessionToolSelection } from "../components/pickers";
+import {
+  TerminalSessionArchive,
+  TerminalSessionBanner,
+  UserMessageBody,
+} from "../components/session/banners";
+import { HumanInputDelegationRecord } from "../components/session/human-input-delegation-record";
+import {
+  ReadOnlySessionNotice,
+  sessionReadOnlyArchive,
+} from "../components/session/session-retention";
+import { useRail } from "../components/rail/rail-context";
+import { machineDisplayName, sessionComputeLabel } from "../../sandbox-label-model";
+import { useBackgroundAttentionTitle } from "../lib/background-attention-title";
+import { ChatViewportFileDropTarget } from "../components/session/chat-viewport-file-drop-target";
+import { sessionInputWait } from "../lib/session-rail";
+import { SessionWorkspace } from "../components/session/sandbox-workspace";
+import { ArtifactLinkBoundary } from "../components/session/artifact-link-boundary";
+import { Button } from "../../ui/button";
+import { EmptyState } from "../../ui/empty-state";
+import {
+  createSessionEventFeedStore,
+  useAppContext,
+  type SessionCreationHandoff,
+} from "../app-context";
+import { useLiveSessionEvents } from "../../hooks/use-live-session-events";
+import {
+  sessionRouteAppState,
+  sessionRouteCreationHandoff,
+  type SessionRoutePlacement,
+} from "../lib/session-route-placement";
+import { SessionStartupProvider } from "../../lib/session-startup";
+import { useFindShortcut } from "../lib/find-shortcut";
+import type { InitialComposerDraft } from "../../hooks/use-composer";
+import { cn } from "../lib/utils";
+import { useBrowserAccountBridgeBlocker } from "../lib/browser-account-bridge";
+import type {
+  SessionEditableArtifactSummary,
+  SessionEditableArtifactsStatus,
+} from "../components/session/editable-artifacts-workspace";
+import { startMcpOAuthWithTimeout } from "../lib/mcp-oauth";
+import { useSessionRouteMemory } from "../lib/last-session-memory";
+import {
+  canConnectWorkspaceMcpFromChat,
+  hasAccountPermission,
+  hasWorkspacePermission,
+} from "../lib/permissions";
+import { secretSaveTargets } from "../lib/secrets-ui";
+import { chatLearningScope } from "../lib/chat-learning-scope";
+import { currentModelRecovery } from "../lib/model-recovery";
+import { ModelRecoveryNotice } from "../components/session/model-recovery-notice";
+import { isPersonalWorkspace } from "../lib/managed-self-context";
+import {
+  isTerminalSessionStatus,
+  projectSessionTimeline,
+  summarizeSessionFailure,
+} from "../lib/events";
+import {
+  EMPTY_COMPOSER_LAUNCH,
+  composerLaunchSearchAfterPolicyApply,
+  composerLaunchSearchKey,
+  type ComposerLaunchSearch,
+} from "../lib/composer-launch";
+import { connectableSubscriptions, isDeploymentFreeModel } from "../lib/deployment-free-model";
+import { findPickerRow } from "../lib/model-policy";
+import { sessionTimelineEmptyStateCopy } from "../lib/session-empty-state";
+import {
+  isCodexUsageLimitFailure,
+  latestTurnFailedOnUsageLimit,
+  sessionModelMissingFromCatalog,
+  unavailableModelName,
+  unavailableModelReplacement,
+} from "../lib/unavailable-session-model";
+import { UnavailableModelNotice } from "../components/session/unavailable-model-notice";
+import {
+  CodexUsageNotice,
+  ModelSwitchHeadsUp,
+  type CodexUsageChoice,
+} from "../components/session/codex-usage-notice";
+import { isCodexProductModel } from "../lib/session-model";
+import { useCodexUsageModelSwitch } from "../lib/use-codex-usage-model-switch";
+import {
+  CONTEXT_CHECKPOINT_EVENT_TYPES,
+  codexUsageContinueAtResetAction,
+  codexUsageContinuesAtReset,
+  codexUsageNoticeApplies,
+  codexUsageResetText,
+  codexUsageResetsAt,
+  codexWaitIsUsageLimit,
+  latestCheckpointIsCompaction,
+  modelSwitchHeadsUpText,
+  needsModelSwitchHeadsUp,
+} from "../lib/codex-model-switch";
+import {
+  consumeSessionComposerFocusIntent,
+  FOCUS_SESSION_COMPOSER_EVENT,
+  focusSessionComposerWhenReady,
+  sessionComposerFocusIntentIsEligible,
+  type SessionComposerFocusIntent,
+} from "../lib/session-focus";
+import {
+  applySessionAttentionProjection,
+  updateLocalSessionDeliveryAttention,
+  notifySessionAttentionChanged,
+  sessionAttentionReadThroughSequence,
+  sessionReadProjectionKey,
+  shouldAcknowledgeActiveSession,
+  shouldProjectActiveSessionRead,
+} from "../lib/session-attention";
+import {
+  mergeSessionContextProjection,
+  mergeSessionDetailReadProjection,
+} from "../lib/session-pins";
+import {
+  readSessionDockNavigation,
+  sessionDockLayoutStorageId,
+  updateSessionDockNavigation,
+} from "../lib/session-dock-preferences";
+import { useWorkspaceAppLinkResolver } from "../lib/session-artifact-navigation";
+import {
+  clientFirstPartyMcpToolPolicy,
+  firstPartySessionToolOptionsFor,
+  sessionPolicyPickerIds,
+} from "../lib/session-tools";
+import { resolveWorkspaceBusySend, stableJson } from "@opengeni/contracts";
+import { connectProviderAcceptsRequestedScopes } from "@opengeni/contracts/connect";
+import { useFollowUpRepositories } from "../lib/use-follow-up-repositories";
+import type { ChatSendContext } from "../components/capabilities/session-github-repositories";
+import { githubAppConnectRequest } from "../lib/github-app-connect";
+import {
+  clearGitHubInstallRequest,
+  recordGitHubInstallRequest,
+} from "../lib/github-install-request";
+import {
+  useFixedRigScope,
+  usePersonalResourceAttachment,
+} from "../lib/use-personal-resource-attachment";
+import { personalMachineUseIntent } from "../lib/personal-resource-attachments";
+import {
+  isPersonalMachine,
+  machineUseMessage,
+  moveChatToMachine,
+} from "../lib/move-chat-to-machine";
+import type { MachineView } from "../../machines";
+import { useWorkspaceModelCatalog } from "../lib/use-workspace-model-catalog";
+import type {
+  McpElicitationAnswer,
+  ChatLineageNode as LineageNode,
+  SessionRealtimeModel,
+  UpdateSessionToolPolicyRequest,
+} from "@opengeni/sdk";
+import type { ConnectionMetadata, Session, SessionEvent } from "../types";
+import { useUiEventTarget } from "../lib/ui-events";
+import { FORK_CURRENT_CHAT_EVENT } from "../lib/actions/events";
+import { usePortalContainer } from "../../ui/portal-container";
+import { sessionHasPendingWake, withLineageAutomationFacts } from "../../session-list-model";
+
+const InlineChatArtifact = lazy(() =>
+  import("../components/artifacts/retained-file-preview").then((module) => ({
+    default: module.InlineChatArtifact,
+  })),
+);
+const ChatInteractiveBlock = lazy(() =>
+  import("../components/artifacts/chat-interactive-block").then((module) => ({
+    default: module.ChatInteractiveBlock,
+  })),
+);
+
+const HumanInputSurface = lazy(() => import("../components/session/human-input"));
+const DescendantRequests = lazy(() => import("../components/session/descendant-requests"));
+const SessionSkillReviews = lazy(() =>
+  import("../components/session/session-skill-reviews").then((module) => ({
+    default: module.SessionSkillReviews,
+  })),
+);
+const SessionCommands = lazy(() =>
+  import("../../session-ui").then((module) => ({ default: module.SessionCommands })),
+);
+
+const SessionCapabilityCard = lazy(async () => ({
+  default: (await import("../components/capabilities/session-capability-card"))
+    .SessionCapabilityCard,
+}));
+
+const NativeConnectSetup = lazy(() =>
+  import("../components/capabilities/native-connect-setup").then((module) => ({
+    default: module.NativeConnectSetup,
+  })),
+);
+
+const MessageForkDialog = lazy(() =>
+  import("../components/session/session-tenancy-control").then((module) => ({
+    default: module.SessionTenancyRouteControl,
+  })),
+);
+
+const MessageActions = lazy(() => import("../components/session/message-actions"));
+const ConversationFind = lazy(() => import("../components/session/conversation-find"));
+const EMPTY_SEARCH_TARGET: SessionSearchRoute = {};
+
+const SubagentTree = lazy(() =>
+  import("../components/session/subagents").then((module) => ({ default: module.SubagentTree })),
+);
+
+const LazyFailedSessionBanner = lazy(() =>
+  import("../components/session/failed-session-banner").then((module) => ({
+    default: module.FailedSessionBanner,
+  })),
+);
+
+// Only a refused Send shows it, so it stays out of the direct session bundle.
+const LazyCreditRefusalNotice = lazy(() =>
+  import("../components/credits/credit-refusal-notice").then((module) => ({
+    default: module.CreditRefusalNotice,
+  })),
+);
+// Add credits from the chat opens checkout here; paying returns to this chat.
+const LazyCreditTopupPrompt = lazy(() =>
+  import("../components/credit-required-prompt").then((module) => ({
+    default: module.CreditRequiredPrompt,
+  })),
+);
+
+const LazyAgentConfigurationPanel = lazy(() =>
+  import("../components/session/agent-configuration-panel").then(({ AgentConfigurationPanel }) => ({
+    default: AgentConfigurationPanel,
+  })),
+);
+const LazySessionInspector = lazy(() =>
+  import("../components/session/inspector").then(({ SessionInspector }) => ({
+    default: SessionInspector,
+  })),
+);
+
+const LazySessionEditableArtifactsWorkspace = lazy(() =>
+  import("../components/session/editable-artifacts-workspace").then(
+    ({ SessionEditableArtifactsWorkspace }) => ({
+      default: SessionEditableArtifactsWorkspace,
+    }),
+  ),
+);
+
+const LazyCodexRealtimeControl = lazy(() =>
+  import("../../realtime").then(({ SessionRealtimeControl }) => ({
+    default: SessionRealtimeControl,
+  })),
+);
+
+const LazySessionRouteAuxiliary = lazy(
+  () => import("../components/session/session-tenancy-control"),
+);
+
+export function SessionRoute({
+  workspaceId,
+  sessionId,
+  launch = EMPTY_COMPOSER_LAUNCH,
+  realtimeAutostartModel,
+  searchTarget = EMPTY_SEARCH_TARGET,
+  placement = "page",
+  onEvent,
+  messageContext,
+  creationHandoff: givenCreationHandoff,
+  initialDraft,
+  onNewSession,
+  onRealtimeAutostartConsumed,
+}: {
+  workspaceId: string;
+  sessionId: string;
+  launch?: ComposerLaunchSearch | undefined;
+  realtimeAutostartModel?: SessionRealtimeModel | undefined;
+  searchTarget?: SessionSearchRoute | undefined;
+  /**
+   * `panel`: this chat sits beside another view (the Site view) in a narrow
+   * panel, so it uses narrower gutters and is not remembered as the last
+   * session route. Whatever else differs is the host's: it turns off the
+   * session panel with `SessionUiFeaturesOff` and passes the callbacks below.
+   */
+  placement?: SessionRoutePlacement | undefined;
+  /** Each event newer than the loaded history, in order. */
+  onEvent?: ((event: SessionEvent) => void) | undefined;
+  /** The host view's per-message model context, read at send time. */
+  messageContext?: (() => string | undefined) | undefined;
+  /** A conversation the host view just created, shown at once with its first prompt. */
+  creationHandoff?: SessionCreationHandoff | null | undefined;
+  /** What the person typed in the host view's new-chat composer while it was created. */
+  initialDraft?: InitialComposerDraft | undefined;
+  /** Start a new chat; defaults to the new-chat page. */
+  onNewSession?: (() => void) | undefined;
+  /** The voice call a new chat asked for has started; defaults to dropping it from the address. */
+  onRealtimeAutostartConsumed?: (() => void) | undefined;
+}) {
+  const uiEvents = useUiEventTarget("document");
+  const dockEnabled = useSessionUiFeature("dock");
+  useReadSessionInbox(sessionId);
+  const context = useAppContext();
+  const routed = placement === "page";
+  const rail = useRail();
+  const navigate = useNavigate();
+  const page = usePage();
+  const consumeRealtimeAutostart = useCallback(() => {
+    if (onRealtimeAutostartConsumed) {
+      onRealtimeAutostartConsumed();
+      return;
+    }
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: { workspaceId, sessionId },
+      search: {},
+      replace: true,
+    });
+  }, [navigate, onRealtimeAutostartConsumed, sessionId, workspaceId]);
+  // The session-search origin only labels the navigation that opened the find
+  // bar. Drop it once the bar closes so a reload or shared link starts plain.
+  const hasSearchOrigin = searchTarget.searchOrigin === "session-search";
+  const consumeSearchOrigin = useCallback(() => {
+    if (!hasSearchOrigin) return;
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: { workspaceId, sessionId },
+      search: ({ searchOrigin: _searchOrigin, ...rest }) => rest,
+      replace: true,
+    });
+  }, [hasSearchOrigin, navigate, sessionId, workspaceId]);
+
+  // Session record + live event log via @opengeni/react. Fresh opens load a
+  // bounded tail, then stream live events with resume-by-sequence.
+  const {
+    events,
+    timeline: eventTimeline,
+    sessionStatus,
+    sessionStatusSequence,
+    connectionState,
+    initialLoading,
+    initialHistoryReady,
+    hasOlder,
+    loadingOlder,
+    loadOlder,
+    hasNewer,
+    loadingNewer,
+    loadNewer,
+    loadingOldest,
+    loadOldest,
+    jumpToLatest,
+    jumpToSequence,
+    error: streamError,
+  } = useSessionEvents(sessionId);
+  // Consented funnel telemetry: a session this page started reached its first
+  // completed turn. Only event types are inspected.
+  useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
+  useLiveSessionEvents(sessionId, events, initialHistoryReady, onEvent);
+  // The embedding host follows the open chat from this stream.
+  // A chat in a panel beside another view isn't the page's open chat.
+  useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading }, routed);
+  const sessionDetailReadOwner = useRef<object>({});
+  const beginSessionDetailRead = useCallback(
+    () =>
+      context.sessionChannelProjectionAuthority.beginDetailRead(sessionDetailReadOwner.current, {
+        id: sessionId,
+        workspaceId,
+      }),
+    [context.sessionChannelProjectionAuthority, sessionId, workspaceId],
+  );
+  const {
+    session: fetchedSession,
+    error: loadError,
+    readRevision: sessionReadRevision,
+    readGeneration: sessionReadGeneration,
+    refresh: refreshSession,
+  } = useSession(sessionId, {
+    events,
+    beginRead: beginSessionDetailRead,
+  });
+  // "Back to sessions" from Settings reopens this session (see last-session-memory).
+  const restoredSessionId = useRouterState({
+    select: (state) => state.location.state.restoredSessionId,
+  });
+  const leaveRestoredSession = useCallback(() => {
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions",
+      params: { workspaceId },
+      replace: true,
+    });
+  }, [navigate, workspaceId]);
+  const leavingRestoredSession = useSessionRouteMemory({
+    subjectId: context.accessContext.subjectId,
+    workspaceId,
+    sessionId,
+    openedSessionId: fetchedSession?.id ?? null,
+    loadError,
+    restoredSessionId,
+    leave: leaveRestoredSession,
+    enabled: routed,
+  });
+  useEffect(
+    () => () =>
+      context.sessionChannelProjectionAuthority.finishDetailReads(sessionDetailReadOwner.current),
+    [context.sessionChannelProjectionAuthority, sessionId, workspaceId],
+  );
+  useEffect(() => {
+    if (loadError) {
+      context.sessionChannelProjectionAuthority.finishDetailReads(sessionDetailReadOwner.current);
+    }
+  }, [context.sessionChannelProjectionAuthority, loadError]);
+  const creationHandoff = sessionRouteCreationHandoff({
+    sessionId,
+    given: givenCreationHandoff,
+    app: context.sessionCreationHandoff,
+    appSession: context.session,
+    routed,
+  });
+  const pendingCreationHandoff = creationHandoffReconciled(creationHandoff, events)
+    ? null
+    : creationHandoff;
+  // Queue + goal share the timeline's event stream — one SSE connection total.
+  const queue = useTurnQueue(sessionId, { events });
+  const goal = useGoal(sessionId, { events });
+  const humanInput = useHumanInputRequests(sessionId, { events });
+  const sessionSeed = fetchedSession ?? creationHandoff?.session ?? null;
+  const session = useMemo(
+    () =>
+      sessionSeed
+        ? {
+            ...sessionSeed,
+            // Old idle events must not overwrite a fresh queued/claimed detail read.
+            status:
+              (sessionStatusSequence ?? 0) > sessionSeed.lastSequence
+                ? (sessionStatus ?? sessionSeed.status)
+                : sessionSeed.status,
+            effectiveControl: queue.effectiveControl ?? sessionSeed.effectiveControl,
+          }
+        : null,
+    [queue.effectiveControl, sessionSeed, sessionStatus, sessionStatusSequence],
+  );
+  // Background-tab cue: mark the title when this open session settles for the user.
+  useBackgroundAttentionTitle(sessionId, session?.status ?? null);
+  // Dispatch retries update their durable ledger without timeline events. Read
+  // that evidence only while this visible session is queued, with no overlapping
+  // requests, so a moving retry schedule cannot masquerade as active execution.
+  const waitingForDispatch =
+    session?.status === "queued" &&
+    session.activeTurnId === null &&
+    session.effectiveControl.state === "active";
+  useEffect(() => {
+    if (!waitingForDispatch) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      try {
+        if (document.visibilityState === "visible") await refreshSession();
+      } finally {
+        if (!stopped) timer = setTimeout(() => void refresh(), 15_000);
+      }
+    };
+    timer = setTimeout(() => void refresh(), 15_000);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [waitingForDispatch, sessionId, refreshSession]);
+  // A restored chat's content comes back in the background: read it again
+  // until it is live (no event announces that).
+  const restoringArchive = session?.retention?.archive?.restoring === true;
+  useEffect(() => {
+    if (!restoringArchive) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void refreshSession();
+    }, 3_000);
+    return () => clearInterval(timer);
+  }, [restoringArchive, sessionId, refreshSession]);
+  const restoreArchived = useCallback(async () => {
+    if (!session) return false;
+    try {
+      const updated = await requestSessionArchive(
+        context,
+        session,
+        false,
+        sessionDisplayTitle(session),
+      );
+      if (!updated) return false;
+      notifySessionListChanged({ workspaceId, sessionId: session.id, archived: updated.archived });
+      await refreshSession();
+      return true;
+    } catch (error) {
+      toast.error("Couldn't restore the chat.", { description: userErrorText(error) });
+      return false;
+    }
+  }, [context, refreshSession, session, workspaceId]);
+  // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
+  // every event at or before the sequence seen when the operator ran it; the
+  // server log is untouched and newer events (higher sequence) keep streaming
+  // in. Reset when the session identity changes so a new session starts clean.
+  // null = never cleared (distinct from "cleared at sequence 0"): clearing an
+  // empty stream still latches, so the initial-message fallback is suppressed
+  // and any later events stay hidden up to the cleared sequence.
+  const [viewClearedAfter, setViewClearedAfter] = useState<number | null>(null);
+  useEffect(() => {
+    setViewClearedAfter(null);
+  }, [sessionId]);
+  const clearView = useCallback(() => {
+    const latestSequence = events.reduce((max, event) => Math.max(max, event.sequence), 0);
+    setViewClearedAfter(latestSequence);
+  }, [events]);
+  const visibleEvents = useMemo(
+    () =>
+      viewClearedAfter !== null
+        ? events.filter((event) => event.sequence > viewClearedAfter)
+        : events,
+    [events, viewClearedAfter],
+  );
+  const { opened, hasObservedHistory } = useSessionOpening(
+    `${workspaceId}:${sessionId}`,
+    Boolean(session && (initialHistoryReady || pendingCreationHandoff)),
+    events.length > 0,
+  );
+  const timeline = useMemo(() => {
+    if (!session) {
+      return [];
+    }
+    // While the tail window is still being fetched, render nothing rather than
+    // projectSessionTimeline's initial-message fallback — on a large session
+    // that fallback painted the GENESIS message at the top for the whole fetch
+    // (user-reported). The fallback is only for genuinely-empty NEW sessions,
+    // i.e. after the load settles with no events. Once real history was seen,
+    // clearing the window for a reload (including failure) is never genesis.
+    if (
+      (!opened || initialLoading || hasObservedHistory) &&
+      visibleEvents.length === 0 &&
+      !pendingCreationHandoff
+    ) {
+      return [];
+    }
+    const projected = projectSessionTimeline(
+      session,
+      visibleEvents,
+      pendingCreationHandoff?.clientEventId,
+      viewClearedAfter === null ? eventTimeline : undefined,
+    );
+    // projectSessionTimeline falls back to the session's initial message when
+    // the projection is empty; after a clear-view that fallback would resurrect
+    // the very first message, so suppress it once the view has been cleared.
+    return viewClearedAfter !== null && visibleEvents.length === 0 ? [] : projected;
+  }, [
+    pendingCreationHandoff,
+    session,
+    visibleEvents,
+    viewClearedAfter,
+    opened,
+    initialLoading,
+    hasObservedHistory,
+    eventTimeline,
+  ]);
+  // Only approvals still awaiting a decision: the durable log replays every
+  // historical `session.requiresAction`, so subtract decisions and finished
+  // turns instead of rendering decided approvals as live buttons forever.
+  const approvals = useMemo(() => projectPendingApprovals(events), [events]);
+  // Credit death is sneaky: the engine can end the turn as a NOMINALLY
+  // completed one (segmentLimit budget_exhausted), leaving the session idle and
+  // healthy-looking. Track the terminal credit state from the last turn-end so
+  // the banner shows for idle-but-broke sessions too, not only failed ones.
+  const creditExhausted = useMemo(() => creditExhaustedFromEvents(events), [events]);
+  // The one fix (own-key fee or API use) that stop names, from the same turn end.
+  const creditRefusal = useMemo(() => creditRefusalFromEvents(events), [events]);
+  const failure = useMemo(
+    () =>
+      session && (session.status === "failed" || creditExhausted)
+        ? summarizeSessionFailure(
+            events,
+            session.status,
+            session.failureDiagnostics,
+            session.lastSequence,
+          )
+        : null,
+    [events, session, creditExhausted],
+  );
+
+  // Keep the workspace header (title, status badge, connection pill) in sync.
+  // A chat in a panel beside another view (the Site view) isn't the page's
+  // open chat: the header, the sidebar's projections and the command menu
+  // keep following the page, so it keeps its state to itself.
+  const [panelEventFeed] = useState(createSessionEventFeedStore);
+  const { client, captureWorkspaceInvocation, ownsWorkspaceInvocation } = context;
+  const {
+    setSession: setContextSession,
+    setConnectionState: setContextConnectionState,
+    sessionEventFeedStore,
+  } = sessionRouteAppState(placement, context, panelEventFeed);
+  const acknowledgedProjectionRef = useRef<string | null>(null);
+  const confirmedProjectionRef = useRef<string | null>(null);
+  const retriedProjectionRef = useRef<string | null>(null);
+  const [foreground, setForeground] = useState(() => ({
+    documentVisible: document.visibilityState === "visible",
+    windowFocused: document.hasFocus(),
+  }));
+  const [attentionRetryRevision, setAttentionRetryRevision] = useState(0);
+  const reconciledSessionRead = useRef<{
+    sessionId: string;
+    revision: number;
+  } | null>(null);
+  useEffect(() => {
+    if (!fetchedSession || sessionReadRevision === 0) return;
+    if (
+      reconciledSessionRead.current?.sessionId === sessionId &&
+      reconciledSessionRead.current.revision === sessionReadRevision
+    ) {
+      return;
+    }
+    reconciledSessionRead.current = {
+      sessionId,
+      revision: sessionReadRevision,
+    };
+    const accepted = context.sessionChannelProjectionAuthority.recordRead(
+      fetchedSession,
+      sessionReadGeneration,
+    );
+    setContextSession((current) =>
+      mergeSessionDetailReadProjection(
+        current,
+        fetchedSession,
+        context.sessionChannelProjectionAuthority,
+        sessionReadGeneration,
+        accepted,
+      ),
+    );
+  }, [
+    context.sessionChannelProjectionAuthority,
+    fetchedSession,
+    sessionId,
+    sessionReadGeneration,
+    sessionReadRevision,
+    setContextSession,
+  ]);
+  useEffect(() => {
+    setContextSession((current) =>
+      mergeSessionContextProjection(
+        current,
+        session,
+        context.sessionChannelProjectionAuthority,
+        "live",
+      ),
+    );
+  }, [context.sessionChannelProjectionAuthority, session, setContextSession]);
+  useEffect(() => {
+    const reconcileForeground = () => {
+      setForeground({
+        documentVisible: document.visibilityState === "visible",
+        windowFocused: document.hasFocus(),
+      });
+    };
+    window.addEventListener("focus", reconcileForeground);
+    window.addEventListener("blur", reconcileForeground);
+    document.addEventListener("visibilitychange", reconcileForeground);
+    return () => {
+      window.removeEventListener("focus", reconcileForeground);
+      window.removeEventListener("blur", reconcileForeground);
+      document.removeEventListener("visibilitychange", reconcileForeground);
+    };
+  }, []);
+  const projectSessionAttention = useCallback(
+    (projection: Parameters<typeof notifySessionAttentionChanged>[0]) => {
+      notifySessionAttentionChanged(projection);
+      setContextSession((current) =>
+        current?.id === projection.id
+          ? applySessionAttentionProjection(current, projection)
+          : current,
+      );
+    },
+    [setContextSession],
+  );
+  // Raw token/progress batches do not create unread attention. Acknowledge
+  // completed output or an actionable boundary, rather than every stream flush.
+  const attentionThroughSequence = useMemo(
+    () => sessionAttentionReadThroughSequence(events),
+    [events],
+  );
+  const readThroughSequence = Math.max(session?.lastSequence ?? 0, attentionThroughSequence);
+  const activeReadProjectionKey = session
+    ? sessionReadProjectionKey(session.id, readThroughSequence)
+    : null;
+  const routeUnreadProjection = useMemo(
+    () =>
+      session
+        ? {
+            ...session,
+            unread: session.unread || readThroughSequence > session.lastSequence,
+          }
+        : null,
+    [readThroughSequence, session],
+  );
+  useLayoutEffect(() => {
+    if (!session || !activeReadProjectionKey) return;
+    if (
+      confirmedProjectionRef.current === activeReadProjectionKey ||
+      !shouldProjectActiveSessionRead({
+        activeSessionId: sessionId,
+        workspaceId,
+        session: routeUnreadProjection,
+        ...foreground,
+      })
+    ) {
+      return;
+    }
+
+    const optimisticProjection = {
+      id: session.id,
+      workspaceId: session.workspaceId,
+      unread: false,
+      ...(session.attentionVersion !== undefined
+        ? { attentionVersion: session.attentionVersion }
+        : {}),
+      lastSequence: readThroughSequence,
+    };
+    projectSessionAttention(optimisticProjection);
+  }, [
+    activeReadProjectionKey,
+    foreground,
+    projectSessionAttention,
+    readThroughSequence,
+    routeUnreadProjection,
+    session,
+    sessionId,
+    workspaceId,
+  ]);
+  const acknowledgementSessionId = session?.id ?? null;
+  const acknowledgementEligible = shouldAcknowledgeActiveSession({
+    activeSessionId: sessionId,
+    workspaceId,
+    session: routeUnreadProjection,
+    ...foreground,
+  });
+  // Same-value list/focus projections must not invalidate an in-flight retry.
+  useEffect(() => {
+    const projectionKey = activeReadProjectionKey;
+    if (
+      !acknowledgementSessionId ||
+      !projectionKey ||
+      acknowledgedProjectionRef.current === projectionKey ||
+      !acknowledgementEligible
+    ) {
+      return;
+    }
+    let active = true;
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    acknowledgedProjectionRef.current = projectionKey;
+    void client
+      .updateSessionAttention(workspaceId, acknowledgementSessionId, {
+        unread: false,
+        acknowledgedThroughSequence: readThroughSequence,
+      })
+      .then((updated) => {
+        if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
+        confirmedProjectionRef.current = projectionKey;
+        // The rail owns separately polled page objects. Keep this exact
+        // frontier result there so a stale list poll cannot resurrect or
+        // prematurely clear the unread dot.
+        projectSessionAttention(updated);
+      })
+      .catch(() => {
+        // Retry one transient failure for this exact frontier. Keeping the
+        // receipt after the second failure prevents a permanent 4xx/5xx from
+        // becoming an unbounded request and log loop.
+        if (
+          active &&
+          ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
+          acknowledgedProjectionRef.current === projectionKey &&
+          retriedProjectionRef.current !== projectionKey
+        ) {
+          retriedProjectionRef.current = projectionKey;
+          acknowledgedProjectionRef.current = null;
+          setAttentionRetryRevision((revision) => revision + 1);
+          return;
+        }
+        // A transient failure must never resurrect a dot the user already
+        // cleared. Release the attempt receipt so a later focus/navigation
+        // can retry this exact frontier; a reload still reads durable truth
+        // if both attempts failed.
+        if (acknowledgedProjectionRef.current === projectionKey) {
+          acknowledgedProjectionRef.current = null;
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    acknowledgementEligible,
+    acknowledgementSessionId,
+    attentionRetryRevision,
+    activeReadProjectionKey,
+    captureWorkspaceInvocation,
+    client,
+    ownsWorkspaceInvocation,
+    projectSessionAttention,
+    readThroughSequence,
+    workspaceId,
+  ]);
+  useEffect(() => {
+    setContextConnectionState(connectionState);
+  }, [connectionState, setContextConnectionState]);
+  // Content-free operational signal; see lib/stream-health.ts.
+  useStreamHealthTelemetry("session", connectionState);
+  useEffect(() => {
+    sessionEventFeedStore.set({ sessionId, events });
+  }, [events, sessionId, sessionEventFeedStore]);
+  useEffect(
+    () => () => {
+      setContextSession(null);
+      setContextConnectionState("idle");
+      if (sessionEventFeedStore.getSnapshot()?.sessionId === sessionId) {
+        sessionEventFeedStore.set(null);
+      }
+    },
+    [sessionId, sessionEventFeedStore, setContextConnectionState, setContextSession],
+  );
+  useSessionFailureToasts(loadError, streamError);
+  // A reconnect OAuth round-trip lands back here (the reconnect card set
+  // returnPath to this session). The connection is refreshed server-side, but
+  // the original tool call was settled as an error and is never replayed. Strip
+  // the params and tell the user to start a new turn.
+  const oauthReturnHandled = useRef(false);
+  const capabilityClient = context.client;
+  const capabilityCatalog = context.workspaceCapabilityCatalog;
+  const capabilityCatalogReady = context.workspaceMcpCatalogReady;
+  const refreshCapabilityCatalog = context.refreshWorkspaceMcpServers;
+  useEffect(() => {
+    if (oauthReturnHandled.current || !capabilityCatalogReady) {
+      return;
+    }
+    const params = page.readQuery();
+    const outcome = params.get("integration_oauth");
+    if (!outcome) {
+      return;
+    }
+    oauthReturnHandled.current = true;
+    page.replaceQuery(new URLSearchParams());
+    const capabilityId = params.get("capability_auth");
+    if (outcome !== "success") {
+      // The failure copy loads only on this path, keeping it out of the route.
+      void import("../lib/oauth-callback-messages").then(({ mcpOAuthCallbackFailureMessage }) =>
+        toast.error("Reconnect failed", {
+          description: mcpOAuthCallbackFailureMessage(params.get("stage"), params.get("reason")),
+        }),
+      );
+      return;
+    }
+    if (!capabilityId) {
+      toast.success("Connection restored", {
+        description: "The earlier tool call wasn't replayed. Send a new message to try again.",
+      });
+      return;
+    }
+    void (async () => {
+      const finished = await finishMcpCapabilityOAuthReturn({
+        client: capabilityClient,
+        workspaceId,
+        sessionId,
+        capabilityId,
+        params,
+        catalog: capabilityCatalog,
+        refreshCatalog: refreshCapabilityCatalog,
+      });
+      toast.success(`${finished.name} connected`, {
+        description: finished.needsPersonalReview
+          ? "Review its connection card to allow your personal account in this conversation."
+          : "It is available to new tool calls in this session.",
+      });
+    })().catch((error) => {
+      toast.error("Connection succeeded, but setup needs attention", {
+        description: userErrorText(error),
+      });
+    });
+  }, [
+    page,
+    capabilityCatalog,
+    capabilityCatalogReady,
+    capabilityClient,
+    refreshCapabilityCatalog,
+    workspaceId,
+    sessionId,
+  ]);
+
+  const nativeReturnHandled = useRef(false);
+  useEffect(() => {
+    if (nativeReturnHandled.current || !capabilityCatalogReady) return;
+    const params = page.readQuery();
+    const social = params.get("social_oauth");
+    const fiken = params.get("fiken");
+    if (!social && !fiken) return;
+    nativeReturnHandled.current = true;
+    page.replaceQuery(new URLSearchParams());
+    if (social === "success" || fiken === "connected") {
+      const capabilityId = params.get("capability_auth");
+      void (async () => {
+        await refreshCapabilityCatalog(workspaceId);
+        await completeSessionCapabilityOAuth(
+          t,
+          capabilityClient,
+          workspaceId,
+          sessionId,
+          capabilityId,
+        );
+        toast.success("Connection setup completed", {
+          description: "It is available to new tool calls in this session.",
+        });
+      })().catch((error) =>
+        toast.error("Connection authorized, but setup needs attention", {
+          description: userErrorText(error),
+        }),
+      );
+    } else {
+      toast.error("Connection wasn't completed", {
+        description: "You can retry from the connection card.",
+      });
+    }
+  }, [
+    page,
+    capabilityCatalogReady,
+    capabilityClient,
+    refreshCapabilityCatalog,
+    workspaceId,
+    sessionId,
+  ]);
+
+  const githubReturnHandled = useRef(false);
+  useEffect(() => {
+    if (githubReturnHandled.current) return;
+    const params = page.readQuery();
+    const outcome = params.get("github");
+    if (outcome !== "connected" && outcome !== "requested") return;
+    githubReturnHandled.current = true;
+    page.replaceQuery(new URLSearchParams());
+    if (outcome === "requested") {
+      // A non-owner asked their GitHub organization owners to approve the app.
+      recordGitHubInstallRequest(workspaceId);
+      toast.success("Request sent to your GitHub organization owners", {
+        description:
+          "After an owner approves, an owner of the organization connects it here. Your GitHub card updates on its own.",
+      });
+      return;
+    }
+    clearGitHubInstallRequest(workspaceId);
+    toast.success("GitHub connected", {
+      description: "Repository access is now available to new tool calls in this session.",
+    });
+  }, [page, workspaceId]);
+
+  // Start the recovery flow for a lapsed connection surfaced inline in the
+  // timeline. OAuth connections reconnect in place (reuse the connectionId) and
+  // return to this session; api-key ones can't OAuth, so hand off to credential
+  // re-entry on the capabilities sheet for that provider. Throwing bubbles a
+  // calm inline error on the reconnect card.
+  const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
+  const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
+  // The account whose card in this chat opened each reconnect: once it is
+  // done, the agent continues the request that stopped, as after a first
+  // setup. Kept per request, since a reconnect can finish after its dialog
+  // closed and another one opened.
+  const reconnectCardConnections = useRef(new WeakMap<NativeConnectRequest, string>());
+  // Workspace GitHub App setup from the follow-up repository menu uses this
+  // route-level Connect dialog: the menu closes when GitHub's authorization
+  // popup takes focus, which would unmount a dialog hosted inside it.
+  const connectGitHubApp = useCallback(() => {
+    setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport, page.href()));
+  }, [page, reconnectTransport, workspaceId]);
+  const connectPersonalGitHub = context.connectPersonalGitHub;
+  const reconnectPersonalGitHub = context.reconnectPersonalGitHub;
+  const personalGitHubConnection = context.personalGitHubStatus?.connection ?? null;
+  // An existing connection that needs reauthorization reconnects; otherwise connect.
+  const personalGitHubNeedsReconnect =
+    personalGitHubConnection !== null &&
+    personalGitHubConnection.status !== "active" &&
+    personalGitHubConnection.status !== "revoked";
+  const onReconnect = useCallback(
+    async (item: AuthNeededItem) => {
+      if (item.authoritySource === "host") {
+        if (!item.authorizationUrl) {
+          throw new Error(
+            "This connection is managed by the embedding host and has no recovery link.",
+          );
+        }
+        page.assign(item.authorizationUrl);
+        return;
+      }
+      if (item.connectionId) {
+        const { findConnectRecoveryAccount } = await import("@opengeni/connect");
+        const account = findConnectRecoveryAccount(
+          await reconnectTransport.accounts(workspaceId),
+          item.connectionId,
+        );
+        if (account) {
+          const request: NativeConnectRequest = {
+            scope: { workspaceId, transport: reconnectTransport },
+            providerId: account.providerId,
+            ownership: account.ownership,
+            reconnectAccountId: account.id,
+            // A tool needed more access than the account was connected with:
+            // the reconnect asks the provider for exactly that (incremental consent).
+            // Other providers keep their fixed permission set.
+            ...(item.reason === "insufficient_scope" &&
+            item.scopes.length > 0 &&
+            connectProviderAcceptsRequestedScopes(account.providerId)
+              ? { requestedScopes: [...item.scopes] }
+              : {}),
+            displayName: account.label,
+            returnUrl: page.href(),
+            idempotencyKey: crypto.randomUUID(),
+          };
+          reconnectCardConnections.current.set(request, item.connectionId);
+          setReconnectRequest(request);
+          return;
+        }
+      }
+      if (item.capability) {
+        const returnPath = `${new URL(page.href()).pathname}?capability_auth=${encodeURIComponent(item.capability.id)}`;
+        if (item.capability.id === "api:github-app") {
+          const status = await context.client.getGitHubApp(workspaceId, {
+            returnPath,
+          });
+          if (status.status === "bound") {
+            toast.success("GitHub is already connected");
+            return;
+          }
+          if (!status.linkUrl) {
+            throw new Error(
+              status.configured
+                ? "Your account cannot manage this workspace's GitHub connection."
+                : "GitHub is not configured on this deployment.",
+            );
+          }
+          await markIntegrationConnectRedirect("github", "app_install");
+          page.assign(status.linkUrl);
+          return;
+        }
+        if (item.capability.id === "api:github-personal") {
+          await (personalGitHubNeedsReconnect ? reconnectPersonalGitHub : connectPersonalGitHub)(
+            workspaceId,
+          );
+          return;
+        }
+        if (item.capability.id === "mcp:codex_apps") {
+          page.assign(`/workspaces/${encodeURIComponent(workspaceId)}/settings`);
+          return;
+        }
+        const catalogItem = context.workspaceCapabilityCatalog.find(
+          (candidate) => candidate.id === item.capability?.id,
+        );
+        const canInstall = canConnectWorkspaceMcpFromChat(
+          context.accessContext,
+          workspaceId,
+          catalogItem,
+          context.workspaceMemberIntegrationSetup,
+        );
+        const mcpUrl = catalogItem?.mcpUrl ?? catalogItem?.endpointUrl ?? null;
+        if (
+          canInstall &&
+          catalogItem?.kind === "mcp" &&
+          catalogItem.authKind === "oauth2" &&
+          mcpUrl
+        ) {
+          const response = await startMcpOAuthWithTimeout(context.client, workspaceId, {
+            mcpUrl,
+            ...(catalogItem.providerDomain ? { providerDomain: catalogItem.providerDomain } : {}),
+            ownership: "workspace",
+            returnPath,
+          });
+          if (!response.authorizationUrl) {
+            throw new Error("The provider did not return an authorization link.");
+          }
+          await markIntegrationConnectRedirect({ domain: mcpUrl }, "oauth");
+          page.assign(response.authorizationUrl);
+          return;
+        }
+        page.assign(
+          `/workspaces/${encodeURIComponent(workspaceId)}/capabilities?suggested_capability=${encodeURIComponent(item.capability.id)}`,
+        );
+        return;
+      }
+      if (item.serverId === "codex_apps") {
+        // Codex Apps is authorized by the designated workspace subscription,
+        // not by the generic connection broker. Send the user to the existing
+        // Codex subscription control instead of starting a meaningless OAuth
+        // flow for chatgpt.com.
+        page.assign(`/workspaces/${encodeURIComponent(workspaceId)}/settings`);
+        return;
+      }
+      const connections = await context.client
+        .listConnections(workspaceId)
+        .catch(() => [] as ConnectionMetadata[]);
+      const connection = item.connectionId
+        ? (connections.find((candidate) => candidate.id === item.connectionId) ?? null)
+        : null;
+      if (connection?.kind === "api_key") {
+        page.assign(
+          `/workspaces/${encodeURIComponent(workspaceId)}/capabilities?reconnect_domain=${encodeURIComponent(item.providerDomain)}`,
+        );
+        return;
+      }
+      const pageUrl = new URL(page.href());
+      const returnPath = `${pageUrl.pathname}${pageUrl.search}`;
+      const response = await context.client.startConnectionOAuth(workspaceId, {
+        providerDomain: item.providerDomain,
+        ...(item.connectionId ? { connectionId: item.connectionId } : {}),
+        ...(item.resource ? { resource: item.resource } : {}),
+        returnPath,
+      });
+      if (!response.authorizationUrl) {
+        throw new Error("The provider did not return an authorization link.");
+      }
+      await markIntegrationConnectRedirect({ domain: item.providerDomain }, "oauth");
+      page.assign(response.authorizationUrl);
+    },
+    [
+      page,
+      context.accessContext,
+      context.client,
+      connectPersonalGitHub,
+      reconnectPersonalGitHub,
+      personalGitHubNeedsReconnect,
+      context.workspaceCapabilityCatalog,
+      context.workspaceMemberIntegrationSetup,
+      workspaceId,
+      reconnectTransport,
+    ],
+  );
+
+  // The workspace shell already needs the capability catalog for session tool
+  // policy. Reuse that authoritative read for timeline logos instead of
+  // downloading the same large catalog again from the session route.
+  const providerLogos = useMemo(
+    () =>
+      connectorLogoIndex(context.workspaceCapabilityCatalog, (path) =>
+        context.client.catalogAssetUrl(path ?? null),
+      ),
+    [context.client, context.workspaceCapabilityCatalog],
+  );
+  const resolveProviderLogo = useCallback(
+    (domain: string) => connectorLogo(providerLogos, domain),
+    [providerLogos],
+  );
+  // One lineage read feeds the single composer-anchored agents surface. Events
+  // refresh it instantly on spawn/worker-completion, list hints on child-side
+  // status changes, and a poll (faster when hints are unavailable) ensures the
+  // pill's "running" count doesn't go stale on CHILD-side status changes that
+  // emit no event on this parent's feed. Must sit above the loading/error
+  // early-returns — it's a hook, so it has to run unconditionally on every render.
+  const lineagePoll = useLineagePollInterval(workspaceId);
+  const lineage = useSessionLineage(sessionId, {
+    events,
+    pollIntervalMs: lineagePoll.pollIntervalMs,
+  });
+  const agentNodes = useMemo(() => lineage.lineage?.children ?? [], [lineage.lineage]);
+  const observeLineageTree = lineagePoll.observeTree;
+  useEffect(() => observeLineageTree(agentNodes), [agentNodes, observeLineageTree]);
+  // Sub-sessions waiting on the person surface on this page: list hints that
+  // name one, and this agent answering one, re-read the tree.
+  const descendantRefreshSignal = useDescendantRequestsRefresh({
+    client: context.client,
+    workspaceId,
+    sessionId,
+    events,
+    nodes: agentNodes,
+    refreshLineage: lineage.refresh,
+  });
+  // The same lineage read names the agents the timeline spawns, messages, and
+  // hears from (parent and descendants), following renames.
+  const lineageTitles = useMemo(() => {
+    const titles = new Map<string, string>();
+    for (const ancestor of lineage.lineage?.ancestors ?? []) {
+      titles.set(ancestor.id, sessionDisplayTitle(ancestor));
+    }
+    const visit = (nodes: readonly LineageNode[]) => {
+      for (const node of nodes) {
+        titles.set(node.session.id, sessionDisplayTitle(node.session));
+        visit(node.children);
+      }
+    };
+    visit(lineage.lineage?.children ?? []);
+    return titles;
+  }, [lineage.lineage]);
+  const resolveSessionTitle = useCallback(
+    (agentSessionId: string) => lineageTitles.get(agentSessionId) ?? null,
+    [lineageTitles],
+  );
+  const sandboxFileRequestSeq = useRef(0);
+  const [sandboxFileRequest, setSandboxFileRequest] = useState<{
+    path: string;
+    line?: number | undefined;
+    requestId: number;
+  } | null>(null);
+  useEffect(() => {
+    setSandboxFileRequest(null);
+  }, [sessionId]);
+  const setInspectorOpen = context.setInspectorOpen;
+  // Composer + > Chat settings opens the dock's Settings tab at its Agent learning;
+  // the header menu and the usage limit notice open it at Usage limit.
+  const agentSettingsRequestSeq = useRef(0);
+  const [agentSettingsRequest, setAgentSettingsRequest] = useState<{
+    sessionId: string;
+    requestId: number;
+    target: "learning" | "usage-limit";
+  } | null>(null);
+  const openAgentSettings = useCallback(() => {
+    setAgentSettingsRequest({
+      sessionId,
+      requestId: ++agentSettingsRequestSeq.current,
+      target: "learning",
+    });
+    setInspectorOpen(true);
+  }, [sessionId, setInspectorOpen]);
+  const openUsageLimit = useCallback(() => {
+    setAgentSettingsRequest({
+      sessionId,
+      requestId: ++agentSettingsRequestSeq.current,
+      target: "usage-limit",
+    });
+    setInspectorOpen(true);
+  }, [sessionId, setInspectorOpen]);
+  useEffect(() => {
+    uiEvents.addEventListener(OPEN_SESSION_USAGE_LIMIT_EVENT, openUsageLimit);
+    return () => uiEvents.removeEventListener(OPEN_SESSION_USAGE_LIMIT_EVENT, openUsageLimit);
+  }, [openUsageLimit, uiEvents]);
+  const openSandboxFile = useCallback(
+    (path: string, line?: number) => {
+      setSandboxFileRequest({
+        path,
+        line,
+        requestId: ++sandboxFileRequestSeq.current,
+      });
+      setInspectorOpen(true);
+    },
+    [setInspectorOpen],
+  );
+
+  // Keep the same pending canvas through detail and the first history read.
+  // A freshly sent creation handoff already has visible conversation truth.
+  // Never paint the genesis message or mount a second loading treatment first.
+  if (!session || !opened) {
+    if (leavingRestoredSession) return <LoadingPanel />;
+    if (!session && loadError) {
+      return (
+        <Suspense fallback={<LoadingPanel />}>
+          <LazySessionRouteAuxiliary
+            workspaceId={workspaceId}
+            sessionId={sessionId}
+            loadError={loadError}
+            onRetry={() => void refreshSession()}
+          />
+        </Suspense>
+      );
+    }
+    return (
+      <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+        <SessionDock
+          workspaceId={workspaceId}
+          sessionId={sessionId}
+          session={null}
+          events={events}
+          connectionState={connectionState}
+          primary={
+            session && streamError && !initialLoading ? (
+              <ProblemPanel
+                title="Conversation couldn't be loaded"
+                description="Your saved messages are unchanged. Try loading them again."
+                action={
+                  <Button variant="outline" onClick={() => void jumpToLatest()}>
+                    Retry conversation
+                  </Button>
+                }
+              />
+            ) : (
+              <LoadingPanel />
+            )
+          }
+          onReloadSession={refreshSession}
+          dockCollapsed={!context.inspectorOpen}
+          onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+          openFileRequest={sandboxFileRequest}
+          onOpenNavigation={() => {
+            context.setInspectorOpen(false);
+            rail.setDrawerOpen(true);
+          }}
+        />
+      </div>
+    );
+  }
+
+  const chatPane = (
+    <SessionChatPane
+      key={session.id}
+      session={session}
+      admissionSessionControl={sessionSeed?.effectiveControl ?? session.effectiveControl}
+      events={events}
+      timeline={timeline}
+      searchTarget={searchTarget}
+      onJumpToSequence={jumpToSequence}
+      initialLoading={initialLoading}
+      historyReloadFailed={hasObservedHistory && events.length === 0 && !!streamError}
+      launch={launch}
+      realtimeAutostartModel={realtimeAutostartModel}
+      onRealtimeAutostartConsumed={consumeRealtimeAutostart}
+      onSearchOriginConsumed={consumeSearchOrigin}
+      placement={placement}
+      messageContext={messageContext}
+      initialDraft={initialDraft}
+      approvals={approvals}
+      humanInput={humanInput}
+      failure={failure}
+      creditExhausted={creditExhausted}
+      creditRefusal={creditRefusal}
+      goal={goal}
+      queue={queue}
+      agentNodes={agentNodes}
+      pendingWake={sessionHasPendingWake(withLineageAutomationFacts(session, lineage.lineage))}
+      descendantRefreshSignal={descendantRefreshSignal}
+      onDescendantResolved={() => void lineage.refresh()}
+      hasOlder={hasOlder}
+      loadingOlder={loadingOlder}
+      onLoadOlder={loadOlder}
+      hasNewer={hasNewer}
+      loadingNewer={loadingNewer}
+      onLoadNewer={loadNewer}
+      loadingOldest={loadingOldest}
+      onJumpToStart={loadOldest}
+      onJumpToLatest={jumpToLatest}
+      onClearView={clearView}
+      resolveSessionTitle={resolveSessionTitle}
+      onOpenSession={(nextSessionId) =>
+        void navigate({
+          to: "/workspaces/$workspaceId/sessions/$sessionId",
+          params: { workspaceId, sessionId: nextSessionId },
+        })
+      }
+      onMemoryClick={(memoryId) =>
+        void navigate({
+          to: "/workspaces/$workspaceId/memory",
+          params: { workspaceId },
+          search: { memory: memoryId },
+        })
+      }
+      onLearningRefusalOpen={(place) => {
+        switch (place.kind) {
+          case "skill":
+            // The Skills page opens one Skill from its raw `open` parameter.
+            void navigate({
+              href: `/workspaces/${encodeURIComponent(workspaceId)}/plugins?section=skills&open=${encodeURIComponent(`skill:${place.skillId}`)}`,
+            });
+            return;
+          case "skills":
+            void navigate({
+              to: "/workspaces/$workspaceId/plugins",
+              params: { workspaceId },
+              search: { section: "skills" },
+            });
+            return;
+          case "instructions":
+            void navigate({
+              to: "/workspaces/$workspaceId/state",
+              params: { workspaceId },
+              search: { view: "instructions" },
+            });
+            return;
+          case "knowledge":
+            void navigate({ to: "/workspaces/$workspaceId/state", params: { workspaceId } });
+            return;
+          case "learning-settings":
+            void navigate({
+              to: "/workspaces/$workspaceId/settings",
+              params: { workspaceId },
+              search: { section: "learning" },
+            });
+        }
+      }}
+      onNewSession={
+        onNewSession ??
+        (() =>
+          void navigate({
+            to: "/workspaces/$workspaceId/sessions",
+            params: { workspaceId },
+          }))
+      }
+      onContinueInNewSession={() =>
+        void navigate({
+          to: "/workspaces/$workspaceId/sessions",
+          params: { workspaceId },
+          search: { continueSessionId: sessionId },
+        })
+      }
+      onRestoreArchived={
+        session && session.parentSessionId === null && canArchiveChat(context, workspaceId)
+          ? restoreArchived
+          : undefined
+      }
+      onApprove={(approvalId, answer) => approve(approvalId, "approve", answer)}
+      onReject={(approvalId) => approve(approvalId, "reject")}
+      onReconnect={onReconnect}
+      onConnectGitHubApp={connectGitHubApp}
+      resolveProviderLogo={resolveProviderLogo}
+      onReloadSession={refreshSession}
+      // A file link opens the session panel's Files tab; without the panel it is plain text.
+      onOpenSandboxFile={dockEnabled ? openSandboxFile : undefined}
+      // Both open the session panel's Settings tab; without the panel, neither shows.
+      onOpenAgentSettings={dockEnabled ? openAgentSettings : undefined}
+      onOpenUsageLimit={dockEnabled ? openUsageLimit : undefined}
+      connectionState={connectionState}
+    />
+  );
+
+  const routeView = (
+    <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      {reconnectRequest && (
+        <LazyPart fallback={<LoadingPanel label="Opening connection setup" />}>
+          <NativeConnectSetup
+            transport={reconnectTransport}
+            workspaceId={workspaceId}
+            request={reconnectRequest}
+            onClose={() => setReconnectRequest(null)}
+            onComplete={() => {
+              // Setup can finish after its dialog closed: leave a newer one open.
+              setReconnectRequest((current) => (current === reconnectRequest ? null : current));
+              if (reconnectRequest.providerId === "github-app") {
+                toast.success("GitHub connected");
+                void context.refreshGitHub(workspaceId, undefined, {
+                  sync: true,
+                  userInitiated: true,
+                });
+                return;
+              }
+              // Same continuation as after a first setup from a card: the
+              // server checks the account now has what its card asked for,
+              // wakes the agent at most once per card, and not at all once
+              // the person has written since. Never fails the finished setup.
+              const connectionId = reconnectCardConnections.current.get(reconnectRequest);
+              if (connectionId)
+                void Promise.resolve()
+                  .then(() =>
+                    context.client.continueAfterCapabilitySetup(workspaceId, sessionId, {
+                      connectionId,
+                    }),
+                  )
+                  .catch(() => undefined);
+              toast.success("Connection updated", {
+                description: "New tool calls can use the updated connection.",
+              });
+            }}
+          />
+        </LazyPart>
+      )}
+      <SessionDock
+        workspaceId={workspaceId}
+        sessionId={sessionId}
+        session={session}
+        events={events}
+        connectionState={connectionState}
+        primary={
+          <ChatPaymentPages
+            accountId={
+              session?.accountId ??
+              context.workspaces.find((candidate) => candidate.id === workspaceId)?.accountId
+            }
+          >
+            {chatPane}
+          </ChatPaymentPages>
+        }
+        onReloadSession={refreshSession}
+        dockCollapsed={!context.inspectorOpen}
+        onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+        openFileRequest={sandboxFileRequest}
+        openAgentSettingsRequest={
+          agentSettingsRequest?.sessionId === sessionId ? agentSettingsRequest : null
+        }
+        onOpenNavigation={() => {
+          context.setInspectorOpen(false);
+          rail.setDrawerOpen(true);
+        }}
+      />
+    </div>
+  );
+  // The shell times the page's open chat; a panel chat times its own start, so
+  // its "starting" and "retrying" rows show too.
+  return routed ? (
+    routeView
+  ) : (
+    <SessionStartupProvider session={session}>{routeView}</SessionStartupProvider>
+  );
+
+  async function approve(
+    approvalId: string,
+    decision: "approve" | "reject",
+    answer?: McpElicitationAnswer,
+  ) {
+    try {
+      await context.client.sendApprovalDecision(workspaceId, sessionId, {
+        approvalId,
+        decision,
+        ...answer,
+      });
+    } catch (error) {
+      // Already decided (elsewhere, or by an earlier Approve all): no news.
+      if (!(error instanceof OpenGeniApiError && error.status === 409))
+        toast.error("Couldn't submit the decision", {
+          description: userErrorText(error),
+        });
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+  }
+}
+
+/** The embedding page's and the host view's per-message context, as a send extra. */
+function withHostMessageContext(
+  ...sources: ReadonlyArray<(() => string | undefined) | undefined>
+): {
+  modelContext?: string;
+} {
+  const value = sources
+    .map((source) => source?.())
+    .filter((part): part is string => Boolean(part))
+    .join("\n\n");
+  return value ? { modelContext: value } : {};
+}
+
+/** The latest agent-settings change, and whether a turn has started since. */
+function lastAgentChange(events: readonly SessionEvent[]): { at: string; pending: boolean } | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type !== "session.agent.updated") continue;
+    const pending = !events.slice(index + 1).some((later) => later.type === "turn.started");
+    return { at: event.occurredAt, pending };
+  }
+  return null;
+}
+
+/**
+ * The resizable Workspace dock: chat on the left, a collapsible/maximizable dock
+ * on the right with the capability-gated sandbox surfaces (Files |
+ * Terminal | Desktop) + Debug. Replaces the old fixed 390px aside.
+ */
+type SessionDockProps = {
+  workspaceId: string;
+  sessionId: string;
+  session: Session | null;
+  events: SessionEvent[];
+  connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
+  primary: React.ReactNode;
+  onReloadSession: () => Promise<void>;
+  dockCollapsed: boolean;
+  onDockCollapsedChange: (collapsed: boolean) => void;
+  onOpenNavigation: () => void;
+  openFileRequest?:
+    | {
+        path: string;
+        line?: number | null | undefined;
+        requestId: number;
+      }
+    | null
+    | undefined;
+  /** Open the Settings tab at Agent learning or Usage limit. A new requestId reopens it. */
+  openAgentSettingsRequest?:
+    | { requestId: number; target: "learning" | "usage-limit" }
+    | null
+    | undefined;
+};
+
+/** The chat with the session panel beside it, or the chat alone when the surface has no panel. */
+function SessionDock(props: SessionDockProps) {
+  if (!useSessionUiFeature("dock")) {
+    return (
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{props.primary}</div>
+    );
+  }
+  return <SessionDockPanel {...props} />;
+}
+
+function SessionDockPanel(props: SessionDockProps) {
+  const context = useAppContext();
+  // One request sequence for every tab the host opens (an artifact, the Agent
+  // tab): the dock ignores a requestId it has already handled.
+  const tabRequestSeq = useRef(0);
+  const [tabRequest, setTabRequest] = useState<{
+    sessionId: string;
+    tab: string;
+    requestId: number;
+  } | null>(null);
+  const agentSettingsRequestId = props.openAgentSettingsRequest?.requestId ?? null;
+  const agentSettingsTarget = props.openAgentSettingsRequest?.target ?? "learning";
+  const [agentLearningFocus, setAgentLearningFocus] = useState(0);
+  const [usageLimitFocus, setUsageLimitFocus] = useState(0);
+  useEffect(() => {
+    if (agentSettingsRequestId === null) return;
+    setTabRequest({
+      sessionId: props.sessionId,
+      tab: "agent",
+      requestId: ++tabRequestSeq.current,
+    });
+    if (agentSettingsTarget === "usage-limit") setUsageLimitFocus((value) => value + 1);
+    else setAgentLearningFocus((value) => value + 1);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- the target travels with its request
+  }, [agentSettingsRequestId, props.sessionId]);
+  const goalPausedAtLimit = useMemo(() => goalPausedAtUsageLimit(props.events), [props.events]);
+  const currentTabRequest = tabRequest?.sessionId === props.sessionId ? tabRequest : null;
+  const dockLayoutStorageId = sessionDockLayoutStorageId(
+    context.accessContext.subjectId,
+    props.sessionId,
+  );
+  const dockNavigation = useMemo(
+    () => readSessionDockNavigation(dockLayoutStorageId),
+    [dockLayoutStorageId],
+  );
+  const rememberArtifact = useCallback(
+    (artifactId: string | null) => updateSessionDockNavigation(dockLayoutStorageId, { artifactId }),
+    [dockLayoutStorageId],
+  );
+  // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
+  // the package now; the app injects durable artifacts and Debug around it.
+  // Heavy editor/runtime code stays lazy until the user opens the tab.
+  // Tool output may have published a file or Site, here or in a sub-session;
+  // the end of a turn settles everything. Either re-reads the chat's artifacts.
+  const artifactRefreshSequence = useMemo(() => {
+    for (let index = props.events.length - 1; index >= 0; index -= 1) {
+      const event = props.events[index];
+      if (
+        event &&
+        (event.type === "agent.toolCall.output" ||
+          event.type === "turn.completed" ||
+          event.type === "turn.failed" ||
+          event.type === "turn.cancelled")
+      ) {
+        return event.sequence;
+      }
+    }
+    return 0;
+  }, [props.events]);
+  // Let the Artifacts page show its cached rows on the next visit but refetch them.
+  useEffect(() => {
+    if (artifactRefreshSequence) expireArtifactCatalog(context.client, props.workspaceId);
+  }, [artifactRefreshSequence, context.client, props.workspaceId]);
+  const artifactState = useSessionEditableArtifactSummaries({
+    workspaceId: props.workspaceId,
+    sessionId: props.sessionId,
+    refreshSequence: artifactRefreshSequence,
+  });
+  const expireAfterArtifactMutation = useArtifactCatalogMutationInvalidation(
+    context.client,
+    props.workspaceId,
+    expireArtifactCatalog,
+  );
+  const [artifactRequest, setArtifactRequest] = useState<{
+    sessionId: string;
+    artifactId: string;
+    artifactKind?: SessionEditableArtifactSummary["modality"] | undefined;
+    requestId: number;
+    tab: string;
+  } | null>(null);
+  const currentArtifactRequest =
+    artifactRequest?.sessionId === props.sessionId ? artifactRequest : null;
+  const artifactTabRequestId = currentArtifactRequest?.requestId ?? null;
+  useEffect(() => {
+    if (artifactTabRequestId === null) return;
+    setTabRequest({
+      sessionId: props.sessionId,
+      tab: "artifacts",
+      requestId: ++tabRequestSeq.current,
+    });
+  }, [artifactTabRequestId, props.sessionId]);
+  const artifactSummaries = [...artifactState.artifacts];
+  // A just-published artifact may be linked before discovery refresh completes, or
+  // belong to another session in this workspace. The viewer still authorizes its read.
+  if (
+    currentArtifactRequest &&
+    !artifactSummaries.some(
+      (item) =>
+        item.id === currentArtifactRequest.artifactId &&
+        (!currentArtifactRequest.artifactKind ||
+          item.modality === currentArtifactRequest.artifactKind ||
+          (currentArtifactRequest.artifactKind === "file" && item.modality === "image")),
+    )
+  ) {
+    artifactSummaries.push({
+      id: currentArtifactRequest.artifactId,
+      modality: currentArtifactRequest.artifactKind ?? "site",
+      title:
+        currentArtifactRequest.artifactKind === "image"
+          ? "Image"
+          : currentArtifactRequest.artifactKind === "file"
+            ? "File"
+            : "Site",
+    });
+  }
+  const trailingTabs: WorkspaceTab[] = [
+    {
+      id: "artifacts",
+      label: "Artifacts",
+      icon: <PanelsTopLeftIcon />,
+      ...(artifactSummaries.length > 0
+        ? {
+            badge: (
+              <span className="rounded-og-xs bg-og-accent-soft px-1 text-og-xs text-og-fg-muted">
+                {artifactSummaries.length}
+              </span>
+            ),
+          }
+        : {}),
+      content: (
+        <LazyPart fallback={<LoadingPanel label="Opening artifact" />}>
+          <LazySessionEditableArtifactsWorkspace
+            key={props.sessionId}
+            workspaceId={props.workspaceId}
+            sessionId={props.sessionId}
+            artifacts={artifactSummaries}
+            status={artifactState.status}
+            onRetry={artifactState.retry}
+            initialSelectedArtifactId={dockNavigation.artifactId}
+            openArtifactRequest={currentArtifactRequest}
+            onSelectedArtifactIdChange={rememberArtifact}
+            onPin={
+              hasWorkspacePermission(context.accessContext, props.workspaceId, "artifacts:publish")
+                ? async (item, pinned) => {
+                    await context.client.updateArtifactPin(
+                      props.workspaceId,
+                      item.kind,
+                      item.id,
+                      pinned,
+                    );
+                    artifactState.applyPin(item.kind, item.id, pinned);
+                    expireAfterArtifactMutation();
+                    artifactState.retry();
+                  }
+                : undefined
+            }
+          />
+        </LazyPart>
+      ),
+    },
+  ];
+  if (props.session) {
+    trailingTabs.push({
+      id: "agent",
+      label: "Settings",
+      icon: <SettingsIcon />,
+      content: (
+        <LazyPart fallback={<LoadingPanel label="Opening settings" />}>
+          <LazyAgentConfigurationPanel
+            key={props.session.id}
+            session={props.session}
+            lastChange={lastAgentChange(props.events)}
+            onReloadSession={props.onReloadSession}
+            learningFocusRequest={agentLearningFocus}
+            usageLimitFocusRequest={usageLimitFocus}
+            goalPausedAtUsageLimit={goalPausedAtLimit}
+          />
+        </LazyPart>
+      ),
+    });
+  }
+  if (props.session) {
+    trailingTabs.push({
+      id: "debug",
+      label: "Debug",
+      icon: <BugIcon />,
+      content: (
+        <LazyPart fallback={<LoadingPanel label="Opening debug inspector" />}>
+          <LazySessionInspector
+            session={props.session}
+            events={props.events}
+            connectionState={props.connectionState}
+            onReloadSession={props.onReloadSession}
+          />
+        </LazyPart>
+      ),
+    });
+  }
+
+  return (
+    <SessionWorkspace
+      workspaceId={props.workspaceId}
+      sessionId={props.sessionId}
+      preferenceOwnerId={context.accessContext.subjectId}
+      events={props.events}
+      primary={
+        <ArtifactLinkBoundary
+          workspaceId={props.workspaceId}
+          onOpen={(target) => {
+            // Editable artifacts require their discovered modality; unlisted editor
+            // links retain the normal full-page destination.
+            if (
+              target.editable &&
+              !artifactSummaries.some(
+                (item) => item.id === target.id && isEditableArtifactKind(item.modality),
+              )
+            )
+              return false;
+            setArtifactRequest((previous) => ({
+              sessionId: props.sessionId,
+              artifactId: target.id,
+              artifactKind:
+                target.kind === "file"
+                  ? (artifactSummaries.find(
+                      (item) =>
+                        item.id === target.id &&
+                        (item.modality === "file" || item.modality === "image"),
+                    )?.modality ?? "file")
+                  : target.editable
+                    ? artifactSummaries.find(
+                        (item) => item.id === target.id && isEditableArtifactKind(item.modality),
+                      )?.modality
+                    : "site",
+              requestId: (previous?.requestId ?? 0) + 1,
+              tab: "artifacts",
+            }));
+            return true;
+          }}
+        >
+          {props.primary}
+        </ArtifactLinkBoundary>
+      }
+      openTabRequest={currentTabRequest}
+      trailingTabs={trailingTabs}
+      collapsed={props.dockCollapsed}
+      onCollapsedChange={props.onDockCollapsedChange}
+      {...(props.openFileRequest ? { openFileRequest: props.openFileRequest } : {})}
+      mobileLeadingControl={
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Open navigation"
+          onClick={props.onOpenNavigation}
+          className="size-11"
+        >
+          <MenuIcon className="size-4" />
+        </Button>
+      }
+    />
+  );
+}
+
+function useSessionEditableArtifactSummaries(input: {
+  workspaceId: string;
+  sessionId: string;
+  refreshSequence: number;
+}): Readonly<{
+  artifacts: readonly SessionEditableArtifactSummary[];
+  status: SessionEditableArtifactsStatus;
+  retry: () => void;
+  applyPin: (kind: SessionEditableArtifactSummary["modality"], id: string, pinned: boolean) => void;
+}> {
+  const context = useAppContext();
+  const authorityKey = `${input.workspaceId}:${input.sessionId}:${context.accessKeyVersion}`;
+  const [retrySequence, setRetrySequence] = useState(0);
+  // One discovery at a time per view. A refresh asked for while one is in
+  // flight runs once after it, so a busy chat never stacks overlapping reads.
+  const discovery = useRef<{
+    key: string;
+    client: typeof context.client;
+    retrySequence: number;
+    running: boolean;
+    again: boolean;
+  } | null>(null);
+  const [loaded, setLoaded] = useState<{
+    key: string;
+    client: typeof context.client;
+    status: SessionEditableArtifactsStatus;
+    artifacts: readonly SessionEditableArtifactSummary[];
+  } | null>(null);
+
+  useEffect(
+    () => () => {
+      discovery.current = null;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (
+      discovery.current?.key !== authorityKey ||
+      discovery.current.client !== context.client ||
+      discovery.current.retrySequence !== retrySequence
+    )
+      discovery.current = {
+        key: authorityKey,
+        client: context.client,
+        retrySequence,
+        running: false,
+        again: false,
+      };
+    const run = discovery.current;
+    setLoaded((previous) =>
+      previous?.key === authorityKey &&
+      previous.client === context.client &&
+      previous.status === "ready"
+        ? previous
+        : {
+            key: authorityKey,
+            client: context.client,
+            status: "loading",
+            artifacts:
+              previous?.key === authorityKey && previous.client === context.client
+                ? previous.artifacts
+                : [],
+          },
+    );
+    if (run.running) {
+      run.again = true;
+      return;
+    }
+    const workspaceId = input.workspaceId;
+    const sessionId = input.sessionId;
+    const client = context.client;
+    // The stale-result fence is sufficient for this bounded metadata GET.
+    // Aborting Chrome fetch during React StrictMode cleanup surfaced an
+    // unhandled AbortError from the SDK/fetch boundary on every mount.
+    const live = () => discovery.current === run;
+    const previousArtifacts = (previous: typeof loaded) =>
+      previous?.key === authorityKey && previous.client === client ? previous.artifacts : [];
+    const start = () => {
+      run.running = true;
+      run.again = false;
+      void import("../lib/session-artifact-discovery")
+        .then(async ({ discoverSessionArtifacts }) => {
+          const reconcile = await discoverSessionArtifacts(workspaceId, sessionId, live, client);
+          if (live())
+            setLoaded((previous) => ({
+              key: authorityKey,
+              client,
+              ...reconcile(previousArtifacts(previous)),
+            }));
+        })
+        .catch(() => {
+          if (!live()) return;
+          setLoaded((previous) => ({
+            key: authorityKey,
+            client,
+            status: "error",
+            artifacts: previousArtifacts(previous),
+          }));
+        })
+        .finally(() => {
+          run.running = false;
+          if (run.again && live()) start();
+        });
+    };
+    start();
+  }, [
+    authorityKey,
+    context.client,
+    input.refreshSequence,
+    input.sessionId,
+    input.workspaceId,
+    retrySequence,
+  ]);
+
+  const retry = useCallback(() => setRetrySequence((value) => value + 1), []);
+  const applyPin = useCallback(
+    (kind: SessionEditableArtifactSummary["modality"], id: string, pinned: boolean) => {
+      setLoaded((previous) => {
+        if (previous?.key !== authorityKey || previous.client !== context.client) return previous;
+        return {
+          ...previous,
+          artifacts: previous.artifacts.map((artifact) =>
+            artifact.modality === kind && artifact.id === id && artifact.catalogItem
+              ? { ...artifact, catalogItem: { ...artifact.catalogItem, pinned } }
+              : artifact,
+          ),
+        };
+      });
+    },
+    [authorityKey, context.client],
+  );
+  return loaded?.key === authorityKey && loaded.client === context.client
+    ? { artifacts: loaded.artifacts, status: loaded.status, retry, applyPin }
+    : { artifacts: [], status: "loading", retry, applyPin };
+}
+
+/** One decision per approval and question round: a new round under the same id is new. */
+function approvalDecisionKey(approval: PendingApproval): string {
+  return `${approval.id}\u0000${approval.elicitation?.round ?? ""}`;
+}
+
+function SessionChatPane(props: {
+  session: Session;
+  /** A narrow panel beside another view gets narrower gutters. */
+  placement: SessionRoutePlacement;
+  /** The host view's per-message model context, beside the embedding host's. */
+  messageContext: (() => string | undefined) | undefined;
+  /** What the person typed while the host view created this chat. */
+  initialDraft: InitialComposerDraft | undefined;
+  /** Keep the raw detail snapshot: the general route projection prefers queue control. */
+  admissionSessionControl: Session["effectiveControl"];
+  events: SessionEvent[];
+  timeline: TimelineItem[];
+  searchTarget: SessionSearchRoute;
+  onJumpToSequence: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
+  initialLoading: boolean;
+  historyReloadFailed: boolean;
+  launch?: ComposerLaunchSearch | undefined;
+  realtimeAutostartModel?: SessionRealtimeModel | undefined;
+  onRealtimeAutostartConsumed: () => void;
+  onSearchOriginConsumed: () => void;
+  approvals: PendingApproval[];
+  humanInput: ReturnType<typeof useHumanInputRequests>;
+  failure: ReturnType<typeof summarizeSessionFailure> | null;
+  /** The last turn ended budget_exhausted — the workspace is out of credits. */
+  creditExhausted: boolean;
+  /** The one-fix refusal (own-key fee or API use) the last turn ended on, if any. */
+  creditRefusal: CreditRefusalKind | null;
+  goal: ReturnType<typeof useGoal>;
+  queue: ReturnType<typeof useTurnQueue>;
+  /** Spawned-worker lineage children — feeds SessionChrome agents segment. */
+  agentNodes: LineageNode[];
+  /** Something will wake this session on its own (a timed wait or an automation). */
+  pendingWake: boolean;
+  /** Bumped when a sub-session in this tree changed; open request cards re-read. */
+  descendantRefreshSignal: number;
+  /** A sub-session's request was settled from this page: re-read the tree. */
+  onDescendantResolved: () => void;
+  hasOlder: boolean;
+  loadingOlder: boolean;
+  onLoadOlder: OlderHistoryLoader;
+  hasNewer: boolean;
+  loadingNewer: boolean;
+  onLoadNewer: () => Promise<boolean>;
+  loadingOldest: boolean;
+  onJumpToStart: () => Promise<boolean>;
+  onJumpToLatest: () => Promise<void>;
+  /** Reset the local timeline view (the /clear-view command target). */
+  onClearView: () => void;
+  onOpenSession: (sessionId: string) => void;
+  /** Current titles for the agents this session spawns, messages, and hears from. */
+  resolveSessionTitle: (sessionId: string) => string | null;
+  /** Deep-link a timeline memory step to its first-class workspace Memory record. */
+  onMemoryClick: (memoryId: string) => void;
+  /** Opens where a person can make a refused Skill, instruction, or Knowledge change. */
+  onLearningRefusalOpen: (place: LearningRefusalPlace) => void;
+  onNewSession: () => void;
+  /** Starts a new chat that continues this archived chat's work. */
+  onContinueInNewSession: () => void;
+  /**
+   * Restores this archived chat so it can continue here; absent when this
+   * person can't, or for a sub-chat. Resolves whether a restore started.
+   */
+  onRestoreArchived?: (() => Promise<boolean>) | undefined;
+  onApprove: (approvalId: string, answer?: McpElicitationAnswer) => Promise<void>;
+  onReject: (approvalId: string) => Promise<void>;
+  onReconnect: (item: AuthNeededItem) => void | Promise<void>;
+  /** Opens workspace GitHub App setup in the route-level Connect dialog. */
+  onConnectGitHubApp: () => void;
+  resolveProviderLogo: (providerDomain: string) => string | null;
+  onReloadSession: () => Promise<void>;
+  onOpenSandboxFile: ((path: string, line?: number) => void) | undefined;
+  /** Composer + > Chat settings: open this chat's Settings tab. */
+  onOpenAgentSettings: (() => void) | undefined;
+  /** The usage limit notice's Change limit: open the Settings tab at Usage limit. */
+  onOpenUsageLimit: (() => void) | undefined;
+  connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
+}) {
+  const findEvents = useUiEventTarget("document");
+  const portalContainer = usePortalContainer();
+  // A chat in a panel beside another view takes the find shortcut only while
+  // focus is inside it, so the view (or the browser) keeps its own find.
+  const [panelRoot, setPanelRoot] = useState<HTMLDivElement | null>(null);
+  const context = useAppContext();
+  const api = useAppApi();
+  const page = usePage();
+  const navigate = useNavigate();
+  // `session:` chat links in agent text open the chat here; ⌘/Ctrl-click opens its page.
+  const openSession = useCallback(
+    (workspaceId: string, sessionId: string) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions/$sessionId",
+        params: { workspaceId, sessionId },
+      }),
+    [navigate],
+  );
+  const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId, openSession);
+  const hostMessageContext = useHostMessageContext();
+  const gutter = props.placement === "panel" ? "px-3" : "px-4 sm:px-6";
+  // Live voice starts only from the current build: a tab opened before a
+  // deploy reloads onto it once and resumes voice via `?realtime=`.
+  const realtimeClient = useMemo(
+    () => api.voiceRealtimeClient(context.client, () => page.href()),
+    [api, context.client, page],
+  );
+  // Opened on a moment (an inbox item, a notification): when it is older than
+  // the loaded tail, load the window around it; the timeline then lands on it.
+  const momentSequence = props.searchTarget.find ? undefined : props.searchTarget.at;
+  const loadedMoment = useRef<number | null>(null);
+  const { onJumpToSequence, initialLoading: historyLoading } = props;
+  const firstLoadedSequence = props.events[0]?.sequence;
+  useEffect(() => {
+    if (!momentSequence || historyLoading || loadedMoment.current === momentSequence) return;
+    loadedMoment.current = momentSequence;
+    if (firstLoadedSequence !== undefined && firstLoadedSequence > momentSequence) {
+      void onJumpToSequence(momentSequence);
+    }
+  }, [momentSequence, historyLoading, firstLoadedSequence, onJumpToSequence]);
+  const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
+  const [findMounted, setFindMounted] = useState(!!props.searchTarget.find);
+  const [findFocusRevision, setFindFocusRevision] = useState(0);
+  const [activeSearchTarget, setActiveSearchTarget] = useState<TimelineSearchTarget | null>(null);
+  // Find opens from the session header (or Ctrl/Cmd+F); closing returns focus
+  // to whatever opened it.
+  const findReturnFocus = useRef<HTMLElement | null>(null);
+  const openFind = useCallback(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body) findReturnFocus.current = active;
+    setFindMounted(true);
+    setFindOpen(true);
+    setFindFocusRevision((value) => value + 1);
+  }, []);
+  // The back link follows the URL's session-search origin, which closing the
+  // bar removes, so Ctrl/Cmd+F and the Find button then open a plain bar.
+  const { onSearchOriginConsumed } = props;
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    setActiveSearchTarget(null);
+    onSearchOriginConsumed();
+    requestAnimationFrame(() => {
+      // Back to whatever opened Find, else the header's Find button when shown.
+      const opener = findReturnFocus.current;
+      findReturnFocus.current = null;
+      const trigger = document.querySelector<HTMLElement>("[data-conversation-find-trigger]");
+      const target = opener?.isConnected
+        ? opener
+        : trigger && trigger.getClientRects().length > 0
+          ? trigger
+          : null;
+      target?.focus({ preventScroll: true });
+    });
+  }, [onSearchOriginConsumed]);
+  useEffect(() => {
+    findEvents.addEventListener(OPEN_CONVERSATION_FIND_EVENT, openFind);
+    return () => findEvents.removeEventListener(OPEN_CONVERSATION_FIND_EVENT, openFind);
+  }, [findEvents, openFind]);
+  useEffect(() => {
+    if (props.searchTarget.find) openFind();
+  }, [
+    props.searchTarget.find,
+    props.searchTarget.matchSequence,
+    props.searchTarget.matchOffset,
+    openFind,
+  ]);
+  useFindShortcut(
+    props.placement === "panel" ? { scope: panelRoot } : { scope: portalContainer ?? window },
+    openFind,
+  );
+  const fundingRevision = useMemo(() => {
+    for (let index = props.events.length - 1; index >= 0; index -= 1) {
+      const event = props.events[index]!;
+      if (event.type === "agent.model.usage") return event.sequence;
+    }
+    return 0;
+  }, [props.events]);
+  const modelCatalog = useWorkspaceModelCatalog(
+    props.session.workspaceId,
+    `${props.session.id}:${props.session.status}:${fundingRevision}`,
+  );
+  const fleet = useWorkspaceMachines({
+    sessionId: props.session.id,
+    pollIntervalMs: MACHINES_SESSION_POLL_MS,
+  });
+  const computeLabel = sessionComputeLabel(t, fleet.machines);
+  const loadRetainedScreenshot = useMemo(
+    () =>
+      createSessionRetainedScreenshotLoader(
+        context.client,
+        props.session.workspaceId,
+        props.session.id,
+      ),
+    [context.client, props.session.id, props.session.workspaceId],
+  );
+  const loadRetainedArtifact = useMemo(
+    () => createWorkspaceRetainedArtifactLoader(context.client, props.session.workspaceId),
+    [context.client, props.session.workspaceId],
+  );
+  const loadVideoArtifactPlayback = useMemo(
+    () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
+    [context.client, props.session.workspaceId],
+  );
+  // Archived (moving to or in long-term storage): readable, not continuable.
+  const readOnlyArchive = sessionReadOnlyArchive(props.session);
+  // Archiving a chat cancels its running work, so an archived chat often has
+  // the `cancelled` status too: it still reads as archived, never cancelled.
+  const cancelled = readOnlyArchive === null && isTerminalSessionStatus(props.session.status);
+  const terminal = cancelled || readOnlyArchive !== null;
+  const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
+  const composerRegionRef = useRef<HTMLDivElement | null>(null);
+  const [composerFocusSignal, setComposerFocusSignal] = useState(0);
+  const focusEvents = useUiEventTarget("window");
+  const [modelPickerSession, setModelPickerSession] = useState<string | null>(null);
+  // The API's authoritative "model is not available" refusal for this session,
+  // which also covers connection-owned models the catalog cannot judge.
+  const [refusedModel, setRefusedModel] = useState<{ sessionId: string; model: string } | null>(
+    null,
+  );
+  // The API's credit refusal of a Send: no remaining credit pays for that model.
+  // It stays above the composer until a message is accepted or it is dismissed.
+  const [creditRefusal, setCreditRefusal] = useState<CreditRefusalRecord<{
+    sessionId: string;
+  }> | null>(null);
+  useEffect(() => {
+    const onFocusRequest = (event: Event) => {
+      const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
+      if (
+        detail?.workspaceId === props.session.workspaceId &&
+        detail.sessionId === props.session.id
+      ) {
+        setComposerFocusSignal(detail.nonce);
+      }
+    };
+    focusEvents.addEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
+    return () => focusEvents.removeEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
+  }, [focusEvents, props.session.id, props.session.workspaceId]);
+  // Opening a chat (a sidebar click, ⌘K, Control+Tab, a link or a reload)
+  // puts the cursor in its composer, since typing is what comes next. Without
+  // an explicit intent, only the first effect run for a chat may do this, and
+  // only while nothing else has focus.
+  const loadFocusSessionRef = useRef<string | null>(null);
+  // The wait outlives effect re-runs (status, approvals) but not the chat.
+  const composerFocusWaitRef = useRef<{ sessionId: string; cancel: () => void } | null>(null);
+  useEffect(
+    () => () => {
+      composerFocusWaitRef.current?.cancel();
+      composerFocusWaitRef.current = null;
+    },
+    [],
+  );
+  useEffect(() => {
+    if (
+      composerFocusWaitRef.current &&
+      composerFocusWaitRef.current.sessionId !== props.session.id
+    ) {
+      composerFocusWaitRef.current.cancel();
+      composerFocusWaitRef.current = null;
+    }
+    const intent = consumeSessionComposerFocusIntent(
+      focusEvents,
+      props.session.workspaceId,
+      props.session.id,
+    );
+    const firstRunForChat = loadFocusSessionRef.current !== props.session.id;
+    loadFocusSessionRef.current = props.session.id;
+    const source = intent?.source ?? (firstRunForChat ? "load" : null);
+    if (!source) return;
+    if (
+      !sessionComposerFocusIntentIsEligible({
+        viewportWidth: globalThis.innerWidth,
+        coarsePointer: globalThis.matchMedia?.("(pointer: coarse)").matches ?? false,
+        terminal,
+        requiresAction: props.session.status === "requires_action",
+        pendingHumanInput: props.humanInput.requests.length > 0,
+        pendingApproval: props.approvals.length > 0,
+      })
+    ) {
+      return;
+    }
+    composerFocusWaitRef.current?.cancel();
+    composerFocusWaitRef.current = {
+      sessionId: props.session.id,
+      cancel: focusSessionComposerWhenReady({
+        textarea: () => composerRegionRef.current?.querySelector("textarea"),
+        sessionId: props.session.id,
+        source,
+      }),
+    };
+  }, [
+    composerFocusSignal,
+    focusEvents,
+    props.approvals.length,
+    props.humanInput.requests.length,
+    props.session.id,
+    props.session.status,
+    props.session.workspaceId,
+    terminal,
+  ]);
+  const agentsSignal = useMemo(() => sessionAgentsSignal(t, props.agentNodes), [props.agentNodes]);
+  // Sub-sessions resuming from an approval decided on their card here: kept
+  // in the list so the pause's other approvals stay decidable meanwhile.
+  const [resumingSubSessions, setResumingSubSessions] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const onSubSessionResumingChange = useCallback((sessionId: string, resuming: boolean) => {
+    setResumingSubSessions((current) => {
+      if (current.has(sessionId) === resuming) return current;
+      const next = new Set(current);
+      if (resuming) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
+  const waitingSubSessions = useMemo(
+    () => waitingDescendants(props.agentNodes, resumingSubSessions),
+    [props.agentNodes, resumingSubSessions],
+  );
+  // A sub-session whose turn ended (idle, failed) is no longer resuming.
+  useEffect(() => {
+    if (resumingSubSessions.size === 0) return;
+    const live = new Set(waitingSubSessions.map((session) => session.id));
+    for (const id of resumingSubSessions) {
+      if (!live.has(id)) onSubSessionResumingChange(id, false);
+    }
+  }, [onSubSessionResumingChange, resumingSubSessions, waitingSubSessions]);
+  const codexConnected = modelCatalog.models.some(
+    (candidate) =>
+      candidate.provider === "codex-subscription" &&
+      candidate.credentialReadiness.status === "ready",
+  );
+  // Soft-hide dictate while realtime voice owns the mic (model + mutes stay on the bar).
+  const [voiceActive, setVoiceActive] = useState(false);
+  const onVoiceActiveChange = useCallback((active: boolean) => {
+    setVoiceActive(active);
+  }, []);
+  // Per-approval decision state: an in-flight decision disables both buttons for
+  // that approval and shows progress; a settled one can never double-submit even
+  // if the strip lingers for a beat before the status flips.
+  const [selectedApprovalId, setSelectedApprovalId] = useState<string | null>(null);
+  const [reviewDetails, setReviewDetails] = useState<{
+    review: import("@opengeni/sdk").ToolActionReview;
+    path: string;
+    origin?: string | undefined;
+  } | null>(null);
+  const loadToolReview = useCallback(
+    (approval: PendingApproval) =>
+      context.client.getToolActionReview(props.session.workspaceId, props.session.id, approval.id),
+    [context.client, props.session.workspaceId, props.session.id],
+  );
+  const loadRecordedToolReview = useCallback(
+    (id: string) =>
+      context.client.getToolActionReview(props.session.workspaceId, props.session.id, id),
+    [context.client, props.session.workspaceId, props.session.id],
+  );
+  const viewToolReviewDetails = useCallback(
+    (review: import("@opengeni/sdk").ToolActionReview, path: string) =>
+      setReviewDetails({
+        review,
+        path,
+        origin:
+          document.activeElement
+            ?.closest("[data-review-origin]")
+            ?.getAttribute("data-review-origin") ?? undefined,
+      }),
+    [],
+  );
+  const loadToolReviewDetails = useCallback(
+    (review: import("@opengeni/sdk").ToolActionReview, path: string, offset: number) =>
+      context.client.getToolReviewDetails(props.session.workspaceId, props.session.id, review.id, {
+        actionDigest: review.actionDigest,
+        path,
+        offset,
+      }),
+    [context.client, props.session.workspaceId, props.session.id],
+  );
+  const [approvalPending, setApprovalPending] = useState<Record<string, "approve" | "reject">>({});
+  const [approvalSettled, setApprovalSettled] = useState<Record<string, "approve" | "reject">>({});
+  // Decision state is scoped to ONE turn's pauses. A decision resumes the turn
+  // while the pause's other approvals stay decidable, so the maps reset only
+  // when the turn ends, and each entry is keyed by the question round it
+  // decided: an MCP server asking again under the same call id asks anew.
+  useEffect(() => {
+    if (!approvalsDecidable(props.session.status)) {
+      setApprovalPending((current) => (Object.keys(current).length ? {} : current));
+      setApprovalSettled((current) => (Object.keys(current).length ? {} : current));
+    }
+  }, [props.session.status]);
+  // An approval no longer waiting drops its entry, so long sessions never
+  // accumulate stale ones.
+  useEffect(() => {
+    const waiting = new Set(props.approvals.map(approvalDecisionKey));
+    setApprovalSettled((current) => {
+      const kept = Object.entries(current).filter(([key]) => waiting.has(key));
+      return kept.length === Object.keys(current).length ? current : Object.fromEntries(kept);
+    });
+  }, [props.approvals]);
+  // Rapid clicks land before React re-renders with the pending state, so the
+  // in-flight fence is a ref: one request per approval, however fast.
+  const approvalInFlightRef = useRef(new Set<string>());
+  const decideApproval = useCallback(
+    async (approvalId: string, decision: "approve" | "reject", answer?: McpElicitationAnswer) => {
+      const approval = props.approvals.find((candidate) => candidate.id === approvalId);
+      const key = approval ? approvalDecisionKey(approval) : approvalId;
+      if (approvalInFlightRef.current.has(key) || approvalPending[key] || approvalSettled[key]) {
+        return;
+      }
+      approvalInFlightRef.current.add(key);
+      setApprovalPending((current) => ({ ...current, [key]: decision }));
+      // A failure propagates so the approval surface releases its fence and
+      // the buttons stay live for a retry.
+      try {
+        await (decision === "approve"
+          ? props.onApprove(approvalId, answer)
+          : props.onReject(approvalId));
+        setApprovalSettled((current) => ({
+          ...current,
+          [key]: decision,
+        }));
+      } finally {
+        approvalInFlightRef.current.delete(key);
+        setApprovalPending((current) => {
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
+      }
+    },
+    [approvalPending, approvalSettled, props],
+  );
+  // Workspace-scoped: the provider (mounted on the workspace route) supplies
+  // the workspaceId, so the hook needs no positional argument.
+  const attachments = useFileAttachments({ scope: uploadScopeForSession(props.session) });
+  const repositories = useFollowUpRepositories(props.session, props.onConnectGitHubApp);
+  const firstPartyToolOptions = firstPartySessionToolOptionsFor(
+    clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
+  );
+  const selectableSessionMcpServers = context.toolMcpServers;
+  const selectableToolIds = useMemo(
+    () => selectableSessionMcpServers.map((server) => server.id),
+    [selectableSessionMcpServers],
+  );
+  const policyToolIds = useMemo(
+    () => sessionPolicyPickerIds(props.session, selectableToolIds, context.workspaceDefaultToolIds),
+    [context.workspaceDefaultToolIds, props.session, selectableToolIds],
+  );
+  const [durableToolSelection, setDurableToolSelection] = useState<SessionToolSelection>(() => ({
+    mcpServerIds: new Set(policyToolIds),
+    firstPartyToolIds: new Set(props.session.firstPartyMcpTools),
+  }));
+  const [durableToolsSnapshot, setDurableToolsSnapshot] = useState(props.session);
+  const durableToolsSaveInFlight = useRef(false);
+  const [durableToolsHydrated, setDurableToolsHydrated] = useState(false);
+  const durableToolsSessionId = useRef(props.session.id);
+  const [durableToolsSaving, setDurableToolsSaving] = useState(false);
+  const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
+  const [connectorCustomizingOverride, setConnectorCustomizingOverride] = useState<boolean | null>(
+    null,
+  );
+  // "+" > Runs on: the compute this chat runs on and the machines it can move to.
+  const runsOn = useSessionRunsOn(props.session.id, props.session.sandboxBackend);
+  const machineAccess = currentSessionMachineAccess(
+    runsOn.fleet.sessionMachineAccess,
+    props.session.activeSandboxId,
+  );
+  // The chat is shared with other people in the workspace, so the owner of
+  // the personal machine it runs on gets a heads-up that they see the work on
+  // it. A Personal workspace has nobody else in it.
+  const sharedChat =
+    props.session.tenancy?.visibility === "workspace" &&
+    !isPersonalWorkspace(
+      context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null,
+      context.managedSelfContext,
+    );
+  const showMachineAccess = machineAccess !== null && (!machineAccess.isOwner || sharedChat);
+  const connectionAccounts = useConnectionAccounts(
+    context.client,
+    {
+      id: props.session.id,
+      workspaceId: props.session.workspaceId,
+      selectedIds: [...durableToolSelection.mcpServerIds],
+    },
+    context.workspaceCapabilityCatalog,
+    context.accessContext === null
+      ? null
+      : hasWorkspacePermission(
+          context.accessContext,
+          props.session.workspaceId,
+          "connections:read",
+        ),
+  );
+  // A conversation card's human attach is an ordinary Send. It reads the
+  // composer's policy, control and account choices at click time.
+  const chatSendContext = useRef<ChatSendContext>({
+    blocked: null,
+    awaitingHuman: false,
+    extras: {},
+  });
+  const readChatSendContext = useCallback(() => chatSendContext.current, []);
+  // "+" > Runs on: moving onto the person's own machine is their consent to use
+  // it here, so it goes through the same move as the machine card (repoint, then
+  // a message that carries that consent). Other machines only repoint.
+  const runsOnAttach = runsOn.fleet.attach;
+  const runsOnPreviousSandboxId = runsOn.fleet.activeSandboxId;
+  // While the chat runs on the person's own machine (only its owner sees it in
+  // their list), each message renews their consent for this chat, so a chat
+  // whose move message never landed recovers on the next ordinary Send. The
+  // session's own pointer must agree, so a move the agent or another tab made
+  // since the last machine poll doesn't send consent for a machine it left.
+  const runsOnActiveMachineConsent =
+    runsOn.activeMachine &&
+    isPersonalMachine(runsOn.activeMachine) &&
+    runsOn.activeMachine.sandboxId === props.session.activeSandboxId
+      ? personalMachineUseIntent(props.session.tenancy)
+      : undefined;
+  const runsOnCanMessage =
+    context.accessContext === null ||
+    context.accessContext === undefined ||
+    hasWorkspacePermission(context.accessContext, props.session.workspaceId, "sessions:control");
+  const reloadSessionAfterMachineChange = props.onReloadSession;
+  // A saved message approved for another of the person's machines already
+  // carries that machine's consent, so moving the chat back only repoints it
+  // (no "use this machine" message); the notice rechecks and re-reads right after.
+  const moveSavedMessage = runsOnAttach;
+  const moveRunsOn = useCallback(
+    async (machine: MachineView): Promise<string | null> => {
+      if (!isPersonalMachine(machine)) {
+        if (!(await runsOnAttach(machine.sandboxId)))
+          return "The machine change could not be confirmed. Try refreshing the machine list.";
+        await reloadSessionAfterMachineChange();
+        return null;
+      }
+      const result = await moveChatToMachine({
+        machine,
+        chat: readChatSendContext(),
+        canMessage: runsOnCanMessage,
+        previousSandboxId: runsOnPreviousSandboxId,
+        attach: runsOnAttach,
+        sendMessage: (message) =>
+          context.client.sendMessage(props.session.workspaceId, props.session.id, message),
+      });
+      if (result.moved) await reloadSessionAfterMachineChange();
+      return result.moved
+        ? null
+        : (result.reason ??
+            "The machine change could not be confirmed. Refresh the machine list and try again.");
+    },
+    [
+      context.client,
+      props.session.id,
+      props.session.workspaceId,
+      reloadSessionAfterMachineChange,
+      readChatSendContext,
+      runsOnAttach,
+      runsOnCanMessage,
+      runsOnPreviousSandboxId,
+    ],
+  );
+  // Session reads return a new resources array; keep the identity while the
+  // contents match so timeline renderers keyed on it do not reset.
+  const sessionResourcesKey = stableJson(props.session.resources);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by content
+  const stableSessionResources = useMemo(() => props.session.resources, [sessionResourcesKey]);
+  const reloadSessionAfterSetup = props.onReloadSession;
+  const refreshConnectionAccounts = connectionAccounts.refresh;
+  const afterConnectionSetup = useCallback(async () => {
+    await reloadSessionAfterSetup();
+    await refreshConnectionAccounts();
+  }, [reloadSessionAfterSetup, refreshConnectionAccounts]);
+  const renderAuthNeeded = useCallback(
+    (item: AuthNeededItem) => {
+      const recommendation = item.setupRequest
+        ? item
+        : sessionAuthRecommendation(t, item, context.workspaceCapabilityCatalog);
+      return recommendation ? (
+        <Suspense
+          fallback={
+            <p role="status" className="text-sm text-fg-muted">
+              Loading connection card…
+            </p>
+          }
+        >
+          <SessionCapabilityCard
+            key={`${props.session.id}:${props.session.tenancy?.authorityEpoch}:${item.id}`}
+            item={recommendation}
+            workspaceId={props.session.workspaceId}
+            sessionId={props.session.id}
+            visibility={props.session.tenancy?.visibility ?? "workspace"}
+            resources={stableSessionResources}
+            sendContext={readChatSendContext}
+            onConfigured={afterConnectionSetup}
+          />
+        </Suspense>
+      ) : undefined;
+    },
+    [
+      context.workspaceCapabilityCatalog,
+      props.session.id,
+      props.session.workspaceId,
+      props.session.tenancy?.visibility,
+      props.session.tenancy?.authorityEpoch,
+      stableSessionResources,
+      readChatSendContext,
+      afterConnectionSetup,
+    ],
+  );
+  const launch = props.launch ?? EMPTY_COMPOSER_LAUNCH;
+  const launchModel = launch.model;
+  const launchEffort = launch.effort;
+  const launchLatency = launch.latency;
+  const launchRealtime = launch.realtime;
+  const launchKey = composerLaunchSearchKey(launch);
+  const appliedLaunchKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (durableToolsSessionId.current !== props.session.id) {
+      durableToolsSessionId.current = props.session.id;
+      setDurableToolsSnapshot(props.session);
+      setDurableToolsHydrated(false);
+      setConnectorCustomizingOverride(null);
+      return;
+    }
+    if (!context.workspaceMcpCatalogReady) {
+      setDurableToolsHydrated(false);
+      return;
+    }
+    if (durableToolsSaving) return;
+    // A PATCH response can be newer than the parent query. Never let stale
+    // props restore a connector the user just excluded.
+    const snapshot =
+      props.session.toolPolicyVersion > durableToolsSnapshot.toolPolicyVersion
+        ? props.session
+        : durableToolsSnapshot;
+    if (snapshot !== durableToolsSnapshot) setDurableToolsSnapshot(snapshot);
+    const nextMcpIds = sessionPolicyPickerIds(
+      snapshot,
+      selectableToolIds,
+      context.workspaceDefaultToolIds,
+    );
+    const nextFirstPartyIds = new Set(snapshot.firstPartyMcpTools);
+    setDurableToolSelection((current) =>
+      current.mcpServerIds.size === nextMcpIds.size &&
+      [...nextMcpIds].every((id) => current.mcpServerIds.has(id)) &&
+      current.firstPartyToolIds.size === nextFirstPartyIds.size &&
+      [...nextFirstPartyIds].every((id) => current.firstPartyToolIds.has(id))
+        ? current
+        : { mcpServerIds: nextMcpIds, firstPartyToolIds: nextFirstPartyIds },
+    );
+    setDurableToolsHydrated(true);
+  }, [
+    context.workspaceMcpCatalogReady,
+    context.workspaceDefaultToolIds,
+    selectableToolIds,
+    durableToolsSaving,
+    durableToolsSnapshot,
+    props.session,
+  ]);
+  const connectorCustomizing =
+    connectorCustomizingOverride ?? sessionConnectorPolicyIsCustomized(durableToolsSnapshot);
+  const applyDurableToolPolicy = useCallback(
+    async (request: UpdateSessionToolPolicyRequest, optimistic?: SessionToolSelection) => {
+      if (durableToolsSaveInFlight.current) return;
+      durableToolsSaveInFlight.current = true;
+      const targetSessionId = props.session.id;
+      if (optimistic) setDurableToolSelection(optimistic);
+      setDurableToolsSaving(true);
+      setDurableToolsError(null);
+      try {
+        const updated = await context.client.updateSessionToolPolicy(
+          props.session.workspaceId,
+          targetSessionId,
+          request,
+        );
+        if (durableToolsSessionId.current !== targetSessionId) return;
+        setDurableToolSelection({
+          mcpServerIds: sessionPolicyPickerIds(
+            updated,
+            selectableToolIds,
+            context.workspaceDefaultToolIds,
+          ),
+          firstPartyToolIds: new Set(updated.firstPartyMcpTools),
+        });
+        setDurableToolsSnapshot(updated);
+        setConnectorCustomizingOverride((current) => (current === true ? true : null));
+      } catch (error) {
+        const message = userErrorText(error);
+        setDurableToolsError(message);
+        toast.error("Couldn't save session tools", { description: message });
+        try {
+          const refreshed = await context.client.getSession(
+            props.session.workspaceId,
+            props.session.id,
+          );
+          if (durableToolsSessionId.current !== targetSessionId) return;
+          setDurableToolSelection({
+            mcpServerIds: sessionPolicyPickerIds(
+              refreshed,
+              selectableToolIds,
+              context.workspaceDefaultToolIds,
+            ),
+            firstPartyToolIds: new Set(refreshed.firstPartyMcpTools),
+          });
+          setDurableToolsSnapshot(refreshed);
+          setConnectorCustomizingOverride((current) => (current === true ? true : null));
+        } catch {
+          if (durableToolsSessionId.current === targetSessionId) {
+            setDurableToolSelection({
+              mcpServerIds: sessionPolicyPickerIds(
+                durableToolsSnapshot,
+                selectableToolIds,
+                context.workspaceDefaultToolIds,
+              ),
+              firstPartyToolIds: new Set(durableToolsSnapshot.firstPartyMcpTools),
+            });
+          }
+        }
+      } finally {
+        durableToolsSaveInFlight.current = false;
+        setDurableToolsSaving(false);
+      }
+    },
+    [
+      context.client,
+      context.workspaceDefaultToolIds,
+      durableToolsSnapshot,
+      props.session.id,
+      props.session.workspaceId,
+      selectableToolIds,
+    ],
+  );
+  const saveDurableToolPolicy = useCallback(
+    async (next: SessionToolSelection) => {
+      await applyDurableToolPolicy(
+        connectorSelectionUpdate(
+          durableToolsSnapshot,
+          durableToolSelection.mcpServerIds,
+          next.mcpServerIds,
+          context.workspaceDefaultToolIds,
+        ),
+        {
+          mcpServerIds: new Set(next.mcpServerIds),
+          firstPartyToolIds: new Set(next.firstPartyToolIds),
+        },
+      );
+    },
+    [
+      applyDurableToolPolicy,
+      context.workspaceDefaultToolIds,
+      durableToolsSnapshot,
+      durableToolSelection,
+    ],
+  );
+  // Send's guard; whether the model choice can run is worked out below from
+  // the composer's own policy (see useSessionSendGate).
+  const sendGate = useSessionSendGate();
+  const workspace =
+    context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
+  const loadSkillReview = useCallback(
+    (reference: NonNullable<import("@opengeni/sdk").HumanInputQuestion["skillReview"]>) =>
+      context.client.readWorkspaceSkill(
+        props.session.workspaceId,
+        reference.skillId,
+        reference.revisionId,
+      ),
+    // A browser-account switch must discard the previous actor's loaded preview
+    // even when the SDK client instance and workspace remain unchanged.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [context.client, props.session.workspaceId, context.accessContext.subjectId],
+  );
+  const fixedResourceCatalogEnabled = props.session.sandboxBackend !== "selfhosted";
+  const fixedRigScope = useFixedRigScope(
+    context.client,
+    workspace?.id ?? null,
+    props.session.rigId,
+    fixedResourceCatalogEnabled &&
+      hasWorkspacePermission(context.accessContext, props.session.workspaceId, "rigs:use"),
+  );
+  const personalAttachment = usePersonalResourceAttachment({
+    client: context.client,
+    authMode: context.clientConfig.auth.mode,
+    authSession: context.authSession,
+    accessSubjectId: context.accessContext.subjectId,
+    accessContext: context.accessContext,
+    managedSelfContext: context.managedSelfContext,
+    workspace,
+    session: props.session,
+    enabled: props.session.sandboxBackend !== "selfhosted",
+    fixed: {
+      rigId: props.session.rigId,
+      rigScope: fixedRigScope,
+      connectedMachine: null,
+    },
+    personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
+    onReloadSession: props.onReloadSession,
+  });
+  const sendState: SessionSendState = {
+    uploadPending: attachments.hasUnresolved,
+    repositoryError: repositories.error,
+    personalDecision:
+      personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
+    machineAccessDenied: machineAccess !== null && !machineAccess.isOwner,
+    loading:
+      durableToolsSaving ||
+      durableToolsSaveInFlight.current ||
+      !durableToolsHydrated ||
+      personalAttachment.loading ||
+      personalAttachment.refreshing ||
+      connectionAccounts.loading,
+    loadFailed:
+      connectionAccounts.error === null
+        ? false
+        : connectionAccounts.accessDenied
+          ? "denied"
+          : connectionAccounts.unavailable
+            ? "updating"
+            : "failed",
+  };
+  const composerSendBlocker = () => sendGate.blocker(sendState);
+  const workspaceAccountId = context.workspaces.find(
+    (candidate) => candidate.id === props.session.workspaceId,
+  )?.accountId;
+  const canBuyCredits =
+    context.clientConfig.billingMode === "stripe" &&
+    Boolean(workspaceAccountId) &&
+    hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
+  const composer = useComposer(props.session.id, {
+    canBuyCredits,
+    events: props.events,
+    sendExtras: () => ({
+      ...withHostMessageContext(hostMessageContext, props.messageContext),
+      resources: [...attachments.readyResources, ...repositories.pendingResources],
+      connectionAccounts: [
+        ...connectionAccounts.selections,
+        ...(repositories.pendingResources.some(
+          (resource) =>
+            resource.kind === "repository" && resource.connectionType === "github_personal",
+        ) && context.personalGitHubAuthority
+          ? [context.personalGitHubAuthority]
+          : []),
+      ],
+      ...(personalAttachment.intent
+        ? { personalResourceAttachment: personalAttachment.intent }
+        : runsOnActiveMachineConsent
+          ? { personalResourceAttachment: runsOnActiveMachineConsent }
+          : {}),
+    }),
+    sendBlocked: () => composerSendBlocker() !== null,
+    effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
+    sendDestination: () =>
+      promptSendDestination({
+        status: props.session.status,
+        activeTurnId: props.session.activeTurnId,
+        queuedPrompts: props.queue.queue.length,
+        admissionBlock: props.session.admissionBlock,
+      }),
+    busySend: resolveWorkspaceBusySend(workspace?.settings),
+    ...(props.initialDraft ? { initialDraft: props.initialDraft } : {}),
+    // The console always offers the other choice beside Send.
+    offerQueue: true,
+    // Ordinary Send is acknowledged locally. Clear only resources captured in
+    // that immutable optimistic operation; later additions belong to the next
+    // draft, while retry keeps the original resource refs in the failed bubble.
+    onSubmitted: (_text, input) => {
+      noteTurnFailureAction("send_message");
+      attachments.removeReadyFiles(
+        (input.resources ?? []).flatMap((resource) =>
+          resource.kind === "file" ? [resource.fileId] : [],
+        ),
+      );
+      repositories.commitSent(input.resources ?? []);
+    },
+    // Steer and recovered sends do not pass through onSubmitted. Keep the
+    // host-owned upload/repository queue in sync once those inputs are
+    // accepted too; the immutable input snapshot preserves later additions.
+    onSent: (_text, input) => {
+      setCreditRefusal(null);
+      attachments.removeReadyFiles(
+        (input.resources ?? []).flatMap((resource) =>
+          resource.kind === "file" ? [resource.fileId] : [],
+        ),
+      );
+      repositories.commitSent(input.resources ?? []);
+      personalAttachment.onAccepted(input);
+    },
+    onDeliveryError: (error, input, delivery) => {
+      personalAttachment.onDeliveryError(error, input, delivery);
+      connectionAccounts.onSelectionError(error);
+      // Retrying cannot help: re-read the catalog so the composer offers a
+      // replacement, and open the picker so the next step is visible.
+      if (isModelUnavailableSubmissionError(error)) {
+        const refused = refusedModelId(error, input);
+        if (refused) setRefusedModel({ sessionId: props.session.id, model: refused });
+        void modelCatalog.refresh();
+        setModelPickerSession(props.session.id);
+      }
+      // Re-read funding so the notice and picker name what the credit covers now.
+      const refusal = creditRefusalRecord(
+        error,
+        { sessionId: props.session.id },
+        refusedModelId(error, input) ?? props.session.model,
+      );
+      if (refusal) {
+        setCreditRefusal(refusal);
+        void modelCatalog.refresh();
+      }
+    },
+  });
+  // A dropped event stream (an update or brief outage) reads as "updating" in
+  // the composer while it reconnects.
+  const composerView = useComposerWithStreamState(
+    composer,
+    props.connectionState,
+    props.initialLoading,
+  );
+  const queuedRecall = useQueuedPromptRecall({
+    queue: props.queue,
+    composer,
+    subjectId: context.accessContext.subjectId,
+    enabled: !terminal,
+  });
+  useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
+    if (attachments.hasUnresolved) {
+      return {
+        id: "ignored",
+        label: "A file upload is not settled",
+        detail: "Wait for the upload or remove it before changing accounts.",
+      };
+    }
+    if (composer.sending || composer.draftSaving || durableToolsSaving) {
+      return {
+        id: "ignored",
+        label: "A session mutation is still running",
+        detail: "Wait for the current save or send to finish.",
+      };
+    }
+    return composer.hasDraftContent()
+      ? {
+          id: "ignored",
+          label: "This session has an unsent draft",
+          detail: "Continuing clears the account-bound composer state.",
+        }
+      : null;
+  });
+  chatSendContext.current = {
+    blocked: sessionReadOnlyArchive(props.session)
+      ? "This chat is archived. Continue in a new chat to use a repository."
+      : isTerminalSessionStatus(props.session.status)
+        ? "This chat has ended. Start a new chat to use a repository."
+        : connectionAccounts.requiresAccountChoice
+          ? "Choose an account for this chat's connected tools in the composer first."
+          : personalAttachment.requiresDecision
+            ? "Finish the personal access choice in the composer first."
+            : null,
+    awaitingHuman:
+      props.session.status === "requires_action" && !sessionAdmissionBlocked(props.session),
+    // Moving the chat onto the person's own machine turns it on in this workspace.
+    personalMachineIntent: personalMachineUseIntent(props.session.tenancy, "always"),
+    extras: {
+      ...(composer.sendPolicy ?? {}),
+      ...((props.queue.effectiveControl ?? props.session.effectiveControl)?.controlEtag
+        ? {
+            controlEtag: (props.queue.effectiveControl ?? props.session.effectiveControl)!
+              .controlEtag,
+          }
+        : {}),
+      ...(connectionAccounts.selections.length > 0
+        ? { connectionAccounts: connectionAccounts.selections }
+        : {}),
+    },
+  };
+  const composerPolicy = composer.policy;
+  const [retryOperation, setRetryOperation] = useState<FailedSessionRetryInput | null>(null);
+  const pendingRetryInput =
+    retryOperation?.failureEventId === props.failure?.failureEventId ? retryOperation : null;
+  // A failure before a logical turn exists cannot preserve an original intent.
+  // Prefer detail evidence; paged timeline absence is not positive eligibility.
+  const failureTurnId =
+    props.session.failureDiagnostics?.eventId === props.failure?.failureEventId
+      ? props.session.failureDiagnostics?.turnId
+      : props.events.find((event) => event.id === props.failure?.failureEventId)?.turnId;
+  const retryHasRetainedTurn = Boolean(failureTurnId);
+  const retryFailedSession = useMemo(
+    () =>
+      createFailedSessionRetry(
+        (input) => context.client.retrySession(props.session.workspaceId, props.session.id, input),
+        setRetryOperation,
+      ),
+    [context.client, props.session.workspaceId, props.session.id],
+  );
+  const composerDraftLoading = composer.draftLoading;
+  const setComposerModel = composer.setModel;
+  const setComposerReasoningEffort = composer.setReasoningEffort;
+  const setComposerLatencyMode = composer.setLatencyMode;
+  const hasComposerPolicy = composerPolicy !== null;
+  const modelPickerDisabled =
+    composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
+  const canChooseRecoveryModel = !modelPickerDisabled;
+  // An own-key or API stop names its one fix; no model choice or free credit fixes it.
+  const stopRefusal = props.creditExhausted ? props.creditRefusal : null;
+  // The failure events the banner presents, which the timeline then doesn't repeat.
+  const bannerFailureIds = useMemo(
+    () =>
+      props.failure
+        ? bannerFailureEventIds(
+            props.events,
+            props.failure,
+            // As the banner: a structural sandbox failure outranks a credit stop.
+            props.creditExhausted && !props.failure.structuralSandboxFailure,
+          )
+        : undefined,
+    [props.events, props.failure, props.creditExhausted],
+  );
+  // Free credit can still cover other models after this model's credit ran out.
+  const creditGap =
+    props.creditExhausted && !stopRefusal
+      ? freeCreditGap(modelCatalog.rows, props.session.model, {
+          selectedModel: composerPolicy?.model,
+          preferredModel: modelCatalog.defaultSelection?.model,
+        })
+      : null;
+  // Shown while the banner chunk loads or if it fails. On the free model the
+  // generic daily-limit line then gives way to the free-model copy; that brief
+  // text change keeps the free-model copy out of the direct session bundle.
+  // The timeline leaves this failure's text to the banner, so the fallback
+  // keeps the recorded text reachable too.
+  const fallbackCopy = props.failure
+    ? failedSessionCopy(
+        props.failure,
+        props.creditExhausted && !props.failure.structuralSandboxFailure,
+        Boolean(composerPolicy && composerPolicy.model !== props.session.model),
+        canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
+        creditGap,
+        stopRefusal,
+      )
+    : null;
+  const fallbackReason = fallbackCopy ? failureFallbackReason(fallbackCopy, canBuyCredits) : "";
+  const fallbackDetail = detailBeyondHeadline(fallbackReason, fallbackCopy?.detail);
+  const failureFallback = fallbackCopy ? (
+    <div role="alert" className={cn("mx-auto my-2 w-full max-w-3xl text-sm text-fg-muted", gutter)}>
+      {fallbackReason}
+      {fallbackDetail ? (
+        <details className="mt-1 text-xs">
+          <summary className="cursor-pointer select-none text-fg-subtle hover:text-fg-muted">
+            Details
+          </summary>
+          <p className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-2xs">
+            {fallbackDetail}
+          </p>
+        </details>
+      ) : null}
+    </div>
+  ) : null;
+  const model = composerPolicy?.model ?? props.session.model;
+  const reasoningEffort = composerPolicy?.reasoningEffort ?? props.session.reasoningEffort;
+  const latencyMode = composerPolicy?.latencyMode ?? props.session.latencyMode;
+  const selectedPolicyRow = findPickerRow(modelCatalog.rows, model);
+  // The banner's one-click switch: the same model, effort and speed coercion as the picker.
+  const chooseCoveredModel = (id: string) => {
+    const row = findPickerRow(modelCatalog.rows, id);
+    const choice =
+      row && !modelPickerDisabled ? coveredModelChoice(row, reasoningEffort, latencyMode) : null;
+    if (!choice) return;
+    setComposerModel(choice.model);
+    setComposerReasoningEffort(choice.effort);
+    if (choice.latencyMode !== null) setComposerLatencyMode(choice.latencyMode);
+  };
+  const matchesFrozenSessionPolicy = Boolean(
+    composerPolicy &&
+    composerPolicy.model === props.session.model &&
+    composerPolicy.reasoningEffort === props.session.reasoningEffort &&
+    composerPolicy.latencyMode === props.session.latencyMode,
+  );
+  const catalogComboValid = pickerPolicyRunnable(selectedPolicyRow, reasoningEffort, latencyMode);
+  // A model the catalog no longer lists (retired or removed) is refused by the
+  // API, so the frozen session policy stops counting as sendable for it.
+  const refusedSessionModel =
+    refusedModel?.sessionId === props.session.id ? refusedModel.model : null;
+  const composerModelUnavailable =
+    model === refusedSessionModel ||
+    sessionModelMissingFromCatalog({
+      model,
+      models: modelCatalog.models,
+      error: modelCatalog.error,
+    });
+  const sessionModelUnavailable =
+    props.session.model === refusedSessionModel ||
+    sessionModelMissingFromCatalog({
+      model: props.session.model,
+      models: modelCatalog.models,
+      error: modelCatalog.error,
+    });
+  // Only someone who can send may have the composer's model replaced: the
+  // replacement is saved to their durable draft.
+  const canControlSession = Boolean(
+    context.accessContext.workspaceGrants
+      .find((grant) => grant.workspaceId === props.session.workspaceId)
+      ?.permissions.includes("sessions:control"),
+  );
+  const composerPolicyValid = Boolean(
+    composerPolicy &&
+    (catalogComboValid || (matchesFrozenSessionPolicy && !composerModelUnavailable)),
+  );
+  const noRunnableModel =
+    !modelCatalog.loading &&
+    modelCatalog.rows.length > 0 &&
+    !modelCatalog.rows.some((row) => row.selectable);
+  const composerPolicyError =
+    composerPolicy && !modelCatalog.loading && !composerPolicyValid && !noRunnableModel
+      ? composerModelUnavailable
+        ? "This model is no longer available. Select a different model to continue."
+        : "Choose a model, reasoning level, and speed supported by this session."
+      : null;
+
+  // Preselect a runnable model for the next message when the composer still
+  // names an unavailable one. Accepted turns and history keep their frozen
+  // model; the notice above the input names the replacement.
+  const unavailableReplacement = useMemo(
+    () =>
+      composerModelUnavailable || sessionModelUnavailable
+        ? unavailableModelReplacement({
+            rows: modelCatalog.rows,
+            defaultSelection: modelCatalog.defaultSelection,
+            latencyMode,
+          })
+        : null,
+    [
+      composerModelUnavailable,
+      sessionModelUnavailable,
+      modelCatalog.rows,
+      modelCatalog.defaultSelection,
+      latencyMode,
+    ],
+  );
+  const replacesUnavailableModel = Boolean(
+    composerModelUnavailable &&
+    unavailableReplacement &&
+    !composerDraftLoading &&
+    hasComposerPolicy &&
+    !modelPickerDisabled &&
+    !terminal &&
+    // A failed session keeps its model until the person chooses: the
+    // failure banner's Retry re-runs that turn with the composer's model.
+    canControlSession &&
+    !props.failure,
+  );
+  useEffect(() => {
+    if (!replacesUnavailableModel || !unavailableReplacement) return;
+    setComposerModel(unavailableReplacement.model);
+    setComposerReasoningEffort(unavailableReplacement.reasoningEffort);
+    if (unavailableReplacement.latencyMode) {
+      setComposerLatencyMode(unavailableReplacement.latencyMode);
+    }
+  }, [
+    replacesUnavailableModel,
+    setComposerLatencyMode,
+    setComposerModel,
+    setComposerReasoningEffort,
+    unavailableReplacement,
+  ]);
+  const composerDelivery = useSessionComposerDelivery(composerView, sendGate, {
+    policyValid: composerPolicyValid,
+    catalogLoading: modelCatalog.loading,
+    replacingModel: replacesUnavailableModel,
+    send: sendState,
+  });
+  const unavailableModelNotice =
+    (sessionModelUnavailable || composerModelUnavailable) && !terminal ? (
+      <UnavailableModelNotice
+        modelName={unavailableModelName(sessionModelUnavailable ? props.session.model : model)}
+        replacementLabel={composerModelUnavailable ? null : (selectedPolicyRow?.label ?? null)}
+      />
+    ) : null;
+
+  // Send's blocker as one visible line, unless the composer is still
+  // preparing or the unavailable-model notice or picker already explains it.
+  const sendBlocker = composerSendBlocker();
+  const visibleSendBlocker =
+    terminal || composerDelivery.preparing
+      ? null
+      : sendBlocker === "policy" && (unavailableModelNotice || noRunnableModel || !composerPolicy)
+        ? null
+        : sendBlocker === "policy" && selectedPolicyRow?.selectable !== true
+          ? "model_unavailable"
+          : sendBlocker;
+  const sendBlockerNotice = composerSendBlockerNotice(visibleSendBlocker) ? (
+    <ComposerSendBlockerNotice
+      blocker={visibleSendBlocker}
+      className="px-2 pt-2"
+      // While the picker is locked (sending, draft loading) the fix can't
+      // apply, so the line shows no action rather than one that does nothing.
+      onAction={
+        modelPickerDisabled && visibleSendBlocker === "policy"
+          ? undefined
+          : (action) => {
+              if (action === "fix_model_settings") chooseCoveredModel(model);
+              else if (visibleSendBlocker === "accounts") void connectionAccounts.refresh();
+            }
+      }
+    />
+  ) : null;
+
+  useEffect(() => {
+    if (
+      !launchKey ||
+      appliedLaunchKeyRef.current === launchKey ||
+      composerDraftLoading ||
+      !hasComposerPolicy
+    ) {
+      return;
+    }
+    const hasPolicy = Boolean(launchModel || launchEffort || launchLatency);
+    appliedLaunchKeyRef.current = launchKey;
+    if (!hasPolicy) return;
+    if (launchModel) setComposerModel(launchModel);
+    if (launchEffort) setComposerReasoningEffort(launchEffort);
+    if (launchLatency) setComposerLatencyMode(launchLatency);
+    void navigate({
+      to: "/workspaces/$workspaceId/sessions/$sessionId",
+      params: {
+        workspaceId: props.session.workspaceId,
+        sessionId: props.session.id,
+      },
+      search: composerLaunchSearchAfterPolicyApply({
+        model: launchModel,
+        effort: launchEffort,
+        latency: launchLatency,
+        realtime: launchRealtime,
+      }),
+      replace: true,
+    });
+  }, [
+    composerDraftLoading,
+    hasComposerPolicy,
+    launchEffort,
+    launchKey,
+    launchLatency,
+    launchModel,
+    launchRealtime,
+    navigate,
+    props.session.id,
+    props.session.workspaceId,
+    setComposerLatencyMode,
+    setComposerModel,
+    setComposerReasoningEffort,
+  ]);
+  const acceptedClientEventIds = useMemo(
+    () =>
+      new Set(
+        props.events
+          .filter((event) => event.type === "user.message" && event.clientEventId)
+          .map((event) => event.clientEventId as string),
+      ),
+    [props.events],
+  );
+  const {
+    optimisticMessages,
+    retryOptimisticMessage,
+    restoreOptimisticMessage,
+    removeOptimisticMessage,
+  } = composer;
+  const failedOptimisticMessageCount = (optimisticMessages ?? []).filter(
+    (message) => message.state === "failed" && !acceptedClientEventIds.has(message.clientEventId),
+  ).length;
+  useEffect(() => {
+    updateLocalSessionDeliveryAttention({
+      workspaceId: props.session.workspaceId,
+      sessionId: props.session.id,
+      failedMessageCount: failedOptimisticMessageCount,
+    });
+  }, [failedOptimisticMessageCount, props.session.id, props.session.workspaceId]);
+
+  // The task's usage limit: one live read shared with the Settings tab, and the
+  // calm composer notice near and at the limit. Enforcement is server-side;
+  // this only keeps the view fresh.
+  const usageLimitCapability = sessionUsageLimitCapability(context.clientConfig);
+  const usageLimitTreeActive =
+    props.session.status === "running" || lineageHasRunningSession(props.agentNodes);
+  const usageLimit = useSessionUsageLimit({
+    client: context.client,
+    workspaceId: props.session.workspaceId,
+    sessionId: props.session.id,
+    initial: props.session.usageLimit,
+    enabled: usageLimitCapability !== "absent",
+    live: {
+      events: props.events,
+      active: usageLimitTreeActive,
+      watch: props.agentNodes.length > 0,
+      connectionState: props.connectionState,
+    },
+  });
+  // A Send refused at the limit keeps its message (as a failed bubble with
+  // Restore, never Retry). Reread the limit; until that answers, show reached.
+  const refusedUsageLimitSendIds = (optimisticMessages ?? [])
+    .filter(
+      (message) =>
+        message.state === "failed" &&
+        message.error !== undefined &&
+        !acceptedClientEventIds.has(message.clientEventId) &&
+        isSessionUsageLimitSubmissionError(new Error(message.error)),
+    )
+    .map((message) => message.clientEventId)
+    .join(",");
+  const composerUsageLimitError =
+    composer.error instanceof OpenGeniSessionUsageLimitReachedError ? composer.error : null;
+  const [usageLimitRefusalPending, setUsageLimitRefusalPending] = useState(false);
+  const refreshUsageLimit = usageLimit.refresh;
+  useEffect(() => {
+    if (!refusedUsageLimitSendIds && !composerUsageLimitError) return;
+    setUsageLimitRefusalPending(true);
+    void refreshUsageLimit().finally(() => setUsageLimitRefusalPending(false));
+  }, [composerUsageLimitError, refreshUsageLimit, refusedUsageLimitSendIds]);
+  const usageLimitRefusal = usageLimitRefusalFromState({
+    pending: usageLimitRefusalPending,
+    error: composerUsageLimitError,
+    usage: usageLimit.usage,
+  });
+  const usageLimitChild =
+    Boolean(props.session.parentSessionId) || usageLimit.usage?.inherited === true;
+  const usageLimitRootId = usageLimit.usage?.rootSessionId ?? null;
+  const usageLimitNotice =
+    usageLimitCapability !== "absent" && !terminal ? (
+      <SessionUsageLimitNotice
+        usage={usageLimit.usage}
+        stale={usageLimit.error !== null && usageLimit.usage !== null}
+        refusal={usageLimitRefusal}
+        onChangeLimit={!usageLimitChild && canControlSession ? props.onOpenUsageLimit : undefined}
+        mainTaskHref={
+          usageLimitChild && usageLimitRootId
+            ? `/workspaces/${props.session.workspaceId}/sessions/${usageLimitRootId}`
+            : undefined
+        }
+        goalPaused={props.goal.goal?.pausedReason === SESSION_USAGE_LIMIT_GOAL_PAUSED_REASON}
+        dismissStorageKey={`opengeni:${props.session.workspaceId}`}
+      />
+    ) : null;
+  const timelineWithOptimisticSends = useMemo<TimelineItem[]>(() => {
+    return conversationTimeline(
+      props.timeline,
+      {
+        queue: props.queue.queue,
+        snapshot: props.queue.snapshot,
+        acceptedSteers: props.queue.acceptedSteers,
+      },
+      {
+        optimisticMessages,
+        retryOptimisticMessage,
+        restoreOptimisticMessage,
+        removeOptimisticMessage,
+      },
+    );
+  }, [
+    optimisticMessages,
+    removeOptimisticMessage,
+    props.queue.acceptedSteers,
+    props.queue.queue,
+    props.queue.snapshot,
+    props.timeline,
+    retryOptimisticMessage,
+    restoreOptimisticMessage,
+  ]);
+  const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
+  const admissionControl = admissionRecheckControl(
+    props.admissionSessionControl,
+    props.queue.effectiveControl,
+    composer.effectiveControl,
+  );
+  const admissionRefreshRequired = admissionControlNeedsRefresh(
+    admissionControl,
+    props.admissionSessionControl,
+    props.queue.effectiveControl,
+    composer.effectiveControl,
+  );
+  const timelineWithStartup = useSessionStartupTimeline(timelineWithOptimisticSends, {
+    session: { ...props.session, effectiveControl: admissionControl },
+    events: props.events,
+    optimisticMessages,
+    hasNewer: props.hasNewer,
+    queue: props.queue.snapshot,
+  });
+  const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
+    sessionDisplayStatus(props.session),
+    readOnlyArchive === null &&
+      (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
+  );
+
+  // Slash-command palette context: the operator controls (/goal, /clear,
+  // /compact, /help) act on THIS session. Permissions come from the workspace
+  // grant so the palette hides commands the operator can't run.
+  const workspacePermissions = useMemo(
+    () =>
+      context.accessContext.workspaceGrants.find(
+        (grant) => grant.workspaceId === props.session.workspaceId,
+      )?.permissions ?? [],
+    [context.accessContext.workspaceGrants, props.session.workspaceId],
+  );
+  // A ChatGPT/Codex plan out of usage blocks this chat's Codex model. The
+  // chat can wait for the reset, or switch to any model in place (a Codex
+  // remote compaction chat rebuilds its context for it) and carry on.
+  const codexUsageBlocked =
+    isCodexProductModel(props.session.model) &&
+    (props.session.status === "waiting_capacity" ||
+      (props.session.status === "failed"
+        ? isCodexUsageLimitFailure(props.failure?.failureCode)
+        : props.session.status === "idle" && latestTurnFailedOnUsageLimit(props.events)));
+  const codexUsageChoices = codexUsageBlocked && workspacePermissions.includes("sessions:control");
+  const codexUsageResetsAtValue = useMemo(
+    () => (codexUsageChoices ? codexUsageResetsAt(props.events) : null),
+    [codexUsageChoices, props.events],
+  );
+  const [usageContinuationState, setUsageContinuation] = useState<{
+    sessionId: string;
+    pending: boolean;
+    error: string | null;
+  } | null>(null);
+  // One continuation at a time, even for two calls within one render.
+  const usageContinuationInFlight = useRef(false);
+  const usageContinuation =
+    usageContinuationState?.sessionId === props.session.id ? usageContinuationState : null;
+  // Whether Codex already compacted this remote_v2 chat. Another model then
+  // rebuilds its earlier messages from a summary, which the switch line says.
+  const remoteV2Chat = props.session.codexCompactionMode === "remote_v2";
+  const loadedCheckpointIsCompaction = useMemo(
+    () => (remoteV2Chat ? latestCheckpointIsCompaction(props.events) : null),
+    [remoteV2Chat, props.events],
+  );
+  const [fetchedCodexCompaction, setFetchedCodexCompaction] = useState<{
+    sessionId: string;
+    compacted: boolean;
+  } | null>(null);
+  useEffect(() => {
+    // The loaded page may start after the latest checkpoint: read the newest ones.
+    if (!remoteV2Chat || loadedCheckpointIsCompaction !== null) return;
+    let stale = false;
+    const sessionId = props.session.id;
+    context.client
+      .listEvents(props.session.workspaceId, sessionId, {
+        includeTypes: CONTEXT_CHECKPOINT_EVENT_TYPES,
+        // Newest first: only the latest checkpoint matters.
+        direction: "before",
+        limit: 20,
+        payloadMode: "none",
+      })
+      .then((events) => {
+        if (!stale)
+          setFetchedCodexCompaction({
+            sessionId,
+            compacted: latestCheckpointIsCompaction(events) === true,
+          });
+      })
+      .catch(() => undefined);
+    return () => {
+      stale = true;
+    };
+  }, [
+    context.client,
+    loadedCheckpointIsCompaction,
+    props.session.id,
+    props.session.workspaceId,
+    remoteV2Chat,
+  ]);
+  const codexCompacted =
+    loadedCheckpointIsCompaction ??
+    (fetchedCodexCompaction?.sessionId === props.session.id && fetchedCodexCompaction.compacted);
+  const switchHeadsUp = (target: string | null | undefined, label: string) =>
+    needsModelSwitchHeadsUp({
+      codexCompactionMode: props.session.codexCompactionMode,
+      codexCompacted,
+      model: target,
+    })
+      ? modelSwitchHeadsUpText(label)
+      : null;
+  // Run the blocked work on `policy`: the chat's own Codex model to continue
+  // at the reset (its turn parks until then), or the model the person picked.
+  // A paused chat is resumed first, so the work isn't held back.
+  const continueAfterUsageLimit = async (
+    policy: Parameters<typeof retryFailedSession>[1],
+    options: { resumeFirst?: boolean } = {},
+  ) => {
+    if (usageContinuationInFlight.current) return;
+    usageContinuationInFlight.current = true;
+    const sessionId = props.session.id;
+    setUsageContinuation({ sessionId, pending: true, error: null });
+    let error: string | null = null;
+    try {
+      // A failed resume stops here (the server would hold the work) and
+      // shows its error in the notice.
+      if (options.resumeFirst)
+        await context.client.resumeSession(props.session.workspaceId, sessionId, {
+          clientEventId: crypto.randomUUID(),
+          // Never undo a pause made after this page last read the control.
+          expectedControlEtag: admissionControl.controlEtag,
+        });
+      if (
+        props.session.status === "failed" &&
+        props.failure?.failureEventId &&
+        retryHasRetainedTurn
+      ) {
+        // Retry runs the failed turn again on that model.
+        await retryFailedSession(props.failure.failureEventId, policy);
+      } else {
+        // A turn waiting for Codex is replaced by this message (a Steer);
+        // after a usage-limit failure, or a failed turn that cannot be
+        // retried, it is the next message.
+        const chat = readChatSendContext();
+        if (chat.blocked) error = chat.blocked;
+        else {
+          const message = {
+            text: "Continue",
+            ...chat.extras,
+            ...policy,
+            clientEventId: crypto.randomUUID(),
+          };
+          if (props.session.status === "waiting_capacity")
+            await context.client.steerMessage(props.session.workspaceId, sessionId, message);
+          else await context.client.sendMessage(props.session.workspaceId, sessionId, message);
+        }
+      }
+    } catch (failure) {
+      error = userErrorText(failure, "Try again.");
+    } finally {
+      usageContinuationInFlight.current = false;
+      setUsageContinuation({ sessionId, pending: false, error });
+      await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
+    }
+  };
+  // A Codex turn refused for usage waits for capacity and continues at the
+  // reset by default; switching that off pauses the chat, so it waits for the
+  // person. A chat the limit stopped instead (failed or idle) is not waiting:
+  // switching it on runs the work again on Codex, which waits for the reset.
+  const usagePaused = admissionControl.state === "paused";
+  const continueAtReset = codexUsageContinuesAtReset({
+    status: props.session.status,
+    paused: usagePaused,
+  });
+  const setContinueAtReset = (next: boolean) => {
+    const action = codexUsageContinueAtResetAction({
+      status: props.session.status,
+      paused: usagePaused,
+      next,
+    });
+    if (action === "pause") void composer.pause();
+    else if (action === "resume") void composer.resume();
+    else if (action === "run_on_codex" || action === "resume_and_run_on_codex")
+      void continueAfterUsageLimit(
+        {
+          model: props.session.model,
+          reasoningEffort: props.session.reasoningEffort,
+          latencyMode: props.session.latencyMode,
+        },
+        { resumeFirst: action === "resume_and_run_on_codex" },
+      );
+  };
+  // Picking another model in the picker continues the blocked chat with it.
+  const usageModelSwitch = useCodexUsageModelSwitch({
+    sessionId: props.session.id,
+    sessionModel: props.session.model,
+    composerModel: model,
+    enabled: codexUsageChoices,
+    closePicker: () => setModelPickerSession(null),
+    onContinue: (picked) =>
+      void continueAfterUsageLimit(
+        { model: picked, reasoningEffort, latencyMode },
+        // A Steer resumes a paused waiting chat itself; resuming first would
+        // wake its Codex wait for nothing.
+        { resumeFirst: usagePaused && props.session.status !== "waiting_capacity" },
+      ),
+  });
+  // A wait with no reset in sight keeps the server's own wait message; the
+  // picker still continues the chat with another model.
+  const codexUsageChoice: CodexUsageChoice | undefined =
+    codexUsageChoices &&
+    codexUsageNoticeApplies({
+      status: props.session.status,
+      resetsAt: codexUsageResetsAtValue,
+      usageWait: codexWaitIsUsageLimit(props.events),
+    })
+      ? {
+          resetText: codexUsageResetText(codexUsageResetsAtValue),
+          continueAtReset,
+          pending: usageContinuation?.pending || composer.pausing || composer.resuming,
+          error: usageContinuation?.error,
+          onContinueAtResetChange: setContinueAtReset,
+        }
+      : undefined;
+  // A failed chat shows these choices in its failure banner.
+  const codexUsageNotice =
+    codexUsageChoice && props.session.status !== "failed" && !terminal ? (
+      <CodexUsageNotice choice={codexUsageChoice} />
+    ) : null;
+  // The chosen model is about to rebuild a chat Codex compacted.
+  const chosenModelHeadsUp = !terminal
+    ? switchHeadsUp(model, selectedPolicyRow?.label ?? unavailableModelName(model))
+    : null;
+  const modelSwitchHeadsUp = chosenModelHeadsUp ? (
+    <ModelSwitchHeadsUp text={chosenModelHeadsUp} className="px-3.5 pt-2.5 md:px-4" />
+  ) : null;
+  // Your own logins in a chat shared with the workspace (D-54): one quiet line
+  // for you only, never a gate. A Personal workspace has nobody else. It stays
+  // mounted while none are on, so one turned off here can go back on.
+  const ownLoginsApply =
+    !terminal &&
+    props.session.tenancy?.visibility === "workspace" &&
+    !isPersonalWorkspace(workspace, context.managedSelfContext);
+  const ownLoginsHeadsUp = ownLoginsApply ? (
+    <OwnLoginsSharedHeadsUp
+      key={props.session.id}
+      // While the accounts can't be read, the line keeps what it last knew.
+      logins={
+        connectionAccounts.loading || connectionAccounts.error
+          ? null
+          : ownLoginsInUse(
+              // Only the connectors this chat uses.
+              connectionAccounts.accountGroups,
+              connectionAccounts.accountChoices,
+              context.accessContext.subjectId,
+            )
+      }
+      className="px-3.5 pt-2.5 md:px-4"
+      logoFor={(login) => props.resolveProviderLogo(login.accounts[0]!.providerDomain)}
+      onChange={async (login, on) => {
+        try {
+          if (on)
+            await turnOnOwnLoginsHere(context.client, props.session.workspaceId, login.accounts);
+          else await stopOwnLoginsHere(context.client, props.session.workspaceId, login.accounts);
+        } finally {
+          // Some connections may have changed even when one failed.
+          await connectionAccounts.refresh();
+        }
+      }}
+    />
+  ) : null;
+  // The chat's Secrets row: hidden when its agent can't use secrets.
+  const sessionSecrets = useSessionSecrets(props.session.id, {
+    enabled: workspacePermissions.includes("secrets:list"),
+  });
+  const secretsView = sessionSecrets.secrets;
+  const renderMessageSender = useMessageSenderRenderer(
+    context.client,
+    props.session.workspaceId,
+    context.accessContext.subjectId,
+  );
+  const commandContext = useMemo(
+    () => ({
+      client: context.client,
+      workspaceId: props.session.workspaceId,
+      sessionId: props.session.id,
+      status: props.session.status,
+      permissions: workspacePermissions,
+    }),
+    [
+      context.client,
+      props.session.workspaceId,
+      props.session.id,
+      props.session.status,
+      workspacePermissions,
+    ],
+  );
+
+  const [forkEventId, setForkEventId] = useState<string | null>(null);
+  const [turnRatings, setTurnRatings] = useState<Record<string, "positive" | "negative">>({});
+  const mayRate = hasWorkspacePermission(
+    context.accessContext,
+    props.session.workspaceId,
+    "sessions:create",
+  );
+  useEffect(() => {
+    setTurnRatings({});
+    setForkEventId(null);
+    if (!mayRate) return;
+    return loadSessionFeedback(
+      context.client,
+      props.session.workspaceId,
+      props.session.id,
+      ({ feedback }) => {
+        const ratings = turnRatingsFromFeedback(feedback);
+        setTurnRatings((saved) => ({ ...ratings, ...saved }));
+      },
+    );
+  }, [
+    context.client,
+    props.session.workspaceId,
+    props.session.id,
+    mayRate,
+    context.accessContext.subjectId,
+  ]);
+  const mayForkMessage =
+    context.clientConfig.auth.mode === "managedSession" &&
+    context.authSession !== null &&
+    Boolean(props.session.tenancy) &&
+    mayRate;
+  // "Fork chat" from the ⌘K menu or the desktop menu bar forks from the latest
+  // message, as the fork button under that message does.
+  const forkRequests = useUiEventTarget("document");
+  const eventsRef = useRef(props.events);
+  eventsRef.current = props.events;
+  useEffect(() => {
+    if (!mayForkMessage) return;
+    const fork = () => {
+      const events = eventsRef.current;
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index]!;
+        if (event.type === "agent.message.completed" || event.type === "user.message") {
+          setForkEventId(event.id);
+          return;
+        }
+      }
+    };
+    forkRequests.addEventListener(FORK_CURRENT_CHAT_EVENT, fork);
+    return () => forkRequests.removeEventListener(FORK_CURRENT_CHAT_EVENT, fork);
+  }, [forkRequests, mayForkMessage]);
+  const onMessageRated = useCallback((turnId: string, sentiment: "positive" | "negative") => {
+    setTurnRatings((saved) => ({ ...saved, [turnId]: sentiment }));
+  }, []);
+  const renderMessageActions = useCallback(
+    (item: AgentMessageItem | UserMessageItem) => (
+      <Suspense fallback={null}>
+        <MessageActions
+          item={item}
+          client={context.client}
+          workspaceId={props.session.workspaceId}
+          sessionId={props.session.id}
+          mayRate={mayRate}
+          mayFork={mayForkMessage}
+          savedSentiment={
+            item.kind === "agent-message" && item.turnId ? (turnRatings[item.turnId] ?? null) : null
+          }
+          onRated={onMessageRated}
+          onFork={setForkEventId}
+        />
+      </Suspense>
+    ),
+    [
+      context.client,
+      props.session.workspaceId,
+      props.session.id,
+      mayRate,
+      mayForkMessage,
+      turnRatings,
+      onMessageRated,
+    ],
+  );
+
+  const renderImage = useCallback(
+    (image: { src: string; alt: string }) => {
+      const artifactId = retainedImageId(image.src);
+      return artifactId ? (
+        <Suspense fallback={<span role="status">Loading image…</span>}>
+          <InlineChatArtifact
+            key={props.session.workspaceId + ":" + artifactId}
+            workspaceId={props.session.workspaceId}
+            artifactId={artifactId}
+            alt={image.alt}
+          />
+        </Suspense>
+      ) : null;
+    },
+    [props.session.workspaceId],
+  );
+  const renderInteractiveBlock = useCallback(
+    (block: { kind: "html" | "site"; content: string }) => (
+      <Suspense fallback={<span role="status">Loading preview…</span>}>
+        <ChatInteractiveBlock workspaceId={props.session.workspaceId} {...block} />
+      </Suspense>
+    ),
+    [props.session.workspaceId],
+  );
+
+  const renderMessageText = useCallback(
+    (
+      text: string,
+      item: AgentMessageItem | UserMessageItem,
+      renderContext: { searchTarget: TimelineSearchTarget | null },
+    ) => {
+      if (item.kind === "user-message") {
+        if (item.humanInputDelegation) {
+          return (
+            <HumanInputDelegationRecord
+              client={context.client}
+              workspaceId={props.session.workspaceId}
+              item={{ ...item, humanInputDelegation: item.humanInputDelegation }}
+              viewerSubjectId={context.accessContext.subjectId}
+            />
+          );
+        }
+        return <UserMessageBody item={item} searchTarget={renderContext.searchTarget} />;
+      }
+      return (
+        <div data-testid="assistant-markdown">
+          <MarkdownText
+            artifactHref={(id) => `/workspaces/${props.session.workspaceId}/artifacts/files/${id}`}
+            text={text}
+            searchTarget={renderContext.searchTarget}
+            softLineBreaks
+            streaming={item.kind === "agent-message" && item.streaming}
+            onSandboxFile={props.onOpenSandboxFile}
+            renderInteractiveBlock={renderInteractiveBlock}
+            renderImage={renderImage}
+          />
+        </div>
+      );
+    },
+    [
+      context.accessContext.subjectId,
+      context.client,
+      props.onOpenSandboxFile,
+      props.session.workspaceId,
+      renderInteractiveBlock,
+      renderImage,
+    ],
+  );
+
+  const [creditTopupOpen, setCreditTopupOpen] = useState(false);
+  const openCreditTopup = canBuyCredits ? () => setCreditTopupOpen(true) : undefined;
+  // Opened beside an own-key refusal, the top-up hides coupons: their credit
+  // can't pay the own-key fee.
+  const topupRefusal =
+    ((creditRefusal?.sessionId === props.session.id ? creditRefusal.code : null) ?? stopRefusal) ===
+    "byok_paid_credit_required"
+      ? "byok_paid_credit_required"
+      : null;
+  const creditTopupPrompt =
+    canBuyCredits && workspaceAccountId ? (
+      <Suspense fallback={null}>
+        {creditTopupOpen ? (
+          <LazyCreditTopupPrompt
+            purpose="topup"
+            refusalCode={topupRefusal}
+            open
+            workspaceId={props.session.workspaceId}
+            accountId={workspaceAccountId}
+            canBuyCredits
+            onOpenChange={setCreditTopupOpen}
+            beforeLeave={composer.flushDraft}
+          />
+        ) : null}
+      </Suspense>
+    ) : null;
+  const canConnectModel = hasWorkspacePermission(
+    context.accessContext,
+    props.session.workspaceId,
+    "connections:write",
+  );
+  // The turn was refused because this chat isn't allowed on its owner's
+  // machine. Only the owner, viewing a chat that runs on that machine, can
+  // allow it: Allow sends their consent for this chat with a message that
+  // picks the work up again, like an ordinary Send.
+  const allowFailedMachine =
+    props.failure?.failureCode === MACHINE_ACCESS_REQUIRED_CODE &&
+    runsOnCanMessage &&
+    runsOnActiveMachineConsent &&
+    runsOn.activeMachine
+      ? {
+          consent: runsOnActiveMachineConsent,
+          machineName: machineDisplayName(t, runsOn.activeMachine),
+        }
+      : null;
+  const allowMachine = allowFailedMachine
+    ? {
+        machineName: allowFailedMachine.machineName,
+        onAllow: async (): Promise<string | null> => {
+          const chat = readChatSendContext();
+          if (chat.blocked) return chat.blocked;
+          if (chat.awaitingHuman) return "Answer the question above first.";
+          try {
+            await context.client.sendMessage(props.session.workspaceId, props.session.id, {
+              text: `${machineUseMessage(allowFailedMachine.machineName)} Continue where you left off.`,
+              ...chat.extras,
+              personalResourceAttachment: allowFailedMachine.consent,
+              clientEventId: crypto.randomUUID(),
+            });
+            return null;
+          } catch (failure) {
+            return userErrorText(failure, "Try again.");
+          } finally {
+            await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
+          }
+        },
+      }
+    : undefined;
+  // An archived chat is read-only: there is nothing to retry or recover.
+  const failureRecovery =
+    !props.hasNewer &&
+    !readOnlyArchive &&
+    props.failure &&
+    (props.session.status === "failed" ||
+      (props.creditExhausted && props.session.status === "idle")) ? (
+      <FailureRecoveryBoundary key={props.session.id} fallback={failureFallback}>
+        <Suspense fallback={failureFallback}>
+          <LazyFailedSessionBanner
+            key={props.session.id}
+            failure={props.failure}
+            shownInTimeline={timelineShowsFailure(timelineWithStartup, {
+              failureEventId: props.failure.failureEventId,
+              turnId: failureTurnId,
+            })}
+            analyticsKey={
+              props.failure.failureEventId ??
+              `${props.session.id}:${props.failure.failedAt ?? "unknown"}`
+            }
+            canChooseModel={canChooseRecoveryModel}
+            codexUsage={codexUsageChoice}
+            allowMachine={allowMachine}
+            hasModelPicker={hasComposerPolicy}
+            freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
+            subscriptions={connectableSubscriptions(context.clientConfig.models)}
+            modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
+            creditExhausted={props.creditExhausted}
+            creditRefusal={stopRefusal}
+            freeCreditGap={creditGap}
+            onChooseModel={chooseCoveredModel}
+            workspaceId={props.session.workspaceId}
+            canBuyCredits={canBuyCredits}
+            onAddCredits={openCreditTopup}
+            canConnectModel={canConnectModel}
+            sandboxRecovery={
+              needsSandboxRecoveryCheck(props.session, props.failure.structuralSandboxFailure)
+                ? {
+                    client: context.client,
+                    workspaceId: props.session.workspaceId,
+                    sessionId: props.session.id,
+                    canControl: workspacePermissions.includes("sessions:control"),
+                  }
+                : undefined
+            }
+            actions={{
+              failureId: props.failure.failureEventId,
+              retryInput: pendingRetryInput,
+              composerBlocker: composerSendBlocker(),
+              onRetry: async () => {
+                if (
+                  composer.hasDraftContent() ||
+                  composerSendBlocker() ||
+                  !props.failure?.failureEventId ||
+                  !retryHasRetainedTurn ||
+                  !composerPolicy ||
+                  !workspacePermissions.includes("sessions:control") ||
+                  admissionControl.state === "paused"
+                )
+                  return false;
+                try {
+                  return await retryFailedSession(props.failure.failureEventId, composerPolicy);
+                } finally {
+                  await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
+                }
+              },
+              retryBlocker: !workspacePermissions.includes("sessions:control")
+                ? "permission"
+                : admissionControl.state === "paused"
+                  ? "paused"
+                  : composer.hasDraftContent()
+                    ? "draft"
+                    : failedOptimisticMessageCount > 0
+                      ? "unsent"
+                      : (optimisticMessages ?? []).some(
+                            (message) => !acceptedClientEventIds.has(message.clientEventId),
+                          )
+                        ? "delivery"
+                        : props.session.activeTurnId !== null || props.queue.queue.length > 0
+                          ? "queued"
+                          : composer.sending ||
+                              composer.draftLoading ||
+                              !hasComposerPolicy ||
+                              !retryHasRetainedTurn ||
+                              !props.failure.failureEventId
+                            ? "loading"
+                            : null,
+            }}
+          />
+        </Suspense>
+      </FailureRecoveryBoundary>
+    ) : null;
+  // A refused Send names its model, the models the credit still covers, and the
+  // next step above the composer. The credit-stop banner already says this.
+  const sessionCreditRefusal =
+    creditRefusal?.sessionId === props.session.id &&
+    !terminal &&
+    !(failureRecovery && props.creditExhausted)
+      ? creditRefusal
+      : null;
+  // The plain refusal text shows while the notice chunk loads or if it fails.
+  const creditRefusalFallback = sessionCreditRefusal ? (
+    <p role="alert" className="px-1.5 text-sm text-fg-muted">
+      {apiErrorFacts(sessionCreditRefusal.message).serverMessage ?? sessionCreditRefusal.message}
+    </p>
+  ) : null;
+  const creditRefusalNotice = sessionCreditRefusal ? (
+    <FailureRecoveryBoundary key={props.session.id} fallback={creditRefusalFallback}>
+      <Suspense fallback={creditRefusalFallback}>
+        <LazyCreditRefusalNotice
+          gap={creditRefusalGap(modelCatalog.rows, sessionCreditRefusal.model, {
+            selectedModel: composerPolicy?.model,
+            preferredModel: modelCatalog.defaultSelection?.model,
+          })}
+          message={sessionCreditRefusal.message}
+          refusalCode={sessionCreditRefusal.code}
+          workspaceId={props.session.workspaceId}
+          accountId={workspaceAccountId}
+          canReadBilling={
+            Boolean(workspaceAccountId) &&
+            hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:read")
+          }
+          canBuyCredits={canBuyCredits}
+          canConnectModel={canConnectModel}
+          continuing
+          onChooseModel={modelPickerDisabled ? undefined : chooseCoveredModel}
+          onAddCredits={openCreditTopup}
+          onDismiss={() => setCreditRefusal(null)}
+        />
+      </Suspense>
+    </FailureRecoveryBoundary>
+  ) : null;
+
+  const modelRecovery = props.hasNewer
+    ? null
+    : currentModelRecovery({ ...props.session, effectiveControl: admissionControl }, props.events);
+
+  const reviewDetailPane = reviewDetails ? (
+    <div className="min-h-0 flex-1 overflow-y-auto" data-workspace-scroll-owner="self-managed">
+      <ToolActionReviewDetails
+        key={reviewDetails.review.id + reviewDetails.path}
+        review={reviewDetails.review}
+        path={reviewDetails.path}
+        load={loadToolReviewDetails}
+        onBack={() => {
+          const { review, path, origin } = reviewDetails;
+          setReviewDetails(null);
+          requestAnimationFrame(() => {
+            const selector = `[data-approval-id="${CSS.escape(review.id)}"]${origin ? `[data-review-origin="${CSS.escape(origin)}"]` : ""} button[data-review-path="${CSS.escape(path)}"]`;
+            document.querySelector<HTMLElement>(selector)?.focus();
+          });
+        }}
+      />
+    </div>
+  ) : null;
+
+  return createElement(
+    Fragment,
+    null,
+    reviewDetailPane,
+    creditTopupPrompt,
+    createElement(
+      "div",
+      {
+        className: reviewDetails ? "hidden" : "contents",
+        ...inertProps(Boolean(reviewDetails)),
+        ...(props.placement === "panel" ? { ref: setPanelRoot } : {}),
+      },
+      createElement(
+        LightboxProvider,
+        null,
+        <ChatViewportFileDropTarget
+          data-workspace-scroll-owner="self-managed"
+          enabled={!terminal && context.clientConfig.fileUploads.enabled === true}
+          onFiles={attachments.addFiles}
+        >
+          {findMounted ? (
+            <LazyPart fallback={null}>
+              <ConversationFind
+                workspaceId={props.session.workspaceId}
+                sessionId={props.session.id}
+                open={findOpen}
+                focusRevision={findFocusRevision}
+                initial={props.searchTarget}
+                showBackToSessionSearch={props.searchTarget.searchOrigin === "session-search"}
+                onClose={closeFind}
+                onTarget={setActiveSearchTarget}
+                onJump={props.onJumpToSequence}
+              />
+            </LazyPart>
+          ) : null}
+          {cancelled ? (
+            <div className={cn("mx-auto w-full max-w-3xl pt-6", gutter)}>
+              <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
+              <TerminalSessionArchive session={props.session} eventCount={props.timeline.length} />
+            </div>
+          ) : readOnlyArchive ? (
+            <div className={cn("mx-auto w-full max-w-3xl pt-6", gutter)}>
+              <ReadOnlySessionNotice
+                session={props.session}
+                onContinue={props.onContinueInNewSession}
+                onRestore={props.onRestoreArchived}
+              />
+            </div>
+          ) : null}
+          {
+            <>
+              <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
+                <LearningRefusalActionsProvider onOpen={props.onLearningRefusalOpen}>
+                  <KnowledgeActivityProvider
+                    onInspect={props.onMemoryClick}
+                    onRetryFile={(fileId) =>
+                      composer.send(
+                        `Retry searchable source preparation for attached file ${fileId}. Use knowledge_retain_file and report its result.`,
+                      )
+                    }
+                    retryDisabled={
+                      composer.hasDraftContent() ||
+                      composer.sending ||
+                      composer.draftLoading ||
+                      !hasComposerPolicy
+                    }
+                  >
+                    <ToolReviewHistoryProvider
+                      events={props.events}
+                      load={loadRecordedToolReview}
+                      onViewDetails={viewToolReviewDetails}
+                    >
+                      <InteractiveAnswerProvider
+                        send={composer.send}
+                        scope={props.session.id}
+                        store={answerStore}
+                        readOnly={terminal}
+                      >
+                        <MessageTimeline
+                          resolveLink={resolveLink}
+                          artifactScope={{
+                            client: context.client,
+                            workspaceId: props.session.workspaceId,
+                            sessionId: props.session.id,
+                          }}
+                          renderMessageSender={renderMessageSender}
+                          allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
+                          presentedFailureEventIds={failureRecovery ? bannerFailureIds : undefined}
+                          trailingState={
+                            <>
+                              {/* Recovery follows the failed request, only in the latest history window.
+                        Credit exhaustion also surfaces on idle sessions. */}
+                              {failureRecovery}
+                              {/* The pause's other approvals stay up while a decision
+                        resumes the turn: deciding them never waits for it. */}
+                              {props.approvals.length > 0 &&
+                                approvalsDecidable(props.session.status) && (
+                                  <ApprovalSurface
+                                    approvals={props.approvals}
+                                    selectedApprovalId={selectedApprovalId}
+                                    onSelectedApprovalChange={setSelectedApprovalId}
+                                    loadReview={loadToolReview}
+                                    onViewDetails={viewToolReviewDetails}
+                                    onApprove={(approval, answer) =>
+                                      decideApproval(approval.id, "approve", answer)
+                                    }
+                                    onReject={(approval) => decideApproval(approval.id, "reject")}
+                                  />
+                                )}
+                              <LazyPart fallback={null}>
+                                <SessionSkillReviews
+                                  key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
+                                  context={context}
+                                  workspaceId={props.session.workspaceId}
+                                  sessionId={props.session.id}
+                                  events={props.events}
+                                />
+                              </LazyPart>
+                              {props.humanInput.requests.length > 0 &&
+                              props.session.status === "requires_action" ? (
+                                <div className="pb-1" data-human-input-timeline-surface="">
+                                  <LazyPart fallback={<LoadingPanel label="Loading questions…" />}>
+                                    <HumanInputSurface
+                                      loadSkillReview={loadSkillReview}
+                                      allowedSaveTo={secretSaveTargets(
+                                        context.accessContext,
+                                        props.session.workspaceId,
+                                      )}
+                                      requests={props.humanInput.requests}
+                                      respondingRequestId={props.humanInput.respondingRequestId}
+                                      error={props.humanInput.mutationError?.message}
+                                      onSubmit={async (requestId, response) => {
+                                        // A failed send resolves null. Reject so the card
+                                        // keeps what was typed (including a secret) to retry.
+                                        if (
+                                          !(await props.humanInput.respond(requestId, response))
+                                        ) {
+                                          throw new Error("Your answer wasn't sent. Try again.");
+                                        }
+                                      }}
+                                    />
+                                  </LazyPart>
+                                </div>
+                              ) : null}
+                            </>
+                          }
+                          turnSummary={{ rolling: true }}
+                          key={props.session.id}
+                          className="h-full"
+                          items={timelineWithStartup}
+                          searchTarget={activeSearchTarget}
+                          focusSequence={momentSequence}
+                          events={props.events}
+                          status={props.session.status}
+                          pause={timelineLivePause(admissionControl)}
+                          computeLabel={computeLabel}
+                          renderMessageText={renderMessageText}
+                          renderMessageActions={renderMessageActions}
+                          onAnnotate={composer.addAnnotation}
+                          draftAnnotations={composer.annotations}
+                          onDraftAnnotationSelect={composer.requestAnnotationReview}
+                          onOpenSession={props.onOpenSession}
+                          resolveSessionTitle={props.resolveSessionTitle}
+                          onMemoryClick={props.onMemoryClick}
+                          onReconnect={props.onReconnect}
+                          renderAuthNeeded={renderAuthNeeded}
+                          resolveProviderLogo={props.resolveProviderLogo}
+                          loadRetainedScreenshot={loadRetainedScreenshot}
+                          loadRetainedArtifact={loadRetainedArtifact}
+                          loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+                          hasOlder={props.hasOlder}
+                          loadingOlder={props.loadingOlder}
+                          onLoadOlder={props.onLoadOlder}
+                          hasNewer={props.hasNewer}
+                          loadingNewer={props.loadingNewer}
+                          onLoadNewer={props.onLoadNewer}
+                          loadingOldest={props.loadingOldest}
+                          onJumpToStart={async () => {
+                            await props.onJumpToStart();
+                          }}
+                          onJumpToLatest={props.onJumpToLatest}
+                          emptyState={
+                            // Clear view hides history, not the retained failure or retry operation.
+                            failureRecovery ??
+                            (props.queue.stoppingPreviousAttempt ? (
+                              <EmptyState
+                                className="min-h-[24rem]"
+                                icon={
+                                  <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                                }
+                                title={
+                                  props.queue.effectiveControl?.state === "paused"
+                                    ? "Stopping current work"
+                                    : "Stopping previous work"
+                                }
+                                description={
+                                  props.queue.effectiveControl?.state === "paused"
+                                    ? "Waiting for the current command to stop safely. Queued work stays saved."
+                                    : "Your direction is saved. It starts after the previous command stops safely."
+                                }
+                              />
+                            ) : props.initialLoading ? (
+                              <div className="flex min-h-[24rem]">
+                                <LoadingPanel />
+                              </div>
+                            ) : props.historyReloadFailed ? (
+                              <ProblemPanel
+                                title="Conversation couldn't be loaded"
+                                description="Your saved messages are unchanged. Try loading them again."
+                                action={
+                                  <Button
+                                    variant="outline"
+                                    onClick={() => void props.onJumpToLatest()}
+                                  >
+                                    Retry conversation
+                                  </Button>
+                                }
+                              />
+                            ) : (
+                              <EmptyState
+                                className="min-h-[24rem]"
+                                icon={
+                                  props.session.status === "running" ||
+                                  props.session.status === "recovering" ? (
+                                    <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                                  ) : (
+                                    <MessagesSquareIcon className="size-4" />
+                                  )
+                                }
+                                title={timelineEmptyStateCopy.title}
+                                description={timelineEmptyStateCopy.description}
+                              />
+                            ))
+                          }
+                        />
+                      </InteractiveAnswerProvider>
+                    </ToolReviewHistoryProvider>
+                  </KnowledgeActivityProvider>
+                </LearningRefusalActionsProvider>
+              </div>
+            </>
+          }
+
+          {forkEventId ? (
+            <LazyPart fallback={null}>
+              <MessageForkDialog
+                key={forkEventId}
+                session={props.session}
+                events={props.events}
+                sourceEventId={forkEventId}
+                onForkClose={() => setForkEventId(null)}
+              />
+            </LazyPart>
+          ) : null}
+
+          {repositories.removalDialog}
+
+          {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
+
+          {/* One slim status row above the composer: the agent's wait, queue,
+          goal and activity. Hides entirely when there are no signals. */}
+          <div className={cn("mb-1 w-full shrink-0 has-[>div:empty]:hidden", gutter)}>
+            <div className="mx-auto w-full max-w-3xl">
+              <SessionAdmissionNotice
+                key={`${props.session.workspaceId}:${props.session.id}`}
+                session={props.session}
+                machineAccess={machineAccess}
+                machineAction={
+                  <SessionMachinePickerAction
+                    queuedWork
+                    runsOn={runsOn}
+                    workspaceId={props.session.workspaceId}
+                    rigId={props.session.rigId}
+                    move={moveRunsOn}
+                  />
+                }
+                machines={runsOn.fleet.machines}
+                onMoveToMachine={runsOn.fleet.canAttach ? moveSavedMessage : undefined}
+                canControl={workspacePermissions.includes("sessions:control")}
+                paused={admissionControl.state === "paused"}
+                refreshRequired={admissionRefreshRequired}
+                busy={
+                  composer.resuming || composer.pausing || composer.sending || props.queue.mutating
+                }
+                onRecheck={() =>
+                  recheckSessionAdmission({
+                    control: admissionControl,
+                    refreshOnly: admissionRefreshRequired,
+                    resume: (control) =>
+                      context.client.resumeSession(props.session.workspaceId, props.session.id, {
+                        clientEventId: crypto.randomUUID(),
+                        expectedControlEtag: control.controlEtag,
+                      }),
+                    refresh: [props.onReloadSession, props.queue.refresh],
+                  })
+                }
+                onRefresh={async () => {
+                  await Promise.all([props.onReloadSession(), props.queue.refresh()]);
+                }}
+                onAllowMachine={
+                  machineAccess?.isOwner &&
+                  runsOn.activeMachine?.enrollmentId &&
+                  runsOn.activeMachine.sandboxId === props.session.activeSandboxId
+                    ? async () => {
+                        const enrollmentId = runsOn.activeMachine?.enrollmentId;
+                        const allowed = enrollmentId
+                          ? await allowMachineForChat({
+                              client: context.client,
+                              workspaceId: props.session.workspaceId,
+                              session: props.session,
+                              enrollmentId,
+                            })
+                          : false;
+                        await Promise.allSettled([
+                          props.onReloadSession(),
+                          props.queue.refresh(),
+                          runsOn.fleet.refresh(),
+                        ]);
+                        if (!allowed) throw new Error("machine could not be allowed");
+                      }
+                    : undefined
+                }
+                onContinueWaitingWork={async () => {
+                  await context.client.continueSessionWaitingWork(
+                    props.session.workspaceId,
+                    props.session.id,
+                  );
+                  // A chat the refusal blocked resumes with the usual fenced
+                  // Resume; a running chat picks them up at its next step.
+                  if (
+                    sessionAdmissionReason(props.session) !== null &&
+                    admissionControl.state !== "paused"
+                  )
+                    await recheckSessionAdmission({
+                      control: admissionControl,
+                      refreshOnly: admissionRefreshRequired,
+                      resume: (control) =>
+                        context.client.resumeSession(props.session.workspaceId, props.session.id, {
+                          clientEventId: crypto.randomUUID(),
+                          expectedControlEtag: control.controlEtag,
+                        }),
+                      refresh: [props.onReloadSession, props.queue.refresh],
+                    });
+                  else await props.onReloadSession();
+                  // Machines last: the notice clears once nothing waits, and a
+                  // still-blocked session read in between would flash the refusal.
+                  await runsOn.fleet.refresh();
+                }}
+              />
+              {waitingSubSessions.length > 0 ? (
+                <LazyPart fallback={null}>
+                  {/* Links in sub-session questions resolve like links in the timeline. */}
+                  <OpenGeniLinkProvider
+                    resolveLink={resolveLink}
+                    artifactScope={{
+                      client: context.client,
+                      workspaceId: props.session.workspaceId,
+                      sessionId: props.session.id,
+                    }}
+                  >
+                    <DescendantRequests
+                      client={context.client}
+                      workspaceId={props.session.workspaceId}
+                      parentSessionId={props.session.id}
+                      events={props.events}
+                      waiting={waitingSubSessions}
+                      onResolved={props.onDescendantResolved}
+                      onResumingChange={onSubSessionResumingChange}
+                      refreshSignal={props.descendantRefreshSignal}
+                      loadSkillReview={loadSkillReview}
+                      allowedSaveTo={secretSaveTargets(
+                        context.accessContext,
+                        props.session.workspaceId,
+                      )}
+                    />
+                  </OpenGeniLinkProvider>
+                </LazyPart>
+              ) : null}
+              <SessionChrome
+                sessionStatus={props.session.status}
+                // Same rule as the header's Waiting badge, plus the merged admission control.
+                wait={admissionControl.state === "active" ? sessionInputWait(props.session) : null}
+                onOpenSession={props.onOpenSession}
+                queue={props.queue}
+                composer={terminal ? undefined : composer}
+                queuedRecall={queuedRecall}
+                goal={props.goal}
+                readOnly={terminal}
+                commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
+                commandsPanel={
+                  <LazyPart fallback={<LoadingPanel label="Loading commands…" />}>
+                    <SessionCommands
+                      key={props.session.id}
+                      sessionId={props.session.id}
+                      readOnly={terminal}
+                    />
+                  </LazyPart>
+                }
+                agentsSignal={agentsSignal}
+                agentsPanel={
+                  props.agentNodes.length > 0 ? (
+                    <LazyPart fallback={<LoadingPanel label="Loading agents…" />}>
+                      <SubagentTree
+                        workspaceId={props.session.workspaceId}
+                        nodes={props.agentNodes}
+                      />
+                    </LazyPart>
+                  ) : null
+                }
+              />
+            </div>
+          </div>
+
+          {/* A read-only chat can't continue: its notice offers a new chat instead. */}
+          <div
+            ref={composerRegionRef}
+            data-read-only-composer={readOnlyArchive ? "hidden" : undefined}
+            className={cn(
+              "shrink-0",
+              props.placement === "panel" ? "pb-3" : "pb-4",
+              gutter,
+              readOnlyArchive && "hidden",
+            )}
+          >
+            <div className="mx-auto w-full max-w-3xl">
+              <PersonalResourceAttachmentSurface
+                controller={personalAttachment}
+                disabled={terminal || composer.sending}
+                compact
+              />
+              <ConsoleComposer
+                workspaceId={props.session.workspaceId}
+                usageRefreshKey={props.session.status}
+                composer={composerDelivery}
+                attachments={attachments}
+                effectiveControl={composer.effectiveControl}
+                queuedAheadCount={props.queue.queue.length}
+                queuedRecall={queuedRecall}
+                running={
+                  usageLimitTreeActive ||
+                  sessionTurnKeepsRunControl(props.session.status) ||
+                  props.pendingWake
+                }
+                canControlWorkspace={workspacePermissions.includes("workspace:admin")}
+                controlLinks={{
+                  workspaceHref: `/workspaces/${props.session.workspaceId}`,
+                  sessionHref: (sessionId) =>
+                    `/workspaces/${props.session.workspaceId}/sessions/${sessionId}`,
+                }}
+                disabled={terminal}
+                header={
+                  ownLoginsHeadsUp ||
+                  unavailableModelNotice ||
+                  codexUsageNotice ||
+                  modelSwitchHeadsUp ||
+                  usageLimitNotice ||
+                  creditRefusalNotice ||
+                  sendBlockerNotice ||
+                  showMachineAccess ? (
+                    <>
+                      {!sessionAdmissionNeedsDifferentMachine(
+                        sessionAdmissionReason(props.session),
+                        machineAccess,
+                      ) ? (
+                        <SessionMachineAccessNotice
+                          access={machineAccess}
+                          shared={sharedChat}
+                          className="px-3.5 pt-2.5 md:px-4"
+                          action={
+                            <SessionMachinePickerAction
+                              runsOn={runsOn}
+                              workspaceId={props.session.workspaceId}
+                              rigId={props.session.rigId}
+                              move={moveRunsOn}
+                              compact={machineAccess?.isOwner === true}
+                            />
+                          }
+                        />
+                      ) : null}
+                      {unavailableModelNotice}
+                      {codexUsageNotice}
+                      {modelSwitchHeadsUp}
+                      {usageLimitNotice}
+                      {creditRefusalNotice ? (
+                        <div className="px-2 pt-2">{creditRefusalNotice}</div>
+                      ) : null}
+                      {ownLoginsHeadsUp}
+                      {sendBlockerNotice}
+                    </>
+                  ) : null
+                }
+                commandContext={commandContext}
+                onClearView={props.onClearView}
+                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                transcriptionSuppressed={voiceActive}
+                controlsLeading={
+                  <>
+                    <ComposerMobilePlus
+                      connectorActions={{
+                        accountControls: {
+                          groups: connectionAccounts.availableAccountGroups,
+                          choices: connectionAccounts.accountChoices,
+                          onChoose: connectionAccounts.selectAccount,
+                          loading: connectionAccounts.loading,
+                          error: connectionAccounts.error,
+                          accessDenied: connectionAccounts.accessDenied,
+                          onRefresh: () => void connectionAccounts.refresh(),
+                          disabled:
+                            terminal ||
+                            composer.sending ||
+                            durableToolsSaving ||
+                            !durableToolsHydrated,
+                        },
+                      }}
+                      chatSettings={
+                        props.onOpenAgentSettings
+                          ? {
+                              workspaceId: props.session.workspaceId,
+                              sessionId: props.session.id,
+                              scope: chatLearningScope(props.session),
+                              canEdit: workspacePermissions.includes("sessions:control"),
+                              onOpen: props.onOpenAgentSettings,
+                            }
+                          : undefined
+                      }
+                      workspaceId={props.session.workspaceId}
+                      disabled={terminal || composer.sending}
+                      fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                      servers={selectableSessionMcpServers}
+                      firstPartyTools={firstPartyToolOptions}
+                      selection={durableToolSelection}
+                      toolsSaving={durableToolsSaving}
+                      toolsDisabled={
+                        composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
+                      }
+                      connectorCustomizing={connectorCustomizing}
+                      onConnectorCustomizingChange={(next) => {
+                        setConnectorCustomizingOverride(next);
+                        if (next) return;
+                        connectionAccounts.resetEmptyChoices();
+                        void applyDurableToolPolicy(
+                          followWorkspaceConnectorPolicy(durableToolsSnapshot),
+                        );
+                      }}
+                      onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
+                      {...(secretsView?.capabilityEnabled
+                        ? {
+                            secrets: {
+                              summary: sessionSecretsSummary(
+                                secretsView.policy,
+                                secretsView.reachableVaults,
+                              ),
+                              panel: (
+                                <SessionSecretsMenuBody
+                                  vaults={secretsView.reachableVaults}
+                                  policy={secretsView.policy}
+                                  narrowedByParent={secretsView.narrowedBySessionId !== null}
+                                  taskItems={secretsView.taskItems}
+                                  canEdit={workspacePermissions.includes("sessions:control")}
+                                  disabled={terminal}
+                                  loading={sessionSecrets.loading}
+                                  error={sessionSecrets.error}
+                                  onRetry={() => void sessionSecrets.refresh()}
+                                  onPolicyChange={async (policy) => {
+                                    await sessionSecrets.api.setSessionVaultPolicy(
+                                      props.session.id,
+                                      policy,
+                                    );
+                                    await sessionSecrets.refresh();
+                                  }}
+                                  onSaveTo={async (item, target) => {
+                                    await sessionSecrets.api.moveItem(item.vaultId, item.id, {
+                                      targetVaultId: target.id,
+                                      mode: "copy",
+                                    });
+                                    toast.success(`Saved ${item.name} to ${target.name}`);
+                                  }}
+                                  onManage={() =>
+                                    void navigate({
+                                      to: "/workspaces/$workspaceId/secrets",
+                                      params: { workspaceId: props.session.workspaceId },
+                                    })
+                                  }
+                                />
+                              ),
+                            },
+                          }
+                        : {})}
+                      repositories={{
+                        selectedCount: repositories.selectionCount,
+                        disabled: terminal || composer.sending,
+                        panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
+                      }}
+                      {...(runsOn.hasChoices ||
+                      props.session.rigId ||
+                      (runsOn.activeMachine && !runsOn.activeMachine.isSessionGroup)
+                        ? {
+                            runsOn: {
+                              summary: runsOn.activeName,
+                              panel: (
+                                <SessionRunsOnMenuBody
+                                  runsOn={runsOn}
+                                  workspaceId={props.session.workspaceId}
+                                  rigId={props.session.rigId ?? null}
+                                  move={moveRunsOn}
+                                />
+                              ),
+                            },
+                          }
+                        : {})}
+                    />
+                  </>
+                }
+                actions={
+                  !terminal ? (
+                    <LazyPart onLoadFailure="hide" fallback={null}>
+                      <LazyCodexRealtimeControl
+                        client={realtimeClient}
+                        workspaceId={props.session.workspaceId}
+                        sessionId={props.session.id}
+                        sessionStatus={props.session.status}
+                        effectiveControl={
+                          props.queue.effectiveControl ?? props.session.effectiveControl
+                        }
+                        events={props.events}
+                        eventsReady={!props.initialLoading}
+                        codexConnected={codexConnected}
+                        realtimeAutostartModel={props.realtimeAutostartModel}
+                        onRealtimeAutostartConsumed={props.onRealtimeAutostartConsumed}
+                        onVoiceActiveChange={onVoiceActiveChange}
+                      />
+                    </LazyPart>
+                  ) : null
+                }
+                placeholder={chatComposerPlaceholder({
+                  archived: readOnlyArchive !== null,
+                  cancelled,
+                  creditStopped:
+                    Boolean(props.creditExhausted) &&
+                    (props.session.status === "failed" || props.session.status === "idle"),
+                  stopRefusal,
+                  creditGap,
+                  canBuyCredits,
+                })}
+                controls={
+                  <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
+                    <ModelPicker
+                      hasImageAttachments={attachments.attachments.some(
+                        (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
+                      )}
+                      open={modelPickerSession === props.session.id && !pendingRetryInput}
+                      onOpenChange={(open) => {
+                        setModelPickerSession(open ? props.session.id : null);
+                        if (open) void modelCatalog.refresh();
+                      }}
+                      rows={modelCatalog.rows}
+                      model={model}
+                      effort={reasoningEffort}
+                      latencyMode={latencyMode}
+                      disabled={modelPickerDisabled}
+                      loading={modelCatalog.loading || composer.draftLoading}
+                      error={modelCatalog.error ?? composerPolicyError}
+                      sessionKey={props.session.id}
+                      menuSide="top"
+                      connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
+                      claudeSubscriptionAvailable={
+                        context.clientConfig.claudeSubscriptionEnabled === true
+                      }
+                      onModelChange={(modelId) => {
+                        composer.setModel(modelId);
+                        usageModelSwitch.modelPicked(modelId);
+                      }}
+                      onEffortChange={composer.setReasoningEffort}
+                      onLatencyModeChange={composer.setLatencyMode}
+                    />
+                    {durableToolsError ? (
+                      <span className="sr-only" role="alert">
+                        {durableToolsError}
+                      </span>
+                    ) : null}
+                  </div>
+                }
+              />
+            </div>
+          </div>
+        </ChatViewportFileDropTarget>,
+      ),
+    ),
+  );
+}
+
+/** The model a "model is not available" refusal named: the API detail, else the attempted input. */
+function refusedModelId(error: Error, input: unknown): string | null {
+  const details = (error as { details?: Record<string, unknown> | undefined }).details;
+  if (typeof details?.modelId === "string" && details.modelId) return details.modelId;
+  const attempted = (input as { model?: unknown } | null)?.model;
+  return typeof attempted === "string" && attempted ? attempted : null;
+}

@@ -15,10 +15,12 @@ import {
   UpdateCompanyProfileAgentPolicyRequest,
 } from "@opengeni/contracts";
 import {
+  authorizationHoldsOrganizationAdministration,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
+  MissingPermissionRefusal,
 } from "@opengeni/core";
 import {
   activateCompanyProfileRevision,
@@ -38,13 +40,16 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 
 const RevisionId = z.string().uuid();
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
-  const parsed = schema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) throw new HTTPException(422, { message: "Invalid company-profile request" });
-  return parsed.data;
+  const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
+    status: 422,
+    message: "Invalid company-profile request",
+  });
+  return parsed;
 }
 
 export function requireDirectAccountAdmin(access: AccessGrantAuthorization): void {
@@ -61,8 +66,9 @@ export function requireDirectAccountAdmin(access: AccessGrantAuthorization): voi
       message: "Company-profile administration requires a direct human-authorized request",
     });
   }
-  if (!access.accountGrant?.permissions.includes("account:admin")) {
-    throw new HTTPException(403, { message: "missing permission: account:admin" });
+  // The organization's owner or admins administer its identity.
+  if (!authorizationHoldsOrganizationAdministration(access)) {
+    throw new MissingPermissionRefusal("account:admin");
   }
 }
 
@@ -164,20 +170,21 @@ export function registerCompanyProfileRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.get(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
-    const query = CompanyProfileListQuery.safeParse({
-      afterRevision: context.req.query("afterRevision"),
-      limit: context.req.query("limit"),
-    });
-    if (!query.success) throw new HTTPException(422, { message: "Invalid company-profile query" });
+    const query = parseRequestQuery(
+      CompanyProfileListQuery,
+      {
+        afterRevision: context.req.query("afterRevision"),
+        limit: context.req.query("limit"),
+      },
+      { status: 422, message: "Invalid company-profile query" },
+    );
     return context.json(
       CompanyProfileListResponse.parse(
         await listCompanyProfile(deps.db, {
           accountId: grant.accountId,
           workspaceId,
-          limit: query.data.limit,
-          ...(query.data.afterRevision === undefined
-            ? {}
-            : { afterRevision: query.data.afterRevision }),
+          limit: query.limit,
+          ...(query.afterRevision === undefined ? {} : { afterRevision: query.afterRevision }),
         }),
       ),
     );
@@ -217,18 +224,21 @@ export function registerCompanyProfileRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.get(`${base}/diff`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
-    const request = CompanyProfileDiffRequest.safeParse({
-      fromRevisionId: context.req.query("fromRevisionId"),
-      toRevisionId: context.req.query("toRevisionId"),
-    });
-    if (!request.success) throw new HTTPException(422, { message: "Invalid company-profile diff" });
+    const request = parseRequestQuery(
+      CompanyProfileDiffRequest,
+      {
+        fromRevisionId: context.req.query("fromRevisionId"),
+        toRevisionId: context.req.query("toRevisionId"),
+      },
+      { status: 422, message: "Invalid company-profile diff" },
+    );
     try {
       return context.json(
         CompanyProfileDiffResponse.parse(
           await diffCompanyProfileRevisions(deps.db, {
             accountId: grant.accountId,
             workspaceId,
-            ...request.data,
+            ...request,
           }),
         ),
       );

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   browserFrameSocketUrl,
   decodeBrowserFrameMessage,
@@ -20,6 +21,8 @@ import {
   STREAM_ROLE_CLIENT,
 } from "../lib/relay-wire";
 import { usePageLiveActivity } from "./internal";
+import { useOpenGeniText } from "../messages/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type BrowserFrameConnectionState =
   | "idle"
@@ -45,7 +48,7 @@ const RELAY_TAG_FRAME = 3;
 const RELAY_TAG_CLOSE = 4;
 const MAX_AUTOMATIC_RECONNECTS_WITHOUT_A_FRAME = 2;
 
-export type UseBrowserFrameStreamOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseBrowserFrameStreamOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   browserSessionId: string | null;
   targetId: string | null;
   enabled?: boolean | undefined;
@@ -78,6 +81,7 @@ export type UseBrowserFrameStreamResult = {
 export function useBrowserFrameStream(
   options: UseBrowserFrameStreamOptions,
 ): UseBrowserFrameStreamResult {
+  const t = useOpenGeniText();
   const { client, workspaceId } = useEmbeddedBrowserInteraction(options);
   const pageLive = usePageLiveActivity();
   const enabled = (options.enabled ?? true) && pageLive;
@@ -297,7 +301,7 @@ export function useBrowserFrameStream(
 
     const onError = (source: BrowserFrameWebSocket) => {
       if (source !== socket) return;
-      fail(new Error("Browser view lost connection."));
+      fail(new Error(t("hooks.useBrowserFrameStream.browserViewLostConnection")));
     };
 
     const onClose = (source: BrowserFrameWebSocket) => {
@@ -418,7 +422,7 @@ export function useBrowserFrameStream(
       if (expiryTimer) clearTimeout(expiryTimer);
       clearSocket(true);
     };
-  }, [client, enabled, nonce, options.browserSessionId, options.targetId, workspaceId]);
+  }, [client, enabled, nonce, options.browserSessionId, options.targetId, workspaceId, t]);
 
   return { ...result, reconnect };
 }
@@ -442,6 +446,6 @@ async function messageBytes(value: unknown): Promise<Uint8Array> {
 }
 
 function isPlacementGenerationLossError(cause: unknown): boolean {
-  const message = cause instanceof Error ? cause.message : String(cause);
+  const message = errorMessage(cause);
   return /placement instance changed|controller authority changed/i.test(message);
 }

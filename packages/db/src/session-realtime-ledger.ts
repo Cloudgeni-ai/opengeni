@@ -1,7 +1,17 @@
 import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { createHash } from "node:crypto";
 
-import { LatencyMode, ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
+import {
+  LatencyMode,
+  McpPersonalConnectionDelegations,
+  ReasoningEffort,
+  type SessionRealtimeMode,
+} from "@opengeni/contracts";
+import { isNoReplyText } from "@opengeni/contracts/no-reply";
+import {
+  parseAcceptedMcpAccountBindings,
+  parseConnectionAccountIntent,
+} from "./mcp-account-bindings";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -21,6 +31,7 @@ import {
   lockWorkspaceInferenceControlForAdmission,
 } from "./session-control";
 import { submitHumanPromptInTransaction } from "./session-queue-commands";
+import { endSessionUnattendedDefaultInTransaction } from "./session-unattended";
 import { mirrorSessionRealtimeContextInTransaction } from "./session-realtime-mirror";
 
 export const SESSION_REALTIME_LEDGER_MAX_BATCH = 64;
@@ -165,6 +176,8 @@ export type SessionRealtimeInboundEntryInput = {
 export type SyncSessionRealtimeLedgerInput = AssertSessionRealtimeOwnerInput & {
   /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
   controlLockTimeoutMs?: number;
+  /** The owner's own label (their email), so a voice request names its sender. */
+  ownerSubjectLabel?: string | null | undefined;
   connectionId: string;
   connectionEpoch: number;
   entries?: SessionRealtimeInboundEntryInput[] | undefined;
@@ -461,6 +474,12 @@ export async function claimSessionRealtimeConnectionInTransaction(
     };
   }
   if (staleRotationError) throw staleRotationError;
+  if (mode.state === "preparing" && (promotionMode !== "staged" || input.rotate)) {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_NOT_ACTIVE",
+      "Ringing connections must wait for acceptance",
+    );
+  }
   if (mode.connectionEpoch !== input.expectedConnectionEpoch) {
     throw new SessionRealtimeConflictError(
       "REALTIME_CONNECTION_CHANGED",
@@ -636,7 +655,11 @@ async function lockConnectionFinalizationMode(
     )
     .for("update")
     .limit(1);
-  if (!mode || mode.state !== "active" || mode.leaseExpiresAt <= (input.now ?? new Date())) {
+  if (
+    !mode ||
+    !["active", "preparing"].includes(mode.state) ||
+    mode.leaseExpiresAt <= (input.now ?? new Date())
+  ) {
     throw new SessionRealtimeConflictError(
       "REALTIME_NOT_ACTIVE",
       "Realtime mode is no longer active",
@@ -748,6 +771,12 @@ export async function activateSessionRealtimeConnectionInTransaction(
       ...input,
       expectedVersion: input.expectedVersion + 1,
     });
+  }
+  if (mode.state !== "active") {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_NOT_ACTIVE",
+      "Incoming call has not been accepted",
+    );
   }
 
   const [connection] = await db
@@ -1128,7 +1157,12 @@ async function admitRealtimeDelegationInTransaction(
   db: SessionActivityDatabase,
   input: Pick<
     SyncSessionRealtimeLedgerInput,
-    "workspaceId" | "sessionId" | "realtimeId" | "connectionEpoch" | "ownerSubjectId"
+    | "workspaceId"
+    | "sessionId"
+    | "realtimeId"
+    | "connectionEpoch"
+    | "ownerSubjectId"
+    | "ownerSubjectLabel"
   >,
   accountId: string,
   incoming: SessionRealtimeInboundEntryInput,
@@ -1150,6 +1184,19 @@ async function admitRealtimeDelegationInTransaction(
   }
   const [policy] = await withEffectiveSessionPolicy(db, input.workspaceId, [session]);
   if (!policy) throw new Error("Realtime delegation session disappeared");
+  const [mode] = await db
+    .select()
+    .from(schema.sessionRealtimeModes)
+    .where(
+      and(
+        eq(schema.sessionRealtimeModes.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeModes.sessionId, input.sessionId),
+        eq(schema.sessionRealtimeModes.id, input.realtimeId),
+        eq(schema.sessionRealtimeModes.ownerSubjectId, input.ownerSubjectId),
+      ),
+    )
+    .limit(1);
+  if (!mode) throw new Error("Realtime delegation authority snapshot disappeared");
   const provenance = {
     source: "realtime_provider_delegation",
     realtimeId: input.realtimeId,
@@ -1157,16 +1204,21 @@ async function admitRealtimeDelegationInTransaction(
     delegationItemId: incoming.delegationItemId!,
     ledgerEntryId: entryId,
   };
-  const inputTranscript = incoming.payload?.inputTranscript;
-  if (typeof inputTranscript !== "string" || inputTranscript.trim().length === 0) {
-    throw new Error("Realtime delegation input transcript is required");
-  }
+  // Some providers (Azure Live) delegate without echoing the user's words. The
+  // work instructions in `incoming.text` still carry the transcript delta, so a
+  // missing echo only changes the display label; it must never fail the sync
+  // batch, which the browser would retry forever.
+  const rawInputTranscript = incoming.payload?.inputTranscript;
+  const inputTranscript =
+    typeof rawInputTranscript === "string" && rawInputTranscript.trim().length > 0
+      ? rawInputTranscript
+      : "Voice request";
   const admitted = await submitHumanPromptInTransaction(db, {
     accountId,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     subjectId: input.ownerSubjectId,
-    subjectLabel: "Realtime",
+    subjectLabel: input.ownerSubjectLabel?.trim() || "Realtime",
     actor: {
       type: "human",
       subjectId: input.ownerSubjectId,
@@ -1191,6 +1243,18 @@ async function admitRealtimeDelegationInTransaction(
     },
     source: "api",
     surface: "voice",
+    personalConnectionDelegations: McpPersonalConnectionDelegations.parse(
+      mode.personalConnectionDelegations,
+    ),
+    mcpAccountBindings: parseAcceptedMcpAccountBindings(mode.mcpAccountBindings),
+    connectionAccountIntent: parseConnectionAccountIntent(mode.connectionAccountIntent),
+  });
+  // The call's owner is talking: an automation's unattended default ends, as
+  // when a person writes in the chat; an explicit choice stays. After the
+  // admission, which already holds the session row in the canonical lock order.
+  await endSessionUnattendedDefaultInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
   });
   return {
     turnId: admitted.turnId,
@@ -1692,10 +1756,16 @@ export async function appendSessionRealtimeOutboundInTransaction(
 }
 
 /**
- * Under the caller's canonical session/turn fence, mirror accepted assistant
- * text deltas into the active delegation's durable provider-out stream. One
- * append batch becomes one or more bounded progress rows, preserving the
- * ordinary event order without making the browser's live SSE authoritative.
+ * Under the caller's canonical session/turn fence, mirror the agent's
+ * completed working notes into the active delegation's durable provider-out
+ * stream. One append batch becomes one or more bounded progress rows,
+ * preserving the ordinary event order without making the browser's live SSE
+ * authoritative.
+ *
+ * Whole messages, never streaming deltas: every progress row reaches the
+ * voice model as its own context item, so deltas arrived as word fragments
+ * ("You pic", "ked up, so…"). A final answer is not progress either: the
+ * turn's terminal result relays it once.
  */
 export async function projectSessionRealtimeDelegationProgressInTransaction(
   db: Database,
@@ -1703,15 +1773,19 @@ export async function projectSessionRealtimeDelegationProgressInTransaction(
 ): Promise<ProjectSessionRealtimeDelegationProgressResult> {
   const progressEvents = input.events.flatMap((event) => {
     if (
-      event.type !== "agent.message.delta" ||
+      event.type !== "agent.message.completed" ||
       !event.payload ||
       typeof event.payload !== "object" ||
       Array.isArray(event.payload)
     ) {
       return [];
     }
-    const text = (event.payload as Record<string, unknown>).text;
-    return typeof text === "string" && text.length > 0 ? [{ ...event, text }] : [];
+    const payload = event.payload as Record<string, unknown>;
+    if (payload.phase === "final_answer") return [];
+    const text = payload.text;
+    return typeof text === "string" && text.trim().length > 0 && !isNoReplyText(text)
+      ? [{ ...event, text }]
+      : [];
   });
   if (progressEvents.length === 0) return { entries: [] };
 
@@ -1730,7 +1804,9 @@ export async function projectSessionRealtimeDelegationProgressInTransaction(
     )
     .for("update")
     .limit(1);
-  const text = progressEvents.map((event) => event.text).join("");
+  // Clients join the progress rows they receive in one sync without a
+  // separator, so each note carries its own line end.
+  const text = progressEvents.map((event) => `${event.text}\n`).join("");
   const source = sourceEventProvenance(progressEvents.map((event) => event.id));
   const sourceEventIds = source.ids;
   const sourceEventSequences = progressEvents.map((event) => event.sequence);

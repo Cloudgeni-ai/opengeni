@@ -13,6 +13,7 @@ import {
   matchRoutes,
   moduleExports,
   normalizeSdkPath,
+  sdkClassSurface,
   validateAllowlist,
   type Snapshot,
 } from "./surface";
@@ -87,7 +88,20 @@ describe("SDK path extraction", () => {
     const file = join(dir, "client.ts");
     writeFileSync(
       file,
-      `export class Client {
+      `function sessionRoot(workspaceId: string, sessionId: string) {
+  return \`/v1/workspaces/\${workspaceId}/sessions/\${sessionId}\`;
+}
+export class Client {
+  async getSession(workspaceId: string, sessionId: string): Promise<Session> {
+    return this.requestJson<Session>("GET", sessionRoot(workspaceId, sessionId));
+  }
+  async getEvents(workspaceId: string, sessionId: string): Promise<SessionEvent[]> {
+    return this.requestJson("GET", \`\${sessionRoot(workspaceId, sessionId)}/events\`);
+  }
+  opaqueHelper() {
+    const sessionRoot = unknownHelper;
+    return this.requestJson("GET", sessionRoot("workspace", "session"));
+  }
   async createThing(workspaceId: string, request: CreateThingRequest): Promise<Thing> {
     return await this.requestJson<Thing>("POST", \`/v1/workspaces/\${workspaceId}/things\`, request);
   }
@@ -102,6 +116,13 @@ describe("SDK path extraction", () => {
 }`,
     );
     const methods = extractSdkMethods([file]);
+    expect([...methods.find((method) => method.name === "Client.getSession")!.paths]).toEqual([
+      "/v1/workspaces/:p/sessions/:p",
+    ]);
+    expect([...methods.find((method) => method.name === "Client.getEvents")!.paths]).toEqual([
+      "/v1/workspaces/:p/sessions/:p/events",
+    ]);
+    expect(methods.some((method) => method.name === "Client.opaqueHelper")).toBe(false);
     const create = methods.find((method) => method.name === "Client.createThing")!;
     expect([...create.verbs]).toEqual(["POST"]);
     expect([...create.paths]).toEqual(["/v1/workspaces/:p/things"]);
@@ -141,6 +162,166 @@ export * from "@external/pkg";
       LocalBox: "value",
       "* from @external/pkg": "value",
     });
+  });
+});
+
+describe("public SDK client inheritance", () => {
+  const method = `getOrganizationApiKey(organizationId: string, apiKeyId: string): Promise<ApiKey> { throw new Error(); }`;
+
+  function hierarchy() {
+    const dir = mkdtempSync(join(tmpdir(), "public-api-inheritance-"));
+    const files = [
+      "browser",
+      "operator",
+      "barrel",
+      "artifact",
+      "embedding",
+      "root",
+      "core",
+      "artifacts",
+      "authority",
+    ].map((name) => join(dir, `${name}.ts`));
+    const write = (name: string, source: string) => writeFileSync(join(dir, `${name}.ts`), source);
+    write("barrel", 'export * from "./operator";');
+    write(
+      "embedding",
+      'import { OpenGeniClient as Artifacts } from "./artifact"; export class OpenGeniEmbeddingClient extends Artifacts {}',
+    );
+    write(
+      "root",
+      'export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding"; export type { OpenGeniEmbeddingClient as TypeOnlyClient } from "./embedding";',
+    );
+    write(
+      "core",
+      'import { OpenGeniDocumentAuthorityClient as Authority } from "./barrel"; export { Authority as OpenGeniCoreClient };',
+    );
+    write("artifacts", 'export { OpenGeniClient } from "./artifact";');
+    write("authority", 'export { OpenGeniDocumentAuthorityClient } from "./operator";');
+    const entries = {
+      "@opengeni/sdk": join(dir, "root.ts"),
+      "@opengeni/sdk/core": join(dir, "core.ts"),
+      "@opengeni/sdk/artifacts": join(dir, "artifacts.ts"),
+      "@opengeni/sdk/document-authority": join(dir, "authority.ts"),
+    };
+    const configure = (browser: string, operator: string, artifact = "") => {
+      write("browser", `export class OpenGeniClient { ${browser} }`);
+      write(
+        "operator",
+        `import { OpenGeniClient as Browser } from "./browser"; export class OpenGeniDocumentAuthorityClient extends Browser { ${operator} }`,
+      );
+      write(
+        "artifact",
+        `import { OpenGeniDocumentAuthorityClient as Authority } from "./barrel"; export class OpenGeniClient extends Authority { ${artifact} }`,
+      );
+    };
+    return {
+      files,
+      entries,
+      configure,
+      collect: () => sdkClassSurface(files, entries),
+      browser: join(dir, "browser.ts"),
+    };
+  }
+
+  test("moving a method to the shared non-browser base preserves every public alias", () => {
+    const fixture = hierarchy();
+    fixture.configure(method, "");
+    const before = snapshot(fixture.collect());
+    fixture.configure("", method);
+    const after = snapshot(fixture.collect());
+
+    expect(breakingIds(before, after)).toEqual([]);
+    for (const [entry, name] of [
+      ["@opengeni/sdk", "OpenGeniClient"],
+      ["@opengeni/sdk/core", "OpenGeniCoreClient"],
+      ["@opengeni/sdk/artifacts", "OpenGeniClient"],
+      ["@opengeni/sdk/document-authority", "OpenGeniDocumentAuthorityClient"],
+    ])
+      expect(after.sdkSignatures![`${entry}:${name}`]).toHaveProperty("getOrganizationApiKey");
+    expect(after.sdkSignatures).not.toHaveProperty("@opengeni/sdk:TypeOnlyClient");
+    const browser = sdkClassSurface(fixture.files, { browser: fixture.browser });
+    expect(browser.sdkSignatures!["browser:OpenGeniClient"]).not.toHaveProperty(
+      "getOrganizationApiKey",
+    );
+  });
+
+  test("removing an inherited core method fails even when root and artifact retain it", () => {
+    const fixture = hierarchy();
+    fixture.configure("", method);
+    const before = snapshot(fixture.collect());
+    fixture.configure("", "", method);
+    const after = snapshot(fixture.collect());
+
+    expect(after.sdkSignatures!["@opengeni/sdk:OpenGeniClient"]).toHaveProperty(
+      "getOrganizationApiKey",
+    );
+    expect(breakingIds(before, after)).toContain(
+      "signature:@opengeni/sdk/core:OpenGeniCoreClient.getOrganizationApiKey",
+    );
+    expect(breakingIds(before, after)).toContain(
+      "signature:@opengeni/sdk/document-authority:OpenGeniDocumentAuthorityClient.getOrganizationApiKey",
+    );
+  });
+
+  test.each([
+    method.replace("organizationId: string", "organizationId: number"),
+    method.replace("apiKeyId: string", "apiKeyId: string, required: boolean"),
+    method.replace("Promise<ApiKey>", "Promise<ApiKey | null>"),
+  ])("rejects incompatible inherited signatures: %s", (changed) => {
+    const fixture = hierarchy();
+    fixture.configure("", method);
+    const before = snapshot(fixture.collect());
+    fixture.configure("", changed);
+    expect(breakingIds(before, snapshot(fixture.collect()))).toContain(
+      "signature:@opengeni/sdk/core:OpenGeniCoreClient.getOrganizationApiKey",
+    );
+  });
+
+  test("parameter names, implementation bodies and optional additions are not breaks", () => {
+    const fixture = hierarchy();
+    fixture.configure("", method);
+    const before = snapshot(fixture.collect());
+    fixture.configure(
+      "",
+      "getOrganizationApiKey(org: string, key: string, signal?: AbortSignal): Promise<ApiKey> { return fetchOtherImplementation(); }",
+    );
+    expect(breakingIds(before, snapshot(fixture.collect()))).toEqual([]);
+  });
+
+  test("an inline options object may gain optional members, but not required or changed ones", () => {
+    const fixture = hierarchy();
+    const list = (members: string) =>
+      `list(id: string, options: { ${members} } = {}): Promise<ApiKey> { throw new Error(); }`;
+    fixture.configure("", list("query?: string; limit?: number"));
+    const before = snapshot(fixture.collect());
+    fixture.configure("", list("query?: string; person?: string; limit?: number"));
+    expect(breakingIds(before, snapshot(fixture.collect()))).toEqual([]);
+    for (const changed of [
+      "query?: string; person: string; limit?: number",
+      "query?: number; limit?: number",
+      "query?: string",
+    ]) {
+      fixture.configure("", list(changed));
+      expect(breakingIds(before, snapshot(fixture.collect()))).toContain(
+        "signature:@opengeni/sdk/core:OpenGeniCoreClient.list",
+      );
+    }
+  });
+
+  test("narrow overrides and lost overloads cannot hide behind inherited signatures", () => {
+    const fixture = hierarchy();
+    const overloads =
+      "read(id: string): string; read(id: number): number; read(id: string | number): string | number { throw new Error(); }";
+    fixture.configure("", overloads);
+    const before = snapshot(fixture.collect());
+    fixture.configure("", overloads, "read(id: number): number { throw new Error(); }");
+    expect(breakingIds(before, snapshot(fixture.collect()))).toContain(
+      "signature:@opengeni/sdk:OpenGeniClient.read",
+    );
+    fixture.configure("", "read(id: number): number { throw new Error(); }");
+    expect(breakingIds(before, snapshot(fixture.collect()))).toContain(
+      "signature:@opengeni/sdk/core:OpenGeniCoreClient.read",
+    );
   });
 });
 
@@ -191,6 +372,40 @@ describe("schema compatibility rules", () => {
         'Res $.status: values added: "paused"',
       ]),
     );
+  });
+
+  test("literal-to-enum expansion follows enum policy without weakening other guards", () => {
+    const before = withSchemas(
+      z.object({ mode: z.literal("a").optional() }),
+      z.object({ model: z.literal("a") }),
+    );
+    expect(
+      breakingIds(
+        before,
+        withSchemas(
+          z.object({ mode: z.enum(["a", "b"]).optional() }),
+          z.object({ model: z.enum(["a", "b"]) }),
+        ),
+      ),
+    ).toEqual([]);
+    expect(
+      breakingIds(
+        before,
+        withSchemas(
+          z.object({ mode: z.enum(["a", "b"]) }),
+          z.object({ model: z.enum(["a", "b"]).optional() }),
+        ),
+      ),
+    ).toEqual(["schema:Req:$.mode", "schema:Res:$.model"]);
+    expect(
+      breakingIds(
+        before,
+        withSchemas(
+          z.object({ mode: z.enum(["b", "c"]).optional() }),
+          z.object({ model: z.literal([1, 2]) }),
+        ),
+      ),
+    ).toEqual(["schema:Req:$.mode", "schema:Res:$.model"]);
   });
 
   test("new required request fields, narrowed request enums, and optional->required are breaking", () => {
@@ -274,6 +489,78 @@ describe("schema compatibility rules", () => {
     });
     expect(breakingIds(before, narrowed)).toEqual(["schema:Req:$.source"]);
   });
+
+  test("an inline union variant moved into a named schema breaks only when its shape breaks", () => {
+    const key = z.object({ type: z.literal("key"), key: z.string() });
+    const text = z.object({ type: z.literal("text"), value: z.string(), delay: z.number() });
+    const stricter = text.extend({ submit: z.boolean() });
+    const inline = (variant: z.ZodObject) =>
+      snapshot({
+        schemas: {
+          Action: {
+            io: ["input"],
+            shape: shapeOf(z.discriminatedUnion("type", [key, variant]), "input"),
+          },
+        },
+      });
+    const named = (variant: z.ZodObject) => {
+      const shape = { ...inline(text).schemas.Action!.shape };
+      for (const path of Object.keys(shape)) {
+        if (path.startsWith("$|type=text.")) delete shape[path];
+      }
+      shape["$|type=text"] = "ref(TextAction)";
+      return snapshot({
+        schemas: {
+          Action: { io: ["input"], shape },
+          TextAction: { io: ["input"], shape: shapeOf(variant, "input") },
+        },
+      });
+    };
+    expect(diffSnapshots(inline(text), named(text))).toEqual([
+      {
+        id: "schema:Action:$|type=text",
+        breaking: false,
+        message: "Action $|type=text: type changed object -> ref(TextAction) (compatible shape)",
+      },
+    ]);
+    // The reverse move, from a named schema back inline, is judged the same way.
+    expect(breakingIds(named(text), inline(text))).toEqual([]);
+    // A move that also changes the value is still reported, field by field.
+    expect(breakingIds(inline(text), named(stricter))).toContain("schema:Action:$|type=text");
+    expect(breakingIds(named(text), inline(stricter))).toContain("schema:Action:$|type=text");
+  });
+
+  test("a field widened into a union that keeps its previous value is additive", () => {
+    const action = shapeOf(z.object({ type: z.literal("click"), x: z.number() }), "input");
+    const request = (shape: Record<string, string>) =>
+      snapshot({
+        schemas: { Req: { io: ["input"], shape }, Action: { io: ["input"], shape: action } },
+      });
+    const before = request({ $: "object", "$.action": "ref(Action)!" });
+    const widened = request({
+      $: "object",
+      "$.action": 'union!=["0","type=batch"]',
+      "$.action|0": "ref(Action)",
+      "$.action|type=batch": "object",
+      "$.action|type=batch.type": 'const!=["\\"batch\\""]',
+      "$.action|type=batch.steps": "array!",
+      "$.action|type=batch.steps[]": "string",
+    });
+    expect(breakingIds(before, widened)).toEqual([]);
+    expect(diffSnapshots(before, widened).map((finding) => finding.message)).toEqual([
+      "Req $.action: type changed ref(Action) -> union (still accepts ref(Action))",
+      "Req $.action: values added: 0, type=batch",
+      "Req $.action|type=batch: field added",
+    ]);
+    // A union none of whose variants keeps the old value still breaks callers.
+    const replaced = request({
+      $: "object",
+      "$.action": 'union!=["a","b"]',
+      "$.action|a": "string",
+      "$.action|b": "number",
+    });
+    expect(breakingIds(before, replaced)).toEqual(["schema:Req:$.action"]);
+  });
 });
 
 describe("surface-level rules", () => {
@@ -322,31 +609,47 @@ describe("surface-level rules", () => {
 });
 
 describe("breaking-change allowlist", () => {
-  const entry = {
+  const historical = {
     ids: ["route:GET /v1/b", "schema:Res:*"],
     deprecation: ".changeset/remove-b.md",
     removedInMajor: 8,
     sunset: "2027-01-01",
     reason: "Replaced by /v1/c; announced in the 7.4 changelog.",
   };
+  const approved = {
+    ids: ["route:GET /v1/b", "schema:Res:*"],
+    approval: "https://github.com/Cloudgeni-ai/opengeni/pull/1#issuecomment-1",
+    reason: "Owner-approved exception logged in the compatibility policy.",
+  };
 
-  test("entries must reference a deprecation, a removal major, a sunset, and a reason", () => {
-    expect(validateAllowlist([entry])).toHaveLength(1);
-    expect(() => validateAllowlist([{ ...entry, deprecation: "trust me" }])).toThrow(/deprecation/);
-    expect(() => validateAllowlist([{ ...entry, removedInMajor: "8" }])).toThrow(/removedInMajor/);
-    expect(() => validateAllowlist([{ ...entry, sunset: "later" }])).toThrow(/sunset/);
-    expect(() => validateAllowlist([{ ...entry, ids: [] }])).toThrow(/ids/);
+  test("new entries must record a security exception or a linked owner approval", () => {
+    expect(validateAllowlist([historical, approved])).toHaveLength(2);
+    expect(
+      validateAllowlist([{ ...approved, approval: undefined, securityException: true }]),
+    ).toHaveLength(1);
+    expect(() => validateAllowlist([{ ...approved, approval: undefined }])).toThrow(
+      /does not authorize a breaking change/,
+    );
+    expect(() => validateAllowlist([{ ...approved, approval: "trust me" }])).toThrow(/approval/);
+    expect(() => validateAllowlist([{ ...historical, deprecation: "trust me" }])).toThrow(
+      /deprecation/,
+    );
+    expect(() => validateAllowlist([{ ...historical, removedInMajor: "8" }])).toThrow(
+      /removedInMajor/,
+    );
+    expect(() => validateAllowlist([{ ...historical, sunset: "later" }])).toThrow(/sunset/);
+    expect(() => validateAllowlist([{ ...approved, ids: [] }])).toThrow(/ids/);
     expect(() => validateAllowlist({})).toThrow(/array/);
   });
 
-  test("matches exact ids and prefixes, only for a later major unless a security exception", () => {
-    const [valid] = validateAllowlist([entry]);
+  test("a major release never admits a breaking change; only an exception does", () => {
+    const [old, valid] = validateAllowlist([historical, approved]);
     const finding = (id: string) => ({ id, breaking: true, message: id });
-    expect(allowlisted(finding("route:GET /v1/b"), [valid!], 7)).toBe(valid!);
-    expect(allowlisted(finding("schema:Res:$.id"), [valid!], 7)).toBe(valid!);
-    expect(allowlisted(finding("route:GET /v1/z"), [valid!], 7)).toBeNull();
-    expect(allowlisted(finding("route:GET /v1/b"), [valid!], 8)).toBeNull();
-    const security = { ...valid!, removedInMajor: 7, securityException: true };
-    expect(allowlisted(finding("route:GET /v1/b"), [security], 7)).toBe(security);
+    expect(allowlisted(finding("route:GET /v1/b"), [old!])).toBeNull();
+    expect(allowlisted(finding("route:GET /v1/b"), [valid!])).toBe(valid!);
+    expect(allowlisted(finding("schema:Res:$.id"), [valid!])).toBe(valid!);
+    expect(allowlisted(finding("route:GET /v1/z"), [valid!])).toBeNull();
+    const security = { ...old!, securityException: true };
+    expect(allowlisted(finding("route:GET /v1/b"), [security])).toBe(security);
   });
 });

@@ -7,13 +7,16 @@ import {
 } from "@opengeni/contracts";
 import {
   accountScopedApiKeyWorkspaceAuthority,
+  organizationWorkspaceInScope,
   hasPermission,
+  holdsOrganizationAdministration,
   requireAccessContext,
   requireAccessGrantAuthorization,
   requireSessionAuthorizationListScope,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   type ApiRouteDeps,
+  isVerifiedDelegatedHumanAuthorization,
 } from "@opengeni/core";
 import {
   decodeSessionListCursor,
@@ -26,6 +29,8 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { parseRequestQuery } from "../http/request-body";
+import { loadCodexSessionPointerProjection } from "../codex-session-pointers";
 
 /**
  * Upper bound on the workspace page reads one request performs. The
@@ -88,11 +93,11 @@ type OrganizationSessionReadAuthority = "organization_api_key" | "account_admin"
  *
  * An organization API key qualifies through its exact stamped workspace
  * authority when that authority carries `sessions:read` (a `full` key holds the
- * `workspace:admin` wildcard, a `read` key holds the literal). A human
- * organization owner qualifies through an `account:admin` account grant, but
- * that grant alone opens no workspace: every workspace is still authorized
- * through the ordinary per-workspace grant resolution below, so an owner sees
- * exactly the shared workspaces they are a member of.
+ * `workspace:admin` wildcard, a `read` key holds the literal). The
+ * organization's owner or an admin qualifies through organization
+ * administration, but that alone opens no workspace: every workspace is still
+ * authorized through the ordinary per-workspace grant resolution below, so an
+ * owner or admin sees exactly the shared workspaces they are a member of.
  */
 function requireOrganizationSessionReadAuthority(
   context: AccessContext,
@@ -108,10 +113,7 @@ function requireOrganizationSessionReadAuthority(
     }
     throw new HTTPException(403, { message: "organization session read authority required" });
   }
-  const accountGrant = context.accountGrants.find(
-    (candidate) => candidate.accountId === organizationId,
-  );
-  if (accountGrant?.permissions.includes("account:admin")) {
+  if (holdsOrganizationAdministration(context, organizationId)) {
     return "account_admin";
   }
   throw new HTTPException(403, { message: "organization session read authority required" });
@@ -143,16 +145,10 @@ export function registerOrganizationSessionRoutes(app: Hono, deps: ApiRouteDeps)
     const context = await requireAccessContext(c, deps);
     const readAuthority = requireOrganizationSessionReadAuthority(context, organizationId);
 
-    const queryResult = ListOrganizationSessionsQuery.safeParse(c.req.query());
-    if (!queryResult.success) {
-      const issue = queryResult.error.issues[0];
-      throw new HTTPException(400, {
-        message: issue
-          ? `${issue.path.length > 0 ? `${issue.path.join(".")}: ` : ""}${issue.message}`
-          : "invalid organization session list query",
-      });
-    }
-    const query = queryResult.data;
+    const query = parseRequestQuery(ListOrganizationSessionsQuery, c.req.query(), {
+      status: 400,
+      message: "invalid organization session list query",
+    });
     const cursor = query.cursor ? decodeOrganizationSessionListCursor(query.cursor) : null;
     if (query.cursor && !cursor) {
       throw new HTTPException(400, { message: "cursor is invalid" });
@@ -161,9 +157,13 @@ export function registerOrganizationSessionRoutes(app: Hono, deps: ApiRouteDeps)
     // Personal workspaces are excluded by the inventory itself; the stable id
     // order is what makes the `{ workspaceId, cursor }` continuation resumable
     // even when a workspace is created or deleted between pages.
-    const workspaces = (await listSharedWorkspacesForAccount(deps.db, organizationId)).sort(
-      compareWorkspaceIds,
-    );
+    const authority = accountScopedApiKeyWorkspaceAuthority(context);
+    const workspaces = (await listSharedWorkspacesForAccount(deps.db, organizationId))
+      .filter(
+        (workspace) =>
+          !authority || organizationWorkspaceInScope(authority.workspaceScope, workspace.id),
+      )
+      .sort(compareWorkspaceIds);
     let index = 0;
     let innerCursor: string | null = null;
     let pinnedOffset = 0;
@@ -201,7 +201,14 @@ export function registerOrganizationSessionRoutes(app: Hono, deps: ApiRouteDeps)
         pinnedOffset = 0;
         continue;
       }
-      sessions.push(...page.sessions);
+      // The Codex pointers by the organization's cutover disposition, exactly
+      // as the workspace session routes show them.
+      const codexPointers = await loadCodexSessionPointerProjection(
+        deps.db,
+        workspace.id,
+        page.sessions,
+      );
+      sessions.push(...page.sessions.map(codexPointers));
       if (page.nextPinnedOffset !== null) {
         // The page ended inside this workspace's pinned prefix.
         innerCursor = null;
@@ -298,7 +305,9 @@ async function listWorkspaceSessionPage(
           ? { scopeSubjectId: input.query.scopeSubjectId }
           : {}),
         ...(authorizationScope ? { authorizationScope } : {}),
-        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
+        personalWorkspaceOwnerException:
+          authorization.canonicalManagedHumanSession ||
+          isVerifiedDelegatedHumanAuthorization(authorization),
       });
     const withStatus = (rows: Session[]) =>
       input.query.status ? rows.filter((session) => session.status === input.query.status) : rows;

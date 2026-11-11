@@ -1,10 +1,17 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { and, asc, eq } from "drizzle-orm";
 
 import {
   addSessionSystemUpdate,
   beginSessionRealtimeInTransaction,
+  claimSessionRealtimeConnectionInTransaction,
+  completeSessionRealtimeConnectionInTransaction,
+  activateSessionRealtimeConnectionInTransaction,
+  syncSessionRealtimeLedgerInTransaction,
+  settleExpiredSessionRealtimeInTransaction,
+  settleAgentCall,
+  sessionRealtimeIsActiveInTransaction,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -24,6 +31,7 @@ import {
   type SessionActivityDatabase,
   type Database,
 } from "../src/index";
+import { mirrorSessionRealtimeContextInTransaction } from "../src/session-realtime-mirror";
 import * as schema from "../src/schema";
 
 let shared: SharedTestDatabase;
@@ -100,7 +108,9 @@ function owner(
 
 async function begin(
   value: Fixture,
-  input: ReturnType<typeof owner>,
+  input: ReturnType<typeof owner> & {
+    incomingCall?: { callId: string; device: string; answered?: boolean };
+  },
   options: { now?: Date; leaseMs?: number } = {},
 ) {
   return await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
@@ -239,6 +249,222 @@ async function withBlockedSession<T>(
 }
 
 describe("session realtime lifecycle (real PostgreSQL)", () => {
+  test("ringing phones prepare independently, deliver the accepted opening first, and retire losers without call events", async () => {
+    const value = await fixture();
+    const callId = crypto.randomUUID();
+    await shared.admin`insert into agent_calls(id, account_id, workspace_id, session_id, callee_subject_id, reason, ring_until)
+      values (${callId}, ${value.grant.accountId}, ${value.grant.workspaceId}, ${value.session.id}, ${value.grant.subjectId}, 'Opening reason', now() + interval '40 seconds')`;
+    const first = { ...owner(value), incomingCall: { callId, device: "phone-one" } };
+    const second = { ...owner(value), incomingCall: { callId, device: "phone-two" } };
+    const [one, two] = await Promise.all([begin(value, first), begin(value, second)]);
+    expect(one.mode.state).toBe("preparing");
+    expect(two.mode.state).toBe("preparing");
+    expect(one.eventIds).toEqual([]);
+    expect(
+      await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+        sessionRealtimeIsActiveInTransaction(db, value.grant.workspaceId, value.session.id),
+      ),
+    ).toBe(false);
+    await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+      mirrorSessionRealtimeContextInTransaction(db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId,
+        sessionId: value.session.id,
+        sourceKind: "assistant_progress",
+        sourceId: "during-ring",
+        channel: "commentary",
+        text: "Existing progress",
+      }),
+    );
+    const pending =
+      await shared.admin`select realtime_id, sequence, client_acked_at from session_realtime_entries where realtime_id in (${one.mode.id}, ${two.mode.id})`;
+    expect(pending).toHaveLength(2);
+    expect(pending.every((entry) => entry.sequence === 2 && entry.client_acked_at === null)).toBe(
+      true,
+    );
+    const connectionProof = {
+      ...first,
+      realtimeId: one.mode.id,
+      expectedVersion: one.mode.version,
+      expectedConnectionEpoch: 1,
+      operationId: crypto.randomUUID(),
+      rotate: false,
+      promotionMode: "staged" as const,
+    };
+    const claimed = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+      claimSessionRealtimeConnectionInTransaction(db, connectionProof),
+    );
+    const activationProof = {
+      ...connectionProof,
+      connectionId: claimed.connection.id,
+      connectionEpoch: 1,
+    };
+    const ready = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+      completeSessionRealtimeConnectionInTransaction(db, {
+        ...activationProof,
+        sdpAnswer: "v=0\r\nm=audio 9 RTP/AVP 0\r\n",
+      }),
+    );
+    expect(ready.connection.state).toBe("ready");
+    await expect(
+      withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+        activateSessionRealtimeConnectionInTransaction(db, activationProof),
+      ),
+    ).rejects.toThrow("not been accepted");
+    await expect(
+      withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+        syncSessionRealtimeLedgerInTransaction(db, {
+          ...activationProof,
+          providerStarted: { providerSessionId: "ring-test" },
+        }),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      begin(value, { ...first, incomingCall: { ...first.incomingCall, answered: true } }),
+    ).rejects.toThrow("not answered");
+    await settleAgentCall(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      callId,
+      outcome: "answered",
+      calleeSubjectId: value.grant.subjectId,
+      answeredBy: "phone-one",
+    });
+    const accepted = await begin(value, {
+      ...first,
+      incomingCall: { ...first.incomingCall, answered: true },
+    });
+    expect(accepted.mode.state).toBe("active");
+    expect(accepted.mode.id).toBe(one.mode.id);
+    await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+      activateSessionRealtimeConnectionInTransaction(db, {
+        ...activationProof,
+        expectedVersion: accepted.mode.version,
+      }),
+    );
+    const released = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+      syncSessionRealtimeLedgerInTransaction(db, {
+        ...activationProof,
+        expectedVersion: accepted.mode.version,
+        providerStarted: { providerSessionId: "ring-test" },
+      }),
+    );
+    expect(released.outbound.map((entry) => entry.payload.source)).toEqual([
+      "agent_call",
+      "assistant_progress",
+    ]);
+    const entries =
+      await shared.admin`select sequence, payload->>'source' as source from session_realtime_entries where realtime_id=${one.mode.id} order by sequence`;
+    expect(entries.map((entry) => entry.source)).toEqual(["agent_call", "assistant_progress"]);
+    const [loser] =
+      await shared.admin`select state from session_realtime_modes where id=${two.mode.id}`;
+    expect(loser!.state).toBe("ended");
+    const events = await lifecycleRows(value);
+    expect(
+      events
+        .filter((event) => event.type.startsWith("session.realtime."))
+        .map((event) => event.type),
+    ).toEqual(["session.realtime.started"]);
+    expect(
+      (await begin(value, { ...first, incomingCall: { ...first.incomingCall, answered: true } }))
+        .replay,
+    ).toBe(true);
+    await end(value, first, one.mode.id, accepted.mode.version);
+  });
+
+  test("declining a prepared mode emits no started or ended call event", async () => {
+    const value = await fixture();
+    const callId = crypto.randomUUID();
+    await shared.admin`insert into agent_calls(id, account_id, workspace_id, session_id, callee_subject_id, reason, ring_until)
+      values (${callId}, ${value.grant.accountId}, ${value.grant.workspaceId}, ${value.session.id}, ${value.grant.subjectId}, 'Opening reason', now() + interval '40 seconds')`;
+    const input = { ...owner(value), incomingCall: { callId, device: "phone-one" } };
+    const prepared = await begin(value, input);
+    await settleAgentCall(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      callId,
+      outcome: "declined",
+      calleeSubjectId: value.grant.subjectId,
+    });
+    expect((await end(value, input, prepared.mode.id, prepared.mode.version)).mode.state).toBe(
+      "ended",
+    );
+    expect(
+      (await lifecycleRows(value)).filter((event) => event.type.startsWith("session.realtime.")),
+    ).toEqual([]);
+  });
+
+  test.each(["cancelled", "missed"] as const)(
+    "%s closes a prepared provider connection without call lifecycle events",
+    async (outcome) => {
+      const value = await fixture();
+      const callId = crypto.randomUUID();
+      await shared.admin`insert into agent_calls(id, account_id, workspace_id, session_id, callee_subject_id, reason, ring_until)
+      values (${callId}, ${value.grant.accountId}, ${value.grant.workspaceId}, ${value.session.id}, ${value.grant.subjectId}, 'Opening reason', now() + interval '40 seconds')`;
+      const input = { ...owner(value), incomingCall: { callId, device: "phone" } };
+      const prepared = await begin(value, input);
+      const claimed = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+        claimSessionRealtimeConnectionInTransaction(db, {
+          ...input,
+          realtimeId: prepared.mode.id,
+          expectedVersion: 1,
+          operationId: crypto.randomUUID(),
+          expectedConnectionEpoch: 1,
+          rotate: false,
+          promotionMode: "staged",
+        }),
+      );
+      if (outcome === "missed")
+        await shared.admin`update agent_calls set ring_until = now() - interval '10 seconds' where id=${callId}`;
+      await settleAgentCall(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId,
+        callId,
+        outcome,
+      });
+      const [connection] =
+        await shared.admin`select state from session_realtime_connections where id=${claimed.connection.id}`;
+      expect(connection!.state).toBe("closed");
+      expect(
+        (await lifecycleRows(value)).filter((event) => event.type.startsWith("session.realtime.")),
+      ).toEqual([]);
+      expect((await begin(value, input)).mode.state).toBe("ended");
+    },
+  );
+
+  test("an abandoned preparation expires without extending its lease or pausing chat work", async () => {
+    const value = await fixture();
+    const callId = crypto.randomUUID();
+    await shared.admin`insert into agent_calls(id, account_id, workspace_id, session_id, callee_subject_id, reason, ring_until)
+      values (${callId}, ${value.grant.accountId}, ${value.grant.workspaceId}, ${value.session.id}, ${value.grant.subjectId}, 'Opening reason', now() + interval '40 seconds')`;
+    const input = { ...owner(value), incomingCall: { callId, device: "phone" } };
+    const prepared = await begin(value, input);
+    const renewed = await withWorkspaceRls(client.db, value.grant.workspaceId, (db) =>
+      renewSessionRealtimeInTransaction(db, {
+        ...input,
+        realtimeId: prepared.mode.id,
+        expectedVersion: 1,
+      }),
+    );
+    expect(renewed.mode.leaseExpiresAt).toBe(prepared.mode.leaseExpiresAt);
+    await withWorkspaceRls(client.db, value.grant.workspaceId, async (db) => {
+      const [row] = await db
+        .select()
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, value.session.id));
+      await settleExpiredSessionRealtimeInTransaction(
+        db,
+        row!,
+        new Date(Date.parse(prepared.mode.leaseExpiresAt) + 1),
+      );
+    });
+    const [ended] =
+      await shared.admin`select state, end_reason from session_realtime_modes where id=${prepared.mode.id}`;
+    expect(ended).toMatchObject({ state: "ended", end_reason: "lease_expired" });
+    expect(
+      (await lifecycleRows(value)).filter((event) => event.type.startsWith("session.realtime.")),
+    ).toEqual([]);
+  });
   test("starts, replays, renews, and ends one durable owner with ordered lifecycle events", async () => {
     const value = await fixture();
     const proof = owner(value);

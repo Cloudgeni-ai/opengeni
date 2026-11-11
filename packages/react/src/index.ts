@@ -14,8 +14,16 @@ export {
   type SessionCapabilityFrameProps,
 } from "./components/session-capability-frame";
 export {
+  SessionIntegrationCapabilityCard,
+  supportsIntegrationCapabilityCard,
+  type SessionIntegrationCapabilityCardProps,
+} from "./components/session-integration-capability-card";
+export {
   attachSessionCapability,
   completeSessionCapabilityOAuth,
+  prepareSessionCapabilityAccess,
+  applySessionCapabilityAccess,
+  type SessionCapabilityAccessPlan,
 } from "./session-capability-policy";
 export { retainedImageId } from "./components/markdown";
 // oxlint-disable-next-line typescript/triple-slash-reference -- package consumers must load the ambient type for this optional untyped peer without emitting a runtime import.
@@ -43,7 +51,26 @@ export type {
   SessionClientLike,
 } from "./client";
 export { OpenGeniProvider } from "./provider";
-export type { OpenGeniProviderProps } from "./provider";
+export type { OpenGeniProviderProps, ErrorMessageFormatter } from "./provider";
+export {
+  createOpenGeniText,
+  OpenGeniMessagesProvider,
+  useOpenGeniLocale,
+  useOpenGeniText,
+} from "./messages/runtime";
+export type {
+  MessageParamValue,
+  OpenGeniMessageCatalog,
+  OpenGeniMessageKey,
+  OpenGeniMessageParams,
+  OpenGeniMessages,
+  OpenGeniMessagesProviderProps,
+  OpenGeniText,
+  PluralCategory,
+} from "./messages/runtime";
+export { englishMessages } from "./messages/en";
+export { SINGLE_SEND_WORDING, singleSendText } from "./messages/single-send";
+export { SingleSendWording } from "./messages/runtime";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
@@ -62,6 +89,8 @@ export type {
 
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
+export { useRetainedReads } from "./hooks/shared-query";
+export { readClientConfig } from "./lib/client-config-read";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export {
   SESSION_EVENT_BROWSER_MAX_BYTES,
@@ -87,8 +116,10 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type {
+  ComposerBusySend,
   ComposerControllerState,
   ComposerPolicy,
+  InitialComposerDraft,
   ComposerSendExtras,
   ComposerState,
   UseComposerOptions,
@@ -104,6 +135,7 @@ export type {
   UseVoiceInputOptions,
   UseVoiceInputResult,
   VoiceInputStatus,
+  VoiceInputRecordingsClient,
 } from "./hooks/use-voice-input";
 export {
   IndexedDbVoiceRecordingStore,
@@ -130,7 +162,14 @@ export type {
   VoiceRecordingTranscriptionState,
   VoiceRecordingUploadState,
 } from "./voice-recording-store";
-export { COMPOSER_PAYMENT_REQUIRED_MESSAGE, composerSubmissionErrorMessage } from "./lib/format";
+export {
+  COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
+  COMPOSER_PAYMENT_REQUIRED_MESSAGE,
+  COMPOSER_SESSION_USAGE_LIMIT_MESSAGE,
+  composerSubmissionErrorMessage,
+  isModelUnavailableSubmissionError,
+  isSessionUsageLimitSubmissionError,
+} from "./lib/format";
 export {
   INITIAL_TRANSCRIPTION_CONTROL_STATE,
   appendFinalTranscript,
@@ -144,18 +183,41 @@ export type {
   UseTranscriptionOptions,
   UseTranscriptionResult,
 } from "./hooks/use-transcription";
-export { useFileAttachments } from "./hooks/use-file-attachments";
+export { uploadScopeForSession, useFileAttachments } from "./hooks/use-file-attachments";
 export type {
   FileAttachment,
   UseFileAttachmentsOptions,
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
+export {
+  isStoredImage,
+  readStoredFile,
+  readStoredFilePreviewUrl,
+  useStoredFilePreview,
+  useStoredFiles,
+} from "./stored-file-preview";
+export type {
+  StoredFileClientLike,
+  StoredFilePreview,
+  StoredFileSource,
+  StoredFiles,
+} from "./stored-file-preview";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
+  QueueRecallResult,
   UseTurnQueueOptions,
   UseTurnQueueResult,
 } from "./hooks/use-turn-queue";
+export {
+  latestRecallableQueuedTurn,
+  shouldRecallQueuedOnKey,
+  useQueuedPromptRecall,
+} from "./hooks/use-queued-prompt-recall";
+export type {
+  ComposerQueuedRecall,
+  QueuedPromptRecallOutcome,
+} from "./hooks/use-queued-prompt-recall";
 export {
   useLastStartedTurnPolicy,
   isLastStartedTurnPolicyEvent,
@@ -178,6 +240,7 @@ export type {
   SessionChromeProps,
   SessionChromeSignalId,
   SessionChromeSignalTone,
+  SessionChromeWait,
 } from "./components/session-chrome";
 export { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/tooltip";
 export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./workstream-control-event";
@@ -185,6 +248,7 @@ export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
 export { useSessionControl } from "./hooks/use-session-control";
 export type {
+  ApprovalDecisionOptions,
   UseSessionControlOptions,
   UseSessionControlResult,
 } from "./hooks/use-session-control";
@@ -207,6 +271,7 @@ export type {
   UseWorkspaceSessionsResult,
 } from "./hooks/use-workspace-sessions";
 export { useSessionBackgroundCommands } from "./hooks/use-session-background-commands";
+export { useWorkspaceBackgroundCommands } from "./hooks/use-workspace-background-commands";
 export type {
   UseSessionBackgroundCommandsOptions,
   UseSessionBackgroundCommandsResult,
@@ -216,13 +281,82 @@ export type {
   UseSessionLineageOptions,
   UseSessionLineageResult,
 } from "./hooks/use-session-lineage";
-export { useVariableSets, useEnvironments } from "./hooks/use-environments";
+export {
+  useVaultsApi,
+  useVaults,
+  useVault,
+  useVaultItems,
+  useVaultItem,
+  useVaultFieldVersions,
+  useSessionSecrets,
+  VAULT_ITEM_PAGE_LIMIT,
+} from "./hooks/use-vaults";
+export type { UseVaultQueryOptions } from "./hooks/use-vaults";
+export { asVaultClient, vaultsApi, vaultErrorCode, vaultErrorDetail } from "@opengeni/sdk";
+export type { VaultClientLike, VaultsApi } from "@opengeni/sdk";
 export type {
-  UseVariableSetsOptions,
-  UseVariableSetsResult,
-  UseEnvironmentsOptions,
-  UseEnvironmentsResult,
-} from "./hooks/use-environments";
+  VaultPolicy,
+  VaultOwnerKind,
+  VaultSource,
+  VaultMode,
+  VaultSyncStatus,
+  VaultItemType,
+  VaultFieldKind,
+  VaultAvailability,
+  VaultSummary,
+  VaultItemReferences,
+  VaultItemSummary,
+  VaultItemField,
+  PasskeySummary,
+  VaultItem,
+  VaultVersionCreatedByKind,
+  VaultFieldVersionMeta,
+  GeneratePasswordOptions,
+  CreateVaultRequest,
+  UpdateVaultRequest,
+  VaultFieldInput,
+  CreateVaultItemRequest,
+  UpdateVaultItemRequest,
+  MoveVaultItemRequest,
+  RevealVaultFieldResponse,
+  SecretUseGrantScope,
+  SecretUseGrant,
+  VaultItemApproval,
+  SetVaultItemApprovalRequest,
+  ListVaultItemsQuery,
+  SessionSecretsVault,
+  SessionSecretsView,
+  OnePasswordPlanTier,
+  InstallOnePasswordRequest,
+  ProviderVaultMeta,
+  InstallOnePasswordResponse,
+  OnePasswordConnectionSummary,
+  ReplaceOnePasswordTokenRequest,
+  DisconnectOnePasswordResponse,
+  LinkProviderVaultRequest,
+  CreateManagedProviderVaultRequest,
+  VaultErrorCode,
+} from "@opengeni/sdk";
+export { SecretsUiProvider, useSecretsUi } from "./secrets-ui";
+export {
+  SecretAnswerChip,
+  SecretRefChip,
+  SecretRefText,
+  secretReferenceLabel,
+} from "./components/secret-ref-chip";
+export type {
+  SecretAnswerChipProps,
+  SecretRefChipProps,
+  SecretRefTextProps,
+  SecretReferenceLabel,
+} from "./components/secret-ref-chip";
+export type {
+  SecretsUi,
+  SecretReferenceLike,
+  SecretReferenceTargetLike,
+  SecretTextTokenLike,
+  PasswordStrengthLike,
+} from "./secrets-ui";
 export { useChannels } from "./hooks/use-channels";
 export type { UseChannelsOptions, UseChannelsResult } from "./hooks/use-channels";
 export { useRigs, useRig, useRigVersions, useRigChanges } from "./hooks/use-rigs";
@@ -320,9 +454,15 @@ export type {
 } from "./hooks/use-machine-chip";
 
 // Pending-approvals projection
-export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
+export {
+  approvalsDecidable,
+  approvalsFromRequiresAction,
+  projectPendingApprovals,
+} from "./approvals";
 export type { PendingApproval } from "./approvals";
 export { ApprovalSurface, defaultApprovalSurfaceMessages } from "./components/approval-surface";
+export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
+export type { ToolReviewDetailsLoader } from "./components/tool-action-review";
 export type { ApprovalSurfaceMessages, ApprovalSurfaceProps } from "./components/approval-surface";
 
 // Structured human input: event projection, authoritative hook, and styled form.
@@ -345,18 +485,26 @@ export type {
 } from "./components/human-input-form";
 export { HumanInputSurface } from "./components/human-input-surface";
 export type { HumanInputSurfaceProps } from "./components/human-input-surface";
+export { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "./human-input-draft-store";
 
 // Timeline projection
 export {
+  automationRunOutcomesOnly,
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
+  timelineLivePause,
+  timelinePauseSpans,
   toolDisplayName,
+  useTimelinePauses,
 } from "./timeline";
 export type {
   GroupTimelineOptions,
+  TimelineLivePause,
+  TimelinePauseSpan,
   ActivityItem,
   AgentMessageItem,
   AuthNeededItem,
@@ -370,10 +518,14 @@ export type {
   ReasoningItem,
   SandboxItem,
   SessionStatusItem,
+  SessionUsageLimitStop,
   TimelineGroup,
   TimelineItem,
   TurnEndItem,
+  TurnStepsItem,
+  TurnStepsState,
   ToolCallItem,
+  ToolOutputPreview,
   UserMessageItem,
   WorkerItem,
 } from "./timeline";
@@ -381,14 +533,21 @@ export type {
 // Tool-renderer registry + the per-tool renderers (the timeline's extension API)
 export {
   createDefaultToolRegistry,
+  createSessionRetainedScreenshotLoader,
   createToolRegistry,
+  createWorkspaceRetainedArtifactLoader,
+  createWorkspaceRetainedVideoLoader,
   defaultToolRegistry,
   rawTypeOf,
 } from "./timeline";
 export type {
   CreateToolRegistryOptions,
   RetainedArtifactLoader,
+  RetainedArtifactLoadOptions,
+  RetainedArtifactLoaderClient,
   RetainedScreenshotLoader,
+  RetainedScreenshotLoaderClient,
+  RetainedVideoLoaderClient,
   VideoArtifactPlaybackLoader,
   ToolRegistry,
   ToolRegistryEntry,
@@ -412,6 +571,7 @@ export {
   TurnSummary,
   BUILT_IN_TURN_SUMMARY_FACET_IDS,
   useLightbox,
+  useLightboxGalleryItem,
   useLightboxOptional,
 } from "./timeline";
 export type {
@@ -424,10 +584,13 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
   TurnSummaryProps,
   TurnSummaryStatus,
   LightboxControlLabels,
+  LightboxGalleryEntry,
+  LightboxGalleryImage,
 } from "./timeline";
 
 // Pure provider-shape parsers (exec banner, V4A diff, tool arguments, …)
@@ -482,16 +645,50 @@ export type { CommandPaletteProps } from "./components/command-palette";
 // Components
 export { ChatComposer } from "./components/chat-composer";
 export { conversationTimeline } from "./conversation-timeline";
-export { SessionConversation } from "./components/session-conversation";
+export { SessionConversation, SessionConversationView } from "./components/session-conversation";
+export { useSessionConversation } from "./hooks/use-session-conversation";
+export {
+  useSessionReadAcknowledgement,
+  type SessionAttentionClientLike,
+  type UseSessionReadAcknowledgementInput,
+} from "./hooks/use-session-read-acknowledgement";
+export { useNewConversation } from "./hooks/use-new-conversation";
+export type {
+  NewConversationController,
+  UseNewConversationOptions,
+  NewConversationCreateOptions,
+  CreatedConversation,
+} from "./hooks/use-new-conversation";
+export { NewConversation, NewConversationView } from "./components/new-conversation";
+export type {
+  NewConversationProps,
+  NewConversationViewProps,
+  NewConversationLabels,
+} from "./components/new-conversation";
+export type {
+  PendingPrompt,
+  SessionConversationController,
+  UseSessionConversationOptions,
+} from "./hooks/use-session-conversation";
 export { SessionList } from "./components/session-list";
 export type { SessionListLabels, SessionListProps } from "./components/session-list";
 export { OpenGeniChat } from "./components/open-geni-chat";
-export type { OpenGeniChatLabels, OpenGeniChatProps } from "./components/open-geni-chat";
-export type { SessionConversationProps } from "./components/session-conversation";
+export type {
+  OpenGeniChatCreateOptions,
+  OpenGeniChatLabels,
+  OpenGeniChatProps,
+} from "./components/open-geni-chat";
+export type {
+  SessionConversationLabels,
+  SessionConversationProps,
+  SessionConversationViewProps,
+} from "./components/session-conversation";
+export type { AgentSignalOptions, AgentSignals } from "./session-agents-model";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {
   ComposerTranscriptionControlProps,
+  ComposerVoiceInputOptions,
   ComposerTranscriptionMessages,
 } from "./components/composer-transcription-control";
 export { defaultChatComposerMessages } from "./components/composer";
@@ -531,11 +728,34 @@ export {
   runnableLatencyModesForModel,
   sortPickerRows,
 } from "./model-policy";
-export type { LatencyModeId, PickerBillingClass, PickerModelRow } from "./model-policy";
+export type {
+  GroupPickerRowsOptions,
+  LatencyModeId,
+  PickerBillingClass,
+  PickerModelRow,
+} from "./model-policy";
+export { ChatGptMark, ModelMark, ModelName, modelHasMark } from "./components/model-mark";
+export {
+  REGION_RESTRICTED,
+  inferenceFeatureRestriction,
+  isRegionRestricted,
+  regionRestrictedText,
+} from "./inference-region";
+export {
+  humanizeModelSlug,
+  isRawModelLabel,
+  modelDisplayName,
+  modelSlug,
+  modelVendor,
+} from "@opengeni/sdk/model-display";
+export type { ModelDisplayInput, ModelVendor } from "@opengeni/sdk/model-display";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export { GeneratedVideoPlayer } from "./components/generated-video-player";
 export type { GeneratedVideoPlayerProps } from "./components/generated-video-player";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export { MessageSenderLabel } from "./timeline/message-sender";
+export type { RenderMessageSender } from "./timeline/message-sender";
+export type { MessageSender } from "./timeline";
 export type { RenderAllowanceExhausted } from "./timeline/allowance-exhausted-row";
 export type { AllowanceLabels, AllowanceScope } from "./usage/allowance-copy";
 export type { TimelineSearchTarget } from "./components/timeline-search";
@@ -556,12 +776,16 @@ export type {
 } from "./components/markdown";
 export {
   OpenGeniLinkProvider,
+  chainLinkRenderers,
   chainLinkResolvers,
   sessionLinkResolver,
+  useOpenGeniLinkRenderer,
   useOpenGeniLinkResolver,
   viewerLinkResolver,
 } from "./components/open-geni-links";
 export type {
+  OpenGeniHostLink,
+  OpenGeniLinkRenderer,
   OpenGeniLinkResolution,
   OpenGeniLinkResolver,
   OpenGeniLinkTarget,
@@ -576,6 +800,13 @@ export {
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
+export {
+  promptSendDestination,
+  sessionAdmissionBlocked,
+  sessionArchived,
+  sessionDisplayStatus,
+} from "./session-status-model";
+export type { SessionDisplayStatus } from "./session-status-model";
 export type {
   SessionStatusProps,
   StatusDotProps,
@@ -619,7 +850,7 @@ export { SandboxFiles } from "./components/sandbox-files";
 export type { SandboxFilesProps } from "./components/sandbox-files";
 export { DesktopViewer } from "./components/desktop-viewer";
 export type { DesktopViewerProps } from "./components/desktop-viewer";
-export { WorkspaceDock } from "./components/workspace-dock";
+export { WorkspaceDock, useWorkspacePanelOwnsExpand } from "./components/workspace-dock";
 export type { WorkspaceDockProps, WorkspaceTab } from "./components/workspace-dock";
 
 // The embeddable dock "brain" (Workbench v2, M4): the whole session workspace as
@@ -654,6 +885,13 @@ export type {
   UseCodexAccountsOptions,
   UseCodexAccountsResult,
 } from "./hooks/use-codex-accounts";
+// Model-account choice for every provider on the shared subscription core.
+export { useSessionModelAccount, isModelAccountEvent } from "./hooks/use-session-model-account";
+export type {
+  ModelAccountClientLike,
+  UseSessionModelAccountOptions,
+  UseSessionModelAccountResult,
+} from "./hooks/use-session-model-account";
 export { useSuperGrokAccounts } from "./hooks/use-supergrok-accounts";
 export type {
   SuperGrokAccountsClientLike,
@@ -667,6 +905,7 @@ export { xtermThemeFromTokens } from "./lib/xterm-theme";
 
 // Utilities
 export { cn } from "./lib/cn";
+export { markClassicScrollbars } from "./lib/scrollbars";
 export {
   CREDIT_EXHAUSTION_MESSAGE,
   formatBytes,
@@ -679,10 +918,33 @@ export {
   truncate,
   tryParseJson,
 } from "./lib/format";
+export {
+  currentProviderRecovery,
+  parseProviderRecovery,
+  providerRecoveryExhaustedText,
+  providerRecoveryRetryingText,
+  providerRecoverySubject,
+  type ProviderRecoveryCondition,
+  type ProviderRecoveryFacts,
+} from "./lib/provider-recovery";
+export {
+  ProviderRecoveryNotice,
+  PROVIDER_RECOVERY_NOTICE_DETAIL,
+  type ProviderRecoveryNoticeProps,
+} from "./components/provider-recovery-notice";
 export { SessionCommandsPanel } from "./components/session-commands-panel";
 export { SessionCommands } from "./components/session-commands";
 
 export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
+export {
+  PaymentPageActivityProvider,
+  type PaymentPageActivity,
+} from "./timeline/payment-page-activity";
+export {
+  LearningRefusalActionsProvider,
+  type LearningRefusalActions,
+} from "./timeline/learning-refusal-row";
+export type { LearningRefusalPlace } from "./timeline/learning-refusal-copy";
 export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
 
 export { StartupTimings } from "./timeline/startup-timings";
@@ -691,4 +953,15 @@ export { setStartupDetails, useStartupDetails } from "./timeline/startup-prefere
 export { ClaudeMark } from "./components/claude-mark";
 export { AnthropicMark } from "./components/anthropic-mark";
 export { OpenRouterMark } from "./components/openrouter-mark";
+export { OpperMark } from "./components/opper-mark";
 export { GrokMark } from "./components/grok-mark";
+
+export { ToolReviewHistoryProvider } from "./components/tool-review-history";
+export { InteractiveAnswer, type InteractiveAnswerProps } from "./components/interactive-answer";
+export {
+  browserInteractiveAnswerStore,
+  INTERACTIVE_ANSWER_FENCE,
+  InteractiveAnswerProvider,
+  type InteractiveAnswerHost,
+  type InteractiveAnswerStore,
+} from "./interactive-answer-model";

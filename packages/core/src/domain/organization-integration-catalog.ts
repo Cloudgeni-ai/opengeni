@@ -41,12 +41,13 @@ export function integrationSourceForOrganizationPolicy(
 
 const dedicated = [
   { key: "gmail", label: "Gmail" },
+  { key: "google-drive", label: "Google Drive" },
+  { key: "google-calendar", label: "Google Calendar" },
   { key: "atlassian", label: "Atlassian (Jira and Confluence)" },
   { key: "slack-personal", label: "Slack personal accounts" },
   { key: "slack-bot", label: "Slack workspace bots" },
   { key: "github-personal", label: "GitHub personal accounts" },
   { key: "github-app", label: "GitHub App installations" },
-  { key: "github-lens", label: "GitHub PR review" },
   { key: "fiken", label: "Fiken" },
   { key: "x", label: "X" },
   { key: "reddit", label: "Reddit" },
@@ -77,8 +78,6 @@ export function integrationKeyForConnectProvider(providerId: string): string | n
     return providerId;
   if (dedicated.some((item) => item.key === providerId)) return providerId;
   if (providerId === "fiken-token" || providerId === "fiken-oauth") return "fiken";
-  if (providerId === "google-drive-knowledge" || providerId === "google-drive-publish")
-    return "google-drive";
   if (["mcp-oauth", "mcp-headers", "mcp-bearer", "mcp-install"].includes(providerId))
     return "custom:mcp";
   if (providerId === "openapi") return "custom:openapi";

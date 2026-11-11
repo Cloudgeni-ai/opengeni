@@ -7,7 +7,7 @@ import {
   renderMessageSentAtForModel,
   UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,
@@ -221,6 +221,8 @@ async function addAcceptedScheduledOccurrence(
         personalResourceAuthoritySubjectId ?? causalHumanAuthority?.subjectId ?? null,
       causalHumanAuthority,
       xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+      claudeProviderAccountAuthoritySnapshot: { version: 1 as const, scope: "workspace" as const },
+      claudeAuthoritySubjectId: null,
       xaiAuthoritySubjectId: null,
       connectionAuthoritySubjectId: null,
       triggerInitiator: { kind: "service", subjectId: "scheduler" },
@@ -512,7 +514,7 @@ describe("immutable session turn initiators", () => {
     });
   });
 
-  test("Send and Steer capture their actor while queue Edit preserves the original actor", async () => {
+  test("Send and Steer capture their actor; another person's queue Edit becomes their own message", async () => {
     const grant = await fixture();
     const session = await createSession(client.db, sessionInput(grant));
     const sender = "user:sender";
@@ -608,12 +610,12 @@ describe("immutable session turn initiators", () => {
           reasoningEffort: "low",
           reasoningEffortFallback: "low",
           source: "user",
-          personalConnectionDelegations: [
-            { ...originalDelegations[0]!, connectionId: crypto.randomUUID() },
-          ],
+          personalConnectionDelegations: [],
         }),
       ),
     );
+    // The sender's own accounts never run another person's words: the edit
+    // is the editor's message, with the editor's accounts (here none).
     expect(
       await getSessionTurnPersonalConnectionDelegations(
         client.db,
@@ -621,10 +623,17 @@ describe("immutable session turn initiators", () => {
         session.id,
         resubmitted.turnId,
       ),
-    ).toEqual(originalDelegations);
+    ).toEqual([]);
     expect(
       (await getSessionTurn(client.db, grant.workspaceId!, resubmitted.turnId))?.initiator,
-    ).toEqual(original?.initiator);
+    ).toEqual({ kind: "subject", subjectId: editor, label: "Editor" });
+    // A new acceptance, so it names no edit source to copy (0716).
+    expect(
+      (await getSessionTurn(client.db, grant.workspaceId!, resubmitted.turnId))?.lineage,
+    ).toEqual({ actor: "human" });
+    expect((await getSessionTurn(client.db, grant.workspaceId!, sent.turnId))?.lineage).toEqual({
+      actor: "human",
+    });
 
     const steerSource = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, sender, (db) =>
       db.transaction((tx) =>
@@ -684,6 +693,9 @@ describe("immutable session turn initiators", () => {
     expect(
       (await getSessionTurn(client.db, grant.workspaceId!, steered.turnId))?.initiator,
     ).toEqual({ kind: "subject", subjectId: editor, label: "Editor" });
+    expect((await getSessionTurn(client.db, grant.workspaceId!, steered.turnId))?.lineage).toEqual({
+      actor: "human",
+    });
   });
 
   test("freezes a trusted service command separately from its authorizing subject", async () => {
@@ -1092,7 +1104,7 @@ describe("immutable session turn initiators", () => {
     expect(malformedClaim.turn.initiator).toEqual({
       kind: "service",
       subjectId: "internal-update",
-      label: "OpenGeni internal update",
+      label: "Opengeni internal update",
     });
     expect(malformedClaim.turn.initiatorContext.provenanceError).toBe(
       "agent_steer_lineage_incomplete",
@@ -1155,7 +1167,7 @@ describe("immutable session turn initiators", () => {
     if (typeof scheduledHistoryContent !== "string") {
       throw new Error("Scheduled occurrence history item has no text content");
     }
-    expect(scheduledHistoryContent).toContain("[OpenGeni scheduled task occurrence]");
+    expect(scheduledHistoryContent).toContain("[Opengeni scheduled task occurrence]");
     expect(scheduledHistoryContent).toContain(`Scheduled task ID: ${scheduledTaskId}`);
     expect(scheduledHistoryContent).toContain(`Scheduled task run ID: ${scheduledRunId}`);
     expect(scheduledHistoryContent).toContain("Instructions:\nScheduled work");
@@ -1207,13 +1219,25 @@ describe("immutable session turn initiators", () => {
         .where(eq(schema.sessionHistoryItems.turnId, attachedClaim.turn.id))
         .orderBy(schema.sessionHistoryItems.position),
     );
-    expect(attachedHistory.map(({ item }) => item.role)).toEqual(["user", "system"]);
+    // A captured schedule keeps its explicit service lane (0608): it never
+    // joins the human request and stays pending for its own scheduled turn.
+    expect(attachedHistory.map(({ item }) => item.role)).toEqual(["user"]);
     expect(attachedHistory[0]?.item.content).toEqual([
-      { type: "input_text", text: renderMessageSentAtForModel(attachedClaim.turn.createdAt) },
+      // The model is told which member sent the human message.
+      {
+        type: "input_text",
+        text: renderMessageSentAtForModel(
+          attachedClaim.turn.createdAt,
+          "Scheduled attachment sender",
+        ),
+      },
       { type: "input_text", text: "Keep this human task authoritative." },
     ]);
-    expect(attachedHistory[1]?.item.content).toContain("[OpenGeni internal updates]");
-    expect(attachedHistory[1]?.item.content).not.toContain("[OpenGeni scheduled task occurrence]");
+    const attachedContent = attachedHistory[0]?.item.content as { text: string }[] | undefined;
+    expect(String(attachedContent?.[0]?.text)).toEndWith(" by Scheduled attachment sender]");
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, attachedTarget.id),
+    ).toMatchObject([{ state: "pending" }]);
 
     const mixedTarget = await createSession(client.db, sessionInput(grant));
     const goal = await createSessionGoal(client.db, {
@@ -1269,7 +1293,7 @@ describe("immutable session turn initiators", () => {
     expect(mixedClaim.turn.initiator).toEqual({
       kind: "service",
       subjectId: "goal-continuation",
-      label: "OpenGeni goal continuation",
+      label: "Opengeni goal continuation",
     });
     // An old message without caller lineage must not borrow the goal's human.
     expect(

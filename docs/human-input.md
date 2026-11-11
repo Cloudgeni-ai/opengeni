@@ -1,6 +1,6 @@
 # Structured human input
 
-OpenGeni has a built-in `request_human_input` agent tool for questions that need
+Opengeni has a built-in `request_human_input` agent tool for questions that need
 an answer before the current turn can continue. A single request can contain up
 to 20 text, single-select, or multi-select questions. Select questions can
 always accept an inline `Other` free-text value; requests can optionally allow
@@ -11,23 +11,100 @@ workspace settings API. Disabled workspaces omit the tool from model-visible
 tools; a stale resume or forged interruption is rejected before the worker can
 install a `requires_action` boundary. The setting defaults to enabled.
 
+## Who gets the tool
+
+The tool is sent only where someone can answer it, so a session nobody answers
+does not pay for it on every model call:
+
+- A session that started unattended has no `request_human_input` and its
+  prompt offers no question: a create with `unattended: true`, a chat a
+  scheduled task or event trigger creates without its own `unattended: false`
+  (or an `approvalTimeoutSeconds`), and Slack open-agent runs. A run delivered
+  to an existing chat keeps that chat's attendance. This follows how the
+  chat started, so its tool list never changes under earlier requests; a chat
+  switched to **Work without me** later keeps the tool and gets an immediate
+  "no one will answer" result instead.
+- `humanInput: false` in the agent capabilities, or the workspace setting
+  above, removes it for any session.
+- Every other session keeps it, including one started over the API with no
+  person in the chat: the backend can answer through
+  `submitHumanInputResponse`, and Opengeni cannot tell whether it will. A
+  backend that never answers should create its sessions with
+  `unattended: true`.
+- A child session keeps it even under an unattended root, because its parent
+  agent can answer (`child_requires_action`, below); its description then
+  carries the parent-agent guidance.
+
 This is not tool approval. Approval asks whether an already-proposed tool may
 run and can approve or reject it. Structured human input is itself a tool call:
-when the workspace setting allows it, OpenGeni authorizes that built-in call,
+when the workspace setting allows it, Opengeni authorizes that built-in call,
 freezes it behind the open suffix, and later injects one of these structured outcomes
 into that exact call:
 
 - `answered`, with validated question answers;
-- `skipped`, only when the request allows it;
+- `skipped`, only when the request allows it, or with `agentDecides: true`
+  when the person chose "Let the agent decide";
 - `expired`, when its durable deadline wins the settlement race; or
 - `cancelled`, when the owning turn is permanently replaced or terminated.
 
 The agent sees that outcome as ordinary tool output and decides how to proceed.
 An `Other` answer is returned exactly as entered. The agent may interpret it as
 the answer or issue a new structured request if genuine clarification is still
-needed; OpenGeni never manufactures an automatic reprompt.
+needed; Opengeni never manufactures an automatic reprompt.
 No outcome creates a synthetic `user.message`, no response starts a new logical
 turn, and a host must not translate Skip or expiry into approval rejection.
+
+## Let the agent decide
+
+Every ordinary question card offers one secondary action, "Let the agent
+decide", in place of Skip. It settles the request as
+`{ outcome: "skipped", agentDecides: true }`, which the server accepts even
+when the request does not allow an ordinary skip. The agent's tool result then
+carries a `note` telling it to make its own best choice, continue, and say in
+one short sentence what it chose; the settled card reads "You let the agent
+decide". It is never offered, and the server refuses it, for secret questions,
+Skill reviews and secret-use approval cards; tool approvals are a separate
+surface and stay human-only.
+
+On a sub-session's card shown in an ancestor's chat, the action hands the
+question to that chat's own agent instead: it sends a `user.message` whose
+visible text is `Let the agent decide: <question>` and whose `modelContext`
+starts with an `opengeni:human-input-delegation {"sessionId","requestId"}`
+marker line, then the questions and an instruction to answer with
+`session_human_input_respond` using its best judgement (doing any agent work
+the question asks for, such as starting a reviewer) and to say what it chose.
+The card stays answerable and says "Your agent is deciding"; in the chat the
+message renders as a small record that reads the child's request and shows
+"Agent decided: <answer>" once it settles
+(`packages/react/src/human-input-delegation.ts`).
+
+## Secret questions
+
+A question with `kind: "secret"` collects a password, key or one-time-code seed
+without it ever reaching the model. The card shows a masked input, an optional
+username, an optional password generator (`allowGenerate`) and where the value
+is saved (`saveTo`: `user` for Only me, `workspace`, or `task`). The client
+submits values in the write-only `secretAnswers` array next to the normal
+answers; the API strips it before building any event, and the database writes
+the vault item in the same transaction as the answer. The agent's answer is
+`{secret: {reference, username, vaultName, itemName, saveTo}}`, never a value.
+
+Saving to Only me requires a signed-in human submitter. Only hosted vaults can
+be targets. Slack, push and email surfaces link to the card instead of
+collecting values, and voice asks the person to answer in the app. The full
+model is in [`secrets.md`](secrets.md#asking-a-person).
+
+## Opengeni's own cards
+
+A request's `origin` says who asked. `tool_call` (the default, and what an
+older server's rows mean) is an agent's `request_human_input` call: its turn
+waits for the answer. `secret_use_approval` is Opengeni's own approval card
+for a blocked secret use: the turn did not wait, so the card is not closed
+when the turn ends, stays in the pending list and the person's inbox until
+answered, and its answer reaches the agent as a `secret_use_approval_decided`
+update instead of resuming a turn. Only the signed-in person the run acts for
+can answer it, in Opengeni; Slack and push link to it. See
+[Approval for each use](secrets.md#approval-for-each-use).
 
 ## Durable lifecycle
 
@@ -45,7 +122,7 @@ an `agent_run_states` sentinel, all new human-input rows, the
 requested events, and the session's `requires_action` status. A crash therefore
 cannot expose a request without durable completed-pair history and the open
 suffix, or a suffix without its request. On recovery,
-OpenGeni loads the response selected by the triggering
+Opengeni loads the response selected by the triggering
 `user.humanInputResponse` event, writes the paired history result, and
 continues from history when the interruption group is empty.
 It does not rediscover the response through a best-effort event or tool
@@ -80,6 +157,9 @@ Settlement is first-writer-wins under a database lock and compare-and-set:
   worker restart or `continueAsNew`. A stale early timer caused by bounded
   workflow/database clock skew re-arms with an interruptible floor instead of
   spinning the workflow and database;
+- a decision that commits while the workflow's parking peek is in flight still
+  resumes the turn: the wait baselines its wakes from before that peek (see
+  [run-lifecycle.md](./run-lifecycle.md), `approval-wait`);
 
 `session_events` remains the exact audit/live projection for accepted payloads.
 The request table
@@ -120,7 +200,9 @@ answers, text-answer shape, and selection-bound violations. Every choice
 question accepts `Other`, including legacy rows whose compatibility field still
 says `allowOther: false`. The runtime normalizes new choice requests to `true`,
 while stock React and realtime surfaces expose the free-text path regardless of
-that legacy field. User-controlled
+that legacy field. The schema sent to the model leaves `allowOther` out for the
+same reason, so a call takes the contract default and the normalization above.
+User-controlled
 regular expressions are intentionally not part of the contract. Legacy
 persisted `minLength`/`maxLength` on question JSON is ignored.
 
@@ -161,7 +243,7 @@ unknown request is a `404`.
 
 Slack treats a reply as a structured answer only when the committed outcome is
 `answered` or `skipped`. If expiry or cancellation wins after Slack reads the
-actionable request, OpenGeni still publishes that terminal settlement but then
+actionable request, Opengeni still publishes that terminal settlement but then
 submits the incoming text as an ordinary message so the conversation never
 silently consumes it.
 
@@ -192,13 +274,32 @@ Each single- and multi-select control includes an inline Other option and text
 field. Hosts submit that exact value in `answer.other`; they should not create a
 synthetic follow-up prompt or coerce it into an option id.
 
-The stock OpenGeni session route mounts the hook plus `HumanInputSurface` at the
+When the form's `request` carries `workspaceId` and `sessionId` (as every
+pending request from the hook or SDK does), unsent non-secret answers (text,
+Other text and selections) are kept per browser tab
+(`packages/react/src/human-input-draft-store.ts`: in-memory map mirrored to
+`sessionStorage`, keyed by workspace, session and request, bounded in count,
+size and age) and restored when the card mounts again, for example after
+visiting Settings. A draft is forgotten when the answer is accepted or skipped,
+when the request has expired, and when `useHumanInputRequests` reads a pending
+list that no longer contains it; a denied (401/403/404) pending-list read forgets
+every draft of that session. Secret answers are never stored. Drafts belong to
+the person signed in to the tab: the stock app calls
+`claimHumanInputDraftOwner(subjectId)` synchronously whenever it installs the
+principal's access context, before any session route renders (a different
+principal, or drafts with no recorded owner, are forgotten; the same principal
+keeps them across a reload or re-authentication), and
+`forgetAllHumanInputDrafts()` on sign-out.
+Embedding hosts whose signed-in person can change within one tab should call
+the same two functions from `@opengeni/react`.
+
+The stock Opengeni session route mounts the hook plus `HumanInputSurface` at the
 timeline tip, so the live question is part of the main conversation rather than
 a detached strip above the composer. An
 embedded product may mount the surface, the single form, compose its own
 renderer over the hook, or use the SDK through its backend proxy. It should not
 maintain an independent request state machine: access control stays at the
-host/OpenGeni API boundary, while the OpenGeni row, turn checkpoint, workflow
+host/Opengeni API boundary, while the Opengeni row, turn checkpoint, workflow
 timer, and response event remain the durable truth.
 
 After a response is accepted, the React timeline keeps a chat-native resolved
@@ -209,12 +310,57 @@ labels replace their wire ids; a readable id-based fallback keeps paginated
 history understandable.
 
 Agent-created child sessions use the same tool and lifecycle. Their requests are
-owned by the exact child session and surface when that child is opened; the
-parent session shows only its existing `Needs you` child signal. An authorized
-workspace controller answers on the child route. Settlement wakes the child's
-frozen turn and returns the structured result to that original child tool call;
-the parent receives only the child's later ordinary terminal result, not a copy
-of the human answer.
+owned by the exact child session. The web app also pins them above the
+composer of every ancestor session: for each descendant whose status is
+`requires_action` (the same state behind the parent's `Needs you` signal), the
+parent page reads that child's pending requests and newest approval events and
+renders the ordinary answer form or approval card, naming the child and linking
+to it at the request's moment. Answers and decisions go to the child's own
+routes, so the server's permission checks and the draft store are the same as
+on the child page. Several waiting children stack under one collapsible line.
+Live session-list hints that name a descendant (the server batches them, about
+every 15 seconds) and the output of the parent agent's own
+`session_human_input_respond` or `session_steer` call re-read the tree; the
+lineage poll covers pages without hints. The tree read stops at 200
+descendants and 5 levels, so the `Needs you` count can include a child the
+card does not show; the child's own page still has its request.
+Settlement wakes the child's frozen turn and returns the structured result to
+that original child tool call.
+
+The parent agent may answer the same request. When child lifecycle notices are
+enabled (`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED`), the child's
+`requires_action` settlement sends the parent a `child_requires_action` update
+carrying each request's compact questions (id, kind, prompt, required, option
+ids and labels; secret questions carry no options or secret spec, and a Skill
+review question is marked `humanOnly`), so the parent can call
+`session_human_input_respond` without reading the child's history. That update
+wakes an idle parent that has an active goal, a held wait, no goal at all, or
+a completed goal (the worker is still its work; the goal is not reopened). A
+goal paused by intent keeps the update pending for its next turn. A
+mid-turn parent receives it at its next claim, and a waiting parent's
+`wait_for_input` ends. When the parent cannot act on it (failed, or its agent
+has no session tools), the update goes to the nearest ancestor that can, and
+only to that one (see `docs/durable-agent-inputs.md`).
+
+The first accepted answer wins under the request row lock. A later human
+submission returns `200` with the winning event. A later agent call returns
+`outcome: "unchanged"` with `facts.alreadyAnswered: true`, `facts.answeredBy`
+(`person | api | agent | you | system`) and a warning not to answer again.
+Either answer refreshes the human's card, which then disappears, and the parent
+gets a deferred `child_requires_action_resolved` update. The
+`user.humanInputResponse` event records `respondedByKind`
+(`human | api | agent_attempt | system`). A question an agent answered or
+skipped is agent work, not conversation: the timeline folds it into that turn's
+work details as one quiet row ("Asked  Target branch → main") that opens to the
+question, who answered, and the answer
+(`isAgentWorkHumanInput` in
+`packages/react/src/timeline/agent-work-human-input.ts`, shared by web and
+native). A person's or API client's answer, an expired or cancelled question,
+and a system skip (a scheduled run's question nobody answered in time) keep the
+conversation card. Agents are told to answer a child's question from their task context before the
+person has to, to do agent work it asks for (such as starting a reviewer) and
+then answer, and to leave questions only a person can answer (decisions,
+preferences, credentials, approvals) to the person.
 
 ## Acceptance boundary
 

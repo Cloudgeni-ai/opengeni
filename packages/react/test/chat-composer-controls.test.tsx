@@ -139,6 +139,141 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     expect(textarea?.getAttribute("aria-keyshortcuts")).toContain("Meta+Enter");
   });
 
+  test("the other send choice sits beside Send exactly while Send takes its busy path", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    const alternate = () =>
+      mounted!.container.querySelector<HTMLButtonElement>("[data-og-composer-alternate-send]");
+    const state = (alternateSend: "queue" | "steer" | null): ComposerState => ({
+      ...composer(spy),
+      busySend: alternateSend === "queue" ? "steer" : "queue",
+      alternateSend,
+      sendAlternate: async () => {
+        spy.sends.push(`alternate:${alternateSend}`);
+        return true;
+      },
+    });
+    // Nothing running or waiting: Send is the only way to send, even when the
+    // host reports a run (the button follows the composer, not the host).
+    mounted = await renderComponent(<ChatComposer composer={state(null)} running />);
+    expect(alternate()).toBeNull();
+
+    // Send queues: Steer sits beside it, labelled on every width.
+    await mounted.rerender(<ChatComposer composer={state("steer")} />);
+    expect(alternate()?.textContent).toBe("Steer");
+    expect(alternate()?.getAttribute("title")).toContain("usually within seconds");
+    // The shortcut is announced as a shortcut, not read out in the description.
+    expect(alternate()?.getAttribute("title")).not.toContain("Cmd/Ctrl");
+    expect(alternate()?.getAttribute("aria-keyshortcuts")).toBe("Meta+Enter Control+Enter");
+    await act(async () => alternate()?.click());
+    expect(spy.sends).toEqual(["alternate:steer"]);
+
+    // Send steers: Queue sits beside it, so touch users can still queue.
+    await mounted.rerender(<ChatComposer composer={state("queue")} />);
+    expect(alternate()?.textContent).toBe("Queue");
+    expect(alternate()?.getAttribute("data-analytics-action")).toBe("queue");
+    await act(async () => alternate()?.click());
+    expect(spy.sends).toEqual(["alternate:steer", "alternate:queue"]);
+
+    // Cmd/Ctrl+Enter is the same choice.
+    const textarea = mounted.container.querySelector("textarea")!;
+    await press(textarea, { metaKey: true });
+    expect(spy.sends).toEqual(["alternate:steer", "alternate:queue", "alternate:queue"]);
+
+    // A host without the alternate delivery never shows a Queue that steers.
+    await mounted.rerender(
+      <ChatComposer composer={{ ...state("queue"), sendAlternate: undefined }} />,
+    );
+    expect(alternate()).toBeNull();
+
+    // Nothing to send: no alternate choice either.
+    await mounted.rerender(
+      <ChatComposer composer={{ ...state("queue"), value: "", canSend: false }} />,
+    );
+    expect(alternate()).toBeNull();
+  });
+
+  test("after sending the other way, focus returns to the message box and only that control spins", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    let finish: (sent: boolean) => void = () => {};
+    const state: ComposerState = {
+      ...composer(spy),
+      alternateSend: "steer",
+      sendAlternate: () => new Promise<boolean>((resolve) => (finish = resolve)),
+    };
+    mounted = await renderComponent(<ChatComposer composer={state} />);
+    const alternate = mounted.container.querySelector<HTMLButtonElement>(
+      "[data-og-composer-alternate-send]",
+    )!;
+    const send = mounted.container.querySelector<HTMLButtonElement>(
+      'button[data-analytics-action="send"]',
+    )!;
+    alternate.focus();
+    await act(async () => alternate.click());
+    // In flight: the alternate shows progress; Send keeps its arrow.
+    expect(alternate.querySelector(".animate-og-spin")).not.toBeNull();
+    expect(send.querySelector(".animate-og-spin")).toBeNull();
+    await act(async () => finish(true));
+    expect(document.activeElement).toBe(mounted.container.querySelector("textarea"));
+  });
+
+  test("an annotation note blocking Send also explains the disabled alternate", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    mounted = await renderComponent(
+      <ChatComposer
+        composer={{
+          ...composer(spy),
+          alternateSend: "steer",
+          sendAlternate: async () => true,
+          annotations: [
+            {
+              id: "a1",
+              kind: "text",
+              quote: "x",
+              note: "",
+            } as never,
+          ],
+        }}
+      />,
+    );
+    const alternate = mounted.container.querySelector<HTMLButtonElement>(
+      "[data-og-composer-alternate-send]",
+    );
+    const send = mounted.container.querySelector<HTMLButtonElement>(
+      'button[data-analytics-action="send"]',
+    );
+    expect(alternate?.getAttribute("title")).toBe(send?.getAttribute("title"));
+  });
+
+  test("with a draft, Pause steps aside on narrow composers so Send and its choice keep room", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    const active: EffectiveSessionControl = {
+      state: "active",
+      controlVersion: 0,
+      controlEtag: "active",
+      directState: "active",
+      primaryBlocker: null,
+      additionalBlockerCount: 0,
+      blockers: [],
+      resumeOptions: [],
+      override: null,
+      settlement: null,
+    };
+    const pause = () =>
+      mounted!.container.querySelector<HTMLButtonElement>('button[data-analytics-action="pause"]');
+    mounted = await renderComponent(
+      <ChatComposer composer={composer(spy)} effectiveControl={active} />,
+    );
+    expect(pause()?.className).toContain("og-composer-pause-yields");
+    expect(pause()?.className).toContain("max-sm:hidden");
+    await mounted.rerender(
+      <ChatComposer
+        composer={{ ...composer(spy), value: "", canSend: false }}
+        effectiveControl={active}
+      />,
+    );
+    expect(pause()?.className).not.toContain("og-composer-pause-yields");
+  });
+
   test("running shows one Pause control; paused replaces it with one Resume control", async () => {
     const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
     const active: EffectiveSessionControl = {
@@ -263,6 +398,51 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     expect(send?.getAttribute("data-analytics-action")).toBe("send");
     await act(async () => send?.click());
     expect(spy.sends).toEqual(["send"]);
+  });
+
+  test("one Send: no other choice, Cmd/Ctrl+Enter sends, and no Queue or Steer words", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    const single: ComposerState = {
+      ...composer(spy),
+      busySend: "steer",
+      singleSend: true,
+      alternateSend: null,
+    };
+    mounted = await renderComponent(<ChatComposer composer={single} running />);
+    expect(mounted.container.querySelector("[data-og-composer-alternate-send]")).toBeNull();
+    const textarea = mounted.container.querySelector("textarea")!;
+    await press(textarea, {});
+    await press(textarea, { metaKey: true });
+    await press(textarea, { ctrlKey: true });
+    expect(spy.sends).toEqual(["send", "send", "send"]);
+    const words = (root: HTMLElement) =>
+      [
+        root.textContent ?? "",
+        ...[...root.querySelectorAll("*")].flatMap((node) =>
+          ["aria-label", "title", "placeholder", "data-og-tip"].map(
+            (name) => node.getAttribute(name) ?? "",
+          ),
+        ),
+      ].join(" ");
+    expect(words(mounted.container)).not.toMatch(/queue|steer/i);
+
+    const paused: EffectiveSessionControl = {
+      state: "paused",
+      controlVersion: 1,
+      controlEtag: "paused",
+      directState: "paused",
+      primaryBlocker: null,
+      additionalBlockerCount: 0,
+      blockers: [],
+      resumeOptions: [],
+      override: null,
+      settlement: null,
+    };
+    await mounted.rerender(
+      <ChatComposer composer={single} effectiveControl={paused} queuedAheadCount={2} />,
+    );
+    expect(textarea.placeholder).toBe("Message the agent — it reads it when it resumes…");
+    expect(words(mounted.container)).not.toMatch(/queue|steer/i);
   });
 
   test.each([false, true])("annotation review survives custom footer: %s", async (customFooter) => {
@@ -491,5 +671,358 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     expect(
       mounted.container.querySelectorAll('button[aria-label="Resume this workstream"]'),
     ).toHaveLength(1);
+  });
+
+  test("Stop run control: Stop only while running, no Pause, next message continues", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    const active: EffectiveSessionControl = {
+      state: "active",
+      controlVersion: 0,
+      controlEtag: "active",
+      directState: "active",
+      primaryBlocker: null,
+      additionalBlockerCount: 0,
+      blockers: [],
+      resumeOptions: [],
+      override: null,
+      settlement: null,
+    };
+    const stop = () =>
+      mounted!.container.querySelector<HTMLButtonElement>('button[aria-label="Stop"]');
+    const pause = () =>
+      mounted!.container.querySelector('button[aria-label="Pause this workstream"]');
+    mounted = await renderComponent(
+      <ChatComposer composer={composer(spy)} effectiveControl={active} runControl="stop" />,
+    );
+    // Idle: neither control.
+    expect(stop()).toBeNull();
+    expect(pause()).toBeNull();
+
+    await mounted.rerender(
+      <ChatComposer composer={composer(spy)} effectiveControl={active} runControl="stop" running />,
+    );
+    expect(pause()).toBeNull();
+    expect(stop()?.getAttribute("data-analytics-action")).toBe("stop");
+    await act(async () => stop()?.click());
+    expect(spy.pauses).toBe(1);
+
+    // Stopped: the conversation's own pause is not presented; sending continues it.
+    const blocker = {
+      kind: "session" as const,
+      sessionId: "22222222-2222-4222-8222-222222222222",
+      displayName: "Paused here",
+      actor: null,
+      reason: null,
+      changedAt: null,
+      revision: 1,
+    };
+    const stopped: EffectiveSessionControl = {
+      ...active,
+      state: "paused",
+      directState: "paused",
+      controlVersion: 1,
+      controlEtag: "paused",
+      primaryBlocker: blocker,
+      blockers: [blocker],
+    };
+    await mounted.rerender(
+      <ChatComposer composer={composer(spy)} effectiveControl={stopped} runControl="stop" />,
+    );
+    expect(stop()).toBeNull();
+    expect(
+      mounted.container.querySelector('button[aria-label="Resume this workstream"]'),
+    ).toBeNull();
+    const textarea = mounted.container.querySelector("textarea")!;
+    expect(textarea.getAttribute("placeholder")).toBe("Message the agent…");
+    await press(textarea, {});
+    expect(spy.sends).toEqual(["steer"]);
+
+    // A pause applied elsewhere (here: the workspace) still shows and still queues.
+    const elsewhere: EffectiveSessionControl = {
+      ...stopped,
+      directState: "active",
+      controlEtag: "workspace",
+    };
+    await mounted.rerender(
+      <ChatComposer composer={composer(spy)} effectiveControl={elsewhere} runControl="stop" />,
+    );
+    expect(textarea.getAttribute("placeholder")).toBe(
+      "Message the agent — it will wait in the queue…",
+    );
+    await press(textarea, {});
+    expect(spy.sends).toEqual(["steer", "send"]);
+
+    // A direct pause this composer did not make (operator, API, agent) is never
+    // reinterpreted as a stopped response.
+    await mounted.unmount();
+    mounted = await renderComponent(
+      <ChatComposer composer={composer(spy)} effectiveControl={stopped} runControl="stop" />,
+    );
+    expect(mounted.container.querySelector("textarea")!.getAttribute("placeholder")).toBe(
+      "Message the agent — it will wait in the queue…",
+    );
+  });
+
+  test("runControl none hides every run control", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    mounted = await renderComponent(
+      <ChatComposer
+        composer={composer(spy)}
+        runControl="none"
+        running
+        effectiveControl={{
+          state: "active",
+          controlVersion: 0,
+          controlEtag: "active",
+          directState: "active",
+          primaryBlocker: null,
+          additionalBlockerCount: 0,
+          blockers: [],
+          resumeOptions: [],
+          override: null,
+          settlement: null,
+        }}
+      />,
+    );
+    expect(mounted.container.querySelector('button[aria-label="Stop"]')).toBeNull();
+    expect(
+      mounted.container.querySelector('button[aria-label="Pause this workstream"]'),
+    ).toBeNull();
+  });
+});
+
+describe("ChatComposer while the agent is idle", () => {
+  const active: EffectiveSessionControl = {
+    state: "active",
+    controlVersion: 0,
+    controlEtag: "active",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  };
+  const spy = () => ({ sends: [] as string[], pauses: 0, resumes: 0 });
+  const pauseButton = () =>
+    mounted!.container.querySelector<HTMLButtonElement>('button[data-analytics-action="pause"]');
+  const sendButton = () =>
+    mounted!.container.querySelector<HTMLButtonElement>('button[data-analytics-action="send"]');
+  const wait = async (ms: number) =>
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, ms)));
+
+  test("nothing running: no Pause, no Queue or Steer, and Send just sends", async () => {
+    const state = { ...composer(spy()), working: false, alternateSend: null };
+    mounted = await renderComponent(<ChatComposer composer={state} effectiveControl={active} />);
+    expect(pauseButton()).toBeNull();
+    expect(mounted.container.querySelector("[data-og-composer-alternate-send]")).toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe("Send message (Enter)");
+    expect(sendButton()?.getAttribute("aria-label")).toBe("Send message");
+  });
+
+  test("while the agent works, Pause and the queue wording are offered", async () => {
+    const state = { ...composer(spy()), working: true };
+    mounted = await renderComponent(<ChatComposer composer={state} effectiveControl={active} />);
+    expect(pauseButton()).not.toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe(
+      "Queue message (Enter); steer with Cmd/Ctrl+Enter",
+    );
+  });
+
+  test("an idle conversation whose started work still runs keeps Pause, with plain Send", async () => {
+    const state = { ...composer(spy()), working: false };
+    mounted = await renderComponent(
+      <ChatComposer composer={state} effectiveControl={active} running />,
+    );
+    expect(pauseButton()).not.toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe("Send message (Enter)");
+  });
+
+  test("a delivery that does not report working keeps the working controls", async () => {
+    mounted = await renderComponent(
+      <ChatComposer composer={composer(spy())} effectiveControl={active} />,
+    );
+    expect(pauseButton()).not.toBeNull();
+  });
+
+  test("the switch to idle does not blink between a turn and the message after it", async () => {
+    const base = composer(spy());
+    const render = (working: boolean) => (
+      <ChatComposer composer={{ ...base, working }} effectiveControl={active} />
+    );
+    mounted = await renderComponent(render(true));
+    expect(pauseButton()).not.toBeNull();
+    // The turn ends; the queued message starts a moment later.
+    await mounted.rerender(render(false));
+    expect(pauseButton()).not.toBeNull();
+    await wait(200);
+    await mounted.rerender(render(true));
+    expect(pauseButton()).not.toBeNull();
+    await wait(1_100);
+    expect(pauseButton()).not.toBeNull();
+    // Done for real: the working controls leave soon after.
+    await mounted.rerender(render(false));
+    expect(pauseButton()).not.toBeNull();
+    await wait(1_100);
+    expect(pauseButton()).toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe("Send message (Enter)");
+  });
+
+  test("Pause's room stays in the controls while it is hidden, so the row never changes width", async () => {
+    const slot = () =>
+      mounted!.container.querySelector<HTMLElement>("[data-og-composer-pause-slot]");
+    const controls = () => mounted!.container.querySelector<HTMLElement>(".og-composer-controls");
+    const boxOf = (element: Element | null) =>
+      (element?.className ?? "")
+        .split(/\s+/)
+        .filter((name) =>
+          /^(?:pointer-coarse:)?size-|^og-composer-pause-yields$|^max-sm:hidden$/.test(name),
+        )
+        .sort();
+    const base = composer(spy());
+    const render = (state: ComposerState, control = active) => (
+      <ChatComposer
+        composer={state}
+        effectiveControl={control}
+        controlsStart={<span data-model-controls="">Model</span>}
+      />
+    );
+    // Idle with an empty draft: no Pause, but its box keeps its room at the
+    // end of the controls, invisible and hidden from assistive technology.
+    const empty = { ...base, value: "", hasDraftContent: () => false, canSend: false };
+    mounted = await renderComponent(render({ ...empty, working: false }));
+    expect(pauseButton()).toBeNull();
+    expect(slot()).not.toBeNull();
+    expect(slot()?.getAttribute("aria-hidden")).toBe("true");
+    expect(slot()?.className).toContain("invisible");
+    expect(controls()?.lastElementChild).toBe(slot());
+    const idleBox = boxOf(slot());
+    // Working: Pause takes the same box in the actions and the room is released.
+    await mounted.rerender(render({ ...empty, working: true }));
+    expect(slot()).toBeNull();
+    expect(boxOf(pauseButton())).toEqual(idleBox);
+    // With a draft, both step aside on narrow composers the same way.
+    await mounted.rerender(render({ ...base, working: true }));
+    const draftBox = boxOf(pauseButton());
+    expect(draftBox).toContain("og-composer-pause-yields");
+    await mounted.rerender(render({ ...base, working: false }));
+    await wait(1_100);
+    expect(pauseButton()).toBeNull();
+    expect(boxOf(slot())).toEqual(draftBox);
+    // Paused (Pause is never offered there) or without control: no room either.
+    await mounted.rerender(render({ ...base, working: false }, { ...active, state: "paused" }));
+    expect(slot()).toBeNull();
+    await mounted.rerender(
+      <ChatComposer composer={{ ...base, working: false }} controlsStart={<span>Model</span>} />,
+    );
+    expect(slot()).toBeNull();
+  });
+
+  test("a custom composer from the public parts keeps one row width when idle and working", async () => {
+    const box = (element: Element | null) =>
+      (element?.className ?? "")
+        .split(/\s+/)
+        .filter((name) => /^(?:pointer-coarse:)?size-/.test(name))
+        .sort();
+    function CustomComposer({ state }: { state: ComposerState }) {
+      const controller = Composer.useChatComposerController({
+        delivery: state,
+        draft: state,
+        control: state,
+        effectiveControl: active,
+      });
+      return (
+        <Composer.Root controller={controller}>
+          <Composer.Frame>
+            <Composer.Surface>
+              <Composer.Input />
+              <Composer.Footer>
+                <Composer.Controls>
+                  <span data-model-controls="">Model</span>
+                  <Composer.PauseButtonSlot />
+                </Composer.Controls>
+                <Composer.Actions>
+                  <Composer.PauseButton />
+                  <Composer.SendButton />
+                </Composer.Actions>
+              </Composer.Footer>
+            </Composer.Surface>
+          </Composer.Frame>
+        </Composer.Root>
+      );
+    }
+    const slot = () => mounted!.container.querySelector("[data-og-composer-pause-slot]");
+    const row = () =>
+      [slot(), pauseButton()]
+        .filter((element): element is HTMLElement => element !== null)
+        .map((element) => box(element));
+    const empty = {
+      ...composer(spy()),
+      value: "",
+      hasDraftContent: () => false,
+      canSend: false,
+    };
+    // Idle: Pause is hidden and the slot keeps exactly one Pause-sized box.
+    mounted = await renderComponent(<CustomComposer state={{ ...empty, working: false }} />);
+    expect(pauseButton()).toBeNull();
+    expect(slot()?.getAttribute("aria-hidden")).toBe("true");
+    const idle = row();
+    expect(idle).toHaveLength(1);
+    expect(idle[0]!.length).toBeGreaterThan(0);
+    // Working: Pause shows in the same box and the slot gives its room back.
+    await mounted.rerender(<CustomComposer state={{ ...empty, working: true }} />);
+    expect(slot()).toBeNull();
+    expect(row()).toEqual(idle);
+  });
+
+  test("at the turn's end Steer and Send's queue wording leave together; only Pause lingers", async () => {
+    const base = composer(spy());
+    const render = (working: boolean) => (
+      <ChatComposer
+        composer={{
+          ...base,
+          working,
+          alternateSend: working ? "steer" : null,
+          sendAlternate: async () => true,
+        }}
+        effectiveControl={active}
+      />
+    );
+    const alternate = () => mounted!.container.querySelector("[data-og-composer-alternate-send]");
+    mounted = await renderComponent(render(true));
+    expect(alternate()).not.toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe(
+      "Queue message (Enter); steer with Cmd/Ctrl+Enter",
+    );
+    await mounted.rerender(render(false));
+    expect(alternate()).toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe("Send message (Enter)");
+    expect(pauseButton()).not.toBeNull();
+    // A host that reports a Steer choice while idle does not get it shown.
+    await mounted.rerender(
+      <ChatComposer
+        composer={{
+          ...base,
+          working: false,
+          alternateSend: "steer",
+          sendAlternate: async () => true,
+        }}
+        effectiveControl={active}
+      />,
+    );
+    expect(alternate()).toBeNull();
+  });
+
+  test("an idle conversation with a pending wake keeps Pause, with plain Send", async () => {
+    // The session route passes `running` while a timed wait or an automation
+    // can still wake the session; with nothing pending it shows only Send.
+    const state = { ...composer(spy()), working: false, alternateSend: null };
+    mounted = await renderComponent(
+      <ChatComposer composer={state} effectiveControl={active} running />,
+    );
+    expect(pauseButton()).not.toBeNull();
+    expect(mounted.container.querySelector("[data-og-composer-pause-slot]")).toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe("Send message (Enter)");
   });
 });

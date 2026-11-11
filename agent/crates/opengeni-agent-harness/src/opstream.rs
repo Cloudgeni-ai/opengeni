@@ -109,6 +109,7 @@ impl OpDriver {
                 window_bytes,
                 deadline_ms,
                 origin_id: "hx-op-scenarios".to_string(),
+                connection_generation: 0,
             }),
         )
         .await
@@ -175,6 +176,7 @@ impl OpDriver {
             credit_bytes,
             r#final: is_final,
             attach_generation: generation,
+            detach: false,
         };
         self.client
             .publish(self.ack_subject.clone(), ack.encode_to_vec().into())

@@ -3,14 +3,14 @@ import { FileTextIcon, UploadIcon, XIcon } from "lucide-react";
 import { useId, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { Field } from "@/components/ui/field";
-import { FormDialog } from "@/components/ui/form-dialog";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { useAppContext } from "@/context";
-import { formatBytes } from "@/lib/format";
-import { cn } from "@/lib/utils";
+import { Button } from "@opengeni/react/ui/button";
+import { Field } from "@opengeni/react/ui/field";
+import { FormDialog } from "@opengeni/react/ui/form-dialog";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { formatBytes } from "@opengeni/react/app/lib/format";
+import { cn } from "@opengeni/react/app/lib/utils";
 
 import { errorText } from "./knowledge-data";
 
@@ -64,7 +64,6 @@ export function UploadFilesDialog({
   onOpenChange,
   workspaceId,
   workspaceName,
-  personal,
   canWriteOrganization,
   defaultScope,
   onUploaded,
@@ -73,7 +72,6 @@ export function UploadFilesDialog({
   onOpenChange: (open: boolean) => void;
   workspaceId: string;
   workspaceName: string;
-  personal: boolean;
   canWriteOrganization: boolean;
   defaultScope: KnowledgeEntryScope;
   onUploaded: () => void;
@@ -85,9 +83,11 @@ export function UploadFilesDialog({
   const [scope, setScope] = useState<KnowledgeEntryScope>(defaultScope);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
-  const scopes: KnowledgeEntryScope[] = personal
-    ? ["personal"]
-    : ["workspace", "personal", ...(canWriteOrganization ? (["organization"] as const) : [])];
+  const scopes: KnowledgeEntryScope[] = [
+    "workspace",
+    "personal",
+    ...(canWriteOrganization ? (["organization"] as const) : []),
+  ];
 
   const add = (list: FileList | null) => {
     const next = Array.from(list ?? []);

@@ -1,14 +1,11 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import postgres from "postgres";
-import {
-  testSettings,
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
-import { MemoryEventBus } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
   acquireLease,
   claimSessionWorkForAttempt,
@@ -27,8 +24,10 @@ import {
 } from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import { createSessionForRequest } from "@opengeni/core";
+import { UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE } from "@opengeni/config";
 import {
   establishSandboxSessionFromEnvelope,
+  PROVIDER_REGISTRY,
   SandboxResumeStateUnavailableError,
   serializeEstablishedSandboxEnvelope,
   type EstablishedSandboxSession,
@@ -42,11 +41,12 @@ import {
 import { withChannelA } from "../src/sandbox/channel-a";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // P1.4 — the shared-sandbox MCP surface (create-session resolution) + the
 // API-direct viewer-holder lifecycle, driven through the REAL packages/db lease
 // fns + the REAL createSessionForRequest resolution against a THROWAWAY postgres
-// (pgvector/pgvector:pg16, the 0000_initial CREATE EXTENSION vector). Mirrors the
+// (pgvector/pgvector:pg16, the migration baseline's CREATE EXTENSION vector). Mirrors the
 // sandbox-leases harness: package fns connect as the NON-superuser opengeni_app
 // (so FORCE RLS applies); accounts/workspaces are seeded as the superuser.
 //
@@ -82,13 +82,9 @@ const settings = testSettings({
   environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
 });
 
-/** A workspace Variable Set row (no variables needed — grouping compares ids). */
-async function freshEnvironment(accountId: string, workspaceId: string): Promise<string> {
-  const [e] = await admin<{ id: string }[]>`
-    insert into workspace_variable_sets (account_id, workspace_id, name)
-    values (${accountId}, ${workspaceId}, 'env') returning id`;
-  return e!.id;
-}
+// The viewer-lifecycle tests run real `local` boxes, so their deployment
+// default is `local`: a host backend is served only as the deployment default.
+const localDeploymentSettings = testSettings({ ...settings, sandboxBackend: "local" });
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
   const [a] = await admin<{ id: string }[]>`
@@ -596,7 +592,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       accountId,
       workspaceId,
       subjectId: "worker:first-party-mcp",
-      subjectLabel: "OpenGeni worker",
+      subjectLabel: "Opengeni worker",
       permissions: ["sessions:create", "sessions:read"],
       metadata: {
         sessionId: parent.id,
@@ -639,7 +635,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       accountId,
       workspaceId,
       subjectId: "worker:first-party-mcp",
-      subjectLabel: "OpenGeni worker",
+      subjectLabel: "Opengeni worker",
       permissions: ["sessions:create", "sessions:read"],
       metadata: {
         sessionId: parent.id,
@@ -749,216 +745,6 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
         targetSandboxId: crypto.randomUUID(),
       }),
     ).rejects.toMatchObject({ status: 422 });
-  }, 60_000);
-
-  test("ENV-AWARE: inherited default with a DIFFERENT environment falls back to an OWN box (break mode 1 dissolved)", async () => {
-    if (!available) return;
-    const { accountId, workspaceId } = await freshWorkspace();
-    const environmentId = await freshEnvironment(accountId, workspaceId);
-    const bus = new MemoryEventBus();
-    // A: credential-less manager (top-level, no environment) on a REAL backend
-    // (the boxless backend:"none" is exempt from the env-aware check).
-    const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "manager",
-      sandboxBackend: "modal",
-    });
-    // B: credentialed worker spawned FROM INSIDE A, sandbox OMITTED. The old
-    // env-blind default joined A's box and the first turn died on the SDK's
-    // manifest-env guard; env-aware grouping gives B its own box instead.
-    const g = {
-      ...grant(accountId, workspaceId, a.id),
-      permissions: [
-        "sessions:create",
-        "sessions:read",
-        "variable-sets:attach",
-        "variable-sets:use",
-      ] as AccessGrant["permissions"],
-    };
-    const b = await createSessionForRequest(deps(bus), g, workspaceId, {
-      initialMessage: "worker",
-      environmentId,
-    });
-    expect(b.parentSessionId).toBe(a.id);
-    expect(b.sandboxGroupId).toBe(b.id); // own singleton box, NOT a's group
-    expect(b.sandboxGroupId).not.toBe(a.sandboxGroupId);
-  }, 60_000);
-
-  test("ENV-AWARE: inherited default with the SAME environment still shares", async () => {
-    if (!available) return;
-    const { accountId, workspaceId } = await freshWorkspace();
-    const environmentId = await freshEnvironment(accountId, workspaceId);
-    const bus = new MemoryEventBus();
-    const g0 = {
-      ...grant(accountId, workspaceId),
-      permissions: [
-        "sessions:create",
-        "sessions:read",
-        "variable-sets:attach",
-        "variable-sets:use",
-      ] as AccessGrant["permissions"],
-    };
-    const a = await createSessionForRequest(deps(bus), g0, workspaceId, {
-      initialMessage: "credentialed founder",
-      environmentId,
-      sandboxBackend: "modal",
-    });
-    const g1 = {
-      ...grant(accountId, workspaceId, a.id),
-      permissions: [
-        "sessions:create",
-        "sessions:read",
-        "variable-sets:attach",
-        "variable-sets:use",
-      ] as AccessGrant["permissions"],
-    };
-    const b = await createSessionForRequest(deps(bus), g1, workspaceId, {
-      initialMessage: "same-env sibling",
-      environmentId,
-    });
-    expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
-  }, 60_000);
-
-  test("ENV-AWARE: EXPLICIT 'shared' with a different environment ⇒ 422 at create (not a dead first turn)", async () => {
-    if (!available) return;
-    const { accountId, workspaceId } = await freshWorkspace();
-    const environmentId = await freshEnvironment(accountId, workspaceId);
-    const bus = new MemoryEventBus();
-    const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "manager",
-      sandboxBackend: "modal",
-    });
-    const g = {
-      ...grant(accountId, workspaceId, a.id),
-      permissions: [
-        "sessions:create",
-        "sessions:read",
-        "variable-sets:attach",
-        "variable-sets:use",
-      ] as AccessGrant["permissions"],
-    };
-    await expect(
-      createSessionForRequest(deps(bus), g, workspaceId, {
-        initialMessage: "worker",
-        environmentId,
-        sandbox: "shared",
-      }),
-    ).rejects.toThrow(/same environment/);
-  }, 60_000);
-
-  test("ENV-AWARE: {groupId} join with a different environment ⇒ 422 at create", async () => {
-    if (!available) return;
-    const { accountId, workspaceId } = await freshWorkspace();
-    const environmentId = await freshEnvironment(accountId, workspaceId);
-    const bus = new MemoryEventBus();
-    const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "founder",
-      sandboxBackend: "modal",
-    });
-    const g = {
-      ...grant(accountId, workspaceId),
-      permissions: [
-        "sessions:create",
-        "sessions:read",
-        "variable-sets:attach",
-        "variable-sets:use",
-      ] as AccessGrant["permissions"],
-    };
-    await expect(
-      createSessionForRequest(deps(bus), g, workspaceId, {
-        initialMessage: "joiner",
-        environmentId,
-        sandbox: { groupId: a.sandboxGroupId! },
-      }),
-    ).rejects.toThrow(/different environment/);
-  }, 60_000);
-
-  test("ENV-AWARE: a legacy MIXED-env group rejects a {groupId} join DETERMINISTICALLY (all members compared)", async () => {
-    if (!available) return;
-    const { accountId, workspaceId } = await freshWorkspace();
-    const environmentId = await freshEnvironment(accountId, workspaceId);
-    const bus = new MemoryEventBus();
-    // Founder: credential-less.
-    const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "founder",
-      sandboxBackend: "modal",
-    });
-    // Simulate a LEGACY env-blind share through the low-level persistence API:
-    // the current request-layer environment check would refuse this grouping.
-    await createSession(db, {
-      accountId,
-      workspaceId,
-      initialMessage: "legacy env-blind member",
-      resources: [],
-      metadata: {},
-      model: "gpt-test",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "modal",
-      variableSetId: environmentId,
-      sandboxGroupId: a.sandboxGroupId,
-    });
-    const g = {
-      ...grant(accountId, workspaceId),
-      permissions: [
-        "sessions:create",
-        "sessions:read",
-        "variable-sets:attach",
-        "variable-sets:use",
-      ] as AccessGrant["permissions"],
-    };
-    // A joiner matching EITHER member must reject: the group is mixed, so no
-    // environment matches ALL members — the verdict cannot depend on which
-    // member an arbitrary single-row read happens to return.
-    await expect(
-      createSessionForRequest(deps(bus), g, workspaceId, {
-        initialMessage: "joiner with the env",
-        environmentId,
-        sandbox: { groupId: a.sandboxGroupId! },
-      }),
-    ).rejects.toThrow(/different environment/);
-    await expect(
-      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-        initialMessage: "joiner without an env",
-        sandbox: { groupId: a.sandboxGroupId! },
-      }),
-    ).rejects.toThrow(/different environment/);
-  }, 60_000);
-
-  test("ENV-AWARE EXEMPTION: a boxless backend:'none' parent SHARES with an env-differing child (no box ⇒ no conflict)", async () => {
-    if (!available) return;
-    const { accountId, workspaceId } = await freshWorkspace();
-    const environmentId = await freshEnvironment(accountId, workspaceId);
-    const bus = new MemoryEventBus();
-    // Boxless parent (the harness default backend is "none").
-    const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "boxless manager",
-    });
-    expect(a.sandboxBackend).toBe("none");
-    const g = {
-      ...grant(accountId, workspaceId, a.id),
-      permissions: [
-        "sessions:create",
-        "sessions:read",
-        "variable-sets:attach",
-        "variable-sets:use",
-      ] as AccessGrant["permissions"],
-    };
-    // Env-carrying child, sandbox OMITTED: with no box there is no shared box
-    // state — the pre-env-aware sharing behavior (and the inherited "none"
-    // backend) must be preserved, NOT a silent fallback onto a billable cloud box.
-    const b = await createSessionForRequest(deps(bus), g, workspaceId, {
-      initialMessage: "env child of boxless parent",
-      environmentId,
-    });
-    expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
-    expect(b.sandboxBackend).toBe("none");
-    // The explicit form shares too (nothing to conflict with).
-    const c = await createSessionForRequest(deps(bus), g, workspaceId, {
-      initialMessage: "explicit shared env child",
-      environmentId,
-      sandbox: "shared",
-    });
-    expect(c.sandboxGroupId).toBe(a.sandboxGroupId);
   }, 60_000);
 
   test("{groupId} explicit join (I13/OD-S5) ⇒ same group as the sibling", async () => {
@@ -1140,7 +926,7 @@ async function seedWarmBox(
     leaseTtlMs: 5_000,
   });
   expect(acquired.role).toBe("spawner");
-  const established = await establishSandboxSessionFromEnvelope(settings, null, {
+  const established = await establishSandboxSessionFromEnvelope(localDeploymentSettings, null, {
     sessionId: session.id,
     recovery: "create-or-restore",
     backendOverride: "local",
@@ -1259,6 +1045,74 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     expect(keeper?.holder_id).toBe("channel-a-keeper");
   }, 60_000);
 
+  test("a Channel-A request joining a box still starting waits for its start instead of refusing it", async () => {
+    if (!available) return;
+    const localSettings = testSettings({
+      sandboxBackend: "local",
+      sandboxOwnershipEnabled: true,
+      sandboxLeaseTtlMs: 5_000,
+      sandboxIdleGraceMs: 500,
+    });
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "channel-a joins a warming box",
+      resources: [],
+      metadata: {},
+      model: "m",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "local",
+    });
+    // A fresh chat's first turn is still bringing its sandbox up.
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      kind: "turn",
+      holderId: "channel-a-first-turn",
+      subjectId: session.id,
+      backend: "local",
+      leaseTtlMs: localSettings.sandboxLeaseTtlMs,
+    });
+    expect(acquired.role).toBe("spawner");
+
+    // Its first Browser or Computer open arrives meanwhile.
+    const request = withChannelA(
+      { db, settings: localSettings, bus: new MemoryEventBus() },
+      {
+        accountId,
+        workspaceId,
+        session: session as never,
+        subjectId: "channel-a-test",
+      },
+      async () => "unreachable",
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await Bun.sleep(800);
+    expect(await readLease(db, workspaceId, session.sandboxGroupId)).toMatchObject({
+      liveness: "warming",
+      refcount: 2,
+    });
+    // The turn's start commits. With no resume state recorded the request
+    // then fails on that, past the lease check it used to fail at.
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "channel-a-box-warming",
+      resumeBackendId: "unix_local",
+      resumeState: null,
+      leaseTtlMs: localSettings.sandboxLeaseTtlMs,
+    });
+    expect(committed.committed).toBe(true);
+    expect(await request).toBeInstanceOf(SandboxResumeStateUnavailableError);
+  }, 60_000);
+
   test("a viewer holder keeps a WARM box alive with NO turn running; the reaper does NOT terminate it", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
@@ -1271,7 +1125,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     expect(legacy?.recovery.workspace.status).toBe("unknown");
 
     const attached = await attachViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       {
         accountId,
         workspaceId,
@@ -1292,7 +1146,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     // Refresh the viewer holder so its heartbeat stays fresh across the sweep,
     // then run the reaper. With a live viewer holder the box must NOT drain.
     await heartbeatViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       {
         accountId,
         workspaceId,
@@ -1330,7 +1184,10 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
 
     let blocked: unknown;
     try {
-      await attachViewer({ db, settings }, { accountId, workspaceId, session: session! });
+      await attachViewer(
+        { db, settings: localDeploymentSettings },
+        { accountId, workspaceId, session: session! },
+      );
     } catch (error) {
       blocked = error;
     }
@@ -1351,7 +1208,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
       idleGraceMs: settings.sandboxIdleGraceMs,
     });
     const attached = await attachViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       { accountId, workspaceId, session: session! },
     );
     expect(attached.liveness).toBe("warm");
@@ -1369,7 +1226,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const session = await getSession(db, workspaceId, sessionId);
     const readinessSubject = `user:fleet-${crypto.randomUUID()}`;
     const hold = await ensureSessionGroupReady(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       { accountId, workspaceId, session: session!, subjectId: readinessSubject },
     );
 
@@ -1432,13 +1289,13 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
     const session = await getSession(db, workspaceId, sessionId);
     const attached = await attachViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       { accountId, workspaceId, session: session! },
     );
 
     // Detach the viewer → refcount 0, warm->draining (guarded turn_holders=0).
     const released = await detachViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       {
         accountId,
         workspaceId,
@@ -1465,7 +1322,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
     const session = await getSession(db, workspaceId, sessionId);
     const attached = await attachViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       { accountId, workspaceId, session: session! },
     );
     expect(attached.liveness).toBe("warm");
@@ -1489,12 +1346,12 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     const { sandboxGroupId, leaseEpoch, sessionId } = await seedWarmBox(accountId, workspaceId);
     const session = await getSession(db, workspaceId, sessionId);
     const attached = await attachViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       { accountId, workspaceId, session: session! },
     );
     // A heartbeat on the WRONG (superseded) epoch is rejected.
     const stale = await heartbeatViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       {
         accountId,
         workspaceId,
@@ -1506,7 +1363,7 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     expect(stale).toBe(false);
     // A heartbeat on the CURRENT epoch succeeds.
     const fresh = await heartbeatViewer(
-      { db, settings },
+      { db, settings: localDeploymentSettings },
       {
         accountId,
         workspaceId,
@@ -1544,6 +1401,96 @@ function hasModalCredentials(): boolean {
   }
   return false;
 }
+
+describe("a stored host-backend session the deployment does not serve", () => {
+  // Rows stored before the create-time gate (or shared-box children of one)
+  // may still name `local` or `docker` on a cloud deployment. Every API-direct
+  // surface (terminal exec, files, browser, computer through Channel A, and
+  // viewer attach) must refuse with a plain 409 before building a box on the
+  // API host. The local provider is runnable in this process, so the refusal
+  // comes from deployment configuration, not a missing runtime.
+  const modalDeployment = testSettings({
+    ...settings,
+    sandboxBackend: "modal",
+    modalTokenId: "ak-test",
+    modalTokenSecret: "as-test",
+  });
+
+  async function storedHostSession(backend: "local" | "docker") {
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "stored before the create gate",
+      resources: [],
+      metadata: {},
+      model: "m",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: backend,
+    });
+    return { accountId, workspaceId, session };
+  }
+
+  async function refusal(run: () => Promise<unknown>): Promise<HTTPException> {
+    let caught: unknown;
+    try {
+      await run();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(HTTPException);
+    return caught as HTTPException;
+  }
+
+  for (const backend of ["local", "docker"] as const) {
+    test(`a ${backend} row gets 409 from a Channel A command and from viewer attach, with no box`, async () => {
+      if (!available) return;
+      const { accountId, workspaceId, session } = await storedHostSession(backend);
+      const build = spyOn(PROVIDER_REGISTRY[backend], "build");
+      let ran = false;
+      try {
+        const exec = await refusal(() =>
+          withChannelA(
+            { db, settings: modalDeployment, bus: new MemoryEventBus() },
+            { accountId, workspaceId, session: session as never, subjectId: "terminal-exec" },
+            async () => {
+              ran = true;
+              return "ran on the API host";
+            },
+          ),
+        );
+        expect(exec.status).toBe(409);
+        expect(exec.message).toBe(UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE);
+
+        const viewer = await refusal(() =>
+          attachViewer({ db, settings: modalDeployment }, { accountId, workspaceId, session }),
+        );
+        expect(viewer.status).toBe(409);
+        expect(viewer.message).toBe(UNSERVED_HOST_SANDBOX_BACKEND_MESSAGE);
+
+        expect(ran).toBe(false);
+        expect(build).not.toHaveBeenCalled();
+        expect(await readLease(db, workspaceId, session.sandboxGroupId)).toBeNull();
+      } finally {
+        build.mockRestore();
+      }
+    }, 60_000);
+  }
+
+  test("the deployment's own host backend still attaches", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { sessionId } = await seedWarmBox(accountId, workspaceId);
+    const session = await getSession(db, workspaceId, sessionId);
+    const result = await withChannelA(
+      { db, settings: localDeploymentSettings, bus: new MemoryEventBus() },
+      { accountId, workspaceId, session: session as never, subjectId: "terminal-exec" },
+      async () => "ran in the deployment's own box",
+    );
+    expect(result).toBe("ran in the deployment's own box");
+  }, 60_000);
+});
 
 const liveGate = process.env.OPENGENI_P14_LIVE_MODAL === "1" && hasModalCredentials();
 
@@ -1645,9 +1592,7 @@ describe("P1.4 GATED live-Modal viewer-keep-warm (opt-in)", () => {
         try {
           await box?.delete?.();
         } catch (error) {
-          console.error(
-            `[p14 live teardown] ${error instanceof Error ? error.message : String(error)}`,
-          );
+          console.error(`[p14 live teardown] ${errorMessage(error)}`);
         }
       }
     },

@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
+  AGENT_CAPABILITY_IDS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  OPENING_TOOLS_METADATA_KEY,
+  openingToolsFromTurnMetadata,
   signDelegatedAccessToken,
   type FirstPartyMcpToolName,
   type Permission,
@@ -11,26 +14,30 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  getAgent,
   getSession,
   initializeSessionStartAtomically,
   listSessionEvents,
+  listSessionTurns,
   updateWorkspaceSettings,
   type DbClient,
 } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { OpenGeniClient } from "../../../packages/sdk/src/client";
+import { ScriptedModel, functionCall } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
+import { buildOpenGeniAgent, prepareAgentTools, runAgentStream } from "@opengeni/runtime";
+import type { ModelRequest } from "@openai/agents";
 import { Hono } from "hono";
 import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { withFirstPartyToolClient, withMcpClient } from "./helpers/first-party-tool-client";
 
 // Agent configuration on the public session API: create, PUT .../agent with the
-// shared tool-policy CAS, typed 422s, the admission switch, the default-for-new-
-// sessions switch, MCP child narrowing, and previously mutable endpoints.
+// shared tool-policy CAS, typed 422s, the omitted-agent default, MCP child
+// narrowing, and previously mutable endpoints.
 
 const SECRET = "agent-config-route-test-secret";
 const ENVIRONMENTS_ENCRYPTION_KEY = Buffer.alloc(32, 43).toString("base64");
@@ -42,7 +49,21 @@ const AGENT_PERMISSIONS: Permission[] = [
   "goals:manage",
   "workspace:read",
 ];
-const RUNTIME_TOOLS = ["command_read", "command_wait", "set_session_title", "wait_for_input"];
+// What "none" keeps: runtime mechanics plus reaching the person (humanInput).
+const RUNTIME_TOOLS = [
+  "call_user",
+  "command_read",
+  "command_wait",
+  "inbox_tidy",
+  "notification_withdraw",
+  "notify_user",
+  "set_session_title",
+  "wait_for_input",
+];
+// A "none" create request leaves notifications off: only the turn mechanics remain.
+const NONE_RUNTIME_TOOLS = RUNTIME_TOOLS.filter(
+  (tool) => !["call_user", "inbox_tidy", "notification_withdraw", "notify_user"].includes(tool),
+);
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -68,23 +89,19 @@ afterAll(async () => {
 }, 60_000);
 
 type Grant = Awaited<ReturnType<typeof bootstrapWorkspace>>["workspaceGrants"][number];
-type Switches = { admission?: boolean; defaultForNewSessions?: boolean };
-
-function settings(switches: Switches = {}) {
+function settings() {
   return testSettings({
     productAccessMode: "managed",
     delegationSecret: SECRET,
     environmentsEncryptionKey: ENVIRONMENTS_ENCRYPTION_KEY,
     sandboxBackend: "none",
-    agentConfigAdmissionEnabled: switches.admission ?? false,
-    agentConfigDefaultForNewSessions: switches.defaultForNewSessions ?? false,
   });
 }
 
-function routeDeps(switches: Switches = {}): ApiRouteDeps {
+function routeDeps(): ApiRouteDeps {
   const noop = async () => undefined;
   return {
-    settings: settings(switches),
+    settings: settings(),
     db: client.db,
     bus: new MemoryEventBus(),
     workflowClient: {
@@ -104,10 +121,10 @@ function routeDeps(switches: Switches = {}): ApiRouteDeps {
   } as unknown as ApiRouteDeps;
 }
 
-function app(switches: Switches = {}): Hono {
-  const deps = routeDeps(switches);
+function app(overrides: Parameters<typeof testSettings>[0] = {}): Hono {
+  const deps = routeDeps();
   return createApp({
-    settings: deps.settings,
+    settings: { ...deps.settings, ...overrides },
     db: client.db,
     bus: deps.bus,
     workflowClient: deps.workflowClient,
@@ -145,10 +162,15 @@ async function request(
   method: string,
   path: string,
   body?: unknown,
+  compact = true,
 ): Promise<{ status: number; json: any }> {
   const response = await target.request(path, {
     method,
-    headers: { authorization: bearer, "content-type": "application/json" },
+    headers: {
+      authorization: bearer,
+      "content-type": "application/json",
+      ...(compact ? { accept: "application/json; opengeni-session=chat" } : {}),
+    },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const text = await response.text();
@@ -187,100 +209,499 @@ async function putAgent(
   );
 }
 
+async function configuration(target: Hono, grant: Grant, sessionId: string) {
+  const result = await request(
+    target,
+    await humanBearer(grant),
+    "GET",
+    `/v1/workspaces/${grant.workspaceId}/sessions/${sessionId}/configuration`,
+  );
+  expect(result.status).toBe(200);
+  return result.json;
+}
+
 function sorted(values: readonly string[]): string[] {
   return [...values].sort();
 }
 
-describe("agent configuration admission switch (real PostgreSQL)", () => {
-  test("off: any agent input and PUT .../agent are 422 agent_config_not_enabled", async () => {
+const FIRST_PARTY_URL = "http://127.0.0.1:8000/v1/workspaces/{workspaceId}/mcp";
+
+/**
+ * A stored session's first turn up to its first answer: the runtime prepares
+ * the session's own refs against the real first-party tool listing (narrowed
+ * to the session's selection, as the API lists it), loads the initial turn's
+ * frozen opening tools as the worker does, and a scripted model plays `steps`.
+ * Returns every provider request and the first-party tools called.
+ */
+async function firstTurn(
+  session: Session,
+  turnMetadata: unknown,
+  steps: ConstructorParameters<typeof ScriptedModel>[0] = "ok",
+): Promise<{ requests: ModelRequest[]; called: string[] }> {
+  const listed = await withFirstPartyToolClient(async (mcp) => (await mcp.listTools()).tools);
+  const selected = listed.filter((tool) =>
+    session.firstPartyMcpTools.includes(tool.name as FirstPartyMcpToolName),
+  );
+  const called: string[] = [];
+  const runtimeSettings = testSettings({
+    sandboxBackend: "none",
+    webSearchEnabled: false,
+    lazyToolSearchEnabled: true,
+    codexToolSearchEnabled: true,
+    integrationsAllowPrivateNetworkTargets: true,
+    mcpServers: [{ id: "opengeni", url: FIRST_PARTY_URL, cacheToolsList: false }],
+  });
+  const prepared = await prepareAgentTools(
+    runtimeSettings,
+    session.tools.filter((tool) => tool.kind === "mcp" && tool.id === "opengeni"),
+    {
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      turnId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      executionGeneration: 1,
+      firstPartyTools: [...session.firstPartyMcpTools],
+      deferNonEagerUntilToolDemand: true,
+      mcpFetchImpl: async (_url, init) => {
+        if (init?.method !== "POST") return new Response(null, { status: 405 });
+        const rpc = JSON.parse(String(init.body));
+        if (rpc.id === undefined) return new Response(null, { status: 202 });
+        if (rpc.method === "tools/call") {
+          called.push(String(rpc.params?.name));
+          const result = { content: [{ type: "text", text: "Sheet1!A1 = 5" }] };
+          return Response.json({ jsonrpc: "2.0", id: rpc.id, result });
+        }
+        const result =
+          rpc.method === "initialize"
+            ? {
+                protocolVersion: "2025-03-26",
+                capabilities: { tools: {} },
+                serverInfo: { name: "opengeni", version: "1" },
+              }
+            : { tools: selected };
+        return Response.json({ jsonrpc: "2.0", id: rpc.id, result });
+      },
+    },
+  );
+  try {
+    const model = new ScriptedModel(steps);
+    const agent = buildOpenGeniAgent(runtimeSettings, [], {
+      model,
+      lazyToolTransport: "openai_native",
+      openingToolNames: openingToolsFromTurnMetadata(turnMetadata),
+      mcpServers: prepared.mcpServers,
+      inputWaitYield: prepared.inputWaitYield,
+      ...(prepared.ready ? { toolPreparationReady: prepared.ready.then(() => undefined) } : {}),
+    });
+    const stream = await runAgentStream(agent, "hello", runtimeSettings);
+    for await (const _event of stream) {
+      /* drain the real SDK stream */
+    }
+    await stream.completed;
+    return { requests: model.requests, called };
+  } finally {
+    await prepared.close();
+  }
+}
+
+function toolName(entry: unknown): string | undefined {
+  const tool = entry as { type?: string; name?: string };
+  return tool.type === "function" ? tool.name : undefined;
+}
+
+describe("agent configuration client config and MCP (real PostgreSQL)", () => {
+  test("client config always reports agent configuration on", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app();
-    const rejected = await create(target, grant, { agent: { capabilities: "none" } });
-    expect(rejected.status).toBe(422);
-    expect(rejected.json.details.code).toBe("agent_config_not_enabled");
-
-    const legacy = await create(target, grant, {});
-    expect(legacy.status).toBe(202);
-    expect(legacy.json.agent).toBeNull();
-    expect(legacy.json.effectiveTools).toBeUndefined();
-    expect(sorted(legacy.json.firstPartyMcpTools)).toEqual(sorted(DEFAULT_FIRST_PARTY_MCP_TOOLS));
-
-    const put = await putAgent(target, await humanBearer(grant), grant, legacy.json.id, {
-      agent: { capabilities: "none" },
-      expectedVersion: 1,
-    });
-    expect(put.status).toBe(422);
-    expect(put.json.error.details.code).toBe("agent_config_not_enabled");
-
-    const config = await request(target, await humanBearer(grant), "GET", "/v1/config/client");
-    expect(config.json.agentConfig).toMatchObject({ enabled: false, defaultForNewSessions: false });
-    expect(config.json.agentConfig.capabilities).toHaveLength(13);
-    const enabled = await request(
-      app({ admission: true }),
-      await humanBearer(grant),
-      "GET",
-      "/v1/config/client",
-    );
-    expect(enabled.json.agentConfig.enabled).toBe(true);
+    const config = await request(app(), await humanBearer(grant), "GET", "/v1/config/client");
+    expect(config.json.agentConfig).toMatchObject({ enabled: true, defaultForNewSessions: true });
+    const ids = config.json.agentConfig.capabilities.map((entry: { id: string }) => entry.id);
+    expect(ids).toEqual([...AGENT_CAPABILITY_IDS]);
+    expect(ids).toContain("notifications");
+    expect(ids).toContain("privacyFacts");
   });
 
-  test("off: the MCP session_create schema is unchanged (no agent parameter)", async () => {
+  test("MCP session_create exposes optional agent selection", async () => {
     if (!available) return;
     const grant = await fixture();
     const root = await rootSession(grant, null);
     const attempt = await liveAttempt(grant, root.id);
-    const schemaKeys = (switches: Switches) => {
+    const discoverSchema = async () => {
       const server = buildOpenGeniMcpServer(
-        routeDeps(switches),
+        routeDeps(),
         agentGrant(grant, attempt, ["session_create"]),
       );
-      const tool = (
-        server as unknown as {
-          _registeredTools: Record<string, { inputSchema: { shape?: Record<string, unknown> } }>;
-        }
-      )._registeredTools["session_create"]!;
-      const schema = tool.inputSchema as unknown as { def?: { in?: { shape?: object } } };
-      return (
-        JSON.stringify(schema).includes('"agent"') || "agent" in (tool.inputSchema.shape ?? {})
-      );
+      return withMcpClient(server, async (mcpClient) => {
+        const tool = (await mcpClient.listTools()).tools.find(
+          (entry) => entry.name === "session_create",
+        );
+        expect(tool).toBeDefined();
+        return tool!.inputSchema;
+      });
     };
-    expect(schemaKeys({})).toBe(false);
-    expect(schemaKeys({ admission: true })).toBe(true);
+    const schema = await discoverSchema();
+    expect(schema.properties).toHaveProperty("initialMessage");
+    expect(schema.required).toContain("initialMessage");
+    expect(schema.required).not.toContain("agent");
+    expect(schema.properties!.agent).toMatchObject({
+      type: "object",
+      properties: { capabilities: { anyOf: expect.any(Array) } },
+    });
+  });
+
+  test("an agent a chat makes with bot_template_save remembers, with its Memory collection", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const root = await rootSession(grant, null, ["bot_template_save"]);
+    const attempt = await liveAttempt(grant, root.id);
+    const server = buildOpenGeniMcpServer(
+      routeDeps(),
+      agentGrant(grant, attempt, ["bot_template_save"]),
+    );
+    const saved = await callMcpTool(server, "bot_template_save", {
+      name: "Release notes",
+      instructions: "Write the release notes.",
+    });
+    expect(saved.isError).not.toBe(true);
+    const agentId = (JSON.parse(saved.text) as { agent: { id: string } }).agent.id;
+    expect(
+      await getAgent(
+        client.db,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        agentId,
+      ),
+    ).toMatchObject({ memoryEnabled: true, memoryCollectionId: expect.any(String) });
   });
 });
 
 describe("agent configuration on create (real PostgreSQL)", () => {
-  test('"all" reproduces the legacy tools exactly; "none" keeps runtime mechanics', async () => {
+  test("SDK upgrades keep full default responses; chat is an explicit typed opt-in", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app({ admission: true });
-    const legacy = await create(target, grant, {});
+    const target = app();
+    const bearer = await humanBearer(grant);
+    const sdk = new OpenGeniClient({
+      baseUrl: "http://api.test",
+      headers: { authorization: bearer },
+      fetch: (input, init) => target.fetch(new Request(input, init)),
+    });
+    const created = await sdk.createSession(grant.workspaceId, {
+      initialMessage: "hello",
+      instructions: "Retain the SDK contract.",
+      skills: [
+        {
+          files: [
+            {
+              path: "SKILL.md",
+              content: "---\nname: sdk-compatibility\ndescription: Compatibility\n---\nRetain.",
+            },
+          ],
+        },
+      ],
+    });
+    expect(created.instructions).toBe("Retain the SDK contract.");
+    expect(created.skills.map((skill) => skill.name)).toEqual(["sdk-compatibility"]);
+    expect((await sdk.getSession(grant.workspaceId, created.id)).skills.length).toBe(1);
+    expect((await sdk.listSessions(grant.workspaceId))[0]!.skills.length).toBe(1);
+    const chat = sdk.withSessionResponse("chat");
+    for (const session of [
+      await chat.getSession(grant.workspaceId, created.id),
+      ...(await chat.listSessions(grant.workspaceId)),
+      await chat.updateSessionAgent(grant.workspaceId, created.id, {
+        agent: { identity: "Typed chat" },
+        expectedVersion: created.toolPolicyVersion,
+      }),
+    ]) {
+      expect(session.skills).toBeUndefined();
+      expect(session.instructions).toBeUndefined();
+      expect(session.effectiveTools).toBeUndefined();
+    }
+    // Opting another client into chat projection never changes this client's readers.
+    expect(
+      (await sdk.getSession(grant.workspaceId, created.id, { fresh: true })).skills.length,
+    ).toBe(1);
+    expect((await chat.getSessionConfiguration(grant.workspaceId, created.id)).skills.length).toBe(
+      1,
+    );
+  });
+
+  test("previous clients retain full create, detail, list and mutation response bodies", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
+    const bearer = await humanBearer(grant);
+    const base = `/v1/workspaces/${grant.workspaceId}/sessions`;
+    for (const compact of [false, true]) {
+      const created = await request(
+        target,
+        bearer,
+        "POST",
+        base,
+        {
+          initialMessage: "hello",
+          resources: [],
+          instructions: "Keep this configuration.",
+          skills: [
+            {
+              files: [
+                {
+                  path: "SKILL.md",
+                  content:
+                    "---\nname: compatibility\ndescription: Compatibility\n---\nRetained skill body.",
+                },
+              ],
+            },
+          ],
+        },
+        compact,
+      );
+      expect(created.status).toBe(202);
+      const path = `${base}/${created.json.id}`;
+      const detail = await request(target, bearer, "GET", path, undefined, compact);
+      const list = await request(target, bearer, "GET", base, undefined, compact);
+      const mutation = await request(
+        target,
+        bearer,
+        "PUT",
+        `${path}/agent`,
+        {
+          agent: { identity: "Compatible" },
+          expectedVersion: created.json.toolPolicyVersion,
+        },
+        compact,
+      );
+      expect(detail.status).toBe(200);
+      expect(list.status).toBe(200);
+      expect(mutation.status).toBe(200);
+      for (const session of [created.json, detail.json, ...list.json, mutation.json]) {
+        if (compact) {
+          for (const field of ["instructions", "skills", "effectiveTools"]) {
+            expect(Object.hasOwn(session, field)).toBe(false);
+          }
+        } else {
+          // These are unchanged prior-client expressions, not today's optional types.
+          expect(session.instructions).toBe("Keep this configuration.");
+          expect(session.skills.map((skill: { name: string }) => skill.name)).toEqual([
+            "compatibility",
+          ]);
+          expect(session.effectiveTools.tools.length).toBeGreaterThan(0);
+        }
+      }
+    }
+  });
+
+  test("chat reads omit large configuration; explicit configuration requires control permission", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
+    const instructions = "i".repeat(15_000);
+    const created = await create(target, grant, {
+      instructions,
+      skills: Array.from({ length: 18 }, (_, index) => ({
+        files: [
+          {
+            path: "SKILL.md",
+            content: `---\nname: skill-${index}\ndescription: Test skill\n---\n${"s".repeat(11_112)}`,
+          },
+        ],
+      })),
+    });
+    expect(created.status).toBe(202);
+    const id = created.json.id;
+    const path = `/v1/workspaces/${grant.workspaceId}/sessions/${id}`;
+    const full = await configuration(target, grant, id);
+    expect(full.instructions).toBe(instructions);
+    expect(full.skills).toHaveLength(18);
+    expect(full.effectiveTools.tools.length).toBeGreaterThan(0);
+    const reader = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      permissions: ["sessions:read"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    const detail = await request(target, reader, "GET", path);
+    expect(detail.status).toBe(200);
+    const list = await request(
+      target,
+      reader,
+      "GET",
+      `/v1/workspaces/${grant.workspaceId}/sessions`,
+    );
+    expect(list.status).toBe(200);
+    for (const value of [created.json, detail.json, ...list.json]) {
+      expect(Object.hasOwn(value, "instructions")).toBe(false);
+      expect(Object.hasOwn(value, "skills")).toBe(false);
+      expect(Object.hasOwn(value, "effectiveTools")).toBe(false);
+    }
+    expect((await request(target, reader, "GET", `${path}/configuration`)).status).toBe(403);
+    const stranger = await fixture();
+    expect(
+      (await request(target, await humanBearer(stranger), "GET", `${path}/configuration`)).status,
+    ).not.toBe(200);
+    // Measure actual prior-client and compact responses with identical annotations.
+    const legacyDetail = await request(target, reader, "GET", path, undefined, false);
+    expect(legacyDetail.status).toBe(200);
+    expect(legacyDetail.json.instructions).toBe(instructions);
+    const beforeBytes = Buffer.byteLength(JSON.stringify(legacyDetail.json));
+    const afterBytes = Buffer.byteLength(JSON.stringify(detail.json));
+    expect(beforeBytes - afterBytes).toBeGreaterThan(200_000);
+    console.info(
+      JSON.stringify({ fixture: "real session API, 18 skills", beforeBytes, afterBytes }),
+    );
+  });
+  test("keyed retries never adopt the new eager selection into an existing session", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const body = { idempotencyKey: crypto.randomUUID() };
+    const before = await create(app(), grant, body);
+    expect(before.status).toBe(202);
+    const saved = JSON.stringify(before.json.tools);
+    const replay = await create(
+      app({ mcpServers: [{ id: "opengeni", url: "https://mcp.example.test/opengeni" }] }),
+      grant,
+      body,
+    );
+    expect(replay.status).toBe(202);
+    expect(replay.json.id).toBe(before.json.id);
+    expect(JSON.stringify(replay.json.tools)).toBe(saved);
+  });
+  test("new configured first-party sessions persist eager search, not other Knowledge tools", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app({
+      mcpServers: [{ id: "opengeni", url: "https://mcp.example.test/opengeni" }],
+    });
+    const created = await create(target, grant, {});
+    expect(created.status).toBe(202);
+    expect(
+      created.json.tools.find((tool: { id: string }) => tool.id === "opengeni")?.eager,
+    ).toEqual(["knowledge_search"]);
+    const saved = await getSession(client.db, grant.workspaceId, created.json.id);
+    expect(saved?.tools.find((tool) => tool.id === "opengeni")?.eager).toEqual([
+      "knowledge_search",
+    ]);
+  });
+  test("a chat bound by its opening context starts with that tool loaded; others are unchanged", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app({
+      mcpServers: [{ id: "opengeni", url: "https://mcp.example.test/opengeni" }],
+    });
+    const context = 'The person is writing from their open workbook "Budget". Use excel_run.';
+    const bound = await create(target, grant, {
+      modelContext: context,
+      modelContextTools: ["excel_run", "not_a_tool"],
+    });
+    expect(bound.status).toBe(202);
+    const plain = await create(target, grant, {});
+    const contextOnly = await create(target, grant, { modelContext: context });
+    const unknownOnly = await create(target, grant, {
+      modelContext: context,
+      modelContextTools: ["not_a_tool"],
+    });
+    // A name outside the session's own tool selection grants nothing.
+    const narrowed = await create(target, grant, {
+      modelContext: context,
+      modelContextTools: ["excel_run"],
+      agent: { capabilities: "none" },
+    });
+    const narrowedPlain = await create(target, grant, { agent: { capabilities: "none" } });
+    for (const created of [plain, contextOnly, unknownOnly, narrowed, narrowedPlain])
+      expect(created.status).toBe(202);
+
+    // The session's tools stay exactly as selected; only the initial turn
+    // records the tools its opening context is for.
+    for (const created of [bound, contextOnly, unknownOnly])
+      expect(JSON.stringify(created.json.tools)).toBe(JSON.stringify(plain.json.tools));
+    expect(JSON.stringify(narrowed.json.tools)).toBe(JSON.stringify(narrowedPlain.json.tools));
+    const initialTurn = async (id: string) =>
+      (await listSessionTurns(client.db, grant.workspaceId, id))[0]!;
+    const boundTurn = await initialTurn(bound.json.id);
+    expect(openingToolsFromTurnMetadata(boundTurn.metadata)).toEqual(["excel_run"]);
+    for (const created of [plain, contextOnly, unknownOnly, narrowed]) {
+      const turn = await initialTurn(created.json.id);
+      expect(turn.metadata).not.toHaveProperty(OPENING_TOOLS_METADATA_KEY);
+    }
+
+    // The bound chat's first provider request: today's tools block and
+    // instructions byte for byte, then the person's message and the loaded
+    // excel_run, so the model's first step calls it without a tool_search.
+    const sessionOf = async (id: string) => (await getSession(client.db, grant.workspaceId, id))!;
+    const excel = "opengeni__excel_run";
+    const boundRun = await firstTurn(await sessionOf(bound.json.id), boundTurn.metadata, [
+      { output: [functionCall(excel, { code: "return 1" })] },
+      { outputText: "A1 is 5." },
+    ]);
+    const plainRun = await firstTurn(
+      await sessionOf(plain.json.id),
+      (await initialTurn(plain.json.id)).metadata,
+    );
+    expect(boundRun.called).toEqual(["excel_run"]);
+    expect(boundRun.requests).toHaveLength(2);
+    const [boundFirst] = boundRun.requests;
+    const [plainFirst] = plainRun.requests;
+    expect(JSON.stringify(boundFirst!.tools)).toBe(JSON.stringify(plainFirst!.tools));
+    expect(plainFirst!.tools.map(toolName)).not.toContain(excel);
+    expect(boundFirst!.systemInstructions).toBe(plainFirst!.systemInstructions);
+    const input = boundFirst!.input as Array<Record<string, unknown>>;
+    expect(JSON.stringify(input[0])).toBe(JSON.stringify((plainFirst!.input as unknown[])[0]));
+    expect(input[1]).toMatchObject({
+      type: "tool_search_call",
+      execution: "client",
+      arguments: { query: "", names: [excel] },
+    });
+    expect(input[2]).toMatchObject({ type: "tool_search_output" });
+    expect((input[2]!.tools as unknown[]).map(toolName)).toEqual([excel]);
+    expect(input).toHaveLength(3);
+
+    // Chats without such context send exactly today's first request.
+    for (const created of [contextOnly, unknownOnly]) {
+      const run = await firstTurn(
+        await sessionOf(created.json.id),
+        (await initialTurn(created.json.id)).metadata,
+      );
+      expect(run.requests).toHaveLength(1);
+      expect(JSON.stringify(run.requests[0])).toBe(JSON.stringify(plainFirst));
+    }
+  });
+  test('"all" matches an omitted agent exactly; "none" keeps runtime mechanics', async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
+    const omitted = await create(target, grant, {});
     const all = await create(target, grant, { agent: { capabilities: "all" } });
     expect(all.status).toBe(202);
     expect(all.json.agent).toMatchObject({ version: 1, from: "all", source: "request" });
-    expect(all.json.firstPartyMcpTools).toEqual(legacy.json.firstPartyMcpTools);
-    expect(all.json.tools).toEqual(legacy.json.tools);
-    expect(all.json.toolPolicy).toEqual(legacy.json.toolPolicy);
-    expect(all.json.effectiveTools.capabilities.goals).toBe(true);
+    expect(all.json.firstPartyMcpTools).toEqual(omitted.json.firstPartyMcpTools);
+    expect(all.json.tools).toEqual(omitted.json.tools);
+    expect(all.json.toolPolicy).toEqual(omitted.json.toolPolicy);
+    expect(all.json.effectiveTools).toBeUndefined();
+    expect(
+      (await configuration(target, grant, all.json.id)).effectiveTools.capabilities.goals,
+    ).toBe(true);
 
     const none = await create(target, grant, { agent: { capabilities: "none" } });
     expect(none.status).toBe(202);
-    expect(sorted(none.json.firstPartyMcpTools)).toEqual(RUNTIME_TOOLS);
+    expect(sorted(none.json.firstPartyMcpTools)).toEqual(NONE_RUNTIME_TOOLS);
     expect(none.json.toolPolicy.mode).toBe("explicit");
     // No workspace connectors or built-in files/docs servers; the mandatory
     // first-party server is attached at runtime.
     expect(none.json.tools).toEqual([]);
-    const names = none.json.effectiveTools.tools.map((tool: { name: string }) => tool.name);
+    const names = (await configuration(target, grant, none.json.id)).effectiveTools.tools.map(
+      (tool: { name: string }) => tool.name,
+    );
     expect(names).toContain("request_human_input");
     expect(names).not.toContain("web_search");
     expect(names).not.toContain("list_models");
   });
 
-  test("typed 422s: goal conflict, instructions alias conflict, explicit tool conflict", async () => {
+  test("typed 422s: goal conflict, instructions alias conflict", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app({ admission: true });
+    const target = app();
     const goalConflict = await create(target, grant, {
       goal: { text: "Ship it" },
       agent: { capabilities: { from: "all", goals: false } },
@@ -295,17 +716,34 @@ describe("agent configuration on create (real PostgreSQL)", () => {
       agent: { instructions: "b" },
     });
     expect(alias.json.details.code).toBe("agent_config_conflict");
+  });
+
+  test("a client's explicit tool of a capability that is off is narrowed away, not refused", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
     const explicit = await create(target, grant, {
       firstPartyMcpTools: ["goal_set"],
       agent: { capabilities: "none" },
     });
-    expect(explicit.json.details.code).toBe("agent_config_conflict");
+    expect(explicit.status).toBe(202);
+    expect(explicit.json.firstPartyMcpTools).not.toContain("goal_set");
+    // A client built before a tool moved under a capability keeps offering it:
+    // the session is still created, without that tool.
+    const stale = await create(target, grant, {
+      firstPartyMcpTools: ["set_session_title", "connected_machine_enable_screen_control"],
+      agent: { capabilities: { from: "all", workspaceAdmin: false } },
+    });
+    expect(stale.status).toBe(202);
+    expect(stale.json.firstPartyMcpTools).toContain("set_session_title");
+    expect(stale.json.firstPartyMcpTools).not.toContain("connected_machine_enable_screen_control");
+    expect(stale.json.agent.capabilities.workspaceAdmin).toBe(false);
   });
 
   test("a goal implies goals; instructions alias writes the session instructions", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app({ admission: true });
+    const target = app();
     const created = await create(target, grant, {
       goal: { text: "Ship it" },
       agent: { capabilities: "none", instructions: "Answer briefly.", identity: "Acme" },
@@ -313,28 +751,30 @@ describe("agent configuration on create (real PostgreSQL)", () => {
     expect(created.status).toBe(202);
     expect(created.json.agent.capabilities.goals).toBe(true);
     expect(created.json.agent.identity).toBe("Acme");
-    expect(created.json.instructions).toBe("Answer briefly.");
+    expect(created.json.instructions).toBeUndefined();
+    expect((await configuration(target, grant, created.json.id)).instructions).toBe(
+      "Answer briefly.",
+    );
     expect(created.json.firstPartyMcpTools).toContain("goal_complete");
   });
 
-  test("default-for-new-sessions resolves omitted agent to all with legacy tools", async () => {
+  test("an omitted agent resolves to all with the default tools", async () => {
     if (!available) return;
     const grant = await fixture();
-    const legacy = await create(app(), grant, {});
-    const defaulted = await create(app({ defaultForNewSessions: true }), grant, {});
+    const defaulted = await create(app(), grant, {});
     expect(defaulted.json.agent).toMatchObject({ from: "all", source: "deployment_default" });
-    expect(defaulted.json.firstPartyMcpTools).toEqual(legacy.json.firstPartyMcpTools);
-    expect(defaulted.json.tools).toEqual(legacy.json.tools);
+    expect(sorted(defaulted.json.firstPartyMcpTools)).toEqual(
+      sorted(DEFAULT_FIRST_PARTY_MCP_TOOLS),
+    );
   });
 
-  test("workspace defaults apply only with admission on", async () => {
+  test("workspace defaults apply to an omitted agent", async () => {
     if (!available) return;
     const grant = await fixture();
     await updateWorkspaceSettings(client.db, grant.workspaceId, {
       sessionAgentDefaults: { capabilities: { from: "none", knowledge: true }, identity: "Ws bot" },
     });
-    expect((await create(app(), grant, {})).json.agent).toBeNull();
-    const created = await create(app({ admission: true }), grant, {});
+    const created = await create(app(), grant, {});
     expect(created.json.agent).toMatchObject({
       source: "workspace_default",
       identity: "Ws bot",
@@ -349,7 +789,7 @@ describe("PUT .../agent (real PostgreSQL)", () => {
   test("CAS, next-attempt event, stale 409, human widening adds tools back", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app({ admission: true });
+    const target = app();
     const bearer = await humanBearer(grant);
     const created = await create(target, grant, { agent: { capabilities: "none" } });
     const sessionId = created.json.id as string;
@@ -382,19 +822,24 @@ describe("PUT .../agent (real PostgreSQL)", () => {
       expectedVersion: version + 1,
     });
     expect(identity.json.agent).toMatchObject({ identity: "Helper", renderer: "markdown" });
-    expect(identity.json.instructions).toBe("One sentence.");
+    expect(identity.json.instructions).toBeUndefined();
+    expect((await configuration(target, grant, sessionId)).instructions).toBe("One sentence.");
   });
 
   test("a legacy session converts from its current effective state without widening", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app({ admission: true });
-    const legacy = await create(target, grant, {
-      firstPartyMcpTools: ["set_session_title", "wait_for_input", "goal_set", "goal_update"],
-    });
-    const converted = await putAgent(target, await humanBearer(grant), grant, legacy.json.id, {
+    const target = app();
+    // Sessions created before agent configuration keep a null config.
+    const legacy = await rootSession(grant, null, [
+      "set_session_title",
+      "wait_for_input",
+      "goal_set",
+      "goal_update",
+    ]);
+    const converted = await putAgent(target, await humanBearer(grant), grant, legacy.id, {
       agent: { identity: "Converted" },
-      expectedVersion: legacy.json.toolPolicyVersion,
+      expectedVersion: legacy.toolPolicyVersion,
     });
     expect(converted.status).toBe(200);
     expect(converted.json.agent.source).toBe("legacy_conversion");
@@ -434,7 +879,7 @@ describe("PUT .../agent (real PostgreSQL)", () => {
     });
     const attempt = await liveAttempt(grant, root.id);
     const bearer = await agentBearer(grant, attempt, root.firstPartyMcpTools);
-    const target = app({ admission: true });
+    const target = app();
     const widened = await putAgent(target, bearer, grant, root.id, {
       agent: { capabilities: { from: "none", subagents: true, goals: true } },
       expectedVersion: root.toolPolicyVersion,
@@ -453,7 +898,7 @@ describe("PUT .../agent (real PostgreSQL)", () => {
   test("previously mutable endpoints still work on a configured session", async () => {
     if (!available) return;
     const grant = await fixture();
-    const target = app({ admission: true });
+    const target = app();
     const bearer = await humanBearer(grant);
     const created = await create(target, grant, {
       agent: { capabilities: { from: "all", goals: false } },
@@ -499,14 +944,14 @@ describe("MCP session_create agent narrowing (real PostgreSQL)", () => {
   test("children inherit the parent's configuration and may only narrow it", async () => {
     if (!available) return;
     const grant = await fixture();
-    const parentTarget = app({ admission: true });
+    const parentTarget = app();
     const parent = await create(parentTarget, grant, {
       agent: { capabilities: { from: "none", subagents: true } },
     });
     const root = (await getSession(client.db, grant.workspaceId, parent.json.id))!;
     const attempt = await liveAttempt(grant, root.id);
     const server = buildOpenGeniMcpServer(
-      routeDeps({ admission: true }),
+      routeDeps(),
       agentGrant(grant, attempt, root.firstPartyMcpTools),
     );
     const widened = await callMcpTool(server, "session_create", {
@@ -525,6 +970,30 @@ describe("MCP session_create agent narrowing (real PostgreSQL)", () => {
     expect(children[0]!.agent).toMatchObject({ source: "inherited", from: "none" });
     expect(children[0]!.agent?.capabilities.knowledge).toBe(false);
 
+    for (const compact of [false, true]) {
+      for (const id of [root.id, children[0]!.id]) {
+        const lineage = await request(
+          parentTarget,
+          await humanBearer(grant),
+          "GET",
+          `/v1/workspaces/${grant.workspaceId}/sessions/${id}/lineage`,
+          undefined,
+          compact,
+        );
+        expect(lineage.status).toBe(200);
+        const sessions = [
+          ...lineage.json.ancestors,
+          ...lineage.json.children.map((node: any) => node.session),
+        ];
+        expect(sessions.length).toBeGreaterThan(0);
+        for (const session of sessions) {
+          expect(Object.hasOwn(session, "instructions")).toBe(!compact);
+          expect(Object.hasOwn(session, "skills")).toBe(!compact);
+          expect(Object.hasOwn(session, "effectiveTools")).toBe(!compact);
+        }
+      }
+    }
+
     const narrowed = await callMcpTool(server, "session_create", {
       initialMessage: "leaf work",
       agent: { capabilities: { from: "none", subagents: false } },
@@ -539,12 +1008,16 @@ describe("MCP session_create agent narrowing (real PostgreSQL)", () => {
 
 // ---------------------------------------------------------------------------
 
-async function rootSession(grant: Grant, agentConfig: Session["agent"]) {
+async function rootSession(
+  grant: Grant,
+  agentConfig: Session["agent"],
+  legacyFirstPartyMcpTools: FirstPartyMcpToolName[] = ["session_create"],
+) {
   const firstPartyMcpTools: FirstPartyMcpToolName[] = agentConfig
     ? [...RUNTIME_TOOLS, "session_create", "sessions_list"].map(
         (tool) => tool as FirstPartyMcpToolName,
       )
-    : ["session_create"];
+    : legacyFirstPartyMcpTools;
   return await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,

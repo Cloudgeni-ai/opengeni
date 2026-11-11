@@ -7,13 +7,9 @@ import {
   type Page,
   type PageScreenshotOptions,
 } from "playwright";
-import {
-  assertScreenshotPainted,
-  freePort,
-  runCommand,
-  startProcess,
-  type StartedProcess,
-} from "@opengeni/testing";
+import { assertScreenshotPainted } from "@opengeni/testing/screenshot";
+import { freePort } from "@opengeni/testing/compose";
+import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const dockStates = [
@@ -29,6 +25,7 @@ const dockStates = [
   "error",
   "permission-gated",
   "connecting",
+  "terminal-history",
 ] as const;
 
 describe("workbench browser acceptance", () => {
@@ -737,6 +734,68 @@ describe("workbench browser acceptance", () => {
     }
   }, 30_000);
 
+  test("a reloaded dock reads terminal history on demand, outside the conversation window", async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+    try {
+      const page = await context.newPage();
+      await page.addInitScript(() => {
+        const scope = globalThis as unknown as {
+          __OG_TERMINAL_DEBUG__?: (info: { term: unknown }) => void;
+          __ogTerminal?: unknown;
+        };
+        scope.__OG_TERMINAL_DEBUG__ = (info) => {
+          scope.__ogTerminal = info.term;
+        };
+      });
+      await page.goto(dockUrl(baseUrl, "terminal-history", "dark", "changes"), {
+        waitUntil: "networkidle",
+      });
+      // The Terminal tab is closed: nothing has read terminal history yet.
+      const readsBefore = await historyReads(page);
+      expect(readsBefore.filter((read) => read.includeTypes)).toEqual([]);
+
+      await page.goto(dockUrl(baseUrl, "terminal-history", "dark", "terminal"), {
+        waitUntil: "networkidle",
+      });
+      await page.locator("[data-og-term-ready='true']").first().waitFor({ timeout: 20_000 });
+      const transcript = await page
+        .waitForFunction(
+          () => {
+            const term = (globalThis as unknown as { __ogTerminal?: XtermBufferProbe })
+              .__ogTerminal;
+            const buffer = term?.buffer.active;
+            if (!buffer) return null;
+            const lines: string[] = [];
+            for (let i = 0; i < buffer.length; i += 1) {
+              lines.push(buffer.getLine(i)?.translateToString(true) ?? "");
+            }
+            const text = lines.join("\n");
+            return text.includes("successfully rolled out") ? text : null;
+          },
+          undefined,
+          { timeout: 20_000 },
+        )
+        .then((handle) => handle.jsonValue() as Promise<string>);
+      // Past turns' agent command output and the PTY's own scrollback.
+      expect(transcript).toContain("412 pass");
+      expect(transcript).toContain("successfully rolled out");
+      expect(transcript).toContain("src/carts/expiry.ts");
+      expect(transcript).toContain("GET /v1/");
+
+      const reads = await historyReads(page);
+      const dockReads = reads.filter((read) => read.includeTypes);
+      expect(dockReads).toHaveLength(1);
+      expect(dockReads[0]?.includeTypes).toContain("terminal.pty.output.delta");
+      expect(dockReads[0]?.rows).toBe(1000);
+      // Conversation reads never carry terminal rows.
+      const conversationReads = reads.filter((read) => read.excludeTypes);
+      expect(conversationReads.length).toBeGreaterThan(0);
+      for (const read of conversationReads) expect(read.terminalRows).toBe(0);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("tab semantics work from the keyboard in the narrow overlay", async () => {
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
@@ -1211,6 +1270,30 @@ function dockUrl(
   const params = new URLSearchParams({ state, theme });
   if (tab) params.set("tab", tab);
   return `${baseUrl}/workbench-dock.html?${params}`;
+}
+
+type XtermBufferProbe = {
+  buffer: {
+    active: {
+      length: number;
+      getLine(index: number): { translateToString(trimRight?: boolean): string } | undefined;
+    };
+  };
+};
+
+type DockHistoryReadProbe = {
+  includeTypes: string[] | null;
+  excludeTypes: string[] | null;
+  rows: number;
+  terminalRows: number;
+};
+
+async function historyReads(page: Page): Promise<DockHistoryReadProbe[]> {
+  return page.evaluate(
+    () =>
+      (globalThis as unknown as { __OG_DOCK_HISTORY_READS__?: DockHistoryReadProbe[] })
+        .__OG_DOCK_HISTORY_READS__ ?? [],
+  );
 }
 
 async function manualAccessibilityAudit(page: Page): Promise<{

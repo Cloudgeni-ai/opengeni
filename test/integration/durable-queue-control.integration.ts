@@ -3,7 +3,11 @@ import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import postgres from "postgres";
 import type { AccessGrant, SessionEvent } from "@opengeni/contracts";
-import { controlHumanSessionWorkstream, postUserMessageTurn } from "@opengeni/core";
+import {
+  controlHumanSessionWorkstream,
+  postUserMessageTurn,
+  steerHumanQueuePrompt,
+} from "@opengeni/core";
 import {
   addSessionSystemUpdate,
   bootstrapWorkspace,
@@ -26,14 +30,12 @@ import {
 import { migrate } from "@opengeni/db/migrate";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import {
-  ScriptedModel,
-  startTestServices,
-  testSettings,
-  waitFor,
-  type TestServices,
-} from "@opengeni/testing";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { startTestServices, type TestServices } from "@opengeni/testing/compose";
+import { testSettings } from "@opengeni/testing/settings";
+import { waitFor } from "@opengeni/testing/process";
 import { createActivityTestHarness } from "../../apps/worker/src/activities";
+import { goalContinuationPrompt } from "../../apps/worker/src/activities/goals";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
@@ -41,6 +43,7 @@ import {
 } from "../../apps/worker/src/concurrency";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import { submitTestHumanPrompt } from "./helpers/session-control";
+import { errorMessage } from "@opengeni/contracts/values";
 
 type RequiredServices = Pick<
   TestServices,
@@ -192,6 +195,9 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           sessionId: session.id,
+          // The same human who started the work steers it, as the HTTP route
+          // does; their agent messages join that request's context.
+          actor: grant.subjectId,
           text: "urgent correction",
           resources: [],
           tools: [],
@@ -220,7 +226,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
             session.id,
           );
           throw new Error(
-            `${error instanceof Error ? error.message : String(error)}; ` +
+            `${errorMessage(error)}; ` +
               `queue=${JSON.stringify({
                 version: diagnosticQueue?.version,
                 stopping: diagnosticQueue?.stoppingPreviousAttempt,
@@ -265,23 +271,23 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
             event.type === "session.control.steer_requested" &&
             event.payload.targetTurnId === urgent.turn.id,
         );
-        const quiesced = events.find(
-          (event) =>
-            event.type === "session.queue.changed" &&
-            event.turnId === initial.turn.id &&
-            event.payload.operation === "attempt_quiesced",
+        // The Steer cuts the streaming answer and the initial attempt hands over
+        // itself at that boundary: nothing is interrupted or left to quiesce.
+        const handedOver = events.find(
+          (event) => event.type === "turn.superseded" && event.turnId === initial.turn.id,
         );
         const replacementStarted = events.find(
           (event) => event.type === "turn.started" && event.turnId === urgent.turn.id,
         );
         expect(steerRequested).toBeDefined();
-        expect(quiesced).toBeDefined();
+        expect(handedOver).toBeDefined();
         expect(replacementStarted).toBeDefined();
-        expect(quiesced!.sequence).toBeGreaterThan(steerRequested!.sequence);
-        expect(replacementStarted!.sequence).toBeGreaterThan(quiesced!.sequence);
+        expect(handedOver!.sequence).toBeGreaterThan(steerRequested!.sequence);
+        expect(replacementStarted!.sequence).toBeGreaterThan(handedOver!.sequence);
         expect(
-          Date.parse(quiesced!.occurredAt) - Date.parse(urgent.accepted.occurredAt),
+          Date.parse(handedOver!.occurredAt) - Date.parse(urgent.accepted.occurredAt),
         ).toBeLessThan(2_000);
+        expect(urgent.turn.metadata).toMatchObject({ interruptionCount: 0 });
         expect(model.calls).toBe(2);
         const deliveredUpdates = await listSessionSystemUpdatesForTurn(
           dbClient.db,
@@ -411,9 +417,28 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           resources: [],
           tools: [],
           clientEventId: `receipt-exhaustion-steer-${crypto.randomUUID()}`,
-          delivery: "steer",
+          delivery: "send",
           controlEtag: beforeSteer!.effectiveControl.controlEtag,
         });
+        expect(urgent.turn.status).toBe("queued");
+        // A plain Steer hands over cooperatively at the next model step, with
+        // no quiescence. "Send now" on the queued message is the interrupting
+        // Steer that physically quiesces the running attempt.
+        await steerHumanQueuePrompt(
+          { db: dbClient.db, bus, workflowClient },
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+            subjectId: grant.subjectId,
+          },
+          urgent.turn.id,
+          {
+            clientEventId: `receipt-exhaustion-send-now-${crypto.randomUUID()}`,
+            expectedTurnVersion: urgent.turn.version,
+            interrupt: true,
+          },
+        );
 
         await handle.result();
 
@@ -487,7 +512,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
     async () => {
       const grant = await testGrant(dbClient.db, "lost-wake");
       const session = await createDurableSession(dbClient.db, grant, "repair a lost Temporal wake");
-      await createSessionGoal(dbClient.db, {
+      const goal = await createSessionGoal(dbClient.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -561,13 +586,20 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         // either acknowledged or truthfully pending; the model/turn checks
         // below establish that this specific session actually executed.
         expect(repair.delivered + repair.pendingAdmission).toBe(repair.claimed);
+        // The child result is delivered to exactly one system turn. The active
+        // goal may then legitimately continue in its own goal turn, and the
+        // global dispatcher may run other sessions on this worker, so wait on
+        // this session's turns rather than the shared model's total call count.
         let observedSession: Awaited<ReturnType<typeof getSession>> | null = null;
+        let observedTurns: Awaited<ReturnType<typeof listSessionTurns>> = [];
         await waitFor(
           async () => {
             const current = await getSession(dbClient.db, grant.workspaceId, session.id);
             observedSession = current;
+            observedTurns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
             return (
-              model.calls === 1 && (current?.status === "idle" || current?.status === "failed")
+              observedTurns.some((turn) => turn.source === "system" && turn.finishedAt) &&
+              (current?.status === "idle" || current?.status === "failed")
             );
           },
           {
@@ -576,6 +608,10 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
                 modelCalls: model.calls,
                 status: observedSession?.status ?? null,
                 activeTurnId: observedSession?.activeTurnId ?? null,
+                turns: observedTurns.map((turn) => ({
+                  source: turn.source,
+                  status: turn.status,
+                })),
               }),
           },
         );
@@ -594,21 +630,42 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           );
         }
 
-        expect(model.calls).toBe(1);
         const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-        expect(turns).toHaveLength(1);
-        expect(turns[0]).toMatchObject({
-          source: "system",
-          status: "completed",
-        });
+        const systemTurns = turns.filter((turn) => turn.source === "system");
+        expect(systemTurns).toHaveLength(1);
+        expect(systemTurns[0]).toMatchObject({ status: "completed" });
+        expect(turns.every((turn) => turn.source === "system" || turn.source === "goal")).toBe(
+          true,
+        );
+        // Turn counts alone miss a duplicate model call inside the one system
+        // turn. Attribute the shared model's requests instead: this session's
+        // requests that are not goal continuations belong to the system turn,
+        // which has finished, so exactly one inference consumed the update.
+        const goalContinuationMarker = JSON.stringify(
+          goalContinuationPrompt(goal, 1, null).split("\n")[0]!,
+        ).slice(1, -1);
+        expect(
+          model.requests.filter((request) => {
+            const serialized = JSON.stringify(request);
+            return serialized.includes(session.id) && !serialized.includes(goalContinuationMarker);
+          }),
+        ).toHaveLength(1);
         expect(
           await listSessionSystemUpdatesForTurn(
             dbClient.db,
             grant.workspaceId,
             session.id,
-            turns[0]!.id,
+            systemTurns[0]!.id,
           ),
         ).toHaveLength(1);
+        expect(
+          countOccurrences(
+            JSON.stringify(
+              await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id),
+            ),
+            input.summary,
+          ),
+        ).toBe(1);
         const durable = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
         expect(committedEventIds.every((id) => durable.some((event) => event.id === id))).toBe(
           true,
@@ -1570,7 +1627,7 @@ function internalUpdatesFromModelRequest(input: unknown): unknown[] {
       item.role === "system" &&
       "content" in item &&
       typeof item.content === "string" &&
-      item.content.startsWith("[OpenGeni internal updates]\n"),
+      item.content.startsWith("[Opengeni internal updates]\n"),
   );
   if (message === undefined || !("content" in message) || typeof message.content !== "string") {
     throw new Error("internal update model input has no system update message");

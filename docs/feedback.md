@@ -30,6 +30,57 @@ a timeout. Reusing a key with different content returns 409. A new key creates a
 new immutable submission, preserving earlier ratings instead of overwriting them.
 Analytics must distinguish submissions from the newest rating per author/target.
 
+### Context and screenshots
+
+A report can say where it came from and show what the person saw. `context`
+carries app and device facts: `source` (`web`, `desktop` or `mobile`) is
+required; `trigger` (`menu` or `shake`), `platform`, `appVersion`,
+`buildNumber`, `osVersion`, `deviceModel`, `screen` (the app path in view),
+`locale`, `timeZone`, `online` and up to ten `recentErrors` (`at`, `message`,
+optional `title`, `code`, `status`, `screen`) are optional, as is what helps debug
+a report:
+
+- `sessionId`, the chat in view. Unlike the request's `sessionId` it does not make
+  the report about that chat.
+- Up to twenty `recentRequests`: `at`, `method`, `path` (never the query string),
+  `status` (0 when no response arrived), `durationMs` and the API's
+  `correlationId` from the `x-opengeni-correlation-id` response header, which
+  finds the request in the server's logs.
+- Up to ten `recentExceptions`: `at`, `kind` (`error` for an uncaught error,
+  `unhandled_rejection`, or `resource` for an image or file that failed to load),
+  `message` and optional `stack` and `source` (an address without its query).
+- Up to thirty `breadcrumbs`: `at`, `kind` (`navigation`, `lifecycle` or
+  `network`) and `label`, such as the path opened or "Went offline".
+
+The web and desktop console and the phone app keep these in memory only and send
+them with a report; requests the app cancelled itself and sending feedback are
+left out. A server older than these fields refuses them as invalid; the phone
+app then resends the report without them rather than drop it. `screenshots` holds up
+to three JPEG or PNG images as `{ contentType, base64 }`, each at most 3 MiB once
+decoded; the server checks each image's signature against its declared type.
+
+The server adds its own record for whoever investigates the report, stored once
+in `feedback_submissions.diagnostics` and never returned to clients: its
+`server.version` and `server.revision`, and, when the report names a chat (the
+request's or the context's `sessionId`) that the author can read, `session` with
+that chat's `status`, `visibility`, `lastSequence` and `latestTurn` (`id`,
+`status`, `model`, `reasoningEffort` and its times) at that moment. Join
+`session_id` or `diagnostics->'session'->>'id'` to the chat's events, and a
+request's `correlationId` to the API logs.
+
+Screenshot bytes go to the deployment's object storage under create-only,
+content-addressed keys before the row is written, so a retry stores nothing new.
+The stored feedback lists `screenshots` as `{ index, contentType, sizeBytes,
+sha256 }`; a retry with different images under the same key returns 409.
+Submitting screenshots requires object storage (503 without it). The author reads
+an image with `GET /v1/workspaces/:workspaceId/feedback/:feedbackId/screenshots/:index`.
+
+The phone app sends this from **Shake to send feedback**: shaking opens a sheet
+with a screenshot of the screen in view (removable), a comment and a summary of
+the context it attaches. Reports are written to the device first and retried on
+launch, on return to the app and every minute until the server accepts them, so a
+report is not lost without a connection. Settings has a toggle to turn shaking off.
+
 `GET /v1/workspaces/:workspaceId/feedback` returns `{ feedback: [...] }` containing
 only the authenticated principal's general feedback, newest first. Pass
 `?sessionId=<uuid>` to read that principal's feedback for an authorized session.
@@ -37,7 +88,16 @@ only the authenticated principal's general feedback, newest first. Pass
 by the web rating indicator. `limit` is 1-100 (default 50); this is a bounded recent list, not a full export.
 The SDK equivalent is `client.listOwnFeedback(workspaceId, { sessionId, limit })`.
 
-The web sidebar offers **Send feedback**. Completed assistant messages show
+The web and desktop account menu offers **Send feedback** under **Help & feedback**.
+Its form attaches up to three images: **Take screenshot** (the desktop app takes a
+still of its own page without asking, and does so as the form opens; a browser
+uses tab capture, which asks first), **Add image**, or pasting one. Each can be
+removed before sending. Reports from web and the desktop app carry the same
+context as phone reports: `source` `web` or `desktop`, the platform, the server
+version (and the desktop app's own version), the page in view, the browser, the
+language, the time zone, whether the device was online, the last error toasts
+the person saw, the chat in view and the request, error and step lists above. The
+forms say what is sent. Completed assistant messages show
 thumbs up/down beside Copy and the timestamp on hover, keyboard focus, or touch.
 The optional-comment form submits the selected reply's exact turn. Messages from
 the same turn share the current rating. The route loads the viewer's recent

@@ -10,6 +10,9 @@ import {
 import type { SessionEvent } from "@opengeni/sdk";
 import "./styles.css";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
+import { createOpenGeniText } from "@opengeni/react/messages";
+
+const englishText = createOpenGeniText();
 
 // The demo ships the optional @pierre/diffs peer.
 enablePierreDiffs();
@@ -86,14 +89,14 @@ function App() {
     return () => timers.forEach(window.clearTimeout);
   }, [scenario, run]);
   const phases = useMemo(
-    () => buildTimeline(events).filter((item) => item.kind === "startup-phase"),
+    () => buildTimeline(englishText, events).filter((item) => item.kind === "startup-phase"),
     [events],
   );
   return (
     <div className="mx-auto flex min-h-screen max-w-5xl flex-col px-6 py-8 sm:px-12">
       <header className="flex items-center justify-between border-b border-og-border pb-6">
         <div className="text-og-sm font-medium tracking-wide">
-          ✦ OpenGeni <span className="ml-2 font-normal text-og-fg-subtle">/ Loading studio</span>
+          ✦ Opengeni <span className="ml-2 font-normal text-og-fg-subtle">/ Loading studio</span>
         </div>
         <button className={BUTTON} onClick={() => setDark(!dark)}>
           {dark ? "Light mode" : "Dark mode"}

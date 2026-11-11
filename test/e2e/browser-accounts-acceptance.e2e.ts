@@ -13,15 +13,19 @@ import {
   type ManagedAuthSessionSetProjection,
 } from "@opengeni/contracts/managed-auth-session-sets";
 import { createDb, provisionRoles, type DbClient } from "@opengeni/db";
+import {
+  acquireManagedAuthActorMutationLease,
+  releaseManagedAuthActorMutationLease,
+} from "@opengeni/db/managed-auth-session-sets";
 import { migrate } from "@opengeni/db/migrate";
 import { OpenGeniClient } from "@opengeni/sdk";
 import {
   acquireOwnerMigratedTestDatabase,
-  freePort,
-  MemoryEventBus,
-  testSettings,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   chromium,
   firefox,
@@ -31,14 +35,24 @@ import {
   type BrowserType,
   type Locator,
   type Page,
+  type Request as BrowserRequest,
   type Route,
 } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
 import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
 import { createAccountReadDiagnostics } from "./browser-account-read-diagnostics";
+import {
+  createFiniteReviewReadDiagnostics,
+  type FiniteReviewDiagnosticsWindow,
+} from "./browser-account-finite-review-diagnostics";
 import { observeReloadCapabilities } from "./browser-account-reload-barrier";
-import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
+import {
+  cancelledWithReplacedDocument,
+  DocumentRequestLedger,
+  isBrowserCancellation,
+  observeChromiumNeutralSessionSetRequestAuthority,
+} from "./browser-account-request-observation";
 import {
   observeCapabilityResume,
   consumeCapabilityResumeRead,
@@ -56,11 +70,13 @@ import {
 } from "./browser-account-race-diagnostics";
 import { exactLogoutAllSessionListSearch } from "./logout-all-session-list-search";
 
+// Signup first asks how to use Opengeni; these flows take the cloud path.
+const USE_CASE_HEADING = "How do you want to use Opengeni?";
 // The model-access step leads with credits the organization already holds, or
 // the included default model when the deployment provides one, otherwise it
 // asks how to power chats.
 const MODEL_ACCESS_HEADING =
-  /^(Choose how to power your chats|Start chatting for free|Start chatting with Opengeni credits|You’re ready to chat)$/;
+  /^(Choose how to power your chats|Start chatting for free|You got \S+ in free credits|You got free Opengeni credits|You’re ready to chat)$/;
 const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
@@ -103,8 +119,11 @@ type PendingFiniteRead = {
 type BrowserProblems = {
   capabilityDiagnostics: ReturnType<typeof createCapabilityDiagnostics>;
   crossTabReloadStartedAt?: number;
+  /** Receipt times of top-level document commits (Playwright `framenavigated`). */
+  mainFrameCommits: number[];
   acceptedRequestTerminals: Array<{
     observedAt: number;
+    origin?: string | undefined;
     pathnameAndSearch: string;
     responsePhase: string;
     terminal: "failed" | "finished";
@@ -379,20 +398,6 @@ type FiniteReadRetirementInput = {
   startedAt: number;
 };
 
-type DocumentReplacementRetirementInput = {
-  actorEpoch: string | null;
-  confirmedActorEpoch: string;
-  currentSessionSetAuthorityHash: string | null;
-  dispatchPhase: string;
-  expectedDispatchPhase: string;
-  method: string;
-  pathname: string;
-  replacementStartedAt: number;
-  requestSessionSetAuthorityHash: string | null;
-  startedAt: number;
-  workspaceId: string;
-};
-
 type LogoutAllFiniteReadRetirementInput = {
   acceptedActorTransitions: readonly ActorMutationAcceptance[];
   actorEpoch: string | null;
@@ -440,17 +445,8 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     );
   const isActorOwnedRead =
     (input.method === "GET" &&
-      (pathname === "/v1/auth/get-session" ||
-        pathname === "/v1/auth/session-set" ||
-        pathname === "/v1/workspaces" ||
-        pathname === "/v1/organization-invitations" ||
-        (pathname === "/v1/billing" &&
-          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
-            requestUrl.searchParams.get("accountId") ?? "",
-          )) ||
-        pathname.startsWith("/v1/workspaces/"))) ||
-    (input.method === "POST" &&
-      /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(pathname));
+      (pathname === "/v1/auth/get-session" || pathname === "/v1/auth/session-set")) ||
+    isActorFencedRead(input.method, requestUrl);
   const allowedDispatchPhases = SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(
     input.responsePhase,
   );
@@ -695,37 +691,6 @@ function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInpu
   );
 }
 
-function finiteReadMayRetireAfterDocumentReplacement(
-  input: DocumentReplacementRetirementInput,
-): boolean {
-  const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`;
-  const documentOwnedSessionRead = new RegExp(
-    `^${exactWorkspacePrefix.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}sessions/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}(?:/lineage)?$`,
-    "u",
-  ).test(input.pathname);
-  // Chromium may omit the HttpOnly Cookie header from Playwright metadata
-  // after destroying the old document. The only headerless exception is the
-  // exact same-actor deep-link document replaced before re-authentication;
-  // that interval cannot replace the session-set authority, and every other
-  // actor, phase, path, method, and timing check remains mandatory.
-  const requestAuthorityMatches =
-    input.requestSessionSetAuthorityHash === input.currentSessionSetAuthorityHash ||
-    (input.requestSessionSetAuthorityHash === null &&
-      input.expectedDispatchPhase === "cross-slot-deep-link");
-  return (
-    new Set(["GET", "HEAD"]).has(input.method) &&
-    input.actorEpoch !== null &&
-    input.actorEpoch === input.confirmedActorEpoch &&
-    input.dispatchPhase === input.expectedDispatchPhase &&
-    documentOwnedSessionRead &&
-    input.currentSessionSetAuthorityHash !== null &&
-    requestAuthorityMatches &&
-    Number.isFinite(input.startedAt) &&
-    Number.isFinite(input.replacementStartedAt) &&
-    input.startedAt <= input.replacementStartedAt
-  );
-}
-
 function finiteReadMayRetireAfterLogoutAllAuthorityReset(
   input: LogoutAllFiniteReadRetirementInput,
 ): boolean {
@@ -780,6 +745,36 @@ function isActorTransitionRead(method: string, pathname: string): boolean {
   );
 }
 
+// The person's own reads outside any workspace. Like workspace reads they carry
+// the selected actor's epoch, so the actor fence rejects one still in flight
+// when another tab moves the selection on. The inbox polls (and reads again on
+// focus), so one can be in flight at any moment.
+const PERSON_ACTOR_READ_PATHS = new Set([
+  "/v1/workspaces",
+  "/v1/organization-invitations",
+  "/v1/inbox",
+  "/v1/billing",
+]);
+
+function isPersonActorRead(method: string, url: URL): boolean {
+  return (
+    method === "GET" &&
+    PERSON_ACTOR_READ_PATHS.has(url.pathname) &&
+    (url.pathname !== "/v1/billing" ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+        url.searchParams.get("accountId") ?? "",
+      ))
+  );
+}
+
+/** A read the actor fence rejects (409) once the selected actor has changed. */
+function isActorFencedRead(method: string, url: URL): boolean {
+  return (
+    isPersonActorRead(method, url) ||
+    (url.pathname.startsWith("/v1/workspaces/") && isActorTransitionRead(method, url.pathname))
+  );
+}
+
 let owned: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let edge: ReturnType<typeof Bun.serve> | null = null;
@@ -826,7 +821,6 @@ function sdk(cookie: string, actorEpoch: string): OpenGeniClient {
 async function createActualUser(input: {
   displayName: string;
   email: string;
-  organizationName: string;
 }): Promise<AccountFixture> {
   if (!owned) throw new Error("database fixture unavailable");
   const signUp = await fetch(`${publicOrigin}/v1/auth/sign-up/email`, {
@@ -843,7 +837,7 @@ async function createActualUser(input: {
   return {
     displayName: input.displayName,
     email: input.email,
-    organizationName: input.organizationName,
+    organizationName: input.displayName,
     organizationId: "",
     workspaceId: "",
     sessionId: "",
@@ -870,6 +864,7 @@ async function authSessionCount(email: string): Promise<number> {
 function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
     capabilityDiagnostics: createCapabilityDiagnostics(),
+    mainFrameCommits: [],
     acceptedRequestTerminals: [],
     activeStreams: new Map(),
     boundedHttp1StreamDispatches: 0,
@@ -889,6 +884,11 @@ function observeBrowser(page: Page): BrowserProblems {
     retiredFiniteReadTombstones: new Map(),
   };
   observedBrowserProblems.set(page, problems);
+  // A reload or navigation takes down the old document's requests; Chromium
+  // then reports no terminal for them at all, so the ledger closes them itself.
+  const documents = new DocumentRequestLedger();
+  const isMainFrameDocumentRequest = (request: BrowserRequest) =>
+    request.isNavigationRequest() && request.frame() === page.mainFrame();
   const requestPhases = new WeakMap<
     object,
     {
@@ -899,6 +899,7 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   >();
   page.on("request", (request) => {
+    documents.request(request, isMainFrameDocumentRequest(request) ? request.url() : null);
     const requestUrl = new URL(request.url());
     const pathname = requestUrl.pathname;
     if (companionReadDiagnostics?.page === page) {
@@ -964,6 +965,7 @@ function observeBrowser(page: Page): BrowserProblems {
   });
   page.on("response", (response) => {
     const request = response.request();
+    documents.response(request);
     problems.capabilityDiagnostics.response(request, problems.phase, response.status());
     if (companionReadDiagnostics?.page === page) {
       companionReadDiagnostics.ledger.response("browser", request, response.status());
@@ -1002,8 +1004,7 @@ function observeBrowser(page: Page): BrowserProblems {
         pathname.endsWith("/attention") &&
         new Set(["logout-one", "logout-all-response-loss-replay"]).has(problems.phase)) ||
       (response.status() === 409 &&
-        isActorTransitionRead(request.method(), pathname) &&
-        pathname.startsWith("/v1/workspaces/") &&
+        isActorFencedRead(request.method(), new URL(response.url())) &&
         problems.phase === "cross-tab-select-race");
     if (recordsActorTransition) {
       const dispatch = requestPhases.get(request);
@@ -1044,6 +1045,7 @@ function observeBrowser(page: Page): BrowserProblems {
       if (finishedBoundedStream) problems.boundedHttp1NativeSeams += 1;
       problems.acceptedRequestTerminals.push({
         observedAt: finishedAt,
+        origin: finishedUrl.origin,
         pathnameAndSearch: `${finishedUrl.pathname}${finishedUrl.search}`,
         responsePhase: problems.phase,
         terminal: "finished",
@@ -1069,6 +1071,19 @@ function observeBrowser(page: Page): BrowserProblems {
         problems.consoleErrors.push(`[${problems.phase}] ${rendered}`);
         problems.capabilityDiagnostics.console(problems.phase, source, message.text());
       }
+    }
+  });
+  page.on("framenavigated", (frame) => {
+    if (frame !== page.mainFrame()) return;
+    problems.mainFrameCommits.push(performance.now());
+    if (!documents.mainFrameNavigated(frame.url())) return;
+    for (const [request, pending] of problems.pendingFiniteReads) {
+      if (!documents.replaced(request)) continue;
+      problems.pendingFiniteReads.delete(request);
+      problems.retiredFiniteReads.push(`${pending.description} [retired=document-replaced]`);
+    }
+    for (const request of problems.activeStreams.keys()) {
+      if (documents.replaced(request)) problems.activeStreams.delete(request);
     }
   });
   page.on("pageerror", (error) => {
@@ -1109,13 +1124,51 @@ function observeBrowser(page: Page): BrowserProblems {
       // actor-transition cancellations instead of broadly allowing CORS text.
       problems.acceptedRequestTerminals.push({
         observedAt: failedAt,
+        origin: failedUrl.origin,
         pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
         responsePhase,
         terminal: "failed",
       });
       return;
     }
+    const documentReplacedBeforeFailure =
+      documents.replaced(request) || documents.replacing(request);
+    documents.failed(request);
     const check = (async () => {
+      if (isBrowserCancellation(failure)) {
+        // WebKit and Firefox can cancel a superseded document request, or the
+        // outgoing document's in-flight reads, before they report the
+        // navigation responsible; one protocol round trip delivers it.
+        if (
+          await cancelledWithReplacedDocument(
+            documents,
+            request,
+            documentReplacedBeforeFailure,
+            () => page.evaluate(() => undefined),
+          )
+        ) {
+          // Taken down with its document by a reload or navigation: nothing it
+          // could still deliver has a document to reach.
+          problems.retirementChecks.push(
+            JSON.stringify({
+              dispatchPhase: dispatch?.phase ?? "unknown",
+              failure,
+              method: request.method(),
+              pathname: failedUrl.pathname,
+              responsePhase,
+              result: "cancelled-with-replaced-document",
+            }),
+          );
+          problems.acceptedRequestTerminals.push({
+            observedAt: failedAt,
+            origin: failedUrl.origin,
+            pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
+            responsePhase,
+            terminal: "failed",
+          });
+          return;
+        }
+      }
       const problem = requestFailureProblem({
         crossTabReloadStartedAt: problems.crossTabReloadStartedAt,
         acceptedActorTransitions: actorMutationAcceptances,
@@ -1151,6 +1204,7 @@ function observeBrowser(page: Page): BrowserProblems {
         }
         problems.acceptedRequestTerminals.push({
           observedAt: failedAt,
+          origin: failedUrl.origin,
           pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
           responsePhase,
           terminal: "failed",
@@ -1200,6 +1254,15 @@ async function waitForFiniteReadQuiescenceAcross(
         actorDispatches: problems.actorDispatches.slice(-20),
         retirementChecks: problems.retirementChecks.slice(-20),
         retiredFiniteReads: problems.retiredFiniteReads.slice(-20),
+        edge: [...problems.pendingFiniteReads.values()].map((pending) => ({
+          pending: pending.description,
+          edgeMatches: edgeRequestLog.filter(
+            (entry) =>
+              entry.pathname === pending.pathname &&
+              Math.abs(entry.startedAt - pending.startedAt) < 60_000,
+          ),
+        })),
+        edgePending: [...pendingAccountApiRequests.values()],
       })),
     )}; acceptances=${JSON.stringify(actorMutationAcceptances.slice(-20))}`,
   );
@@ -1228,8 +1291,15 @@ async function waitForCompanionFiniteReadQuiescence(
     `companion browser reads did not settle around the intentional hold: ${JSON.stringify(
       [...problems.pendingFiniteReads.entries()]
         .filter(([request]) => request !== intentionallyHeldRequest)
-        .map(([, pending]) => pending.description)
-        .sort(),
+        .map(([, pending]) => ({
+          pending: pending.description,
+          edgeMatches: edgeRequestLog.filter(
+            (entry) =>
+              entry.pathname === pending.pathname &&
+              Math.abs(entry.startedAt - pending.startedAt) < 60_000,
+          ),
+        }))
+        .sort((left, right) => left.pending.localeCompare(right.pending)),
     )}`,
   );
 }
@@ -1289,54 +1359,6 @@ async function retirePendingReadsAfterConfirmedActorTransition(
       `${pending.description} [retired=confirmed-actor-${input.confirmedActorEpoch}]`,
     );
     problems.retiredFiniteReadTombstones.set(request, pending.description);
-    problems.pendingFiniteReads.delete(request);
-  }
-}
-
-async function retirePendingReadsAfterConfirmedDocumentReplacement(
-  page: Page,
-  problems: BrowserProblems,
-  input: {
-    confirmedActorEpoch: string;
-    dispatchPhase: string;
-    replacementStartedAt: number;
-    workspaceId: string;
-  },
-): Promise<void> {
-  const currentSessionSetAuthorityHash = sessionSetAuthorityHash(
-    await browserCookieHeader(page.context()),
-  );
-  const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sessions/`;
-  for (const [request, pending] of [...problems.pendingFiniteReads.entries()]) {
-    if (
-      (pending.method !== "GET" && pending.method !== "HEAD") ||
-      pending.actorEpoch !== input.confirmedActorEpoch ||
-      pending.dispatchPhase !== input.dispatchPhase ||
-      !pending.pathname.startsWith(exactWorkspacePrefix) ||
-      pending.startedAt > input.replacementStartedAt
-    ) {
-      continue;
-    }
-    const requestSessionSetAuthorityHash =
-      pending.sessionSetAuthorityHashImmediate ??
-      (await Promise.race([pending.sessionSetAuthorityHash, Bun.sleep(1_000).then(() => null)]));
-    const mayRetire = finiteReadMayRetireAfterDocumentReplacement({
-      actorEpoch: pending.actorEpoch,
-      confirmedActorEpoch: input.confirmedActorEpoch,
-      currentSessionSetAuthorityHash,
-      dispatchPhase: pending.dispatchPhase,
-      expectedDispatchPhase: input.dispatchPhase,
-      method: pending.method,
-      pathname: pending.pathname,
-      replacementStartedAt: input.replacementStartedAt,
-      requestSessionSetAuthorityHash,
-      startedAt: pending.startedAt,
-      workspaceId: input.workspaceId,
-    });
-    if (!mayRetire) continue;
-    problems.retiredFiniteReads.push(
-      `${pending.description} [retired=confirmed-document-replacement]`,
-    );
     problems.pendingFiniteReads.delete(request);
   }
 }
@@ -1556,20 +1578,27 @@ const WEBKIT_PAGE_ERROR_DELIVERY_QUIET_MS = 4_000;
 // evidence, so this cannot authorize an error from another lifecycle step.
 const WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS = 30_000;
 
-function correlatedWebKitReauthenticationTerminalIndex(
+// Phases that deliberately replace a document whose finite reads WebKit can
+// report twice: once as a request terminal and once as a renderer page error.
+type WebKitReplacedDocumentPhase =
+  | "slot-revocation-reauthentication"
+  | "independent-set-after-other-logout-all";
+
+function correlatedWebKitAccessControlTerminalIndex(
   pageError: BrowserProblems["pageErrorEvidence"][number],
   acceptedRequestTerminals: BrowserProblems["acceptedRequestTerminals"],
+  phase: WebKitReplacedDocumentPhase,
 ): number | null {
   const match =
-    /^\[slot-revocation-reauthentication\] \/127\.0\.0\.1:\d+(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9_./?=&%-]+) due to access control checks\.$/u.exec(
+    /^\[(?<messagePhase>[a-z-]+)\] \/127\.0\.0\.1:\d+(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9_./?=&%-]+) due to access control checks\.$/u.exec(
       pageError.message,
     );
   const pathnameAndSearch = match?.groups?.pathnameAndSearch;
-  if (pathnameAndSearch === undefined) return null;
+  if (pathnameAndSearch === undefined || match?.groups?.messagePhase !== phase) return null;
   const matchingTerminalIndexes = acceptedRequestTerminals
     .flatMap((terminal, index) => {
       const distance = Math.abs(pageError.observedAt - terminal.observedAt);
-      return terminal.responsePhase === "slot-revocation-reauthentication" &&
+      return terminal.responsePhase === phase &&
         terminal.pathnameAndSearch === pathnameAndSearch &&
         distance <= WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS
         ? [{ distance, index }]
@@ -1581,9 +1610,10 @@ function correlatedWebKitReauthenticationTerminalIndex(
   return nearest.index;
 }
 
-function optionalWebKitReauthenticationAccessControlPageError(
+function optionalWebKitAccessControlPageErrors(
   problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence">,
   engine: EngineName,
+  phase: WebKitReplacedDocumentPhase,
 ): string[] {
   if (engine !== "webkit") return [];
   // WebKit can surface reads from the deliberately replaced document as page
@@ -1600,9 +1630,10 @@ function optionalWebKitReauthenticationAccessControlPageError(
   }));
   const candidates: Array<{ terminalIndex: number; message: string }> = [];
   for (const pageError of problems.pageErrorEvidence) {
-    const availableIndex = correlatedWebKitReauthenticationTerminalIndex(
+    const availableIndex = correlatedWebKitAccessControlTerminalIndex(
       pageError,
       available.map(({ terminal }) => terminal),
+      phase,
     );
     if (availableIndex === null) return [];
     const [matched] = available.splice(availableIndex, 1);
@@ -1755,8 +1786,11 @@ async function expectAndConsumeActorTransitionResponse(
     const pathnameValid =
       response.pathname === input.pathname ||
       (input.timing?.kind === "direct-race-fence" &&
-        input.workspaceId !== undefined &&
-        response.pathname.startsWith(`/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`));
+        ((input.workspaceId !== undefined &&
+          response.pathname.startsWith(
+            `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`,
+          )) ||
+          isPersonActorRead(response.method, new URL(request.url()))));
     if (!pathnameValid) {
       throw new Error(
         `actor transition response did not target its exact old workspace: ${JSON.stringify({ input, response: responseEvidence })}`,
@@ -1785,7 +1819,12 @@ async function expectAndConsumeActorTransitionResponse(
       problems.pendingFiniteReads.delete(request);
     }
   }
-  expect(problems.actorTransitionResponses.length).toBeLessThanOrEqual(2);
+  // Each fenced read is one the old actor had in flight; the same resource
+  // fenced twice would mean the page kept reading as the old actor.
+  const fencedResources = problems.actorTransitionResponses.map(
+    ({ method, pathname }) => `${method} ${pathname}`,
+  );
+  expect(fencedResources).toEqual([...new Set(fencedResources)]);
   const exactConsoleErrors = problems.actorTransitionResponses.map(
     (response) =>
       `[${input.phase}] Failed to load resource: the server responded with a status of ${input.status} (${input.statusLabel}) @ ${response.pathname}`,
@@ -1796,7 +1835,19 @@ async function expectAndConsumeActorTransitionResponse(
     [...exactConsoleErrors, ...(input.allowedConsoleErrors ?? [])],
     requestedEngine === "firefox" ? [] : exactConsoleErrors,
   );
-  consumeAllowedPageErrors(problems, input.allowedPageErrors);
+  if (requestedEngine === "webkit" && input.allowedPageErrors !== undefined) {
+    await expectAndConsumePageErrors(
+      page,
+      problems,
+      () =>
+        typeof input.allowedPageErrors === "function"
+          ? input.allowedPageErrors()
+          : [...(input.allowedPageErrors ?? [])],
+      [],
+    );
+  } else {
+    consumeAllowedPageErrors(problems, input.allowedPageErrors);
+  }
   problems.actorTransitionResponses.splice(0);
 }
 
@@ -1882,6 +1933,226 @@ function firefoxLiveEventsAbortPageErrorsForValidatedRace(
     )
     .slice(0, expectedCount)
     .map((evidence) => evidence.message);
+}
+
+function minimumCostTerminalAssignment(
+  costs: readonly ReadonlyMap<number, number>[],
+  terminalCount: number,
+  excluded?: { errorIndex: number; terminalIndex: number },
+): { cost: number; terminalIndexes: number[] } | null {
+  if (costs.length > terminalCount) return null;
+  // Rectangular Hungarian assignment. Missing edges have infinite cost;
+  // an unreachable augmenting path means the full ledger cannot correlate.
+  const rowPotential = Array.from({ length: costs.length + 1 }, () => 0);
+  const columnPotential = Array.from({ length: terminalCount + 1 }, () => 0);
+  const rowByColumn = Array.from({ length: terminalCount + 1 }, () => 0);
+  const previousColumn = Array.from({ length: terminalCount + 1 }, () => 0);
+  for (let row = 1; row <= costs.length; row += 1) {
+    rowByColumn[0] = row;
+    let column = 0;
+    const distances = Array.from({ length: terminalCount + 1 }, () => Number.POSITIVE_INFINITY);
+    const visited = Array.from({ length: terminalCount + 1 }, () => false);
+    do {
+      visited[column] = true;
+      const currentRow = rowByColumn[column] ?? 0;
+      let delta = Number.POSITIVE_INFINITY;
+      let nextColumn = 0;
+      for (let candidateColumn = 1; candidateColumn <= terminalCount; candidateColumn += 1) {
+        if (visited[candidateColumn]) continue;
+        const forbidden =
+          excluded?.errorIndex === currentRow - 1 && excluded.terminalIndex === candidateColumn - 1;
+        const edgeCost = forbidden
+          ? Number.POSITIVE_INFINITY
+          : (costs[currentRow - 1]?.get(candidateColumn - 1) ?? Number.POSITIVE_INFINITY);
+        const distance =
+          edgeCost - (rowPotential[currentRow] ?? 0) - (columnPotential[candidateColumn] ?? 0);
+        if (distance < (distances[candidateColumn] ?? Number.POSITIVE_INFINITY)) {
+          distances[candidateColumn] = distance;
+          previousColumn[candidateColumn] = column;
+        }
+        if ((distances[candidateColumn] ?? Number.POSITIVE_INFINITY) < delta) {
+          delta = distances[candidateColumn] ?? Number.POSITIVE_INFINITY;
+          nextColumn = candidateColumn;
+        }
+      }
+      if (!Number.isFinite(delta)) return null;
+      for (let candidateColumn = 0; candidateColumn <= terminalCount; candidateColumn += 1) {
+        if (visited[candidateColumn]) {
+          const assignedRow = rowByColumn[candidateColumn] ?? 0;
+          rowPotential[assignedRow] = (rowPotential[assignedRow] ?? 0) + delta;
+          columnPotential[candidateColumn] = (columnPotential[candidateColumn] ?? 0) - delta;
+        } else {
+          distances[candidateColumn] =
+            (distances[candidateColumn] ?? Number.POSITIVE_INFINITY) - delta;
+        }
+      }
+      column = nextColumn;
+    } while (rowByColumn[column] !== 0);
+    do {
+      const predecessor = previousColumn[column] ?? 0;
+      rowByColumn[column] = rowByColumn[predecessor] ?? 0;
+      column = predecessor;
+    } while (column !== 0);
+  }
+  const terminalIndexes = Array.from({ length: costs.length }, () => -1);
+  for (let column = 1; column <= terminalCount; column += 1) {
+    const row = rowByColumn[column] ?? 0;
+    if (row > 0) terminalIndexes[row - 1] = column - 1;
+  }
+  let cost = 0;
+  for (const [errorIndex, terminalIndex] of terminalIndexes.entries()) {
+    const distance = costs[errorIndex]?.get(terminalIndex);
+    if (distance === undefined || !Number.isFinite(distance)) return null;
+    cost += distance;
+  }
+  return { cost, terminalIndexes };
+}
+
+// The SDK live stream never reopens sooner than its minimum jittered reconnect
+// delay (500 ms base, 20% jitter). Two outgoing-document refusals closer than
+// that cannot both be the single stream's sequential reconnect attempts.
+const WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS = 400;
+
+function webKitLiveEventsPageErrorsForValidatedRace(
+  problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence"> &
+    Partial<Pick<BrowserProblems, "crossTabReloadStartedAt" | "mainFrameCommits">>,
+  engine: EngineName,
+  input: { acceptedAt: number; origin: string; pathname: string; settledAt: number },
+): string[] {
+  if (
+    engine !== "webkit" ||
+    !Number.isFinite(input.acceptedAt) ||
+    !Number.isFinite(input.settledAt) ||
+    input.settledAt < input.acceptedAt
+  ) {
+    return [];
+  }
+  // The explicit reload starts a navigation, and WebKit cancels the outgoing
+  // alpha document's in-flight loads at that point but keeps the document
+  // running until the replacement commits. The SDK live stream treats that
+  // cancellation (or its ordinary finite-batch close) as a reason to reopen
+  // after its backoff. When the reopen lands before the commit, WebKit refuses
+  // the load locally: the request never reaches the network, Playwright emits
+  // no request or terminal for it, and the console reports it as an
+  // access-control error, which Playwright surfaces as a pageerror. Accept only
+  // that exact shape: the old workspace's exact bounded live-events URL,
+  // observed after this page's reload started and no later than this page's
+  // first subsequent top-level commit, which itself precedes settlement, with
+  // sequential-reconnect spacing. Such errors consume no request terminal.
+  const reloadStartedAt = problems.crossTabReloadStartedAt;
+  const outgoingDocumentCommitAt =
+    reloadStartedAt === undefined
+      ? undefined
+      : problems.mainFrameCommits?.find((commitAt) => commitAt >= reloadStartedAt);
+  const outgoingDocumentWindow =
+    reloadStartedAt !== undefined &&
+    outgoingDocumentCommitAt !== undefined &&
+    Number.isFinite(reloadStartedAt) &&
+    Number.isFinite(outgoingDocumentCommitAt) &&
+    reloadStartedAt >= input.acceptedAt &&
+    outgoingDocumentCommitAt <= input.settledAt
+      ? { startedAt: reloadStartedAt, committedAt: outgoingDocumentCommitAt }
+      : null;
+  const outgoingDocumentRefusals: string[] = [];
+  let previousOutgoingDocumentRefusalAt = Number.NEGATIVE_INFINITY;
+  // WebKit may additionally report an accepted old-document cancellation as
+  // an access-control pageerror. Never infer cancellation from that text: the direct-race
+  // gate has already validated the actor transition, and every remaining
+  // callback must consume a distinct, exact-URL failed terminal accepted by
+  // the strict request-failure ledger within that race's acceptance/settlement
+  // window.
+  const candidates: Array<{
+    pageError: BrowserProblems["pageErrorEvidence"][number];
+    matches: Array<{ distance: number; index: number }>;
+  }> = [];
+  for (const pageError of problems.pageErrorEvidence) {
+    const match =
+      /^\[cross-tab-select-race\] \/(?<authority>127\.0\.0\.1:\d+)(?<pathnameAndSearch>\/v1\/auth\/session-set|\/v1\/workspaces\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/live-events\/stream\?controlAfter=\d+&interactionAfter=\d+&transport=http1-bounded) due to access control checks\.$/u.exec(
+        pageError.message,
+      );
+    const pathnameAndSearch = match?.groups?.pathnameAndSearch;
+    const url =
+      pathnameAndSearch === undefined ? undefined : new URL(pathnameAndSearch, input.origin);
+    // The neutral projection can be cancelled by this same reload. Unlike an
+    // outgoing live-stream reconnect, it must consume a failed terminal that
+    // already passed requestFailureProblem's authority/acceptance/reload fence.
+    const neutralSessionSet = pathnameAndSearch === "/v1/auth/session-set";
+    if (
+      url === undefined ||
+      `http://${match?.groups?.authority}` !== input.origin ||
+      (!neutralSessionSet &&
+        (url.pathname !== input.pathname || !exactBoundedWorkspaceLiveStreamSearch(url.search))) ||
+      !Number.isFinite(pageError.observedAt) ||
+      pageError.observedAt < input.acceptedAt
+    ) {
+      return [];
+    }
+    if (
+      !neutralSessionSet &&
+      outgoingDocumentWindow !== null &&
+      pageError.observedAt >= outgoingDocumentWindow.startedAt &&
+      pageError.observedAt <= outgoingDocumentWindow.committedAt
+    ) {
+      if (
+        pageError.observedAt - previousOutgoingDocumentRefusalAt <
+        WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS
+      ) {
+        return [];
+      }
+      previousOutgoingDocumentRefusalAt = pageError.observedAt;
+      outgoingDocumentRefusals.push(pageError.message);
+      continue;
+    }
+    const matches = problems.acceptedRequestTerminals
+      .flatMap((terminal, index) => {
+        const distance = Math.abs(pageError.observedAt - terminal.observedAt);
+        return terminal.terminal === "failed" &&
+          terminal.origin === input.origin &&
+          terminal.responsePhase === "cross-tab-select-race" &&
+          terminal.pathnameAndSearch === pathnameAndSearch &&
+          terminal.observedAt >= input.acceptedAt &&
+          terminal.observedAt <= input.settledAt + 1_000 &&
+          distance <= WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS
+          ? [{ distance, index }]
+          : [];
+      })
+      .sort((left, right) => left.distance - right.distance || left.index - right.index);
+    const nearest = matches[0];
+    if (!nearest || matches[1]?.distance === nearest.distance) return [];
+    // Do not use an ambiguous fallback edge if an augmenting path later
+    // needs to move the nearest match. Equal-distance evidence stays red.
+    candidates.push({
+      pageError,
+      matches: matches.filter(
+        (candidateMatch, index) =>
+          matches[index - 1]?.distance !== candidateMatch.distance &&
+          matches[index + 1]?.distance !== candidateMatch.distance,
+      ),
+    });
+  }
+  // Require a uniquely minimum-lag complete assignment, not a nearest-first
+  // traversal that can steal a later callback's only eligible terminal.
+  // Every different assignment excludes at least one selected edge, so
+  // re-solving without each such edge detects all equal-cost alternatives.
+  const costs = candidates.map(
+    ({ matches }) => new Map(matches.map(({ index, distance }) => [index, distance])),
+  );
+  const best = minimumCostTerminalAssignment(costs, problems.acceptedRequestTerminals.length);
+  if (best === null) return [];
+  for (const [errorIndex, terminalIndex] of best.terminalIndexes.entries()) {
+    const alternative = minimumCostTerminalAssignment(
+      costs,
+      problems.acceptedRequestTerminals.length,
+      { errorIndex, terminalIndex },
+    );
+    // One nanosecond absorbs summation roundoff conservatively: nearly tied
+    // evidence remains red, rather than manufacturing a unique correlation.
+    if (alternative !== null && alternative.cost <= best.cost + 0.000_001) return [];
+  }
+  for (const index of [...best.terminalIndexes].sort((a, b) => b - a)) {
+    problems.acceptedRequestTerminals.splice(index, 1);
+  }
+  return [...outgoingDocumentRefusals, ...candidates.map(({ pageError }) => pageError.message)];
 }
 
 async function expectNoAxeViolations(page: Page, include?: string): Promise<void> {
@@ -2033,7 +2304,7 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
         }),
       ]);
       await continueAsAccount.click();
-      await page.getByRole("heading", { name: "Create your organization" }).waitFor({
+      await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor({
         timeout: 30_000,
       });
     } catch (error) {
@@ -2053,9 +2324,14 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
         { cause: error },
       );
     }
-    await page.getByLabel("Organization name").fill(account.organizationName);
-    await page.getByRole("button", { name: "Create organization" }).click();
+    await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
     await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
+    expect(await page.getByLabel("Organization name").count()).toBe(0);
+    await page
+      .getByText(`Your organization is called ${account.organizationName}.`, {
+        exact: false,
+      })
+      .waitFor();
     await page.getByRole("button", { name: MODEL_ACCESS_CONTINUE }).click();
     await page.waitForURL(
       /\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\/|$)/iu,
@@ -2209,12 +2485,42 @@ async function closeResponsiveAccountMenu(page: Page, width: number): Promise<vo
 }
 
 async function expectActiveAccountAnnouncement(page: Page, account: AccountFixture): Promise<void> {
-  await page
-    .locator('span[aria-live="polite"][aria-atomic="true"]')
-    .filter({
-      hasText: `Active account: ${account.displayName}, ${account.email}`,
-    })
-    .waitFor();
+  const liveRegions = page.locator('span[aria-live="polite"][aria-atomic="true"]');
+  try {
+    await liveRegions
+      .filter({
+        hasText: `Active account: ${account.displayName}, ${account.email}`,
+      })
+      .waitFor();
+  } catch (error) {
+    // The announcement is driven by the account provider's `ready` phase, while
+    // the trigger label can fall back to the host auth session. Record which
+    // account surface is actually rendered so a timeout distinguishes a
+    // provider stuck in loading/error from a stale or missing selection.
+    const evidence = await page
+      .evaluate(() => ({
+        url: location.pathname,
+        liveRegions: [
+          ...document.querySelectorAll('span[aria-live="polite"][aria-atomic="true"]'),
+        ].map((element) => element.textContent ?? ""),
+        accountTriggers: [...document.querySelectorAll('button[aria-label^="Account menu"]')].map(
+          (element) => ({
+            label: element.getAttribute("aria-label"),
+            // The trigger renders a spinner while the provider is loading or committing.
+            busy: element.querySelector(".animate-spin") !== null,
+          }),
+        ),
+        headings: [...document.querySelectorAll("h1, h2, [role=alert]")]
+          .map((element) => element.textContent?.trim() ?? "")
+          .filter(Boolean)
+          .slice(0, 8),
+      }))
+      .catch((evidenceError: unknown) => ({ unavailable: String(evidenceError) }));
+    throw new Error(
+      `active account announcement for ${account.displayName} did not appear: ${JSON.stringify(evidence)}`,
+      { cause: error },
+    );
+  }
 }
 
 async function expectAccountMenuEvidenceVisible(page: Page, displayName: string): Promise<void> {
@@ -2488,6 +2794,14 @@ const pendingAccountApiRequests = new Map<
   Request,
   { method: string; pathname: string; actorEpoch: string | null; authorityHash: string | null }
 >();
+const edgeRequestLog: Array<{
+  method: string;
+  pathname: string;
+  actorEpoch: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  status: number | null;
+}> = [];
 const selectAdmissionDiagnostics: Array<{
   authorityHash: string | null;
   pending: Array<{
@@ -2497,6 +2811,62 @@ const selectAdmissionDiagnostics: Array<{
     authorityHash: string | null;
   }>;
 }> = [];
+
+type SelectionRaceSearchScope = {
+  authorityHash: string;
+  actorEpoch: string;
+  pathname: string;
+};
+type SelectionRaceSearchBoundary = SelectionRaceSearchScope & {
+  released: Promise<void>;
+  release: () => void;
+  deferred: Set<Promise<void>>;
+};
+let selectionRaceSearchBoundary: SelectionRaceSearchBoundary | null = null;
+
+function isSelectionRaceSearch(request: Request, scope: SelectionRaceSearchScope): boolean {
+  return (
+    request.method === "POST" &&
+    new URL(request.url).pathname === scope.pathname &&
+    /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(scope.pathname) &&
+    request.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER) === scope.actorEpoch &&
+    sessionSetAuthorityHash(request.headers.get("cookie")) === scope.authorityHash
+  );
+}
+
+async function withSelectionRaceSearchBoundary<T>(
+  scope: SelectionRaceSearchScope,
+  race: () => Promise<T>,
+): Promise<T> {
+  if (selectionRaceSearchBoundary) throw new Error("selection race boundary already active");
+  const { promise: released, resolve: release } = Promise.withResolvers<void>();
+  const boundary: SelectionRaceSearchBoundary = {
+    ...scope,
+    released,
+    release,
+    deferred: new Set(),
+  };
+  selectionRaceSearchBoundary = boundary;
+  try {
+    // Browser request terminals do not prove the outer API handler released its
+    // actor lease. Include already-admitted searches from responsive contexts,
+    // and defer new exact-scope searches before they acquire a production lease.
+    const deadline = Date.now() + 30_000;
+    while (
+      [...pendingAccountApiRequests.keys()].some((request) => isSelectionRaceSearch(request, scope))
+    ) {
+      if (Date.now() >= deadline) throw new Error("selection race companion search did not settle");
+      await Bun.sleep(25);
+    }
+    return await race();
+  } finally {
+    selectionRaceSearchBoundary = null;
+    boundary.release();
+    // Forward every deferred request unchanged, including its original actor.
+    // Its real stale-actor response remains subject to the strict browser ledger.
+    await Promise.all(boundary.deferred);
+  }
+}
 
 async function observeAccountApiRequest(
   request: Request,
@@ -2510,6 +2880,13 @@ async function observeAccountApiRequest(
     actorEpoch: request.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
     authorityHash: sessionSetAuthorityHash(request.headers.get("cookie")),
   });
+  const boundary = selectionRaceSearchBoundary;
+  const deferred =
+    boundary && isSelectionRaceSearch(request, boundary) ? Promise.withResolvers<void>() : null;
+  if (deferred) {
+    boundary!.deferred.add(deferred.promise);
+    await boundary!.released;
+  }
   if (metadata.pathname === "/v1/auth/session-set/select") {
     selectAdmissionDiagnostics.push({
       authorityHash: metadata.authorityHash,
@@ -2517,8 +2894,20 @@ async function observeAccountApiRequest(
     });
   }
   pendingAccountApiRequests.set(request, metadata);
+  const edgeEntry = {
+    method: metadata.method,
+    pathname: metadata.pathname,
+    actorEpoch: metadata.actorEpoch,
+    startedAt: performance.now(),
+    endedAt: null as number | null,
+    status: null as number | null,
+  };
+  edgeRequestLog.push(edgeEntry);
+  if (edgeRequestLog.length > 400) edgeRequestLog.shift();
   try {
     const response = await dispatch();
+    edgeEntry.endedAt = performance.now();
+    edgeEntry.status = response.status;
     readDiagnostics?.response("server", request, response.status);
     readDiagnostics?.finish("server", request, "handler-resolved");
     return response;
@@ -2527,6 +2916,7 @@ async function observeAccountApiRequest(
     throw failure;
   } finally {
     pendingAccountApiRequests.delete(request);
+    deferred?.resolve();
   }
 }
 
@@ -3014,12 +3404,10 @@ beforeAll(async () => {
   alpha = await createActualUser({
     displayName: "Account Alpha",
     email: `account-alpha-${RUN_ID}@example.test`,
-    organizationName: "Account Alpha Organization",
   });
   beta = await createActualUser({
     displayName: "Account Beta",
     email: `account-beta-${RUN_ID}@example.test`,
-    organizationName: "Account Beta Organization",
   });
 }, 900_000);
 
@@ -3030,6 +3418,75 @@ afterAll(async () => {
 }, 180_000);
 
 describe("provider-neutral browser account acceptance", () => {
+  test("selection race admission defers only the exact actor's knowledge search and forwards on failure", async () => {
+    const authority = "a".repeat(43);
+    const scope: SelectionRaceSearchScope = {
+      authorityHash: managedAuthSha256(authority),
+      actorEpoch: "2",
+      pathname: "/v1/workspaces/workspace/knowledge/entries/search",
+    };
+    const request = (
+      method = "POST",
+      pathname = scope.pathname,
+      actorEpoch = scope.actorEpoch,
+      cookie = authority,
+    ) =>
+      new Request(`${publicOrigin}${pathname}`, {
+        method,
+        headers: {
+          cookie: `${MANAGED_AUTH_SESSION_SET_COOKIE}=${cookie}`,
+          [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: actorEpoch,
+        },
+      });
+    expect(isSelectionRaceSearch(request(), scope)).toBe(true);
+    for (const other of [
+      request("GET"),
+      request("POST", "/v1/auth/session-set/select"),
+      request("POST", `${scope.pathname}/other`),
+      request("POST", scope.pathname.replace("workspace/", "other/")),
+      request("POST", scope.pathname, "3"),
+      request("POST", scope.pathname, "2", "b".repeat(43)),
+      request("POST", scope.pathname, "2", ""),
+    ])
+      expect(isSelectionRaceSearch(other, scope)).toBe(false);
+
+    const forwarded: string[] = [];
+    const sentinel = new Error("race failed");
+    let companion: Promise<Response> | undefined;
+    await expect(
+      withSelectionRaceSearchBoundary(scope, async () => {
+        companion = observeAccountApiRequest(request(), () => {
+          forwarded.push("companion");
+          return new Response(null, { status: 409 });
+        });
+        await observeAccountApiRequest(request("POST", "/v1/auth/session-set/select"), () => {
+          forwarded.push("select");
+          return new Response(null, { status: 200 });
+        });
+        expect(forwarded).toEqual(["select"]);
+        throw sentinel;
+      }),
+    ).rejects.toBe(sentinel);
+    expect((await companion!).status).toBe(409);
+    expect(forwarded).toEqual(["select", "companion"]);
+    expect(selectionRaceSearchBoundary).toBeNull();
+    expect(pendingAccountApiRequests.size).toBe(0);
+
+    const admitted = Promise.withResolvers<Response>();
+    const oldSearch = observeAccountApiRequest(request(), () => admitted.promise);
+    let raceStarted = false;
+    const race = withSelectionRaceSearchBoundary(scope, async () => {
+      raceStarted = true;
+      expect(pendingAccountApiRequests.size).toBe(0);
+    });
+    expect(raceStarted).toBe(false);
+    admitted.resolve(new Response(null, { status: 200 }));
+    expect((await oldSearch).status).toBe(200);
+    await race;
+    expect(raceStarted).toBe(true);
+    expect(selectionRaceSearchBoundary).toBeNull();
+  });
+
   test("actor transition reads include only the exact read-only POST search", () => {
     const path = "/v1/workspaces/workspace/knowledge/entries/search";
     expect(isActorTransitionRead("POST", path)).toBe(true);
@@ -3558,6 +4015,20 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/config/other`,
       }),
     ).toContain("/v1/config/other");
+    const correlateReauthenticationPageError = (
+      pageError: Parameters<typeof correlatedWebKitAccessControlTerminalIndex>[0],
+      terminals: Parameters<typeof correlatedWebKitAccessControlTerminalIndex>[1],
+    ) =>
+      correlatedWebKitAccessControlTerminalIndex(
+        pageError,
+        terminals,
+        "slot-revocation-reauthentication",
+      );
+    const reauthenticationAccessControlPageErrors = (
+      problems: Parameters<typeof optionalWebKitAccessControlPageErrors>[0],
+      engine: EngineName,
+    ) =>
+      optionalWebKitAccessControlPageErrors(problems, engine, "slot-revocation-reauthentication");
     const acceptedWebKitCancellation = {
       observedAt: 100,
       pathnameAndSearch:
@@ -3571,13 +4042,11 @@ describe("provider-neutral browser account acceptance", () => {
       observedAt: 150,
     };
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
-        acceptedWebKitCancellation,
-      ]),
+      correlateReauthenticationPageError(correlatedWebKitPageError, [acceptedWebKitCancellation]),
     ).toBe(0);
-    expect(correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [])).toBeNull();
+    expect(correlateReauthenticationPageError(correlatedWebKitPageError, [])).toBeNull();
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(
+      correlateReauthenticationPageError(
         {
           message:
             "[cross-slot-deep-link] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
@@ -3587,7 +4056,7 @@ describe("provider-neutral browser account acceptance", () => {
       ),
     ).toBeNull();
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(
+      correlateReauthenticationPageError(
         {
           message:
             "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog due to access control checks.",
@@ -3605,7 +4074,7 @@ describe("provider-neutral browser account acceptance", () => {
       ),
     ).toBe(0);
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+      correlateReauthenticationPageError(correlatedWebKitPageError, [
         {
           ...acceptedWebKitCancellation,
           observedAt: 151,
@@ -3614,7 +4083,7 @@ describe("provider-neutral browser account acceptance", () => {
       ]),
     ).toBe(0);
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+      correlateReauthenticationPageError(correlatedWebKitPageError, [
         {
           ...acceptedWebKitCancellation,
           observedAt: 150 + WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS + 1,
@@ -3622,7 +4091,7 @@ describe("provider-neutral browser account acceptance", () => {
       ]),
     ).toBeNull();
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+      correlateReauthenticationPageError(correlatedWebKitPageError, [
         {
           ...acceptedWebKitCancellation,
           observedAt: 150 - WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS - 1,
@@ -3630,13 +4099,13 @@ describe("provider-neutral browser account acceptance", () => {
       ]),
     ).toBeNull();
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+      correlateReauthenticationPageError(correlatedWebKitPageError, [
         { ...acceptedWebKitCancellation, observedAt: 100 },
         { ...acceptedWebKitCancellation, observedAt: 200, terminal: "finished" },
       ]),
     ).toBeNull();
     expect(
-      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+      correlateReauthenticationPageError(correlatedWebKitPageError, [
         acceptedWebKitCancellation,
         {
           ...acceptedWebKitCancellation,
@@ -3647,7 +4116,7 @@ describe("provider-neutral browser account acceptance", () => {
     ).toBe(1);
     const consumableWebKitFailures = [acceptedWebKitCancellation];
     expect(
-      optionalWebKitReauthenticationAccessControlPageError(
+      reauthenticationAccessControlPageErrors(
         {
           acceptedRequestTerminals: consumableWebKitFailures,
           pageErrorEvidence: [correlatedWebKitPageError],
@@ -3657,7 +4126,7 @@ describe("provider-neutral browser account acceptance", () => {
     ).toEqual([correlatedWebKitPageError.message]);
     expect(consumableWebKitFailures).toEqual([]);
     expect(
-      optionalWebKitReauthenticationAccessControlPageError(
+      reauthenticationAccessControlPageErrors(
         {
           acceptedRequestTerminals: [acceptedWebKitCancellation],
           pageErrorEvidence: [correlatedWebKitPageError, correlatedWebKitPageError],
@@ -3677,7 +4146,7 @@ describe("provider-neutral browser account acceptance", () => {
     };
     const bijectiveWebKitFailures = [acceptedWebKitCancellation, secondAcceptedWebKitCancellation];
     expect(
-      optionalWebKitReauthenticationAccessControlPageError(
+      reauthenticationAccessControlPageErrors(
         {
           acceptedRequestTerminals: bijectiveWebKitFailures,
           pageErrorEvidence: [correlatedWebKitPageError, secondCorrelatedWebKitPageError],
@@ -3686,6 +4155,55 @@ describe("provider-neutral browser account acceptance", () => {
       ),
     ).toEqual([correlatedWebKitPageError.message, secondCorrelatedWebKitPageError.message]);
     expect(bijectiveWebKitFailures).toEqual([]);
+    // The independent set's own reload after the other set's logout-all can
+    // cancel its pinned-session read the same way. Its evidence authorizes
+    // only that phase's error, never the re-authentication phase's.
+    const independentReloadCancellation = {
+      observedAt: 300,
+      pathnameAndSearch:
+        "/v1/workspaces/b5b5cb8f-1c47-4729-bdce-45a70fe50775/sessions?view=page&limit=1&projection=summary&pinsOnly=true&siteConversations=include",
+      responsePhase: "independent-set-after-other-logout-all",
+      terminal: "failed" as const,
+    };
+    const independentReloadPageError = {
+      message:
+        "[independent-set-after-other-logout-all] /127.0.0.1:26894/v1/workspaces/b5b5cb8f-1c47-4729-bdce-45a70fe50775/sessions?view=page&limit=1&projection=summary&pinsOnly=true&siteConversations=include due to access control checks.",
+      observedAt: 320,
+    };
+    expect(
+      correlateReauthenticationPageError(independentReloadPageError, [
+        { ...independentReloadCancellation, responsePhase: "slot-revocation-reauthentication" },
+      ]),
+    ).toBeNull();
+    expect(
+      correlatedWebKitAccessControlTerminalIndex(
+        independentReloadPageError,
+        [{ ...independentReloadCancellation, responsePhase: "slot-revocation-reauthentication" }],
+        "independent-set-after-other-logout-all",
+      ),
+    ).toBeNull();
+    const independentReloadFailures = [independentReloadCancellation];
+    expect(
+      optionalWebKitAccessControlPageErrors(
+        {
+          acceptedRequestTerminals: independentReloadFailures,
+          pageErrorEvidence: [independentReloadPageError],
+        },
+        "webkit",
+        "independent-set-after-other-logout-all",
+      ),
+    ).toEqual([independentReloadPageError.message]);
+    expect(independentReloadFailures).toEqual([]);
+    expect(
+      optionalWebKitAccessControlPageErrors(
+        {
+          acceptedRequestTerminals: [independentReloadCancellation],
+          pageErrorEvidence: [independentReloadPageError],
+        },
+        "chromium",
+        "independent-set-after-other-logout-all",
+      ),
+    ).toEqual([]);
     expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,
@@ -3848,67 +4366,6 @@ describe("provider-neutral browser account acceptance", () => {
       },
     ]) {
       expect(finiteReadMayRetireAfterActorTransition(invalid)).toBe(false);
-    }
-
-    const documentReplacementRetirement = {
-      actorEpoch: "current-actor-epoch",
-      confirmedActorEpoch: "current-actor-epoch",
-      currentSessionSetAuthorityHash: "a".repeat(64),
-      dispatchPhase: "cross-slot-deep-link",
-      expectedDispatchPhase: "cross-slot-deep-link",
-      method: "GET",
-      pathname:
-        "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/00000000-0000-4000-8000-000000000002/lineage",
-      replacementStartedAt: 200,
-      requestSessionSetAuthorityHash: "a".repeat(64),
-      startedAt: 100,
-      workspaceId: "00000000-0000-0000-0000-000000000001",
-    } satisfies DocumentReplacementRetirementInput;
-    expect(finiteReadMayRetireAfterDocumentReplacement(documentReplacementRetirement)).toBe(true);
-    expect(
-      finiteReadMayRetireAfterDocumentReplacement({
-        ...documentReplacementRetirement,
-        requestSessionSetAuthorityHash: null,
-      }),
-    ).toBe(true);
-    for (const invalid of [
-      { ...documentReplacementRetirement, method: "POST" },
-      { ...documentReplacementRetirement, actorEpoch: null },
-      { ...documentReplacementRetirement, actorEpoch: "old-actor-epoch" },
-      {
-        ...documentReplacementRetirement,
-        dispatchPhase: "slot-revocation-reauthentication",
-      },
-      {
-        ...documentReplacementRetirement,
-        pathname:
-          "/v1/workspaces/another-workspace/sessions/00000000-0000-4000-8000-000000000002/lineage",
-      },
-      {
-        ...documentReplacementRetirement,
-        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/not-a-uuid/lineage",
-      },
-      {
-        ...documentReplacementRetirement,
-        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog",
-      },
-      {
-        ...documentReplacementRetirement,
-        currentSessionSetAuthorityHash: null,
-      },
-      {
-        ...documentReplacementRetirement,
-        dispatchPhase: "slot-revocation-reauthentication",
-        expectedDispatchPhase: "slot-revocation-reauthentication",
-        requestSessionSetAuthorityHash: null,
-      },
-      {
-        ...documentReplacementRetirement,
-        requestSessionSetAuthorityHash: "b".repeat(64),
-      },
-      { ...documentReplacementRetirement, startedAt: 201 },
-    ]) {
-      expect(finiteReadMayRetireAfterDocumentReplacement(invalid)).toBe(false);
     }
 
     const logoutAllRetirement = {
@@ -4179,6 +4636,425 @@ describe("provider-neutral browser account acceptance", () => {
     ]);
   });
 
+  test("the strict browser ledger solves bounded minimum-lag assignments", () => {
+    // Exhaust every two-error/three-terminal graph with missing or 0/1/2 ms
+    // edges against an independent enumeration, including excluded edges.
+    for (let encoding = 0; encoding < 4 ** 6; encoding += 1) {
+      const costs = Array.from({ length: 2 }, (_, errorIndex) => {
+        const row = new Map<number, number>();
+        for (let terminalIndex = 0; terminalIndex < 3; terminalIndex += 1) {
+          const digit = Math.floor(encoding / 4 ** (errorIndex * 3 + terminalIndex)) % 4;
+          if (digit > 0) row.set(terminalIndex, digit - 1);
+        }
+        return row;
+      });
+      const oracle = (excluded?: { errorIndex: number; terminalIndex: number }) => {
+        let best = Number.POSITIVE_INFINITY;
+        for (let first = 0; first < 3; first += 1) {
+          for (let second = 0; second < 3; second += 1) {
+            if (
+              first === second ||
+              (excluded?.errorIndex === 0 && excluded.terminalIndex === first) ||
+              (excluded?.errorIndex === 1 && excluded.terminalIndex === second)
+            ) {
+              continue;
+            }
+            best = Math.min(
+              best,
+              (costs[0]?.get(first) ?? Number.POSITIVE_INFINITY) +
+                (costs[1]?.get(second) ?? Number.POSITIVE_INFINITY),
+            );
+          }
+        }
+        return Number.isFinite(best) ? best : null;
+      };
+      const best = minimumCostTerminalAssignment(costs, 3);
+      expect(best?.cost ?? null).toBe(oracle());
+      if (best !== null) {
+        expect(new Set(best.terminalIndexes).size).toBe(2);
+        for (const [errorIndex, terminalIndex] of best.terminalIndexes.entries()) {
+          const excluded = { errorIndex, terminalIndex };
+          expect(minimumCostTerminalAssignment(costs, 3, excluded)?.cost ?? null).toBe(
+            oracle(excluded),
+          );
+        }
+      }
+    }
+    expect(
+      minimumCostTerminalAssignment(
+        [
+          new Map([
+            [0, 1],
+            [1, 2],
+          ]),
+          new Map([
+            [1, 1],
+            [2, 2],
+          ]),
+          new Map([[0, 2]]),
+        ],
+        3,
+      ),
+    ).toEqual({ cost: 6, terminalIndexes: [1, 2, 0] });
+    expect(minimumCostTerminalAssignment([new Map(), new Map()], 1)).toBeNull();
+  });
+
+  test("WebKit neutral session-set race pageerrors require a unique validated failed terminal", () => {
+    const origin = "http://127.0.0.1:23212";
+    const pathname = "/v1/auth/session-set";
+    const message = `[cross-tab-select-race] /127.0.0.1:23212${pathname} due to access control checks.`;
+    const failure: BrowserRequestFailureInput = {
+      engine: "webkit",
+      actorEpoch: null,
+      dispatchPhase: "cross-tab-select-race",
+      responsePhase: "cross-tab-select-race",
+      failure: "Load request cancelled",
+      method: "GET",
+      url: `${origin}${pathname}`,
+      sessionSetAuthorityHash: "a".repeat(64),
+      startedAt: 100,
+      failedAt: 400,
+      crossTabReloadStartedAt: 300,
+      acceptedActorTransitions: [
+        {
+          path: "/v1/auth/session-set/select",
+          actorEpoch: "new",
+          sessionSetAuthorityHash: "a".repeat(64),
+          acceptedAt: 200,
+        },
+      ],
+    };
+    // The request listener admits this terminal only after proving authority,
+    // pre-acceptance dispatch, the exact reload window and native cancellation.
+    expect(requestFailureProblem(failure)).toBeNull();
+    const terminal = {
+      observedAt: 400,
+      origin,
+      pathnameAndSearch: pathname,
+      responsePhase: "cross-tab-select-race",
+      terminal: "failed" as const,
+    };
+    const match = (
+      terminals: BrowserProblems["acceptedRequestTerminals"],
+      errors = [{ message, observedAt: 410 }],
+    ) =>
+      webKitLiveEventsPageErrorsForValidatedRace(
+        {
+          acceptedRequestTerminals: terminals,
+          pageErrorEvidence: errors,
+          crossTabReloadStartedAt: 300,
+          mainFrameCommits: [450],
+        },
+        "webkit",
+        {
+          acceptedAt: 200,
+          origin,
+          settledAt: 500,
+          pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+        },
+      );
+    const accepted = [terminal];
+    expect(match(accepted)).toEqual([message]);
+    expect(accepted).toEqual([]);
+    // Unlike the narrowly proven outgoing stream reconnect, a neutral read
+    // never qualifies through the document-replacement window alone.
+    expect(match([])).toEqual([]);
+    for (const changed of [
+      { terminal: "finished" as const },
+      { pathnameAndSearch: `${pathname}/select` },
+      { pathnameAndSearch: `${pathname}?unrelated=1` },
+      { origin: "http://127.0.0.1:23213" },
+      { responsePhase: "settled" },
+      { observedAt: 199 },
+      { observedAt: 1_501 },
+    ]) {
+      const rejected = [{ ...terminal, ...changed }];
+      expect(match(rejected)).toEqual([]);
+      expect(rejected).toHaveLength(1);
+    }
+    expect(match([terminal, terminal])).toEqual([]);
+    expect(
+      match(
+        [terminal],
+        [
+          { message, observedAt: 410 },
+          { message, observedAt: 411 },
+        ],
+      ),
+    ).toEqual([]);
+    for (const suffix of ["/select", "?unrelated=1"]) {
+      expect(
+        match(
+          [{ ...terminal, pathnameAndSearch: `${pathname}${suffix}` }],
+          [
+            {
+              message: message.replace(pathname, `${pathname}${suffix}`),
+              observedAt: 410,
+            },
+          ],
+        ),
+      ).toEqual([]);
+    }
+  });
+
+  test("the strict browser ledger correlates WebKit race pageerrors without broad CORS exemptions", () => {
+    const pathname = "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream";
+    const pathnameAndSearch = `${pathname}?controlAfter=0&interactionAfter=0&transport=http1-bounded`;
+    const message = `[cross-tab-select-race] /127.0.0.1:23212${pathnameAndSearch} due to access control checks.`;
+    const input = { acceptedAt: 100, origin: "http://127.0.0.1:23212", pathname, settledAt: 200 };
+    const terminal = {
+      observedAt: 150,
+      origin: input.origin,
+      pathnameAndSearch,
+      responsePhase: "cross-tab-select-race",
+      terminal: "failed" as const,
+    };
+    const pageError = { message, observedAt: 175 };
+    const match = (
+      terminals: BrowserProblems["acceptedRequestTerminals"],
+      errors = [pageError],
+      engine: EngineName = "webkit",
+      scope = input,
+    ) =>
+      webKitLiveEventsPageErrorsForValidatedRace(
+        { acceptedRequestTerminals: terminals, pageErrorEvidence: errors },
+        engine,
+        scope,
+      );
+    const accepted = [terminal];
+    expect(match(accepted)).toEqual([message]);
+    expect(accepted).toEqual([]);
+    for (const cursor of ["12", String(Number.MAX_SAFE_INTEGER)]) {
+      const validSearch = pathnameAndSearch.replace("controlAfter=0", `controlAfter=${cursor}`);
+      const validTerminal = { ...terminal, pathnameAndSearch: validSearch };
+      const validError = { ...pageError, message: message.replace(pathnameAndSearch, validSearch) };
+      const validTerminals = [validTerminal];
+      expect(match(validTerminals, [validError])).toEqual([validError.message]);
+      expect(validTerminals).toEqual([]);
+    }
+    for (const cursor of ["00", "01", "9007199254740992"]) {
+      for (const name of ["controlAfter", "interactionAfter"]) {
+        const invalidSearch = pathnameAndSearch.replace(`${name}=0`, `${name}=${cursor}`);
+        const invalidTerminal = { ...terminal, pathnameAndSearch: invalidSearch };
+        const invalidError = {
+          ...pageError,
+          message: message.replace(pathnameAndSearch, invalidSearch),
+        };
+        const rejected = [invalidTerminal];
+        expect(match(rejected, [invalidError])).toEqual([]);
+        expect(rejected).toEqual([invalidTerminal]);
+      }
+    }
+    expect(match([], [pageError])).toEqual([]);
+    expect(match([terminal], [pageError], "firefox")).toEqual([]);
+    expect(match([terminal], [pageError], "chromium")).toEqual([]);
+    for (const changed of [
+      { responsePhase: "slot-revocation-reauthentication" },
+      { origin: "http://127.0.0.1:23213" },
+      { origin: undefined },
+      {
+        pathnameAndSearch: `${pathname}?controlAfter=1&interactionAfter=0&transport=http1-bounded`,
+      },
+      { terminal: "finished" as const },
+      { observedAt: input.acceptedAt - 1 },
+      { observedAt: input.settledAt + 1_001 },
+      { observedAt: Number.NaN },
+    ]) {
+      const rejected = [{ ...terminal, ...changed }];
+      expect(match(rejected)).toEqual([]);
+      expect(rejected).toHaveLength(1);
+    }
+    for (const changed of [
+      { message: message.replace("cross-tab-select-race", "logout-one") },
+      { message: message.replace(":23212", ":23213") },
+      { message: message.replace("000000000001", "000000000002") },
+      { message: message.replace("http1-bounded", "http1") },
+      { message: message.replace("live-events/stream", "sessions") },
+      { message: message.replace("access control checks.", "access control checks. unexpected") },
+      { observedAt: input.acceptedAt - 1 },
+      { observedAt: terminal.observedAt + WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS + 1 },
+      { observedAt: Number.NaN },
+    ]) {
+      expect(match([terminal], [{ ...pageError, ...changed }])).toEqual([]);
+    }
+    expect(match([terminal], [pageError], "webkit", { ...input, acceptedAt: Number.NaN })).toEqual(
+      [],
+    );
+    expect(match([terminal], [pageError], "webkit", { ...input, settledAt: 99 })).toEqual([]);
+    const duplicate = [terminal];
+    expect(match(duplicate, [pageError, pageError])).toEqual([]);
+    expect(duplicate).toEqual([terminal]);
+    expect(match([terminal, terminal])).toEqual([]);
+    const nearer = [terminal, { ...terminal, observedAt: 170 }];
+    expect(match(nearer)).toEqual([message]);
+    expect(nearer).toEqual([terminal]);
+    expect(
+      match([
+        { ...terminal, observedAt: 150 },
+        { ...terminal, observedAt: 200 },
+      ]),
+    ).toEqual([]);
+    // A delayed callback uniquely needs the later terminal. The earlier
+    // callback must not consume that terminal just because it is closer.
+    const overlappingTerminals = [
+      { ...terminal, observedAt: 1_000 },
+      { ...terminal, observedAt: 1_900 },
+    ];
+    const overlappingErrors = [
+      { ...pageError, observedAt: 2_000 },
+      { ...pageError, observedAt: 31_500 },
+    ];
+    const overlappingScope = { ...input, acceptedAt: 1_000, settledAt: 2_000 };
+    for (const errors of [overlappingErrors, [...overlappingErrors].reverse()]) {
+      for (const terminals of [overlappingTerminals, [...overlappingTerminals].reverse()]) {
+        const reorderedTerminals = [...terminals];
+        expect(match(reorderedTerminals, errors, "webkit", overlappingScope)).toEqual([
+          message,
+          message,
+        ]);
+        expect(reorderedTerminals).toEqual([]);
+      }
+    }
+    const incomplete = [...overlappingTerminals];
+    expect(
+      match(
+        incomplete,
+        [...overlappingErrors, { ...pageError, observedAt: 31_501 }],
+        "webkit",
+        overlappingScope,
+      ),
+    ).toEqual([]);
+    expect(incomplete).toEqual(overlappingTerminals);
+    // Both complete assignments have the same total lag (2,100 ms), even
+    // though neither pageerror has a local nearest-distance tie.
+    const equalLagErrors = [
+      { ...pageError, observedAt: 2_000 },
+      { ...pageError, observedAt: 3_000 },
+    ];
+    for (const errors of [equalLagErrors, [...equalLagErrors].reverse()]) {
+      for (const terminals of [overlappingTerminals, [...overlappingTerminals].reverse()]) {
+        const ambiguousTerminals = [...terminals];
+        expect(match(ambiguousTerminals, errors, "webkit", overlappingScope)).toEqual([]);
+        expect(ambiguousTerminals).toEqual(terminals);
+      }
+    }
+    const ambiguousFallback = [...overlappingTerminals, { ...terminal, observedAt: 2_000 }];
+    const ambiguousOriginal = [...ambiguousFallback];
+    expect(
+      match(
+        ambiguousFallback,
+        [
+          { ...pageError, observedAt: 1_500 },
+          { ...pageError, observedAt: 31_500 },
+          { ...pageError, observedAt: 31_950 },
+        ],
+        "webkit",
+        overlappingScope,
+      ),
+    ).toEqual([]);
+    expect(ambiguousFallback).toEqual(ambiguousOriginal);
+  });
+
+  test("the strict browser ledger accepts WebKit's local refusal of an outgoing document's live-events reopen only before its commit", () => {
+    const pathname = "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream";
+    const pathnameAndSearch = `${pathname}?controlAfter=0&interactionAfter=0&transport=http1-bounded`;
+    const message = `[cross-tab-select-race] /127.0.0.1:23212${pathnameAndSearch} due to access control checks.`;
+    const input = { acceptedAt: 100, origin: "http://127.0.0.1:23212", pathname, settledAt: 3_000 };
+    const navigation = { crossTabReloadStartedAt: 110, mainFrameCommits: [50, 900] };
+    const match = (
+      errors: BrowserProblems["pageErrorEvidence"],
+      overrides: Partial<
+        Pick<BrowserProblems, "crossTabReloadStartedAt" | "mainFrameCommits">
+      > = {},
+      terminals: BrowserProblems["acceptedRequestTerminals"] = [],
+      engine: EngineName = "webkit",
+      scope = input,
+    ) =>
+      webKitLiveEventsPageErrorsForValidatedRace(
+        {
+          acceptedRequestTerminals: terminals,
+          pageErrorEvidence: errors,
+          ...navigation,
+          ...overrides,
+        },
+        engine,
+        scope,
+      );
+    // The never-dispatched reopen has no request terminal of its own and must
+    // not consume an unrelated one.
+    const unrelatedTerminal = {
+      observedAt: 120,
+      origin: input.origin,
+      pathnameAndSearch,
+      responsePhase: "cross-tab-select-race",
+      terminal: "failed" as const,
+    };
+    const preserved = [unrelatedTerminal];
+    expect(match([{ message, observedAt: 600 }], {}, preserved)).toEqual([message]);
+    expect(preserved).toEqual([unrelatedTerminal]);
+    expect(match([{ message, observedAt: 110 }])).toEqual([message]);
+    expect(match([{ message, observedAt: 900 }])).toEqual([message]);
+    // Sequential reconnect attempts are spaced by the SDK's minimum backoff.
+    expect(
+      match([
+        { message, observedAt: 300 },
+        { message, observedAt: 300 + WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS },
+      ]),
+    ).toEqual([message, message]);
+    expect(
+      match([
+        { message, observedAt: 300 },
+        { message, observedAt: 300 + WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS - 1 },
+      ]),
+    ).toEqual([]);
+    // Before the reload, after the commit, without an observed commit, with a
+    // commit after settlement, or with a reload preceding acceptance, the
+    // error is not this outgoing-document shape and still needs a terminal.
+    expect(match([{ message, observedAt: 109 }])).toEqual([]);
+    expect(match([{ message, observedAt: 901 }])).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], { mainFrameCommits: [] })).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], { mainFrameCommits: [50] })).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], { crossTabReloadStartedAt: undefined })).toEqual(
+      [],
+    );
+    expect(match([{ message, observedAt: 600 }], { crossTabReloadStartedAt: Number.NaN })).toEqual(
+      [],
+    );
+    expect(match([{ message, observedAt: 600 }], { crossTabReloadStartedAt: 99 })).toEqual([]);
+    expect(
+      match([{ message, observedAt: 600 }], {}, [], "webkit", { ...input, settledAt: 899 }),
+    ).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], {}, [], "chromium")).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], {}, [], "firefox")).toEqual([]);
+    // URL, phase, origin, and cursor exactness are unchanged.
+    for (const changed of [
+      message.replace("cross-tab-select-race", "logout-one"),
+      message.replace(":23212", ":23213"),
+      message.replace("000000000001", "000000000002"),
+      message.replace("http1-bounded", "http1"),
+      message.replace("controlAfter=0", "controlAfter=00"),
+      message.replace("live-events/stream", "sessions"),
+      message.replace("access control checks.", "access control checks. unexpected"),
+    ]) {
+      expect(match([{ message: changed, observedAt: 600 }])).toEqual([]);
+    }
+    // An error outside the window still requires its own exact terminal, and
+    // both shapes may settle together without sharing evidence.
+    const lateTerminal = { ...unrelatedTerminal, observedAt: 950 };
+    const mixed = [lateTerminal];
+    expect(
+      match(
+        [
+          { message, observedAt: 600 },
+          { message, observedAt: 960 },
+        ],
+        {},
+        mixed,
+      ),
+    ).toEqual([message, message]);
+    expect(mixed).toEqual([]);
+  });
+
   test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {
     const boundedLiveUrl = `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=http1-bounded`;
     expect(isBoundedHttp1StreamRequest("GET", boundedLiveUrl)).toBe(true);
@@ -4337,16 +5213,100 @@ describe("provider-neutral browser account acceptance", () => {
     }
   });
 
+  test("the strict browser ledger attributes reads a reload took down before reporting it, and nothing else", async () => {
+    // WebKit always, and Firefox usually, reports that a reload cancelled the
+    // outgoing document's in-flight read before Playwright delivers the
+    // reload's document request. Chromium reports neither.
+    const held: Array<() => void> = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        if (new URL(request.url).pathname.startsWith("/v1/held")) {
+          const { promise, resolve } = Promise.withResolvers<Response>();
+          held.push(() => resolve(new Response("late fixture response")));
+          return promise;
+        }
+        return new Response("<!doctype html><title>Document ledger fixture</title>", {
+          headers: { "content-type": "text/html" },
+        });
+      },
+    });
+    const origin = `http://127.0.0.1:${server.port}`;
+    const engine = requestedEngine as EngineName;
+    const browser = await launchAccountBrowser(engine);
+    try {
+      const reloaded = await browser.newPage();
+      const reloadedProblems = observeBrowser(reloaded);
+      setBrowserPhase(reloadedProblems, "document-ledger-fixture");
+      await reloaded.goto(`${origin}/workspace`);
+      const reloads = 5;
+      for (let iteration = 0; iteration < reloads; iteration += 1) {
+        const dispatched = held.length;
+        await reloaded.evaluate(() => void fetch("/v1/held").catch(() => undefined));
+        while (held.length === dispatched) await Bun.sleep(5);
+        await reloaded.reload({ waitUntil: "domcontentloaded" });
+      }
+      await reloaded.evaluate(() => undefined);
+      await expectNoBrowserProblems(reloadedProblems);
+      const attributed = reloadedProblems.retirementChecks
+        .map((check) => JSON.parse(check) as { pathname: string; result: string })
+        .filter(({ pathname }) => pathname === "/v1/held");
+      expect(attributed).toEqual(
+        Array.from({ length: engine === "chromium" ? 0 : reloads }, () => ({
+          dispatchPhase: "document-ledger-fixture",
+          failure: expect.any(String),
+          method: "GET",
+          pathname: "/v1/held",
+          responsePhase: "document-ledger-fixture",
+          result: "cancelled-with-replaced-document",
+        })),
+      );
+
+      // A cancellation no navigation explains remains a strict failure.
+      const aborted = await browser.newPage();
+      const abortedProblems = observeBrowser(aborted);
+      setBrowserPhase(abortedProblems, "document-ledger-fixture");
+      await aborted.goto(`${origin}/workspace`);
+      const dispatched = held.length;
+      await aborted.evaluate(() => {
+        const controller = new AbortController();
+        (window as { abortHeldRead?: () => void }).abortHeldRead = () => controller.abort();
+        void fetch("/v1/held-aborted", { signal: controller.signal }).catch(() => undefined);
+      });
+      while (held.length === dispatched) await Bun.sleep(5);
+      const failed = aborted.waitForEvent("requestfailed");
+      await aborted.evaluate(() => (window as { abortHeldRead?: () => void }).abortHeldRead?.());
+      await failed;
+      await settlePendingRequestFailureChecks(abortedProblems);
+      expect(abortedProblems.failedRequests).toEqual([
+        expect.stringMatching(
+          new RegExp(
+            `^\\[dispatch=document-ledger-fixture; actor=missing; response=document-ledger-fixture\\] GET ${origin.replaceAll(".", "\\.")}/v1/held-aborted: `,
+            "u",
+          ),
+        ),
+      ]);
+    } finally {
+      for (const release of held) release();
+      await browser.close();
+      await server.stop(true);
+    }
+  }, 60_000);
+
   test("repeated finite review reads finish without native transport cancellation", async () => {
     const reviewAccount = await createActualUser({
       displayName: "Review Reader",
       email: `review-reader-${RUN_ID}@example.test`,
-      organizationName: "Review Reader Organization",
     });
     const browser = await launchAccountBrowser(requestedEngine as EngineName);
+    let diagnostics: ReturnType<typeof createFiniteReviewReadDiagnostics> | undefined;
     try {
       const page = await browser.newPage();
       const problems = observeBrowser(page);
+      diagnostics = createFiniteReviewReadDiagnostics(page);
+      await diagnostics.install();
+      diagnostics.mark(null, "sign-in");
       setBrowserPhase(problems, "primary-set-sign-in");
       await signIn(page, reviewAccount);
       await waitForFiniteReadQuiescence(problems);
@@ -4355,17 +5315,27 @@ describe("provider-neutral browser account acceptance", () => {
       // must reach a native terminal before another poll; no routing, fetch
       // replacement, navigation, or cancellation exemption is involved.
       for (let i = 0; i < 100; i++) {
+        diagnostics.mark(i, "response-wait");
         const pending = page.waitForResponse((response) =>
           response.url().endsWith("/knowledge/entries/search"),
         );
-        await page.evaluate(() =>
-          window.dispatchEvent(new Event("opengeni:knowledge-review-updated")),
-        );
+        await page.evaluate((iteration) => {
+          (
+            window as FiniteReviewDiagnosticsWindow
+          ).__opengeniFiniteReviewReadDiagnostics?.markIteration(iteration);
+          return window.dispatchEvent(new Event("opengeni:knowledge-review-updated"));
+        }, i);
         const response = await pending;
+        diagnostics.mark(i, "response-assertion");
         expect(response.status()).toBe(200);
+        diagnostics.mark(i, "quiescence");
         await waitForFiniteReadQuiescence(problems);
       }
+      diagnostics.mark(null, "browser-assertion");
       await expectNoBrowserProblems(problems);
+    } catch (error) {
+      if (diagnostics) await diagnostics.rethrowFailure(error);
+      throw error;
     } finally {
       await browser.close();
     }
@@ -4505,15 +5475,61 @@ describe("provider-neutral browser account acceptance", () => {
       projection = await sessionSet(page);
       const betaSlot = projection.slots.find((slot) => slot.displayName === beta.displayName);
       if (!betaSlot) throw new Error("Beta slot missing after add");
-      const [pageProjection, tabProjection] = await Promise.all([
-        sessionSet(page),
-        sessionSet(secondTab),
-      ]);
-      selectAdmissionDiagnostics.length = 0;
-      const raced = await Promise.all([
-        raceSelect(page, pageProjection, betaSlot.id),
-        raceSelect(secondTab, tabProjection, betaSlot.id),
-      ]);
+      const authority = (await context.cookies(publicOrigin)).find(
+        (cookie) => cookie.name === MANAGED_AUTH_SESSION_SET_COOKIE,
+      )?.value;
+      if (!authority || !client) throw new Error("selection race authority unavailable");
+      const scope: SelectionRaceSearchScope = {
+        authorityHash: managedAuthSha256(authority),
+        actorEpoch: projection.actorEpoch,
+        pathname: `/v1/workspaces/${alpha.workspaceId}/knowledge/entries/search`,
+      };
+      // The CI double-409 was truthful: a search held this exact actor's lease.
+      // Reproduce that denial through canonical restricted-role lease routines;
+      // failed selects must neither advance the actor nor change the selection.
+      const companionRequestId = crypto.randomUUID();
+      await acquireManagedAuthActorMutationLease(client.db, {
+        authorityHash: scope.authorityHash,
+        actorEpoch: scope.actorEpoch,
+        requestId: companionRequestId,
+        leaseSeconds: 30,
+      });
+      try {
+        const blocked = await Promise.all([
+          raceSelect(page, projection, betaSlot.id),
+          raceSelect(secondTab, projection, betaSlot.id),
+        ]);
+        expect(blocked.map(({ status, managedAuthCode }) => ({ status, managedAuthCode }))).toEqual(
+          [
+            { status: 409, managedAuthCode: "actor_mutation_in_flight" },
+            { status: 409, managedAuthCode: "actor_mutation_in_flight" },
+          ],
+        );
+        expect(sanitizeRaceProjection(await sessionSet(page))).toEqual(
+          sanitizeRaceProjection(projection),
+        );
+      } finally {
+        expect(
+          await releaseManagedAuthActorMutationLease(client.db, {
+            authorityHash: scope.authorityHash,
+            requestId: companionRequestId,
+          }),
+        ).toBe(true);
+      }
+      const { raced, pageProjection } = await withSelectionRaceSearchBoundary(scope, async () => {
+        const [primaryProjection, companionProjection] = await Promise.all([
+          sessionSet(page),
+          sessionSet(secondTab),
+        ]);
+        expect(primaryProjection.actorEpoch).toBe(scope.actorEpoch);
+        expect(companionProjection.actorEpoch).toBe(scope.actorEpoch);
+        selectAdmissionDiagnostics.length = 0;
+        const results = await Promise.all([
+          raceSelect(page, primaryProjection, betaSlot.id),
+          raceSelect(secondTab, companionProjection, betaSlot.id),
+        ]);
+        return { raced: results, pageProjection: primaryProjection };
+      });
       const racedStatuses = raced.map(({ status }) => status).sort();
       if (racedStatuses[0] !== 200 || racedStatuses[1] !== 409) {
         const currentProjections = await Promise.all(
@@ -4586,7 +5602,15 @@ describe("provider-neutral browser account acceptance", () => {
                     phase: "cross-tab-select-race",
                     settledAt: racedSelectionSettledAt,
                   })
-              : undefined,
+              : engine === "webkit"
+                ? () =>
+                    webKitLiveEventsPageErrorsForValidatedRace(observedProblems, engine, {
+                      acceptedAt: racedSelectAcceptedAt,
+                      origin: publicOrigin,
+                      pathname: `/v1/workspaces/${alpha.workspaceId}/live-events/stream`,
+                      settledAt: racedSelectionSettledAt,
+                    })
+                : undefined,
         });
       }
       const racedSelectionAcceptance = actorMutationAcceptances
@@ -4801,7 +5825,6 @@ describe("provider-neutral browser account acceptance", () => {
         delete from auth_sessions where id = (
           select auth_session_id from managed_auth_login_slots where id = ${alphaSlot.id}
         )`;
-      const slotRevocationReloadStartedAt = performance.now();
       const resumeCapabilityUrl = `${publicOrigin}/v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`;
       // Firefox does not emit these native HTTP console errors. Preserve its
       // existing strict ledgers; this barrier joins Chromium/WebKit delivery.
@@ -4815,12 +5838,6 @@ describe("provider-neutral browser account acceptance", () => {
       }
       await page.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(page, beta.displayName).waitFor();
-      await retirePendingReadsAfterConfirmedDocumentReplacement(page, pageProblems, {
-        confirmedActorEpoch: projectionBeforeSlotRevocation.actorEpoch,
-        dispatchPhase: "cross-slot-deep-link",
-        replacementStartedAt: slotRevocationReloadStartedAt,
-        workspaceId: beta.workspaceId,
-      });
       // A replacement document and a later re-authentication are separate
       // mounts. Consume the exact denied metadata reads from the reload now,
       // rather than accumulating both transitions in one allowance window.
@@ -4914,7 +5931,12 @@ describe("provider-neutral browser account acceptance", () => {
       await expectAndConsumePageErrors(
         page,
         pageProblems,
-        () => optionalWebKitReauthenticationAccessControlPageError(pageProblems, engine),
+        () =>
+          optionalWebKitAccessControlPageErrors(
+            pageProblems,
+            engine,
+            "slot-revocation-reauthentication",
+          ),
         [],
       );
 
@@ -5110,6 +6132,9 @@ describe("provider-neutral browser account acceptance", () => {
       ]);
       setBrowserPhase(pageProblems, "signed-out-settled");
       setBrowserPhase(secondTabProblems, "signed-out-settled");
+      // The independent set still polls while the other set signs out. Settle
+      // its finite reads before reload can tear down their owning document.
+      await waitForFiniteReadQuiescence(otherProblems);
       setBrowserPhase(otherProblems, "independent-set-after-other-logout-all");
       await otherPage.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(otherPage, beta.displayName).waitFor();
@@ -5170,6 +6195,20 @@ describe("provider-neutral browser account acceptance", () => {
       for (const problems of [pageProblems, secondTabProblems, otherProblems]) {
         expect(problems.boundedHttp1StreamDispatches).toBeGreaterThan(0);
       }
+      // Reloading the independent set can cancel a read its outgoing document
+      // had just started; WebKit may report that accepted cancellation again
+      // as a page error. Consume only exact, one-to-one correlated ones.
+      await expectAndConsumePageErrors(
+        otherPage,
+        otherProblems,
+        () =>
+          optionalWebKitAccessControlPageErrors(
+            otherProblems,
+            engine,
+            "independent-set-after-other-logout-all",
+          ),
+        [],
+      );
       await expectNoBrowserProblems(pageProblems);
       await expectNoBrowserProblems(secondTabProblems);
       await expectNoBrowserProblems(otherProblems);

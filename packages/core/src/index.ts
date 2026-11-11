@@ -1,14 +1,32 @@
+export * from "./billing-credit-notifications";
 export { readSessionAttachmentFiles } from "./domain/session-file-access";
+export {
+  discoverCompatibleModelReasoning,
+  organizationAzureEntraSetupToken,
+  verifyDirectModelAccess,
+  verifyOrganizationAzureOpenAIDeployment,
+  verifyOrganizationDirectModel,
+  type DirectModelAccessCredential,
+} from "./domain/direct-model-provider";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
+export * from "./domain/mcp-streamable-http-client";
+export * from "./domain/mcp-account-routes";
+export * from "./domain/session-connection-accounts";
+export * from "./domain/session-secret-redaction";
+export * from "./domain/session-secret-redaction-matchers";
 export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
 export * from "./domain/knowledge-search";
-// @opengeni/core — the framework-agnostic OpenGeni core.
+export * from "./domain/meeting-summary";
+export * from "./domain/voice-input-billing";
+export * from "./domain/web-search-billing";
+export * from "./domain/realtime-voice-billing";
+// @opengeni/core — the framework-agnostic Opengeni core.
 //
-// WHAT THIS PACKAGE IS: the OpenGeni domain, access, and billing layers carved
+// WHAT THIS PACKAGE IS: the Opengeni domain, access, and billing layers carved
 // out of `apps/api` into an importable library, so a host (e.g. cloudgeni) can
-// call the OpenGeni core DIRECTLY, off-HTTP — e.g. `createSessionForRequest(
+// call the Opengeni core DIRECTLY, off-HTTP — e.g. `createSessionForRequest(
 // deps, grant, workspaceId, input)` — without standing up the Hono router.
 // `apps/api` (@opengeni/api-router) and `apps/worker` (@opengeni/worker-bundle)
 // remain the STANDALONE RUNNERS that consume this library; nothing about the
@@ -33,7 +51,13 @@ export * from "./domain/knowledge-search";
 // The central dependency type surface (AppDependencies, ApiRouteDeps,
 // SessionWorkflowClient, DocumentIndexClient, ObjectStorageDependency).
 export * from "./dependencies";
+export * from "./domain/vaults/provider-registry";
+export * from "./domain/vaults/external-provider-connections";
+export * from "./domain/vaults/remote-provider-runtime";
+export * from "./domain/vaults/provider-sync";
 export * from "./workflow-wake-contract";
+export * from "./user-presence";
+export * from "./product-usage-metrics";
 
 // Boundary type slots referenced by dependencies.ts. The IMPLEMENTATIONS that
 // construct these (the real sandbox client / Better Auth instance) stay in
@@ -41,12 +65,17 @@ export * from "./workflow-wake-contract";
 // structural TYPES live here.
 export * from "./sandbox-types";
 export * from "./managed-auth-type";
+export { siteMayAccessSession, withConsoleSiteSessionAccess } from "./site-session-access";
 export {
   getManagedAuthRequestActorAbortSignal,
   getManagedAuthRequestActorAdmissionStamp,
   getManagedAuthRequestActorEpoch,
   getManagedAuthRequestActorLeaseStamp,
   getManagedSession,
+  getNativeAppManagedSession,
+  NATIVE_APP_CREDENTIAL_PREFIX,
+  recordManagedAuthLoggedFailure,
+  withManagedAuthSessionLookup,
   configureManagedUserAdmission,
   assertManagedUserAdmission,
   ManagedAuthActorLeaseOutcomeUnknownError,
@@ -57,14 +86,24 @@ export {
   type ManagedAuthActorMutationLeaseStamp,
 } from "./managed-session";
 export * from "./transcription";
+export * from "./recording-transcription";
+export * from "./xai-operation-availability";
+export * from "./recording-transcription-azure";
 export * from "./model-catalog";
+export * from "./model-provider-credentials";
+export * from "./side-feature-availability";
+export * from "./side-feature-routes";
+export * from "./goal-admission";
 export * from "./codex-model-availability";
 export * from "./default-session-model";
 
 // Sandbox fleet/routing service — the closure of `domain/sessions.ts`
 // (`swapActiveSandbox` + `FleetContext`). apps/api re-imports these for its MCP
 // fleet tools, the machines REST route, and the rest of the sandbox layer.
+export * from "./sandbox/compute-plane";
+export * from "./sandbox/output-release";
 export * from "./sandbox/fleet";
+export * from "./sandbox/agent-background-commands";
 export * from "./sandbox/routing";
 export * from "./sandbox/runtime-settings";
 
@@ -77,25 +116,42 @@ export * from "./application/session-mcp-credential-rotation";
 export * from "./application/external-link-work-admission";
 export * from "./application/connect-authority";
 export * from "./application/connect-operation";
+export * from "./application/prepared-mcp-connection";
 export * from "./session-authorization";
 
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).
 export * from "./billing/limits";
+export * from "./domain/browser-retained-downloads";
+export * from "./billing/agent-run-admission";
+export * from "./billing/model-usage-settlement";
+export * from "./billing/byok-platform-fee";
+export * from "./billing/model-call-admission";
+export * from "./model-call";
 
 // Domain layer — the off-HTTP V2 surface (createSessionForRequest,
 
 // scheduled-task/workspace-member logic, …).
 export * from "./domain/capabilities";
+export * from "./domain/mcp-credential-content-flow";
+export * from "./domain/organization-connectors";
+export * from "./domain/mcp-auto-connect";
 export * from "./domain/native-mcp-connection-admission";
 export * from "./domain/skill-imports";
 export * from "./domain/skill-search";
 export * from "./domain/github-skill-source";
-export * from "./domain/environments";
+export * from "./domain/encryption-key";
+export * from "./domain/vaults";
+export * from "./domain/credential-profiles";
 export * from "./rigs";
-export * from "./domain/automations";
-export * from "./domain/pr-review";
+export * from "./domain/event-triggers";
 
 export * from "./domain/personal-connection-delegations";
+export * from "./domain/personal-github-repository-access";
+export * from "./domain/connections-needing-reconnect";
+export {
+  listApiIntegrationsWithPersonalExtension,
+  type PersonalWorkspaceExtensionApiIntegration,
+} from "./domain/personal-workspace-connectors";
 export * from "./domain/resources";
 export * from "./domain/github-repository-bindings";
 export * from "./domain/github-action-policies";
@@ -103,8 +159,21 @@ export * from "./domain/session-tool-policy";
 export * from "./domain/agent-config-resolution";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/scheduled-task-access";
+export * from "./domain/scheduled-task-account-audit";
+export * from "./domain/scheduled-task-audience";
+export * from "./domain/automation-templates";
+export * from "./domain/agents";
+export * from "./domain/agent-memory";
+export * from "./domain/bot-templates";
+export * from "./domain/site-audience";
+export * from "./domain/project-audience";
+export * from "./domain/file-audience";
 export * from "./domain/sessions";
+export { UNATTENDED_REQUEST_GOAL } from "./domain/unattended-request-goal";
+export * from "./domain/session-resource-removal";
+export * from "./domain/session-repository-attach";
 export * from "./domain/insights";
+export * from "./domain/insights-usage";
 export * from "./domain/memory-slack-publication";
 export * from "./domain/memory-slack-delivery";
 export * from "./domain/governed-learning-slack-publication";
@@ -115,16 +184,21 @@ export * from "./domain/slack-bot";
 export * from "./domain/conversation-integrations";
 export * from "./domain/fiken";
 export * from "./domain/workspace-members";
+export * from "./domain/member-execution-defaults";
 export * from "./domain/video-generation";
 export * from "./domain/video-generation-capabilities";
 export * from "./domain/organization-membership-lifecycle";
 export * from "./application/new-session-drafts";
 export * from "./application/composer-submit";
 export * from "./application/session-commands";
+export * from "./application/site-session-cancellation";
 export * from "./application/archived-session-imports";
 export * from "./application/session-tenancy";
+export * from "./application/organization-privacy";
+export * from "./application/session-share-links";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
+export * from "./application/admission-release";
 export * from "./application/api-integration-servers";
 
 // Durable editable-artifact live broker, ticket, ports, and projection types.
@@ -132,10 +206,37 @@ export * from "./editable-artifact-live";
 
 // Transport-neutral editable-artifact domain service, ports, and contracts.
 export * from "./editable-artifacts";
-export { withSiteSessionOrigin } from "./site-session-origin";
-export { resolveTurnSurface } from "./turn-surface";
+export {
+  currentSiteSessionOrigin,
+  siteOriginsMatch,
+  siteSessionOriginFromMetadata,
+  withSiteOriginMetadata,
+  withSiteSessionOrigin,
+  type SiteSessionOrigin,
+} from "./site-session-origin";
 
-export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";
+export {
+  currentHostSessionUsageLimit,
+  withHostSessionUsageLimit,
+  type HostSessionUsageLimit,
+} from "./host-session-usage-limit";
+export { resolveTurnSurface } from "./turn-surface";
+export {
+  billingOriginForGrant,
+  configureBillingLegacyAccounts,
+  fundedBillingOrigin,
+  requestBillingOrigin,
+  resolveTurnBillingOrigin,
+  stampRequestBillingOrigin,
+} from "./billing-origin";
+export { turnAppActionGrant } from "./app-action-turn-grant";
+
+export {
+  agentPrivateFileOwnerSubjectId,
+  fileOwnerContextForAccess,
+  fileOwnerContextForAgent,
+  inProcessFileOwnerContext,
+} from "./domain/file-owner";
 
 export { prepareKnowledgeFile } from "./domain/knowledge-files";
 export { prepareKnowledgeSave } from "./domain/knowledge-preparation";
@@ -143,3 +244,5 @@ export { prepareKnowledgeSave } from "./domain/knowledge-preparation";
 export { retainKnowledgeMessage } from "./domain/knowledge-messages";
 
 export * from "./domain/connector-tool-permissions";
+export * from "./session-usage-limits";
+export * from "./session-usage-limit-metrics";

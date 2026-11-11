@@ -2,12 +2,14 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import {
   claimRetainedScreenshotMaintenance,
   withSessionRlsActorContext,
+  ensureManagedAccessForUser,
   getFile,
   claimSessionWorkForAttempt,
   completeRetainedScreenshotMaintenance,
   createDb,
   createSession,
   getRetainedScreenshotArtifact,
+  getSessionRetainedScreenshotArtifacts,
   getWorkspaceScreenshotQuota,
   initializeSessionStartAtomically,
   prepareRetainedScreenshotArtifact,
@@ -16,19 +18,25 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { ObjectBodyIncompleteError, type ObjectHead, type ObjectStorage } from "@opengeni/storage";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   createRetainedScreenshotMaintenanceActivities,
   type RetainedScreenshotMaintenanceActivityOptions,
 } from "../src/activities/retained-screenshot-reaper";
 import {
+  compactRetainedScreenshotHistory,
+  inlineImagesFromToolResultItem,
   materializeRetainedScreenshotHistory,
+  RETAINED_SCREENSHOT_INCOMPLETE_READ_RETRY_DELAYS_MS,
+  RETAINED_SCREENSHOT_READ_CONCURRENCY,
   retainComputerScreenshot,
   retainSessionScreenshot,
   validateComputerScreenshot,
 } from "../src/activities/retained-screenshots";
+import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
+import { RetainedAttachmentUnavailableError } from "../src/activities/retained-image-unavailable";
 import type { ActivityServices } from "../src/activities/types";
 
 const PNG = Uint8Array.from(
@@ -149,10 +157,47 @@ async function freshWorkspace(): Promise<WorkspaceFixture> {
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
-async function freshTurn(): Promise<TurnFixture> {
-  const workspace = await freshWorkspace();
+async function freshPrivateWorkspace(): Promise<WorkspaceFixture & { owner: string }> {
+  const ownerUserId = `screenshot-private-${crypto.randomUUID()}`;
+  const access = await ensureManagedAccessForUser(db, {
+    userId: ownerUserId,
+    email: `${ownerUserId}@example.test`,
+    name: "Private chat owner",
+  });
+  const grant = access.workspaceGrants.find(
+    (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+  );
+  if (!grant) throw new Error("private chat owner has no workspace grant");
+  await admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${grant.accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'retained-screenshot-test')`;
+  await admin`
+    insert into organization_private_session_settings (
+      account_id, enabled, version, updated_by_membership_id
+    ) values (${grant.accountId}, true, 1, null)
+    on conflict (account_id) do update set enabled = true`;
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    owner: `user:${ownerUserId}`,
+  };
+}
+
+async function freshTurn(privateChat = false): Promise<TurnFixture> {
+  const privateWorkspace = privateChat ? await freshPrivateWorkspace() : null;
+  const workspace = privateWorkspace
+    ? { accountId: privateWorkspace.accountId, workspaceId: privateWorkspace.workspaceId }
+    : await freshWorkspace();
   const session = await createSession(db, {
     ...workspace,
+    ...(privateWorkspace
+      ? ({
+          createdBy: { kind: "subject", subjectId: privateWorkspace.owner },
+          subjectId: privateWorkspace.owner,
+          visibility: "user_private",
+        } as never)
+      : {}),
     initialMessage: "retain this screenshot",
     resources: [],
     metadata: {},
@@ -510,6 +555,44 @@ describe("retained screenshot lifecycle fences", () => {
     });
   }, 180_000);
 
+  test("expiry reaps a screenshot from another member's private session", async () => {
+    if (!available) return;
+    const fixture = await freshTurn(true);
+    const memory = storageFixture();
+    const prepared = await prepareArtifact(fixture, memory.storage, {
+      expiresAt: new Date(Date.now() - 1_000),
+    });
+    await memory.storage.putObject({
+      key: prepared.objectKey,
+      contentType: "image/png",
+      body: PNG,
+      sha256: SCREENSHOT.sha256,
+    });
+    await settleRetainedScreenshotArtifactReady(db, {
+      ...fixture,
+      artifactId: prepared.artifactId,
+      settlementKey: prepared.settlementKey,
+    });
+    // A private chat is invisible to any other acting subject, including a
+    // service subject; maintenance must still settle its expiry.
+    const [session] = await admin<Array<{ visibility: string }>>`
+      select visibility from sessions where id = ${fixture.sessionId}`;
+    expect(session?.visibility).toBe("user_private");
+    const maintenance = maintenanceActivity(memory.storage);
+    const result = await maintenance.maintainRetainedScreenshots();
+    expect(maintenance.warnings).toEqual([]);
+    expect(result).toMatchObject({ deleted: 1, retryable: 0 });
+    expect(await artifactRow(prepared.artifactId)).toMatchObject({
+      status: "expired",
+      quotaState: "released",
+      maintenanceClaimId: null,
+    });
+    expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
+      reservedBytes: 0,
+      readyBytes: 0,
+    });
+  }, 180_000);
+
   test("mismatched reconciliation cannot delete after a concurrent ready settlement wins", async () => {
     if (!available) return;
     const fixture = await freshTurn();
@@ -744,6 +827,105 @@ describe("retained screenshot lifecycle fences", () => {
     });
   }, 180_000);
 
+  test("any tool's images are stored once and reach the model with the same pixels", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const pngData = Buffer.from(PNG).toString("base64");
+    const resultItem = {
+      type: "function_call_result",
+      id: "output-integration",
+      callId: "call-integration",
+      output: {
+        content: [
+          { type: "text", text: "captured" },
+          { type: "image", data: pngData, mimeType: "image/png" },
+          { type: "image", data: "not-an-image", mimeType: "image/png" },
+          { type: "image", data: pngData, mimeType: "image/png" },
+        ],
+      },
+    };
+    const receipts = [];
+    for (const image of inlineImagesFromToolResultItem(resultItem)) {
+      const receipt = image
+        ? await retainSessionScreenshot({
+            db,
+            objectStorage: memory.storage,
+            ...fixture,
+            output: image,
+            retentionMs: 60_000,
+            workspaceQuotaBytes: 1024 * 1024,
+          })
+        : null;
+      receipts.push(receipt?.available ? receipt : null);
+    }
+    expect(receipts.map((receipt) => receipt !== null)).toEqual([true, false, true]);
+    expect(receipts[0]!.artifactId).not.toBe(receipts[2]!.artifactId);
+    expect(memory.objects.size).toBe(2);
+
+    const [durable] = compactRetainedScreenshotHistory(
+      [resultItem],
+      new Map([["call-integration", receipts]]),
+    );
+    expect(JSON.stringify(durable)).not.toContain(pngData);
+    const [materialized] = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: [durable!],
+    });
+    expect((materialized!.output as { content: unknown[] }).content).toEqual([
+      { type: "text", text: "captured" },
+      { type: "input_image", image: `data:image/png;base64,${pngData}` },
+      { type: "image", data: "not-an-image", mimeType: "image/png" },
+      { type: "input_image", image: `data:image/png;base64,${pngData}` },
+    ]);
+  }, 180_000);
+
+  test("an integration result stored as SDK content round-trips to the identical model input", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const resultItem = {
+      name: "mcp_server__capture",
+      type: "function_call_result",
+      callId: "call-sdk-content",
+      output: [
+        { text: '{"width":1,"height":1}', type: "input_text" },
+        {
+          type: "input_image",
+          image: `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`,
+        },
+      ],
+    };
+    const [image] = inlineImagesFromToolResultItem(resultItem);
+    expect(image).toMatchObject({ callId: "call-sdk-content", toolOutputId: "call-sdk-content" });
+    const receipt = await retainSessionScreenshot({
+      db,
+      objectStorage: memory.storage,
+      ...fixture,
+      output: image!,
+      retentionMs: 60_000,
+      workspaceQuotaBytes: 1024 * 1024,
+    });
+    expect(receipt.available).toBe(true);
+    const [durable] = compactRetainedScreenshotHistory(
+      [resultItem],
+      new Map([["call-sdk-content", [receipt]]]),
+    );
+    expect(JSON.stringify(durable)).not.toContain("base64");
+    const [materialized] = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: [durable!],
+    });
+    // Same item, same key order, same bytes: the provider request is unchanged.
+    expect(JSON.stringify(materialized)).toBe(JSON.stringify(resultItem));
+  }, 180_000);
+
   test("materialize re-resolves a sticky unavailable receipt from a ready artifact", async () => {
     if (!available) return;
     const fixture = await freshTurn();
@@ -787,6 +969,131 @@ describe("retained screenshot lifecycle fences", () => {
     const output = history[0]?.output;
     expect(typeof output).toBe("string");
     expect(String(output).startsWith("data:image/png;base64,")).toBeTrue();
+  }, 180_000);
+
+  test("a shared session withholds another member's private screenshot with a neutral receipt", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const asMember = <T>(subjectId: string, fn: () => Promise<T>) =>
+      withSessionRlsActorContext({ subjectId, privateFileOwnerSubjectId: subjectId }, fn);
+    const owner = "user:screenshot-owner";
+    const participant = "user:shared-session-participant";
+    const prepared = await asMember(owner, () => prepareArtifact(fixture, memory.storage));
+    await memory.storage.putObject({
+      key: prepared.objectKey,
+      contentType: "image/png",
+      body: PNG,
+      sha256: SCREENSHOT.sha256,
+    });
+    await asMember(owner, () =>
+      settleRetainedScreenshotArtifactReady(db, {
+        ...fixture,
+        artifactId: prepared.artifactId,
+        settlementKey: prepared.settlementKey,
+      }),
+    );
+    const marker = (artifactId: string) => ({
+      type: "retained_artifact",
+      artifact: { available: false, artifactId, reason: "pending" },
+    });
+    const history = (artifactId: string, legacyToolCallId?: string) => [
+      { type: "function_call_result", callId: "call-direct", output: marker(artifactId) },
+      {
+        type: "function_call_result",
+        callId: "call-content",
+        output: [
+          { type: "input_text", text: "Image viewed" },
+          { type: "input_image", image: marker(artifactId) },
+        ],
+      },
+      {
+        type: "function_call_result",
+        callId: "call-result-content",
+        output: { content: [{ type: "input_image", image: marker(artifactId) }] },
+      },
+      ...(legacyToolCallId
+        ? [
+            {
+              // Older canonical history could truncate the receipt fields.
+              type: "function_call_result",
+              callId: legacyToolCallId,
+              output: [
+                {
+                  type: "input_image",
+                  image: {
+                    type: "retained_artifact",
+                    artifact: {
+                      available: false,
+                      artifactId: "[omitted text field 1 ...]",
+                      reason: "[omitted text field 2 ...]",
+                    },
+                  },
+                },
+              ],
+            },
+          ]
+        : []),
+    ];
+    const legacyToolCallId = `call-${prepared.artifactId}`;
+    const materialize = (artifactId: string, now?: Date, legacy?: string) =>
+      materializeRetainedScreenshotHistory({
+        db,
+        objectStorage: memory.storage,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        history: history(artifactId, legacy),
+        ...(now ? { now } : {}),
+      });
+
+    // The owner still receives the pixels.
+    const own = await asMember(owner, () =>
+      materialize(prepared.artifactId, undefined, legacyToolCallId),
+    );
+    expect(String(own[0]?.output).startsWith("data:image/png;base64,")).toBeTrue();
+    const ownLegacy = own[3]?.output;
+    if (!Array.isArray(ownLegacy)) throw new Error("expected recovered content array");
+    expect(
+      String((ownLegacy[0] as { image?: string }).image).startsWith("data:image/png"),
+    ).toBeTrue();
+
+    // Another participant's turn proceeds with a neutral receipt and no bytes.
+    const participantView = await asMember(participant, () =>
+      materialize(prepared.artifactId, undefined, legacyToolCallId),
+    );
+    const direct = String(participantView[0]?.output);
+    expect(direct).toContain(prepared.artifactId);
+    expect(direct).toContain("not available to the current requester");
+    expect(direct).not.toContain("deleted");
+    expect(direct).not.toContain("download_url");
+    expect(direct).not.toContain("base64");
+    expect(participantView[1]?.output).toEqual([
+      { type: "input_text", text: "Image viewed" },
+      { type: "input_text", text: direct },
+    ]);
+    expect(participantView[2]?.output).toEqual({ content: [{ type: "input_text", text: direct }] });
+    expect(participantView[3]?.output).toEqual([{ type: "input_text", text: direct }]);
+    // The authority boundary is unchanged.
+    expect(
+      await asMember(participant, () => getFile(db, fixture.workspaceId, prepared.artifactId)),
+    ).toBeNull();
+
+    // A screenshot that is no longer retained projects as the same neutral
+    // receipt for every requester instead of failing the turn.
+    const afterExpiry = new Date(Date.now() + 120_000);
+    const ownExpired = await asMember(owner, () => materialize(prepared.artifactId, afterExpiry));
+    expect(ownExpired[0]?.output).toBe(direct);
+    expect(ownExpired[2]?.output).toEqual({ content: [{ type: "input_text", text: direct }] });
+    const participantExpired = await asMember(participant, () =>
+      materialize(prepared.artifactId, afterExpiry),
+    );
+    expect(participantExpired[0]?.output).toBe(direct);
+    const neverRetainedId = crypto.randomUUID();
+    const neverRetained = await asMember(participant, () => materialize(neverRetainedId));
+    expect(String(neverRetained[0]?.output)).toBe(
+      direct.replace(prepared.artifactId, neverRetainedId),
+    );
+    expect(String(neverRetained[0]?.output)).not.toContain("base64");
   }, 180_000);
 
   test("recovers a truncated screenshot receipt by exact session and tool call", async () => {
@@ -840,15 +1147,114 @@ describe("retained screenshot lifecycle fences", () => {
     expect(
       String((recoveredOutput[1] as { image?: string }).image).startsWith("data:image/png;base64,"),
     ).toBeTrue();
-    await expect(
-      materializeRetainedScreenshotHistory({
+    // Another session cannot recover it: a neutral receipt, never the image.
+    const unrecovered = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: other.workspaceId,
+      sessionId: other.sessionId,
+      history: corruptedHistory,
+    });
+    const unrecoveredOutput = unrecovered[0]?.output;
+    if (!Array.isArray(unrecoveredOutput)) throw new Error("expected content array");
+    expect(unrecoveredOutput[1]).toEqual({
+      type: "input_text",
+      text: expect.stringContaining("not available to the current requester"),
+    });
+    expect(JSON.stringify(unrecoveredOutput)).not.toContain("base64");
+  }, 180_000);
+
+  test("claims that keep failing never starve fresh expiry work", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const expired = async (expiresAt: Date) => {
+      const prepared = await prepareArtifact(fixture, memory.storage, { expiresAt });
+      await memory.storage.putObject({
+        key: prepared.objectKey,
+        contentType: "image/png",
+        body: PNG,
+        sha256: SCREENSHOT.sha256,
+      });
+      await settleRetainedScreenshotArtifactReady(db, {
+        ...fixture,
+        artifactId: prepared.artifactId,
+        settlementKey: prepared.settlementKey,
+      });
+      return prepared.artifactId;
+    };
+    const stuck = [
+      await expired(new Date("2000-01-01T00:00:00Z")),
+      await expired(new Date("2000-01-02T00:00:00Z")),
+    ];
+    const fresh = await expired(new Date(Date.now() - 1_000));
+    const claim = async () =>
+      (
+        await claimRetainedScreenshotMaintenance(db, {
+          pendingGraceMs: 0,
+          claimTimeoutMs: 0,
+          limit: 2,
+        })
+      ).map((row) => row.artifactId);
+    // The oldest-expiring images are claimed first and their completion never lands.
+    expect((await claim()).sort()).toEqual([...stuck].sort());
+    // Their timed-out claims are reclaimed only after fresh work.
+    const next = await claim();
+    expect(next[0]).toBe(fresh);
+    expect(stuck).toContain(next[1]!);
+  }, 180_000);
+
+  test("a full quota stores the newest image by evicting the oldest", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const retain = (callId: string, retentionMs: number) =>
+      retainComputerScreenshot({
         db,
         objectStorage: memory.storage,
-        workspaceId: other.workspaceId,
-        sessionId: other.sessionId,
-        history: corruptedHistory,
-      }),
-    ).rejects.toThrow("cannot be recovered");
+        ...fixture,
+        output: { callId, toolOutputId: callId, bytes: PNG, mediaType: "image/png" },
+        retentionMs,
+        workspaceQuotaBytes: 2 * PNG.byteLength,
+      });
+    const oldest = await retain("call-oldest", 60_000);
+    const middle = await retain("call-middle", 120_000);
+    const newest = await retain("call-newest", 180_000);
+    expect([oldest.available, middle.available, newest.available]).toEqual([true, true, true]);
+    expect(await artifactRow(oldest.artifactId)).toMatchObject({
+      status: "cleanup_queued",
+      quotaState: "ready",
+      cleanupReason: "evicted",
+    });
+    expect(await artifactRow(middle.artifactId)).toMatchObject({ status: "ready" });
+    // Bytes queued for cleanup count as free; the quota counter follows the sweep.
+    const activity = maintenanceActivity(memory.storage);
+    expect(await activity.maintainRetainedScreenshots()).toMatchObject({
+      claimed: 1,
+      deleted: 1,
+      retryable: 0,
+    });
+    expect(await artifactRow(oldest.artifactId)).toBeNull();
+    expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
+      reservedBytes: 0,
+      readyBytes: 2 * PNG.byteLength,
+    });
+    // An image larger than the whole quota is still refused, and nothing is evicted for it.
+    const tooLarge = await retainComputerScreenshot({
+      db,
+      objectStorage: memory.storage,
+      ...fixture,
+      output: {
+        callId: "call-too-large",
+        toolOutputId: "call-too-large",
+        bytes: PNG,
+        mediaType: "image/png",
+      },
+      retentionMs: 60_000,
+      workspaceQuotaBytes: PNG.byteLength - 1,
+    });
+    expect(tooLarge).toMatchObject({ available: false, reason: "quota_exceeded" });
+    expect(await artifactRow(middle.artifactId)).toMatchObject({ status: "ready" });
   }, 180_000);
 
   test("FORCE-RLS denies cross-workspace rows while the fixed SECURITY DEFINER claim sees both", async () => {
@@ -920,4 +1326,281 @@ describe("retained screenshot lifecycle fences", () => {
       new Set([firstArtifact.artifactId, secondArtifact.artifactId]),
     );
   }, 180_000);
+
+  test("a history's images load with one row query and concurrent reads, each image once", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const receipts = await retainScreenshots(fixture, memory.storage, 4);
+    const history = [
+      ...receipts.map((receipt, index) => retainedOutputItem(`call-batch-${index}`, receipt)),
+      // The same image again later in the history is read once.
+      retainedOutputItem("call-batch-0-again", receipts[0]!),
+    ];
+
+    const reads: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const slowStorage: ObjectStorage = {
+      ...memory.storage,
+      async getObjectBytes(key) {
+        reads.push(key);
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        // Hold each read briefly so overlapping reads are observable.
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        inFlight -= 1;
+        return await memory.storage.getObjectBytes(key);
+      },
+    };
+    const materialized = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: slowStorage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history,
+    });
+
+    const pixels = `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`;
+    expect(materialized.map((item) => item.output)).toEqual(history.map(() => pixels));
+    expect(materialized.map((item) => item.callId)).toEqual(history.map((item) => item.callId));
+    expect(reads).toHaveLength(4);
+    expect(new Set(reads).size).toBe(4);
+    expect(maxInFlight).toBe(Math.min(4, RETAINED_SCREENSHOT_READ_CONCURRENCY));
+  }, 180_000);
+
+  test("a storage error while loading history images fails the turn as a storage condition so it retries", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const receipts = await retainScreenshots(fixture, memory.storage, 3);
+    let calls = 0;
+    const refused = Object.assign(new Error("storage temporarily unavailable"), {
+      code: "ECONNRESET",
+    });
+    const failingStorage: ObjectStorage = {
+      ...memory.storage,
+      async getObjectBytes(key) {
+        calls += 1;
+        if (calls === 2) throw refused;
+        return await memory.storage.getObjectBytes(key);
+      },
+    };
+    const failure = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: failingStorage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: receipts.map((receipt, index) => retainedOutputItem(`call-fail-${index}`, receipt)),
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(RetainedAttachmentUnavailableError);
+    expect((failure as Error).cause).toBe(refused);
+    // A connection reset from storage is never reported as the model provider failing.
+    expect(agentRunFailurePayload(failure)).toMatchObject({
+      code: "retained_attachment_unavailable",
+      retryable: true,
+    });
+  }, 180_000);
+
+  test("an image whose stored bytes never arrive intact becomes the neutral receipt instead of failing every turn", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const receipts = await retainScreenshots(fixture, memory.storage, 3);
+    const lost = await getRetainedScreenshotArtifact(
+      db,
+      fixture.workspaceId,
+      fixture.sessionId,
+      receipts[1]!.artifactId,
+    );
+    const lostKey = lost!.file.objectKey;
+    let lostReads = 0;
+    // The store still lists the object but lost its data: every read fails mid-body.
+    const damagedStorage: ObjectStorage = {
+      ...memory.storage,
+      async getObjectBytes(key) {
+        if (key !== lostKey) return await memory.storage.getObjectBytes(key);
+        lostReads += 1;
+        throw new ObjectBodyIncompleteError(key, {
+          cause: Object.assign(new Error("aborted"), { code: "ECONNRESET" }),
+        });
+      },
+    };
+    const history = receipts.map((receipt, index) =>
+      retainedOutputItem(`call-lost-${index}`, receipt),
+    );
+    const materialized = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: damagedStorage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history,
+    });
+
+    const pixels = `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`;
+    expect(materialized[0]!.output).toBe(pixels);
+    expect(materialized[2]!.output).toBe(pixels);
+    expect(materialized[1]!.output).toEqual(
+      expect.stringContaining(`Image: retained artifactId=${receipts[1]!.artifactId}`),
+    );
+    expect(String(materialized[1]!.output)).not.toContain("base64");
+    expect(materialized.map((item) => item.callId)).toEqual(history.map((item) => item.callId));
+    expect(lostReads).toBe(RETAINED_SCREENSHOT_INCOMPLETE_READ_RETRY_DELAYS_MS.length + 1);
+  }, 180_000);
+
+  test("a body that fails once and then reads intact keeps the image", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const [receipt] = await retainScreenshots(fixture, memory.storage, 1);
+    let reads = 0;
+    const flakyStorage: ObjectStorage = {
+      ...memory.storage,
+      async getObjectBytes(key) {
+        reads += 1;
+        if (reads === 1) throw new ObjectBodyIncompleteError(key);
+        return await memory.storage.getObjectBytes(key);
+      },
+    };
+    const [materialized] = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: flakyStorage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: [retainedOutputItem("call-flaky", receipt!)],
+    });
+    expect(materialized!.output).toBe(
+      `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`,
+    );
+    expect(reads).toBe(2);
+  }, 180_000);
+
+  test("the batched row query returns only this session's own screenshots", async () => {
+    if (!available) return;
+    const first = await freshTurn();
+    const second = await freshTurn();
+    const memory = storageFixture();
+    const [own] = await retainScreenshots(first, memory.storage, 1);
+    const [other] = await retainScreenshots(second, memory.storage, 1);
+    const missing = crypto.randomUUID();
+
+    const rows = await getSessionRetainedScreenshotArtifacts(
+      db,
+      first.workspaceId,
+      first.sessionId,
+      [own!.artifactId, other!.artifactId, missing, own!.artifactId],
+    );
+    expect([...rows.keys()]).toEqual([own!.artifactId]);
+    expect(rows.get(own!.artifactId)).toEqual(
+      (await getRetainedScreenshotArtifact(
+        db,
+        first.workspaceId,
+        first.sessionId,
+        own!.artifactId,
+      ))!,
+    );
+    expect(
+      (
+        await getSessionRetainedScreenshotArtifacts(db, first.workspaceId, crypto.randomUUID(), [
+          own!.artifactId,
+        ])
+      ).size,
+    ).toBe(0);
+    expect(
+      (await getSessionRetainedScreenshotArtifacts(db, first.workspaceId, first.sessionId, []))
+        .size,
+    ).toBe(0);
+  }, 180_000);
+
+  test("a fork's inherited screenshot still loads through the per-image lineage proof", async () => {
+    if (!available) return;
+    const parent = await freshTurn();
+    const memory = storageFixture();
+    const [inherited] = await retainScreenshots(parent, memory.storage, 1);
+    const fork = await createSession(db, {
+      accountId: parent.accountId,
+      workspaceId: parent.workspaceId,
+      initialMessage: "forked",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const item = retainedOutputItem("call-inherited", inherited!);
+    // What a fork records: its ancestry and the copied receipt in its history.
+    // Ancestry is fixed at creation, so the fixture sets it past the fence;
+    // the lineage proof reads only the ancestry and the copied receipt.
+    await admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        update sessions
+        set forked_from_session_id = ${parent.sessionId},
+            forked_from_authority_epoch = 1,
+            forked_from_visibility = 'workspace_shared',
+            forked_at = now(),
+            forked_by_organization_membership_id = ${crypto.randomUUID()}
+        where id = ${fork.id}`;
+    });
+    await admin`insert into session_history_items (account_id, workspace_id, session_id, turn_id, position, item)
+      values (${parent.accountId}, ${parent.workspaceId}, ${fork.id}, null, 0, ${admin.json(item)})`;
+
+    expect(
+      (
+        await getSessionRetainedScreenshotArtifacts(db, parent.workspaceId, fork.id, [
+          inherited!.artifactId,
+        ])
+      ).size,
+    ).toBe(0);
+    const [materialized] = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: parent.workspaceId,
+      sessionId: fork.id,
+      history: [item],
+    });
+    expect(materialized!.output).toBe(
+      `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`,
+    );
+  }, 180_000);
 });
+
+type AvailableReceipt = Extract<
+  Awaited<ReturnType<typeof retainComputerScreenshot>>,
+  { available: true }
+>;
+
+async function retainScreenshots(
+  fixture: TurnFixture,
+  storage: ObjectStorage,
+  count: number,
+): Promise<AvailableReceipt[]> {
+  const receipts: AvailableReceipt[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const receipt = await retainComputerScreenshot({
+      db,
+      objectStorage: storage,
+      ...fixture,
+      output: {
+        callId: `call-retain-${index}-${crypto.randomUUID()}`,
+        toolOutputId: `output-retain-${index}`,
+        bytes: PNG,
+        mediaType: "image/png",
+      },
+      retentionMs: 60_000,
+      workspaceQuotaBytes: 1024 * 1024,
+    });
+    if (!receipt.available) throw new Error("retain must succeed");
+    receipts.push(receipt);
+  }
+  return receipts;
+}
+
+function retainedOutputItem(callId: string, receipt: AvailableReceipt) {
+  return {
+    type: "function_call_output",
+    callId,
+    output: { type: "retained_artifact", artifact: receipt },
+  };
+}

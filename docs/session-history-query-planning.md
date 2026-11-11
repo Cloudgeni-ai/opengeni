@@ -29,3 +29,20 @@ multiple sessions and tenants. It checks bounded index work rather than elapsed
 time, plus exact payloads, forward/backward cursors and cross-workspace denial.
 PostgreSQL remains free to choose plans for other data distributions; the
 statistics are not an index hint or an unconditional latency guarantee.
+
+Migration 0916 adds a concurrent partial index on workspace, session, turn and
+position for rows with a turn. The existing indexes, including the turn-only
+ordered index from 0899, remain unchanged. With many small turns
+and a few large sessions, the actual parameterized receipt-identity query could
+choose an intersection that scanned the whole session index before sorting the
+current turn. The scope-aligned index supplies one ordered access path for all
+three equality predicates, without changing the query or RLS policies.
+
+The regression captures the production helper's generated SQL, including its
+parameterized limit, under the restricted application role. It checks custom
+and generic plans with many background sessions, small and large target turns,
+fractional positions, inactive rows, cursor pages, and foreign-scope denial.
+First pages visit only their requested rows in this fixture. Later pages can
+still filter a numeric cursor above the RLS barrier; no deep-cursor scan bound
+or universal planner guarantee is claimed. The optional benchmark reports
+index storage and insertion cost as well as read plans.

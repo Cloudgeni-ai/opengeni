@@ -3,7 +3,8 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 describe("rich chat media entry", () => {
@@ -54,6 +55,18 @@ describe("rich chat media entry", () => {
         viewport: scroller.clientHeight,
       };
     });
+  }
+
+  // Each fixture row holds an inline visual (row % 3 === 0), a saved Site
+  // (row % 3 === 1) or an image (row % 3 === 2).
+  async function rows(page: Page) {
+    return page.evaluate(() =>
+      [...document.querySelectorAll<HTMLElement>("[data-media-row]")].map((row) => ({
+        row: Number(row.dataset.mediaRow),
+        height: row.getBoundingClientRect().height,
+        frameHeight: row.querySelector("iframe")?.getBoundingClientRect().height ?? null,
+      })),
+    );
   }
   for (const width of [1280, 390]) {
     test(`delayed media preserves the initial tip and offscreen work stays deferred at ${width}px`, async () => {
@@ -127,7 +140,7 @@ describe("rich chat media entry", () => {
       await scroller.hover({ position: { x: 5, y: 40 } });
       await page.mouse.wheel(0, -2200);
       await page.getByRole("button", { name: "Jump to latest" }).waitFor();
-      const before = await geometry(page);
+      const before = await rows(page);
       const samples = await page.evaluate(async () => {
         const node = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
         const top = node.scrollTop;
@@ -141,7 +154,19 @@ describe("rich chat media entry", () => {
         return delta;
       });
       expect(samples).toBeLessThanOrEqual(2);
-      expect(Math.abs((await geometry(page)).height - before.height)).toBeLessThanOrEqual(2);
+      // Delayed Sites and images reserve their space, so loading them moves
+      // nothing. Inline visuals size to their content up to 640 px, so the
+      // fixture's late-growing visual may push the rows below it down while
+      // the reading position itself stays put.
+      const after = await rows(page);
+      for (const row of after) {
+        const previous = before.find((candidate) => candidate.row === row.row)!;
+        if (row.row % 3 === 0) {
+          if (row.frameHeight !== null) expect(row.frameHeight).toBeLessThanOrEqual(640);
+        } else {
+          expect(Math.abs(row.height - previous.height)).toBeLessThanOrEqual(2);
+        }
+      }
       await page.getByRole("button", { name: "Jump to latest" }).click();
       const siteRow = page.locator('[data-media-row="16"]');
       const site = siteRow.frameLocator("iframe");

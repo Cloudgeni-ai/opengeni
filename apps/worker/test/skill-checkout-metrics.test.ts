@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { recordSkillCheckout } from "../src/observability-metrics";
 
 function sample(metrics: string, name: string, labels: Record<string, string>): number | null {

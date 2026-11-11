@@ -26,6 +26,8 @@ export type {
   KnowledgeEntryBatchReviewRequest,
   KnowledgeEntryRestoreRequest,
   KnowledgeEntryWriteReceipt,
+  KnowledgeEntryReach,
+  KnowledgeEntryReachRecord,
   KnowledgeEntryListRequest,
   KnowledgeEntryListResponse,
   KnowledgeReviewBatch,

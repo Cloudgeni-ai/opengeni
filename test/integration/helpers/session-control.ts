@@ -48,7 +48,6 @@ export async function submitTestHumanPrompt(
         controlEtag: input.controlEtag ?? null,
         text: input.text,
         resources: input.resources,
-        tools: input.tools,
         model: input.model ?? null,
         reasoningEffort: input.reasoningEffort ?? null,
         reasoningEffortFallback: input.reasoningEffortFallback,

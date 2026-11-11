@@ -1,5 +1,5 @@
 import { setStartupDetails } from "../src/timeline/startup-preference";
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { EMPTY_FINAL_REPLY_NOTICE, type SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush, actRun } from "./render-hook";
@@ -14,6 +14,9 @@ import type {
   ToolRegistry,
   TimelineItem,
 } from "../src/timeline";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 /* ----------------------------------------------------------------------------
    Renderer integration tests for Issue-2 (multi-file apply_patch count) and
@@ -24,7 +27,21 @@ import type {
    the right words given the dispatch logic lives in JSX.
    -------------------------------------------------------------------------- */
 
-registerDom();
+registerDom({ clock: "virtual" });
+
+// The timeline's lazy rows load with real I/O, but this file runs on the
+// virtual clock, where Date.now(), performance.now() and even Bun.nanoseconds()
+// advance with every flush. A wait for a row is therefore a budget of flush
+// steps, which a loaded runner can spend in a few real milliseconds before a
+// cold import finishes. Load the modules once up front so no render waits on I/O.
+beforeAll(async () => {
+  await Promise.all([
+    import("../src/timeline/fleet-decision-row"),
+    import("../src/timeline/platform-activity-row"),
+    import("../src/components/timeline-annotation-selection"),
+    import("../src/components/timeline-annotation-markers"),
+  ]);
+});
 
 // Radix chooses its layout-effect implementation at import time. Load the real
 // renderers only after the DOM exists so close/open assertions test browser
@@ -56,12 +73,50 @@ test("account-qualified native and Codemode calls render persisted labels after 
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain(
-      "Search documents — Documents — Workspace: Team inbox",
-    );
+    expect(r.container.textContent).toContain("Search documents");
+    expect(r.container.textContent).not.toContain("Workspace: Team inbox");
     expect(r.container.textContent).not.toContain(name);
     await r.unmount();
   }
+});
+
+test("connector tool rows show the connector's logo and a short label", async () => {
+  const name = "b".repeat(64);
+  const events = [
+    timelineEvent("agent.toolCall.created", {
+      id: "call-logo",
+      name,
+      arguments: {},
+      display: {
+        toolName: "list_issues",
+        connector: "Issues",
+        providerDomain: "issues.example.test",
+      },
+    }),
+    timelineEvent("agent.toolCall.output", { id: "call-logo", output: "done" }),
+  ];
+  const withLogo = await renderComponent(
+    <MessageTimeline
+      events={events}
+      resolveProviderLogo={(domain) =>
+        domain === "issues.example.test" ? "/logos/issues.svg" : null
+      }
+    />,
+  );
+  await flush();
+  const logo = withLogo.container.querySelector<HTMLImageElement>("img[data-og-connector-logo]");
+  expect(logo?.getAttribute("src")).toBe("/logos/issues.svg");
+  expect(withLogo.container.textContent).toContain("List issues");
+  expect(withLogo.container.textContent).not.toContain("Issues —");
+  await withLogo.unmount();
+
+  // Without a logo the row keeps its ordinary icon; nothing is drawn in its place.
+  const withoutLogo = await renderComponent(<MessageTimeline events={events} />);
+  await flush();
+  expect(withoutLogo.container.querySelector("img[data-og-connector-logo]")).toBeNull();
+  expect(withoutLogo.container.querySelector("svg")).not.toBeNull();
+  expect(withoutLogo.container.textContent).toContain("List issues");
+  await withoutLogo.unmount();
 });
 
 let timelineSequence = 0;
@@ -98,8 +153,8 @@ function timelineEvent(
 }
 
 async function fleetDecisionDisclosure(container: HTMLElement): Promise<HTMLElement> {
-  const deadline = performance.now() + 5_000;
-  while (performance.now() < deadline) {
+  // Virtual time (see the preload above): 500 flush steps, not five real seconds.
+  for (let step = 0; step < 500; step += 1) {
     const disclosure = Array.from(
       container.querySelectorAll<HTMLElement>('[role="button"][aria-expanded]'),
     ).find((candidate) => candidate.textContent?.includes("Fleet policy shadow"));
@@ -107,7 +162,7 @@ async function fleetDecisionDisclosure(container: HTMLElement): Promise<HTMLElem
     await flush(10);
   }
 
-  throw new Error("Fleet policy shadow disclosure did not load within 5 seconds");
+  throw new Error("Fleet policy shadow disclosure did not render within 500 flush steps");
 }
 
 describe("allowance refusal rendering", () => {
@@ -136,7 +191,7 @@ describe("allowance refusal rendering", () => {
           ? "An organization admin can raise the workspace budget."
           : "A workspace admin can raise this limit.",
       );
-      expect(text).toContain(`Resets ${formatAllowanceDate(refusal.resetsAt)}.`);
+      expect(text).toContain(`Resets ${formatAllowanceDate(englishText, refusal.resetsAt)}.`);
       expect(r.container.querySelectorAll("[data-og-allowance-exhausted]")).toHaveLength(1);
       expect(r.container.querySelector("[data-og-allowance-exhausted]")?.getAttribute("role")).toBe(
         "status",
@@ -211,9 +266,302 @@ describe("context compaction rendering", () => {
     );
     await r.unmount();
   });
+
+  test("rebuilding a Codex chat for another model reads as one short note", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.message", { text: "Now write the backfill script." }),
+          timelineEvent("session.context.compaction.started", {
+            trigger: "auto",
+            implementation: "portable_model_switch",
+          }),
+          timelineEvent("session.context.compacted", {
+            trigger: "auto",
+            implementation: "portable_model_switch",
+            estimatedTokensBefore: 59_471,
+            estimatedTokensAfter: 2_858,
+          }),
+          timelineEvent("turn.started", {}),
+          timelineEvent("agent.message.completed", { text: "Here is the script." }),
+          timelineEvent("turn.completed", { output: "Here is the script." }),
+        ]}
+      />,
+    );
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Earlier messages summarized for the new model");
+    // One note only: no compaction headline and no "compacted" turn facet.
+    expect(text).not.toMatch(/compacted/i);
+    expect(text).not.toContain("estimated history tokens");
+    expect(text).not.toContain("Auto");
+    await r.unmount();
+  });
+
+  test("a provider-rejected compaction stays short and keeps diagnostics behind Details", async () => {
+    const recorded =
+      "compaction summarization failed: 400 Missing required parameter: 'input[116].status'.";
+    const r = await renderComponent(
+      <MessageTimeline
+        turnSummary={{ rolling: true }}
+        events={[
+          timelineEvent("user.message", { text: "Continue" }, null),
+          timelineEvent("turn.started", {}),
+          timelineEvent("turn.startup.phase.started", { phase: "model_preparation" }),
+          timelineEvent("session.context.compaction.started", { trigger: "auto" }),
+          timelineEvent("session.context.compaction.skipped", {
+            trigger: "auto",
+            reason: "summarization_failed",
+            providerRejection: {
+              httpStatus: 400,
+              type: "invalid_request_error",
+              code: "missing_required_parameter",
+              param: "input[116].status",
+              requestId: "req_7f3a",
+            },
+          }),
+          timelineEvent("turn.startup.phase.failed", {
+            phase: "model_preparation",
+            durationMs: 4_000,
+            expectedTransition: false,
+          }),
+          timelineEvent("turn.failed", {
+            error: recorded,
+            code: "context_compaction_failed",
+            retryable: false,
+            recovery: "user_message",
+            compacted: false,
+          }),
+        ]}
+        status="failed"
+      />,
+    );
+    try {
+      await flush();
+      const status = Array.from(r.container.querySelectorAll<HTMLElement>('[role="status"]')).find(
+        (element) => element.textContent?.includes("Couldn’t compact conversation history"),
+      );
+      expect(status?.textContent).toContain("Couldn’t compact conversation history · Auto");
+      expect(status?.textContent).toContain(
+        "Chat history is unchanged. If your next message fails too, start a new session.",
+      );
+      // One failure, one Details control: no separate notice repeats it.
+      expect(
+        Array.from(r.container.querySelectorAll("button, summary")).filter(
+          (control) => control.textContent?.trim() === "Details",
+        ),
+      ).toHaveLength(1);
+      // No raw provider text or identifiers in the visible summary.
+      const panel = r.container.querySelector<HTMLElement>("[data-og-compaction-details]");
+      expect(panel?.hidden).toBe(true);
+      expect(status?.textContent).not.toContain("input[116].status");
+      expect(status?.textContent).not.toContain("HTTP 400");
+      // The turn chip names the outcome; the recorded text is only a hover title.
+      const reason = Array.from(r.container.querySelectorAll<HTMLElement>("[title]")).find(
+        (element) => element.title === recorded,
+      );
+      expect(reason?.textContent).toContain("Couldn’t compact conversation history");
+      expect(r.container.textContent).not.toContain("Missing required parameter");
+
+      const toggle = Array.from(status?.querySelectorAll("button") ?? []).find(
+        (button) => button.textContent === "Details",
+      );
+      expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+      expect(toggle?.getAttribute("aria-controls")).toBe(panel?.id ?? "missing");
+      await act(async () => toggle?.click());
+      await flush();
+      expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+      expect(panel?.hidden).toBe(false);
+      expect(panel?.textContent).toContain(
+        "HTTP 400 · invalid_request_error · missing_required_parameter",
+      );
+      expect(panel?.textContent).toContain("input[116].status");
+      expect(panel?.textContent).toContain("req_7f3a");
+      expect(panel?.textContent).toContain("rejects this request the same way");
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("a checkpoint that trimmed history reads as a recovery, with the provider's reason behind Details", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        turnSummary={{ rolling: true }}
+        events={[
+          timelineEvent("user.message", { text: "Continue" }, null),
+          timelineEvent("session.context.compaction.started", { trigger: "auto" }),
+          timelineEvent("session.context.compacted", {
+            trigger: "auto",
+            implementation: "deterministic_trim",
+            estimatedTokensBefore: 240_000,
+            estimatedTokensAfter: 9_000,
+            fallback: {
+              reason: "provider_rejected",
+              providerRejection: {
+                httpStatus: 400,
+                type: "invalid_request_error",
+                code: null,
+                param: null,
+                requestId: "req_trim",
+              },
+              providerMessage: "max_tokens exceeds the limit",
+            },
+          }),
+        ]}
+      />,
+    );
+    try {
+      await flush();
+      const status = Array.from(r.container.querySelectorAll<HTMLElement>('[role="status"]')).find(
+        (element) => element.textContent?.includes("Older messages trimmed"),
+      );
+      expect(status?.textContent).toContain("Older messages trimmed · Auto");
+      expect(status?.textContent).toContain(
+        "The model couldn’t summarize them. Chat history above is unchanged.",
+      );
+      expect(status?.textContent).not.toContain("Couldn’t compact");
+      expect(status?.className).not.toContain("status-failed");
+      const panel = r.container.querySelector<HTMLElement>("[data-og-compaction-details]");
+      expect(panel?.hidden).toBe(true);
+      expect(status?.textContent).not.toContain("max_tokens exceeds the limit");
+      const toggle = Array.from(status?.querySelectorAll("button") ?? []).find(
+        (button) => button.textContent === "Details",
+      );
+      await act(async () => toggle?.click());
+      await flush();
+      expect(panel?.hidden).toBe(false);
+      expect(panel?.textContent).toContain("HTTP 400 · invalid_request_error");
+      expect(panel?.textContent).toContain("req_trim");
+      expect(panel?.textContent).toContain("max_tokens exceeds the limit");
+      expect(panel?.textContent).not.toContain("rejects this request the same way");
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("a compaction cut short by worker shutdown reads as interrupted, not failed", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.message", { text: "Continue" }, null),
+          timelineEvent("turn.started", {}),
+          timelineEvent("session.context.compaction.started", {
+            trigger: "proactive",
+            implementation: "responses_compaction_v2",
+            estimatedTokensBefore: 291_549,
+          }),
+          timelineEvent("session.context.compaction.skipped", { reason: "interrupted" }),
+          timelineEvent("turn.recovery.requested", { reason: "worker_shutdown" }),
+        ]}
+        status="recovering"
+      />,
+    );
+    try {
+      await flush();
+      const status = Array.from(r.container.querySelectorAll<HTMLElement>('[role="status"]')).find(
+        (element) => element.textContent?.includes("Compaction interrupted"),
+      );
+      expect(status?.textContent).toContain("Compaction interrupted · Auto");
+      expect(status?.textContent).toContain(
+        "It will retry if still needed. Chat history is unchanged.",
+      );
+      expect(status?.className).not.toContain("og-status-failed");
+      expect(r.container.textContent).not.toContain("Couldn’t compact conversation history");
+      expect(r.container.querySelector("[data-og-compaction-details]")).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
 });
 
 describe("structured human-input history", () => {
+  test("an answered question keeps its link clickable and wrapped inside the card", async () => {
+    timelineSequence = 0;
+    const url = `https://example.com/oauth/authorize?client_id=${"x".repeat(120)}&scope=a+b`;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("session.humanInput.requested", {
+            request: {
+              id: "request-link",
+              questions: [
+                {
+                  id: "code",
+                  kind: "text",
+                  label: "Sign-in code",
+                  prompt: `Open this link and approve: ${url}. Then paste the code.`,
+                  options: [],
+                },
+              ],
+            },
+          }),
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-link",
+            response: { outcome: "answered", answers: [{ questionId: "code", values: ["ok"] }] },
+          }),
+          timelineEvent("turn.completed", {}),
+        ]}
+      />,
+    );
+    await flush();
+    try {
+      const history = r.container.querySelector('[data-human-input-history="request-link"]');
+      const anchor = history?.querySelector<HTMLAnchorElement>(`a[href="${url}"]`);
+      expect(anchor).not.toBeNull();
+      expect(anchor?.getAttribute("target")).toBe("_blank");
+      expect(anchor?.parentElement?.className).toContain("[overflow-wrap:anywhere]");
+      expect(history?.textContent).toContain(`${url}. Then paste the code.`);
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("an answered question renders its Markdown prompt like a chat reply", async () => {
+    timelineSequence = 0;
+    const fileId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+    const r = await renderComponent(
+      <MessageTimeline
+        resolveLink={(target) =>
+          target.kind === "file" ? { href: `/files/${target.fileId}` } : null
+        }
+        events={[
+          timelineEvent("session.humanInput.requested", {
+            request: {
+              id: "request-markdown",
+              questions: [
+                {
+                  id: "dish",
+                  kind: "text",
+                  prompt: `Is the **soup** in [the cookbook](artifact:${fileId}) or \`notes.md\`? [x](javascript:alert(1))`,
+                  options: [],
+                },
+              ],
+            },
+          }),
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-markdown",
+            response: { outcome: "answered", answers: [{ questionId: "dish", values: ["ok"] }] },
+          }),
+          timelineEvent("turn.completed", {}),
+        ]}
+      />,
+    );
+    await flush();
+    try {
+      const history = r.container.querySelector('[data-human-input-history="request-markdown"]');
+      expect(history?.querySelector("strong")?.textContent).toBe("soup");
+      expect(history?.querySelector("code")?.textContent).toBe("notes.md");
+      const anchors = [...(history?.querySelectorAll<HTMLAnchorElement>("a") ?? [])];
+      expect(anchors.map((anchor) => [anchor.textContent, anchor.getAttribute("href")])).toEqual([
+        ["the cookbook", `/files/${fileId}`],
+      ]);
+      expect(history?.textContent).not.toContain("](");
+      expect(history?.textContent).not.toContain("**");
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("keeps an answered request visible outside the collapsed steps", async () => {
     timelineSequence = 0;
     const r = await renderComponent(
@@ -287,6 +635,212 @@ describe("structured human-input history", () => {
     const steps = turnSummaryTrigger(r.container);
     expect(steps).toBeNull();
     expect(r.container.querySelector('[data-human-input-history="request-1"]')).not.toBeNull();
+    await r.unmount();
+  });
+
+  // A sub-session whose question was answered by its parent agent (or a
+  // person): the real readable turn the app renders.
+  function subSessionQuestionEvents(respondedByKind?: string, outcome = "answered") {
+    const questions = [
+      {
+        id: "base",
+        kind: "single_select",
+        label: "Target branch",
+        prompt: "The fix also applies to the release branch. Where should it land?",
+        options: [
+          { id: "main", label: "main only" },
+          { id: "both", label: "main and release/2026.10" },
+        ],
+      },
+    ];
+    return [
+      timelineEvent("user.message", { text: "Review PR #4418 and land the fix." }, null),
+      timelineEvent("turn.started", {}),
+      timelineEvent("agent.message.completed", {
+        messageId: "m1",
+        text: "The fix is correct. Which branches should it land on?",
+      }),
+      timelineEvent("agent.toolCall.created", {
+        id: "ask-1",
+        name: "request_human_input",
+        arguments: { questions },
+      }),
+      timelineEvent("session.humanInput.requested", {
+        request: { id: "review-base", toolCallId: "ask-1", questions },
+      }),
+      timelineEvent("user.humanInputResponse", {
+        requestId: "review-base",
+        ...(respondedByKind ? { respondedByKind } : {}),
+        response:
+          outcome === "answered"
+            ? { outcome, answers: [{ questionId: "base", values: ["both"] }] }
+            : { outcome },
+      }),
+      timelineEvent("agent.toolCall.output", {
+        id: "ask-1",
+        output: JSON.stringify({ requestId: "review-base", outcome }),
+      }),
+      timelineEvent("agent.message.completed", {
+        messageId: "m2",
+        text: "Landing it on main and release/2026.10.",
+      }),
+      timelineEvent("turn.completed", {}),
+    ];
+  }
+
+  test("folds a question the parent agent answered into the turn's work, off the person's side", async () => {
+    timelineSequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("agent_attempt")}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    await flush();
+    try {
+      // Collapsed: only the conversation and the "Worked for" row.
+      expect(r.container.querySelector("[data-human-input-history]")).toBeNull();
+      const text = r.container.textContent ?? "";
+      expect(text).not.toContain("Agent answered");
+      expect(text).not.toContain("You answered");
+      expect(text).not.toContain("Agent asked");
+      expect(text).toContain("Landing it on main and release/2026.10.");
+
+      const work = turnSummaryTrigger(r.container);
+      expect(work).not.toBeNull();
+      await act(async () => work!.click());
+      await flush();
+
+      // Expanded work: one quiet row, "Asked  Target branch → main and release/2026.10".
+      const row = r.container.querySelector<HTMLElement>(
+        '[data-og-agent-answered][data-human-input-history="review-base"]',
+      );
+      expect(row).not.toBeNull();
+      expect(row!.textContent).toContain("Asked");
+      expect(row!.textContent).toContain("Target branch → main and release/2026.10");
+      expect(row!.textContent).not.toContain("Agent answered");
+      // Not a user message: no bubble or right-aligned answer anywhere.
+      expect(row!.querySelector(".justify-end")).toBeNull();
+
+      // Opening the row keeps every detail: the question, who answered, the answer.
+      const toggle = row!.querySelector<HTMLElement>('[role="button"]');
+      await act(async () => {
+        toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+      const details = row!.textContent ?? "";
+      expect(details).toContain("Target branch");
+      expect(details).toContain(
+        "The fix also applies to the release branch. Where should it land?",
+      );
+      expect(details).toContain("Agent answered");
+      expect(details).toContain("main and release/2026.10");
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("a question a person answered keeps its card and answer bubble in the conversation", async () => {
+    for (const respondedByKind of ["human", "api", undefined]) {
+      timelineSequence = 0;
+      const r = await renderComponent(
+        <MessageTimeline
+          events={subSessionQuestionEvents(respondedByKind)}
+          turnSummary={{ rolling: true }}
+        />,
+      );
+      await flush();
+      try {
+        const history = r.container.querySelector<HTMLElement>(
+          '[data-human-input-history="review-base"]',
+        );
+        expect(history).not.toBeNull();
+        expect(history!.hasAttribute("data-og-agent-answered")).toBe(false);
+        expect(history!.textContent).toContain("Agent asked");
+        expect(history!.textContent).toContain("You answered");
+        expect(history!.textContent).toContain("main and release/2026.10");
+        expect(history!.querySelector(".justify-end")).not.toBeNull();
+      } finally {
+        await r.unmount();
+      }
+    }
+  });
+
+  test("an agent's skip is quiet work; a system skip or an expired question stays visible", async () => {
+    timelineSequence = 0;
+    let r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("agent_attempt", "skipped")}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector("[data-human-input-history]")).toBeNull();
+    await act(async () => turnSummaryTrigger(r.container)!.click());
+    await flush();
+    const skippedRow = r.container.querySelector("[data-og-agent-answered]");
+    expect(skippedRow?.textContent).toContain("Target branch → Skipped");
+    await act(async () => {
+      skippedRow!
+        .querySelector<HTMLElement>('[role="button"]')!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(skippedRow?.textContent).toContain("Agent skipped");
+    await r.unmount();
+
+    // The system settles a question only when a scheduled run's question went
+    // unanswered in time: the person must still see that card.
+    timelineSequence = 0;
+    r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("system", "skipped")}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    await flush();
+    const systemSkipped = r.container.querySelector('[data-human-input-history="review-base"]');
+    expect(systemSkipped).not.toBeNull();
+    expect(systemSkipped?.hasAttribute("data-og-agent-answered")).toBe(false);
+    expect(systemSkipped?.textContent).toContain("Skipped");
+    await r.unmount();
+
+    timelineSequence = 0;
+    r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("system", "expired")}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    await flush();
+    const expired = r.container.querySelector('[data-human-input-history="review-base"]');
+    expect(expired?.hasAttribute("data-og-agent-answered")).toBe(false);
+    expect(expired?.textContent).toContain("Expired");
+    await r.unmount();
+  });
+
+  test("outside readable turns an agent's answer is still a quiet row", async () => {
+    timelineSequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-agent",
+            respondedByKind: "agent_attempt",
+            response: {
+              outcome: "answered",
+              answers: [{ questionId: "region", values: ["eu-north"] }],
+            },
+          }),
+        ]}
+      />,
+    );
+    await flush();
+
+    const row = r.container.querySelector('[data-human-input-history="request-agent"]');
+    expect(row?.hasAttribute("data-og-agent-answered")).toBe(true);
+    expect(row?.textContent).toContain("Region → eu-north");
+    expect(row?.textContent).not.toContain("You answered");
     await r.unmount();
   });
 
@@ -525,9 +1079,9 @@ describe("durable machine-input timeline", () => {
     await flush();
     expect(r.container.textContent).toContain("3 agent results received");
     expect(r.container.textContent).not.toContain("agents finished");
-    const links = [...r.container.querySelectorAll("button")].filter(
-      (button) => button.textContent === "View session",
-    );
+    const links = [
+      ...r.container.querySelectorAll<HTMLButtonElement>('button[aria-label="Open agent session"]'),
+    ];
     expect(links).toHaveLength(2);
     await act(async () => {
       links[0]?.click();
@@ -578,9 +1132,125 @@ describe("durable machine-input timeline", () => {
     expect(details).not.toBeNull();
     expect(details?.open).toBe(false);
     // Detail rows stay in the DOM for expand-on-demand audit.
-    expect(r.container.textContent).toContain("verification-agent");
     expect(r.container.textContent).toContain("Cache verification completed.");
     expect(r.container.textContent).toContain("Agent result received");
+    await r.unmount();
+  });
+
+  test("names the sending agent, deep-links it, and keeps its words behind the pill", async () => {
+    resetTimelineEvents();
+    const agentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const opened: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        onOpenSession={(id) => opened.push(id)}
+        resolveSessionTitle={(id) => (id === agentId ? "Release audit" : null)}
+        events={[
+          timelineEvent("system.update.delivered", {
+            members: [
+              {
+                id: "update-1",
+                kind: "agent_message",
+                classification: "info",
+                sourceId: agentId,
+                summary: "Two breaking changes so far.",
+              },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    const pill = r.container.querySelector("details[data-og-machine-input-batch] summary");
+    expect(pill?.textContent).toBe("Update from Release audit");
+    // No loose summary under the collapsed pill; the text sits in the named row.
+    const batch = r.container.querySelector("details[data-og-machine-input-batch]")!;
+    expect(batch.nextElementSibling).toBeNull();
+    const row = batch.querySelector("[data-og-agent-row]")!;
+    expect(row.textContent).toContain("Update from Release audit");
+    expect(row.textContent).toContain("Two breaking changes so far.");
+    const open = row.querySelector<HTMLButtonElement>('button[aria-label="Open Release audit"]');
+    await actRun(() => open?.click());
+    expect(opened).toEqual([agentId]);
+    await r.unmount();
+  });
+
+  test("folds repeated progress notes from one agent into its latest note", async () => {
+    resetTimelineEvents();
+    const agentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const r = await renderComponent(
+      <MessageTimeline
+        resolveSessionTitle={() => "Checkout flake"}
+        events={[
+          timelineEvent("system.update.delivered", {
+            members: ["Reproduced locally.", "Root cause found.", "Fix pushed."].map(
+              (note, index) => ({
+                id: `progress-${index}`,
+                kind: "child_progress",
+                classification: "info",
+                sourceId: agentId,
+                summary: `Worker ${agentId} progress: ${note}`,
+              }),
+            ),
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    const batch = r.container.querySelector("details[data-og-machine-input-batch]")!;
+    expect(batch.querySelector("summary")?.textContent).toBe("3 updates from Checkout flake");
+    const rows = batch.querySelectorAll("[data-og-agent-row]");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.textContent).toContain("Progress from Checkout flake");
+    expect(rows[0]!.textContent).toContain("+2 earlier");
+    expect(rows[0]!.querySelector("[data-og-agent-preview]")?.textContent).toBe("Fix pushed.");
+    expect(r.container.textContent).not.toContain(agentId);
+    await actRun(() => rows[0]!.querySelector<HTMLElement>("[role=button]")?.click());
+    expect(rows[0]!.textContent).toContain("Reproduced locally.");
+    expect(rows[0]!.textContent).toContain("Root cause found.");
+    await r.unmount();
+  });
+
+  test("spawn and message rows name the agent from the spawn title", async () => {
+    resetTimelineEvents();
+    const agentId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const opened: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        onOpenSession={(id) => opened.push(id)}
+        events={[
+          timelineEvent("agent.toolCall.created", {
+            id: "call-spawn",
+            name: "opengeni__session_create",
+            arguments: { title: "API audit", initialMessage: "Diff the public SDK surface." },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "call-spawn",
+            output: { structuredContent: { sessionId: agentId, status: "queued" } },
+          }),
+          timelineEvent("agent.toolCall.created", {
+            id: "call-message",
+            name: "opengeni__session_send_message",
+            arguments: { sessionId: agentId, text: "Include webhooks too." },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "call-message",
+            output: { structuredContent: { sessionId: agentId } },
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Spawned API audit");
+    expect(text).toContain("Messaged API audit");
+    expect(text).toContain("Include webhooks too.");
+    const links = r.container.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="Open API audit"]',
+    );
+    expect(links).toHaveLength(2);
+    await actRun(() => links[1]?.click());
+    expect(opened).toEqual([agentId]);
     await r.unmount();
   });
 
@@ -642,9 +1312,7 @@ function timelineEventAt(
 }
 
 function turnSummaryTriggers(container: HTMLElement): HTMLButtonElement[] {
-  return Array.from(container.querySelectorAll("button")).filter((button) =>
-    /\d+ steps?/.test(button.textContent ?? ""),
-  );
+  return Array.from(container.querySelectorAll<HTMLButtonElement>("button[data-og-work-header]"));
 }
 
 function turnSummaryTrigger(container: HTMLElement): HTMLButtonElement | null {
@@ -794,6 +1462,73 @@ describe("published file presentation", () => {
       },
     };
   }
+
+  test("a published patch stays visible and copies one command to apply it", async () => {
+    resetTimelineEvents();
+    const requests: Array<string | undefined> = [];
+    const copied: string[] = [];
+    const clipboardItem = (globalThis as { ClipboardItem?: unknown }).ClipboardItem;
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    (globalThis as { ClipboardItem?: unknown }).ClipboardItem = undefined;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text: string) => void copied.push(text) },
+    });
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.message", { text: "Implement it from my zip" }),
+          timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+          timelineEvent("agent.toolCall.created", {
+            id: "published-patch",
+            name: "opengeni__sandbox_file_publish",
+            arguments: { path: "/workspace/changes.patch" },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "published-patch",
+            output: {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(receipt("application/octet-stream", "changes.patch")),
+                },
+              ],
+            },
+          }),
+          timelineEvent("agent.message.completed", { text: "Here is your patch." }),
+          timelineEvent("turn.completed", {}),
+        ]}
+        loadRetainedArtifact={async (_artifact, _signal, options) => {
+          requests.push(options?.prefer);
+          return {
+            url: "https://objects.example/changes.patch?sig=a'b",
+            expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+          };
+        }}
+      />,
+    );
+    try {
+      await flush();
+      expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+      expect(r.container.textContent).toContain("Published changes.patch");
+      const button = [...r.container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent === "Copy command to apply these changes",
+      );
+      expect(button).toBeDefined();
+      await act(async () => button!.click());
+      await flush();
+      expect(requests).toEqual(["url"]);
+      expect(copied).toEqual([
+        "curl -fsSL 'https://objects.example/changes.patch?sig=a'\\''b' | git apply",
+      ]);
+      expect(r.container.textContent).toContain("The link in it expires in 5 minutes.");
+    } finally {
+      await r.unmount();
+      (globalThis as { ClipboardItem?: unknown }).ClipboardItem = clipboardItem;
+      if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+      else delete (navigator as { clipboard?: unknown }).clipboard;
+    }
+  });
 
   test("published images are visible after a settled turn without filesystem access", async () => {
     resetTimelineEvents();
@@ -1366,7 +2101,10 @@ describe("timeline renderer isolation", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("Message not sent");
+    expect(r.container.querySelector('[role="status"]')?.textContent).toContain(
+      "Gateway unavailable",
+    );
+    expect(r.container.querySelector('[role="status"] [title]')).toBeNull();
     expect(r.container.querySelector('[role="status"]')?.className).toContain(
       "text-og-status-failed",
     );
@@ -1380,6 +2118,43 @@ describe("timeline renderer isolation", () => {
       remove?.click();
     });
     expect({ retries, removals }).toEqual({ retries: 1, removals: 1 });
+    await r.unmount();
+  });
+
+  test("renders a credit refusal inline with Edit message instead of Retry", async () => {
+    let edits = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        items={[
+          {
+            kind: "user-message",
+            id: "credit-refused-message",
+            text: "Keep the original message",
+            resources: [],
+            tools: [],
+            occurredAt: new Date(0).toISOString(),
+            delivery: {
+              state: "failed",
+              error:
+                "Your organization has no Opengeni credits left. Add credits before sending again.",
+              onEdit: () => {
+                edits += 1;
+              },
+            },
+          },
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector('[role="status"]')?.textContent).toContain(
+      "no Opengeni credits left",
+    );
+    const buttons = [...r.container.querySelectorAll("button")];
+    expect(buttons.find((button) => button.textContent === "Retry")).toBeUndefined();
+    const edit = buttons.find((button) => button.textContent === "Edit message");
+    expect(edit).toBeDefined();
+    await act(async () => edit?.click());
+    expect(edits).toBe(1);
     await r.unmount();
   });
 
@@ -1424,11 +2199,13 @@ describe("timeline renderer isolation", () => {
 
       const text = r.container.textContent ?? "";
       expect(text).toContain("Message before the broken renderer");
-      expect(text).toContain("Timeline item unavailable");
+      // Only the broken row is replaced; its work group still renders.
+      expect(text).toContain("Consumer tool with missing renderer · couldn't be displayed");
       expect(text).toContain("Message after the broken renderer");
+      expect(r.container.querySelectorAll('[data-testid="tool-row-render-error"]')).toHaveLength(1);
       expect(
         r.container.querySelectorAll('[data-testid="timeline-group-render-error"]'),
-      ).toHaveLength(1);
+      ).toHaveLength(0);
 
       await r.rerender(<MessageTimeline items={items} toolRegistry={defaultToolRegistry} />);
       await flush();
@@ -1440,6 +2217,7 @@ describe("timeline renderer isolation", () => {
       expect(
         r.container.querySelectorAll('[data-testid="timeline-group-render-error"]'),
       ).toHaveLength(0);
+      expect(r.container.querySelectorAll('[data-testid="tool-row-render-error"]')).toHaveLength(0);
 
       await r.unmount();
     } finally {
@@ -1571,6 +2349,30 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
 }
 
 describe("TimelineRow — connection recovery", () => {
+  test("unconfigured computer offers never turn event URLs or variables into a terminal setup fallback", async () => {
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          authoritySource: "host",
+          authorizationUrl: "https://example.test/install?command=curl",
+          capability: {
+            id: "api:connected-machine",
+            name: "Connected Machine",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Use my computer",
+            requiredVariables: ["OPENGENI_ENROLL_TOKEN"],
+          },
+        })}
+      />,
+    );
+    expect(r.container.textContent).toContain("This app hasn't enabled computer setup here");
+    expect(r.container.querySelector("a")).toBeNull();
+    expect(r.container.textContent).not.toContain("OPENGENI_ENROLL_TOKEN");
+    await r.unmount();
+  });
+
   test("lets the authenticated host render setup inline and preserves the fallback", async () => {
     const row = authNeededItem();
     const custom = await renderComponent(
@@ -1623,6 +2425,41 @@ describe("TimelineRow — connection recovery", () => {
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(selected).toBe("api:github-app");
+    await r.unmount();
+  });
+
+  test("an agent's request to connect a new account offers to connect, never to reconnect", async () => {
+    // The stock conversation's fallback row for an agent's catalog request
+    // (for example in an embedded chat that cannot show the connect card).
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          source: "capability",
+          reason: "expired",
+          providerDomain: "calendar.example.com",
+          capability: {
+            id: "mcp:example-calendar",
+            name: "Example Calendar",
+            kind: "mcp",
+            source: "library",
+            action: "connect",
+            rationale: "To read your calendar for this week.",
+            requiredVariables: [],
+          },
+        })}
+        onReconnect={() => {}}
+      />,
+    );
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Connect Example Calendar");
+    expect(text).toContain("No access has been granted");
+    expect(text).not.toMatch(/reconnect/i);
+    expect(
+      [...r.container.querySelectorAll("button")].some(
+        (button) => button.textContent?.trim() === "Connect",
+      ),
+    ).toBe(true);
     await r.unmount();
   });
 
@@ -1848,8 +2685,8 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(r.container.textContent).not.toContain("Narration: one fixture needs a quick patch.");
 
     const trigger = turnSummaryTrigger(r.container);
-    expect(trigger?.textContent).toContain("2 steps");
-    expect(trigger?.textContent).toContain("2 commands");
+    // Duration only: steps and commands are not counted.
+    expect(trigger?.textContent).toBe("6s");
     await act(async () => {
       trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
@@ -1864,7 +2701,7 @@ describe("MessageTimeline — settled turn folding", () => {
       afterExpand[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
-    expect(r.container.textContent).toContain("bun test");
+    expect(r.container.textContent).toContain("Ran tests");
 
     await r.unmount();
   });
@@ -1907,7 +2744,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
     expect(r.container.textContent).toContain("Waiting: child still running");
-    expect(r.container.textContent).toContain("Wait for input");
+    expect(r.container.textContent).toContain("Waited");
 
     await r.unmount();
   });
@@ -2045,7 +2882,7 @@ describe("MessageTimeline — settled turn folding", () => {
 
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(visibleOutcome?.isConnected).toBe(true);
-    expect(r.container.textContent).toContain("Wait for input");
+    expect(r.container.textContent).toContain("Waited");
 
     await r.unmount();
   });
@@ -2190,7 +3027,35 @@ describe("MessageTimeline — settled turn folding", () => {
 
     const trigger = turnSummaryTrigger(r.container);
     expect(trigger?.getAttribute("data-state")).toBe("open");
-    expect(trigger?.textContent).toContain("provider down");
+    // Unclassified text is a diagnostic: the chip names the outcome and keeps
+    // the recorded text as its hover title, never as visible chip text.
+    expect(trigger?.textContent).toContain("The turn stopped unexpectedly");
+    expect(trigger?.textContent).not.toContain("provider down");
+    expect(trigger?.querySelector('[title="provider down"]')).not.toBeNull();
+
+    await r.unmount();
+  });
+
+  test("copy written for people stays on the failed summary chip", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Deploy preview" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "helm upgrade preview ./chart" },
+      }),
+      timelineEvent("turn.failed", {
+        code: "mcp_server_unavailable",
+        error: "The GitHub connection is unavailable.",
+      }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.textContent).toContain("The GitHub connection is unavailable.");
+    expect(trigger?.querySelector("[title]")).toBeNull();
 
     await r.unmount();
   });
@@ -2202,7 +3067,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
@@ -2210,7 +3075,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two" },
+        arguments: { cmd: "cat step-two.md" },
       }),
     ];
     const r = await renderComponent(<MessageTimeline events={events} status="running" />);
@@ -2228,9 +3093,9 @@ describe("MessageTimeline — settled turn folding", () => {
     // Settled activity stays neutral even while a later cluster is running.
     expect(settled?.querySelector(".animate-og-pulse")).toBeNull();
     // The live tail stays expanded: its command is visible without expanding.
-    expect(r.container.textContent).toContain("step two");
+    expect(r.container.textContent).toContain("step-two.md");
     // The folded cluster's contents are NOT in the DOM until expanded.
-    expect(r.container.textContent).not.toContain("step one");
+    expect(r.container.textContent).not.toContain("step-one.md");
 
     await r.unmount();
   });
@@ -2242,7 +3107,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "terraform apply" },
+        arguments: { cmd: "cat deploy-plan.txt" },
       }),
       timelineEvent("session.requiresAction", {}),
     ];
@@ -2255,8 +3120,32 @@ describe("MessageTimeline — settled turn folding", () => {
     const triggers = turnSummaryTriggers(r.container);
     expect(triggers).toHaveLength(1);
     expect(triggers[0]?.getAttribute("data-state")).toBe("open");
-    expect(r.container.textContent).toContain("terraform apply");
+    expect(r.container.textContent).toContain("deploy-plan.txt");
     expect(r.container.textContent).toContain("Approval needed");
+
+    await r.unmount();
+  });
+
+  test("readable turns carry a live approval wait in the header, not a second banner", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Deploy it" }),
+      timelineEvent("turn.started", {}),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "cat deploy-plan.txt" },
+      }),
+      timelineEvent("session.requiresAction", {}),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline events={events} status="requires_action" turnSummary={{ rolling: true }} />,
+    );
+    await flush();
+
+    // The host's approval surface is the one place to decide.
+    expect(r.container.textContent).toContain("Waiting for you");
+    expect(r.container.textContent).not.toContain("Approval needed");
 
     await r.unmount();
   });
@@ -2268,7 +3157,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
@@ -2277,7 +3166,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two running" },
+        arguments: { cmd: "cat step-two-running.md" },
       }),
       // The queued follow-up remains exclusively in the prompt queue. Its
       // absence from the timeline must not make the live cluster fold.
@@ -2295,7 +3184,7 @@ describe("MessageTimeline — settled turn folding", () => {
     const triggers = turnSummaryTriggers(r.container);
     expect(triggers).toHaveLength(2);
     expect(triggers.some((node) => node.getAttribute("data-state") === "open")).toBe(true);
-    expect(r.container.textContent).toContain("step two running");
+    expect(r.container.textContent).toContain("step-two-running.md");
     expect(r.container.textContent).not.toContain("queued follow-up");
 
     await r.unmount();
@@ -2308,7 +3197,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
@@ -2316,7 +3205,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two" },
+        arguments: { cmd: "cat step-two.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
       timelineEvent("agent.message.completed", { text: "All finished." }),
@@ -2343,14 +3232,14 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.completed", { text: "Mid-turn checkpoint" }),
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two" },
+        arguments: { cmd: "cat step-two.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
       timelineEvent("agent.message.completed", { text: "All finished." }),
@@ -2376,7 +3265,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(triggers).toHaveLength(3);
     expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "open")).toBe(true);
     expect(r.container.textContent).toContain("Mid-turn checkpoint");
-    expect(r.container.textContent).toContain("step one");
+    expect(r.container.textContent).toContain("step-one.md");
 
     // The outer fold closes after its beat but remains in settle choreography
     // through the slow collapse. Assert that durable state on the trigger, not
@@ -2403,7 +3292,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(expanded).toHaveLength(3);
     expect(expanded.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
     expect(r.container.textContent).toContain("Mid-turn checkpoint");
-    expect(r.container.textContent).not.toContain("step one");
+    expect(r.container.textContent).not.toContain("step-one.md");
 
     await r.unmount();
   });
@@ -2419,7 +3308,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
-        arguments: { cmd: "step one" },
+        arguments: { cmd: "cat step-one.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
     ];
@@ -2445,7 +3334,7 @@ describe("MessageTimeline — settled turn folding", () => {
       timelineEvent("agent.toolCall.created", {
         id: "call-2",
         name: "exec_command",
-        arguments: { cmd: "step two" },
+        arguments: { cmd: "cat step-two.md" },
       }),
       timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
     ];
@@ -2479,7 +3368,7 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
     // Narration (visible pre-wrap) rides the beat; folded step rows do not.
     expect(r.container.textContent).toContain("Mid-turn checkpoint");
-    expect(r.container.textContent).not.toContain("step one");
+    expect(r.container.textContent).not.toContain("step-one.md");
 
     // Through the collapse and after chrome clears: everything stays closed.
     await flush(2200);
@@ -2516,11 +3405,11 @@ describe("MessageTimeline — settled turn folding", () => {
     // Outer owns the loud failure (auto-open). Nested cluster chips stay bare /
     // closed — no repeated failure text, two calm sub-expands for the two clusters.
     expect(triggers).toHaveLength(3);
-    expect(triggers[0]?.textContent ?? "").toContain("provider down");
+    expect(triggers[0]?.textContent ?? "").toContain("The turn stopped unexpectedly");
     expect(triggers[0]?.getAttribute("data-state")).toBe("open");
-    expect(triggers.slice(1).every((t) => !(t.textContent ?? "").includes("provider down"))).toBe(
-      true,
-    );
+    expect(
+      triggers.slice(1).every((t) => !(t.textContent ?? "").includes("stopped unexpectedly")),
+    ).toBe(true);
     expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
 
     await r.unmount();
@@ -2675,6 +3564,33 @@ describe("WebSearchRenderer — null/undefined entries in results array", () => 
     expect(text).toContain("Opened web page");
     expect(text).toContain("https://openai.com/research");
     expect(text).not.toContain("query unavailable");
+
+    await r.unmount();
+  });
+
+  test("shows an opened page without the tracking the hosted search tagged on", async () => {
+    const item = toolItem({
+      name: "web_search_call",
+      raw: {
+        type: "hosted_tool_call",
+        status: "completed",
+        providerData: {
+          action: {
+            type: "open_page",
+            url: "https://example.com/rules/4-1?page=2&_t_q=which+rule&utm_source=openai",
+          },
+        },
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("https://example.com/rules/4-1?page=2");
+    expect(text).not.toContain("utm_source");
+    expect(text).not.toContain("_t_q");
 
     await r.unmount();
   });
@@ -3268,6 +4184,46 @@ describe("SandboxRow — failed chip", () => {
 });
 
 describe("StartupPhaseRow", () => {
+  test("a failed step keeps its recorded error behind Details, not in its title", async () => {
+    const detail = "This compute sandbox's agent is too old (capabilities.op_release).";
+    const item: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "sandbox-failed",
+      turnId: "turn-failed",
+      phase: "sandbox",
+      status: "failed",
+      detail,
+      startedAt: new Date(0).toISOString(),
+      completedAt: new Date(1000).toISOString(),
+      durationMs: 1000,
+      outcome: null,
+      occurredAt: new Date(0).toISOString(),
+    };
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    const row = r.container.querySelector<HTMLElement>('[role="button"][data-status="failed"]');
+    expect(row?.textContent ?? "").toContain("Sandbox didn’t start");
+    expect(r.container.textContent ?? "").not.toContain(detail);
+    expect(row?.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => row!.click());
+    expect(r.container.textContent ?? "").toContain("Details");
+    expect(r.container.textContent ?? "").toContain(detail);
+    await r.unmount();
+
+    // A host that hides raw technical detail keeps the row a plain status.
+    const { ToolDetailsProvider } = await import("../src/timeline/tool-details");
+    const plain = await renderComponent(
+      <ToolDetailsProvider value="plain">
+        <ActivityRail items={[item]} />
+      </ToolDetailsProvider>,
+    );
+    await flush();
+    expect(plain.container.querySelector('[role="button"][data-status="failed"]')).toBeNull();
+    expect(plain.container.textContent ?? "").toContain("Sandbox didn’t start");
+    expect(plain.container.textContent ?? "").not.toContain(detail);
+    await plain.unmount();
+  });
+
   test("names a sandbox rotation wait", async () => {
     const item: StartupPhaseItem = {
       kind: "startup-phase",
@@ -3289,8 +4245,277 @@ describe("StartupPhaseRow", () => {
     await r.unmount();
   });
 
+  test("a running setup step names its environment and counts up while it runs", async () => {
+    setStartupDetails(true);
+    const startedAt = new Date(Date.now() - 41_500).toISOString();
+    const running: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "rig-running",
+      turnId: "turn-setup",
+      phase: "rig",
+      status: "running",
+      subject: "cloudgeni",
+      startedAt,
+      completedAt: null,
+      durationMs: null,
+      outcome: null,
+      occurredAt: startedAt,
+    };
+    const r = await renderComponent(<ActivityRail items={[running]} />);
+    try {
+      await flush();
+      const text = () => r.container.textContent ?? "";
+      // The time runs in the title, as in the turn header; no gutter chip.
+      expect(text()).toContain("Setting up cloudgeni · 41s");
+      await flush(1_100);
+      expect(text()).toContain("Setting up cloudgeni · 42s");
+
+      // Settled, the step shows its recorded duration and the ordinary title.
+      await r.rerender(
+        <ActivityRail
+          items={[
+            {
+              ...running,
+              status: "complete",
+              completedAt: new Date().toISOString(),
+              durationMs: 66_400,
+            },
+          ]}
+        />,
+      );
+      await flush();
+      expect(text()).toContain("Sandbox Environment ready");
+      expect(text()).not.toContain("·");
+      expect(text()).toContain("1m 06s");
+    } finally {
+      await r.unmount();
+      setStartupDetails(false);
+    }
+  });
+
   beforeEach(() => setStartupDetails(true));
   afterEach(() => setStartupDetails(false));
+
+  test("rotation recovery replaces neutral preparation waits with successful startup", async () => {
+    const firstAttemptId = "566d06b5-006d-48b8-9e54-9c2f0fc1b28c";
+    const recoveredAttemptId = "e77d3179-b001-4b0b-a0a8-6e6443a164a7";
+    const receipt = (type: string, payload: unknown, attemptId = firstAttemptId) => ({
+      ...timelineEvent(type, payload),
+      turnAttemptId: attemptId,
+    });
+    const waiting = [
+      receipt("turn.startup.phase.started", { phase: "model_preparation" }),
+      receipt("sandbox.operation.started", { name: "sandbox.provision" }),
+      receipt("sandbox.operation.failed", {
+        name: "sandbox.provision",
+        retryable: true,
+        failureCode: "rotation_in_progress",
+        failureStage: "lifecycle_wait",
+        failureCategory: "drain_capture_wait",
+        expectedTransition: true,
+      }),
+      receipt("turn.startup.phase.failed", { phase: "model_preparation", durationMs: 3_000 }),
+      receipt("turn.recovery.requested", { reason: "sandbox_deadline_rotation" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={waiting} status="running" />);
+    try {
+      await flush();
+
+      expect(r.container.textContent).toContain("Waiting for sandbox rotation");
+      expect(r.container.textContent).not.toContain("Runtime/model preparation failed");
+      expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(0);
+      expect(r.container.querySelectorAll(".text-og-status-failed")).toHaveLength(0);
+
+      await r.rerender(
+        <MessageTimeline
+          events={[
+            ...waiting,
+            receipt("turn.started", {}, recoveredAttemptId),
+            receipt(
+              "turn.startup.phase.started",
+              { phase: "model_preparation" },
+              recoveredAttemptId,
+            ),
+            receipt("sandbox.operation.started", { name: "sandbox.provision" }, recoveredAttemptId),
+            receipt(
+              "sandbox.operation.completed",
+              { name: "sandbox.provision", origin: "resumed" },
+              recoveredAttemptId,
+            ),
+            receipt(
+              "turn.startup.phase.completed",
+              { phase: "model_preparation", durationMs: 500 },
+              recoveredAttemptId,
+            ),
+            receipt("agent.model.request", { phase: "started" }, recoveredAttemptId),
+            receipt(
+              "agent.model.request",
+              { phase: "first_byte", durationMs: 125 },
+              recoveredAttemptId,
+            ),
+            receipt("turn.completed", { output: "Ready." }, recoveredAttemptId),
+          ]}
+          status="idle"
+        />,
+      );
+      await flush();
+      expect(r.container.textContent).toContain("Ready.");
+      // The startup-only turn folds behind its duration.
+      const summary = turnSummaryTrigger(r.container);
+      expect(summary?.textContent).toBe("6s");
+      expect(summary?.getAttribute("aria-expanded")).toBe("false");
+      await act(async () => summary?.click());
+      await flush();
+      expect(r.container.textContent).toContain("Model request dispatched");
+      expect(r.container.textContent).toContain("Sandbox reattached");
+      expect(r.container.textContent).not.toContain("Waiting for sandbox rotation");
+      expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(0);
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("actual preparation and provider failures retain red failure rows", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("turn.startup.phase.failed", {
+            phase: "model_preparation",
+            durationMs: 500,
+            expectedTransition: false,
+            error: "Model request rejected",
+          }),
+          timelineEvent("agent.model.request", { phase: "started" }),
+          timelineEvent("agent.model.request", { phase: "failed", durationMs: 125 }),
+        ]}
+        status="failed"
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Runtime/model preparation failed");
+    expect(r.container.textContent).toContain("Model didn’t respond");
+    expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(2);
+    expect(r.container.querySelectorAll(".text-og-status-failed").length).toBeGreaterThan(0);
+    await r.unmount();
+  });
+
+  test("compacting before the first model request is a calm step, not a preparation failure", async () => {
+    const attemptId = "0c4d3b8e-5f7a-4e21-9d6c-2b8a1f3e7c90";
+    const receipt = (type: string, payload: unknown) => ({
+      ...timelineEvent(type, payload),
+      turnAttemptId: attemptId,
+    });
+    const compacting = [
+      receipt("turn.started", {}),
+      receipt("turn.startup.phase.started", { phase: "model_preparation" }),
+      receipt("turn.startup.phase.failed", {
+        phase: "model_preparation",
+        durationMs: 145,
+        expectedTransition: true,
+        failureCategory: "context_compaction",
+        failureStage: "context_compaction",
+        failureCode: "compaction_required",
+        retryable: true,
+      }),
+      receipt("session.context.compaction.started", { trigger: "threshold" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={compacting} status="running" />);
+    try {
+      await flush();
+      expect(r.container.textContent).toContain("Compacting conversation first");
+      expect(r.container.textContent).not.toContain("Runtime/model preparation failed");
+      expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(0);
+      expect(r.container.querySelectorAll(".text-og-status-failed")).toHaveLength(0);
+
+      // The same attempt reopens preparation for the retried request.
+      await r.rerender(
+        <MessageTimeline
+          events={[
+            ...compacting,
+            receipt("session.context.compacted", { trigger: "threshold" }),
+            receipt("turn.startup.phase.started", { phase: "model_preparation" }),
+            receipt("turn.startup.phase.completed", { phase: "model_preparation", durationMs: 90 }),
+            receipt("agent.model.request", { phase: "started" }),
+            receipt("agent.model.request", { phase: "first_byte", durationMs: 125 }),
+            receipt("turn.completed", { output: "Continued." }),
+          ]}
+          status="idle"
+        />,
+      );
+      await flush();
+      expect(r.container.textContent).toContain("Continued.");
+      // The startup-only turn folds behind its compaction facet.
+      const summary = turnSummaryTrigger(r.container);
+      expect(summary?.textContent).toBe("compacted");
+      if (summary?.getAttribute("aria-expanded") === "false") {
+        await act(async () => summary.click());
+        await flush();
+      }
+      expect(r.container.textContent).toContain("Model request dispatched");
+      expect(r.container.textContent).not.toContain("Runtime/model preparation failed");
+      expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(0);
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("an expected preparation wait leaves a lost command failed with retained output", async () => {
+    const callId = "8f71c668-a605-4291-93ef-f4e57a37a4d1";
+    const command = {
+      commandId: "5c81f730-9a3b-40d9-a5b4-cad84c897c73",
+      status: "lost",
+      reason: "provider_deadline_containment",
+      exitCode: null,
+      stdout: "Check started; intermediate result retained.",
+    };
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("turn.startup.phase.started", { phase: "model_preparation" }),
+          timelineEvent("sandbox.operation.failed", {
+            name: "sandbox.provision",
+            expectedTransition: true,
+            retryable: true,
+            failureCode: "rotation_in_progress",
+            failureStage: "lifecycle_wait",
+            failureCategory: "drain_capture_wait",
+          }),
+          timelineEvent("turn.startup.phase.failed", {
+            phase: "model_preparation",
+            durationMs: 500,
+          }),
+          timelineEvent("agent.toolCall.created", {
+            id: callId,
+            name: "exec_command",
+            arguments: { cmd: "bun run checks" },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: callId,
+            error: true,
+            output: JSON.stringify(command),
+          }),
+        ]}
+        status="running"
+      />,
+    );
+    try {
+      await flush();
+      expect(r.container.textContent).toContain("Waiting for sandbox rotation");
+      expect(r.container.textContent).not.toContain("Runtime/model preparation failed");
+      expect(r.container.querySelectorAll('[data-status="failed"]')).toHaveLength(1);
+      const failed = r.container.querySelector<HTMLElement>('[data-status="failed"]');
+      expect(failed?.querySelector(".text-og-status-failed")).not.toBeNull();
+      await act(async () => failed?.click());
+      await flush();
+      expect(r.container.textContent).toContain("provider_deadline_containment");
+      expect(r.container.textContent).toContain('"status":"lost"');
+      expect(r.container.textContent).toContain('"exitCode":null');
+      expect(r.container.textContent).toContain(command.stdout);
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("shows the settled phase duration and truthful sandbox origin", async () => {
     const item: StartupPhaseItem = {
       kind: "startup-phase",
@@ -3596,9 +4821,62 @@ describe("ask / run_on / exec collapsed previews", () => {
     );
     await flush();
     const text = r.container.textContent ?? "";
-    expect(text).toContain("$ pwd");
+    expect(text).toContain("Ran a command");
     expect(text).toContain("on studio-mac");
     expect(text).toContain("/workspace");
+    await r.unmount();
+  });
+});
+
+describe("GenericRenderer — permission Block", () => {
+  test("a blocked connector call reads as a permission decision, not a tool error", async () => {
+    const item = toolItem({
+      name: "mcp_example__read_wiki_structure",
+      arguments: JSON.stringify({ repoName: "example/repo" }),
+      output: {
+        content: [
+          {
+            type: "text",
+            text: "An error occurred while running the tool. Please try again. Error: Connector action was not executed: blocked",
+          },
+        ],
+        isError: true,
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Blocked by your permission settings");
+    expect(text).not.toContain("Please try again");
+    expect(text).not.toContain("error");
+    await r.unmount();
+  });
+});
+
+describe("GenericRenderer — uncertain outcome", () => {
+  test("an uncertain connector outcome never invites a blind retry", async () => {
+    const item = toolItem({
+      name: "mcp_example__read_wiki_contents",
+      arguments: JSON.stringify({ repoName: "example/repo" }),
+      output: {
+        content: [
+          {
+            type: "text",
+            text: "An error occurred while running the tool. Please try again. Error: Connector action outcome is uncertain; inspect provider state before retrying",
+          },
+        ],
+        isError: true,
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("outcome unknown");
+    expect(text).not.toContain("Please try again");
     await r.unmount();
   });
 });

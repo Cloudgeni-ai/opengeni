@@ -1,6 +1,6 @@
 # Fiken connector (first-party)
 
-OpenGeni's first-party connector for [Fiken](https://fiken.no), the Norwegian
+Opengeni's first-party connector for [Fiken](https://fiken.no), the Norwegian
 small-business accounting service. A workspace connects Fiken either through
 the **registered-app OAuth flow** (the default in the UI) or by pasting a
 **personal API token**; both produce the same workspace-shared connection, and
@@ -35,6 +35,11 @@ delegation-snapshot lane exists for them.
   rotating refresh tokens (~24 h access-token lifetime). Passing
   `connectionId` re-authorizes an existing Fiken row in place (this also
   upgrades a pasted-token row to OAuth, preserving its default company).
+  Both start lanes sign the shared `personalOwnerVerified` claim through
+  `connectOwnerStateFields`, and the callback reads it: that is how the
+  callback finds the owner's authority in their own Personal workspace, which
+  has no workspace membership row. The connection itself stays
+  workspace-owned.
   Requires `OPENGENI_FIKEN_OAUTH_CLIENT_ID` / `OPENGENI_FIKEN_OAUTH_CLIENT_SECRET`
   (register the app in Fiken under *Rediger konto → API* with redirect URL
   `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/fiken/callback`) plus
@@ -81,6 +86,18 @@ choices. Send a new message to use the updated selection. Discovery reports
 ready only when a selected Fiken tool is present in the exact current attempt;
 missing runtime tools alone do not imply failed authorization. A connection
 marked `needs_reauth` still requires reconnection.
+
+A child cannot select Fiken tools outside its parent's selection, even when the
+same human initiated both chats. In the web console, **Add tools** reads the
+parent chain first. If parent chats also need Fiken, the card lists those chats
+and offers **Enable in parents and add tools**. That separate confirmation adds
+only the reviewed capability, from the root down to the child, through ordinary
+session authorization and version-fenced tool-policy updates. Existing choices
+are preserved; a changed workspace-default selection becomes explicit. Current
+accepted turns keep their frozen access. Cancel makes no changes. A stale review
+requires another review; a failure partway through can leave already-approved
+parent changes saved, and retry reviews only the remaining additions. Owning or
+initiating a chat is not an agent permission bypass.
 
 | Tool | Permission | Notes |
 | --- | --- | --- |
@@ -146,5 +163,9 @@ rotating refresh tokens), tool connection resolution across both kinds,
 company-slug resolution and validation, request serialization, 401→
 `needs_reauth` vs 429/500 non-poisoning, Location-id parsing, draft
 idempotency, and audit rows — all against an injected Fiken fetch double.
+`apps/api/test/connect-personal-workspace-oauth.test.ts` drives both Fiken
+OAuth start lanes from a real managed-cookie session in the owner's Personal
+workspace and checks that a state without the claim, or one naming another
+member's Personal workspace, is refused before any provider call.
 Web connect-plan/health logic is covered in
 `apps/web/src/lib/capabilities.test.ts`.

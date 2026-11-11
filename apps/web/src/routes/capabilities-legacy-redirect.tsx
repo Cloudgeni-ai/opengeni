@@ -1,5 +1,5 @@
-import { ProblemPanel } from "@/components/common";
-import { useAppContext } from "@/context";
+import { ProblemPanel } from "@opengeni/react/app/components/common";
+import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   ReplaceLocation,
   workspaceIntegrationsCallbackHref,
@@ -8,7 +8,7 @@ import {
   readLastWorkspaceId,
   resolveLandingWorkspaceId,
   workspaceNavigationPreferenceStorageId,
-} from "@/lib/workspace-navigation-preference";
+} from "@opengeni/react/app/lib/workspace-navigation-preference";
 
 // Both forwarders load with the Capabilities route chunk, the page they forward
 // to, so neither adds a route chunk or code to the eager session graph.

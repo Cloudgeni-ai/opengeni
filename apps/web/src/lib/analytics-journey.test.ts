@@ -1,14 +1,18 @@
 import { describe, expect, test } from "bun:test";
-import { ANALYTICS_ACTIONS } from "./analytics-actions";
+import { ANALYTICS_ACTIONS } from "@opengeni/react/ui/analytics-actions";
 import {
   journeyAction,
   journeyMilestone,
   journeyOperation,
   journeyOutcome,
   journeyPage,
+  journeyPageLabels,
 } from "./analytics-journey";
-import { LEGACY_ORGANIZATION_SECTIONS, ORGANIZATION_ADMIN_SECTIONS } from "./organization-admin";
-import { WORKSPACE_SETTINGS_SECTIONS } from "./workspace-management-location";
+import {
+  LEGACY_ORGANIZATION_SECTIONS,
+  ORGANIZATION_ADMIN_SECTIONS,
+} from "@opengeni/react/app/lib/organization-admin";
+import { WORKSPACE_SETTINGS_SECTIONS } from "@opengeni/react/app/lib/workspace-management-location";
 
 const workspace = "11111111-1111-4111-8111-111111111111";
 const session = "22222222-2222-4222-8222-222222222222";
@@ -27,14 +31,16 @@ describe("content-free customer journey", () => {
     });
     expect(journeyPage("/reset-password/private", "?token=private")).toEqual({ page: "other" });
   });
-  test("labels every workspace page, including agents, variable sets, and environments", () => {
+  test("labels every workspace page, including agents and secrets", () => {
     for (const page of [
+      "archived",
+      "read-only-chats",
       "agents",
-      "variable-sets",
-      "environments",
+      "secrets",
       "rigs",
       "capabilities",
       "plugins",
+      "sites",
     ]) {
       expect(journeyPage(`/workspaces/${workspace}/${page}`)).toEqual({
         page,
@@ -60,8 +66,16 @@ describe("content-free customer journey", () => {
     });
     expect(journeyPage("/device", "?user_code=PRIVATE")).toEqual({ page: "device" });
     expect(journeyPage("/reset-password", "?token=private")).toEqual({ page: "reset-password" });
+    // The share id is the link's credential: only the page kind is reported.
+    expect(journeyPage("/share/PRIVATE_share_id_1234567", "")).toEqual({ page: "shared-chat" });
     expect(journeyPage("/billing", "?checkout=success")).toEqual({ page: "checkout-return" });
     expect(journeyPage("/integrations")).toEqual({ page: "integration-return" });
+    const teams = new URL(
+      "https://app.example.test/teams/connect?setupToken=private&tenantId=private#teams_setup=private",
+    );
+    expect(journeyPage(teams.pathname, teams.search)).toEqual({ page: "teams-connect" });
+    expect(journeyPageLabels().has("teams-connect")).toBe(true);
+    expect(journeyPage("/teams/connect/private")).toEqual({ page: "other" });
     expect(journeyPage("/settings/security")).toEqual({ page: "personal-security" });
     // Ids in top-level paths are never reported.
     expect(journeyPage(`/sessions/${session}`)).toEqual({ page: "session-link" });
@@ -196,13 +210,58 @@ describe("content-free customer journey", () => {
   });
 
   test("funnel milestones are exact accepted-route facts", () => {
-    expect(journeyMilestone("/v1/billing/checkout", "POST")).toBe("checkout_started");
-    expect(journeyMilestone("/v1/billing/checkout", "post")).toBe("checkout_started");
-    expect(journeyMilestone("/v1/auth/organization-onboarding", "POST")).toBe(
-      "organization_setup_completed",
-    );
+    expect(journeyMilestone("/v1/billing/checkout", "POST")?.name).toBe("checkout_started");
+    expect(journeyMilestone("/v1/billing/checkout", "post")?.name).toBe("checkout_started");
+    expect(journeyMilestone("/v1/auth/organization-onboarding", "POST")).toEqual({
+      name: "organization_setup_completed",
+      properties: {},
+    });
     expect(journeyMilestone("/v1/auth/organization-onboarding", "GET")).toBeNull();
     expect(journeyMilestone("/v1/billing/checkout/extra", "POST")).toBeNull();
     expect(journeyMilestone("/v1/billing/usage-summary", "POST")).toBeNull();
+  });
+
+  test("API key creation is an embedding milestone with its scope and owner id only", () => {
+    const organization = "33333333-3333-4333-8333-333333333333";
+    expect(journeyMilestone(`/v1/organizations/${organization}/api-keys`, "POST")).toEqual({
+      name: "api_key_created",
+      properties: { scope: "organization", account_id: organization },
+    });
+    expect(journeyMilestone(`/v1/workspaces/${workspace}/api-keys`, "POST")).toEqual({
+      name: "api_key_created",
+      properties: { scope: "workspace", workspace_id: workspace },
+    });
+    expect(journeyMilestone(`/v1/organizations/${organization}/api-keys`, "GET")).toBeNull();
+    expect(
+      journeyMilestone(`/v1/organizations/${organization}/api-keys/${session}`, "DELETE"),
+    ).toBeNull();
+    expect(
+      journeyMilestone(`/v1/organizations/${organization}/api-keys/${session}`, "POST"),
+    ).toBeNull();
+    expect(journeyMilestone("/v1/organizations/private/api-keys", "POST")).toBeNull();
+  });
+
+  test("voice calls and dictations are counted once per start", () => {
+    expect(
+      journeyOperation(`/v1/workspaces/${workspace}/sessions/${session}/realtime`, "POST"),
+    ).toEqual({
+      operation: "voice_call",
+      properties: { workspace_id: workspace, session_id: session, method: "POST" },
+    });
+    for (const leaf of ["webrtc", "gateway", "supergrok"]) {
+      expect(
+        journeyOperation(
+          `/v1/workspaces/${workspace}/sessions/${session}/realtime/${leaf}`,
+          "POST",
+        ),
+      ).toBeNull();
+    }
+    expect(
+      journeyOperation(`/v1/workspaces/${workspace}/sessions/${session}/realtime`, "DELETE"),
+    ).toBeNull();
+    expect(journeyOperation(`/v1/workspaces/${workspace}/transcriptions`, "POST")).toEqual({
+      operation: "dictation",
+      properties: { workspace_id: workspace, method: "POST", mode: "direct" },
+    });
   });
 });

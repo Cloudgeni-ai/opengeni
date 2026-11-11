@@ -18,6 +18,7 @@ import { pinnedFetch, type OutboundNetworkSettings } from "@opengeni/network";
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 export const GIT_CREDENTIALS_FILE = "git/credentials";
 export const GIT_CREDENTIALS_FILE_ENV = "OPENGENI_GIT_CREDENTIALS_FILE";
+export const PROVIDER_GIT_CONFIG_COUNT_ENV = "OPENGENI_PROVIDER_GIT_CONFIG_COUNT";
 
 export class CredentialProviderError extends Error {
   constructor(message: string) {
@@ -43,14 +44,32 @@ function gitCredentialLine(entry: NonNullable<ProviderOk["git"]>[number]): strin
  * GIT_CONFIG_* environment entries appended after any the host already set.
  */
 export function withGitCredentialHelper(response: ProviderOk): ProviderOk {
-  if (!response.git?.length) return response;
   const environment = { ...response.environment };
+  // The clone hook resets ambient helpers. Fence the exact configuration supplied
+  // by this authenticated provider so its renewable custom helpers can be
+  // reapplied without trusting an image's inherited GIT_CONFIG_* variables.
+  delete environment[PROVIDER_GIT_CONFIG_COUNT_ENV];
+  const declaredCount = environment.GIT_CONFIG_COUNT ?? "0";
+  if (!/^(0|[1-9][0-9]*)$/.test(declaredCount) || Number(declaredCount) > 128) {
+    throw new CredentialProviderError("Invalid provider Git configuration count");
+  }
+  for (let i = 0; i < Number(declaredCount); i++) {
+    if (
+      environment[`GIT_CONFIG_KEY_${i}`] === undefined ||
+      environment[`GIT_CONFIG_VALUE_${i}`] === undefined
+    ) {
+      throw new CredentialProviderError("Incomplete provider Git configuration");
+    }
+  }
+  environment[PROVIDER_GIT_CONFIG_COUNT_ENV] = declaredCount;
+  if (!response.git?.length) return { ...response, environment };
   const existingCount = Number.parseInt(environment.GIT_CONFIG_COUNT ?? "0", 10);
   const index = Number.isFinite(existingCount) && existingCount > 0 ? existingCount : 0;
   environment[`GIT_CONFIG_KEY_${index}`] = "credential.helper";
   environment[`GIT_CONFIG_VALUE_${index}`] =
     `!f() { test "$1" = get && sed '/^path=/d' | git credential-store --file="$${GIT_CREDENTIALS_FILE_ENV}" get; }; f`;
   environment.GIT_CONFIG_COUNT = String(index + 1);
+  environment[PROVIDER_GIT_CONFIG_COUNT_ENV] = String(index + 1);
   return {
     ...response,
     environment,

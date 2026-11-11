@@ -1,11 +1,12 @@
 export * from "./types";
 export { pollDeviceAuthorization } from "./device";
 export { findConnectRecoveryAccount } from "./recovery";
-export { pollConnectAttempt } from "./poll";
+export { ConnectWaitTimedOutError, pollConnectAttempt } from "./poll";
 export {
   authorizeConnectAttempt,
   ConnectPopupClosedError,
   type ConnectNavigation,
+  type ConnectPopup,
 } from "./authorization";
 export {
   createBrowserConnectNavigation,
@@ -51,9 +52,14 @@ export class ConnectController {
     providerId: string;
     ownership: ConnectOwnership;
     returnUrl: string;
+    /** Sign-in runs in a popup: it ends on a page that closes the popup. */
+    finishInPopup?: true;
     idempotencyKey: string;
     reconnectAccountId?: string;
+    /** Additional provider access to ask for; only with `reconnectAccountId`. */
+    requestedScopes?: string[];
     installationTarget?: import("./types").ConnectInstallationTarget;
+    mcpSetup?: import("./types").PreparedMcpSetup;
   }): Promise<ConnectAttempt> {
     // Validation must not serialize or decorate the host's exact return string.
     const url = new URL(input.returnUrl);
@@ -113,6 +119,7 @@ export class ConnectController {
           ...options,
           signal,
           minimumRevision: attempt.revision,
+          expiresAt: attempt.expiresAt,
         }),
       false,
       attempt.id,

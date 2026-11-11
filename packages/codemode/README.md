@@ -1,6 +1,6 @@
 # `@opengeni/codemode`
 
-OpenGeni's canonical attempt-frozen programmatic tool surface. It compiles one
+Opengeni's canonical attempt-frozen programmatic tool surface. It compiles one
 catalog from the exact tools admitted to an execution attempt and dispatches
 both model MCP calls and sandbox Codemode calls through the same opaque tool
 identities and executors.
@@ -15,7 +15,7 @@ the already-admitted definitions and one authorization hook.
 `modelName` and `codemodePath` are projections only. Execution authority is
 always the exact `{ serverId, toolName }` identity in the frozen catalog.
 
-Inside an OpenGeni sandbox the worker supplies `OPENGENI_CODEMODE_URL` and a
+Inside an Opengeni sandbox the worker supplies `OPENGENI_CODEMODE_URL` and a
 renewed bearer file. The package exposes one lazy namespace over that exact
 attempt catalog:
 
@@ -71,6 +71,26 @@ await tab.getByRole("button", { name: "Save" }).click();
 const still = await tab.screenshot({ quality: 40 });
 console.log(still.path); // Open this local PNG/JPEG/WebP with view_image.
 
+// Bulk captures: wait for client-rendered data, then keep each still as a file.
+for (const width of [1440, 390]) {
+  await tab.act({ type: "viewport", width, height: 900 }); // Desktop unless mobile: true.
+  await tab.navigate("http://127.0.0.1:3000/reports", { waitUntil: "network_idle" });
+  await tab.screenshot({ saveTo: `shots/reports-${width}.jpg` });
+}
+await tab.act({ type: "viewport_reset" }); // Back to the window's own size and scale.
+
+const { downloads } = await browser.downloads.list();
+const completed = downloads.find((download) => download.status === "completed");
+if (completed) {
+  const operationId = crypto.randomUUID(); // Retain for any reconciliation.
+  const saved = await browser.downloads.download(completed.id).saveToWorkspace(
+    "exports/report.csv",
+    { overwrite: false },
+    { operationId },
+  );
+  console.log(saved.destinationPath); // Read exact bytes with workspace file tools.
+}
+
 const computer = await openGeni.computers.open();
 const app = await computer.apps.focused();
 await app.getByRole("button", { name: "1" }).invoke();
@@ -85,14 +105,28 @@ selectors are rejected to prevent secret-value probing. Browser image blocks
 are bounded below the Code Mode journal limit; for an oversized screenshot,
 capture the viewport or lower JPEG quality.
 
+`CodemodeCallOptions.expectedDefinitionDigest` optionally pins one complete
+public entry. The client checks it before submission and again after the one
+permitted pre-execution stale-catalog refresh. Local Site previews always pass
+this pin, so a retry cannot execute a changed definition while reporting old
+metadata. The pin grants no authority and does not alter durable operation
+reconciliation or frozen approval decisions.
+
 Both surfaces return the same durable tool receipts. Human approval, catalog
 generation, operation idempotency, and outcome-unknown behavior remain enforced
 by the shared attempt executor. Catalog, approval, authorization, input
 validation, and argument-sensitive connector-policy prepare complete before the
 durable execution-start marker. The prepared call performs connector begin at
 the executor boundary and completion afterward, so model MCP and Codemode share
-one lifecycle while invalid, blocked, Ask, or unavailable-policy calls settle
-before provider execution. Human-gated model calls additionally require the
+one lifecycle. Invalid, blocked, or unavailable-policy calls settle before
+provider execution. With the `durableApproval` protocol capability, Ask becomes
+`waiting_for_approval` and returns `CodemodeApprovalPendingError` with a compact
+operation handle. It releases the claim and pauses the owning turn for review.
+Human approval resumes the stored operation once; it does not restore a
+JavaScript stack. Use `environmentCodemodeClient().status(id)` or `.resume(id)`
+from the current authorized attempt of the same turn to observe results.
+`ogtool read <id>` and `ogtool resume <id>` expose the same behavior. Older
+clients receive an upgrade-required failure before an approval can execute. Human-gated model calls additionally require the
 attempt host's exact approved SDK invocation context; calling the environment
 directly cannot bypass approval. The dispatcher keeps its claim alive during
 gateway preparation and reuses a deterministic durable tool-created event if a
@@ -121,7 +155,15 @@ It does not request server cancellation and cannot prove that an operation
 stopped. The attempt/turn lifecycle remains the only cancellation authority; a
 caller that aborts after submission must reconcile with the same operation id.
 
-Editable artifacts use the same path. The object remains in OpenGeni; files are
+`browser.downloads.list()` and `browser.downloads.download(id).get()` use the
+read-only `browser_downloads` tool. `saveToWorkspace(path, options, callOptions)`
+uses `browser_download_save`, requiring both `sessions:control` and `files:upload`.
+It publishes and materializes the exact completed bytes into the browser's
+source session workspace, retaining size/SHA-256 verification and the durable
+operation id. Downloads stay controller-private until this explicit save.
+Lightpanda browsers have no downloads to export.
+
+Editable artifacts use the same path. The object remains in Opengeni; files are
 only explicit import/export boundaries:
 
 ```ts
@@ -141,3 +183,31 @@ await workbook.apply([
   },
 ]);
 ```
+
+### Frozen paginated selections
+
+`collectIdPages(load, { maxItems, maxPages, signal })` reads all pages, removes
+repeated IDs and refuses incomplete selections (repeated cursor, empty continued
+page, cap, provider error or cancellation). Defaults: 10,000 IDs and 200 pages;
+hard bounds: 50,000 IDs and 1,000 pages. `planIdBatches(ids, 1000)` freezes a
+selection digest and distinct operation IDs for chunks of at most 1,000 IDs.
+It performs no writes. Save the plan in the agent workspace before submitting
+chunks; keep the arrays out of model output. Never continue searching after a
+mutation changes the search membership.
+
+For Gmail, use `search_messages` with `messageFormat: "IDS_ONLY"` (or
+`search_threads` with `view: "IDS_ONLY"`). These return one list page without
+hydration requests; existing rich views keep their defaults. Adapt that page's
+`messages.map(message => message.id)` and `nextPageToken` to `collectIdPages`.
+Each planned chunk is an independently authorized durable call. An Ask returns
+a waiting handle; catch that typed result and retain its operation ID rather
+than copying arguments into another call. Original JavaScript locals are not
+restored when a turn resumes. Inspect saved handles on the next attempt.
+
+`batch_modify_messages` returns `status: "acknowledged"`, `submittedCount` and
+`reconciliation: "not_checked"`. Gmail's empty success response establishes
+batch acceptance, not a per-message verification. The former `modified: true`
+claim and echoed ID array are removed. `summarizeIdBatches(plan, receipts)`
+counts acknowledged, failed-before-effect, unknown, waiting and unstarted IDs
+separately. Only mark a receipt acknowledged after that provider response;
+transport uncertainty is unknown and must not be retried automatically.

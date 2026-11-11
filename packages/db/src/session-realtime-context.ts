@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
-import { ReasoningEffort } from "@opengeni/contracts";
+import { McpPersonalConnectionDelegations, ReasoningEffort } from "@opengeni/contracts";
+import {
+  parseAcceptedMcpAccountBindings,
+  parseConnectionAccountIntent,
+} from "./mcp-account-bindings";
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -11,7 +15,7 @@ import { submitHumanPromptInTransaction } from "./session-queue-commands";
 export const SESSION_REALTIME_CONTEXT_MAX_BYTES = 65_536;
 export const SESSION_REALTIME_TAIL_SOURCE = "transcript_tail_flush";
 export const SESSION_REALTIME_TAIL_INSTRUCTION =
-  "The user just ended the realtime voice session but remains reachable by text. Ending voice changes only the communication mode; it does not stop, pause, or complete existing work. Treat the remaining transcript tail as additional context. If work was already underway, continue it from the current state. Change or stop that work only if the user explicitly requested it. If nothing was underway and the transcript contains no unhandled request, acknowledge briefly; otherwise handle any unhandled request.";
+  "The user just ended the realtime voice session but remains reachable by text. Ending voice changes only the communication mode; it does not stop, pause, or complete existing work. Treat the remaining transcript tail as additional context. If work was already underway, continue it from the current state. Change or stop that work only if the user explicitly requested it. If nothing was underway and the transcript contains no unhandled request, acknowledge briefly; otherwise handle any unhandled request. Reply in the language the user spoke in the transcript, not the language of this note.";
 
 export type SessionRealtimeContextProjection = {
   id: string;
@@ -185,6 +189,8 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     sessionId: string;
     realtimeId: string;
     ownerSubjectId: string;
+    /** The owner's own label (their email) when a request carries it. */
+    ownerSubjectLabel?: string | null | undefined;
     now?: Date;
   },
 ): Promise<SessionRealtimeContextProjection | null> {
@@ -257,6 +263,10 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     text: row.text === null ? null : fromPostgresLosslessText(row.text, row.textCodecVersion),
     payload: fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
   }));
+  // Voice-assistant chatter alone ("Still checking.") is not a new request. Steering it into
+  // the session would supersede a running turn or wake an idle one for nothing, so only a
+  // tail with at least one finalized user transcript is handed off.
+  if (!decodedRows.some((entry) => entry.role === "user")) return null;
   const rendered = renderSessionRealtimeTail(decodedRows);
   if (!rendered.context) return null;
   const renderedRows = decodedRows.slice(decodedRows.length - rendered.includedEntryCount);
@@ -291,7 +301,7 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     subjectId: input.ownerSubjectId,
-    subjectLabel: "Realtime",
+    subjectLabel: input.ownerSubjectLabel?.trim() || "Realtime",
     actor: {
       type: "human",
       subjectId: input.ownerSubjectId,
@@ -317,6 +327,11 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     },
     source: "api",
     surface: "voice",
+    personalConnectionDelegations: McpPersonalConnectionDelegations.parse(
+      mode.personalConnectionDelegations,
+    ),
+    mcpAccountBindings: parseAcceptedMcpAccountBindings(mode.mcpAccountBindings),
+    connectionAccountIntent: parseConnectionAccountIntent(mode.connectionAccountIntent),
   });
   const now = input.now ?? new Date();
   const [projection] = await db

@@ -1,6 +1,6 @@
 import postgres from "postgres";
-import { readFile } from "node:fs/promises";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { historicalKnowledgeSql } from "./knowledge-historical";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 
 /** Optional pre-migrated, disposable native PostgreSQL fixture; CI uses the shared harness. */
 export async function listingDatabase(): Promise<SharedTestDatabase> {
@@ -21,7 +21,11 @@ export async function listingDatabase(): Promise<SharedTestDatabase> {
   return database;
 }
 
-export async function seedListingFixture(connection: postgres.Sql, count = 240) {
+export async function seedListingFixture(
+  connection: postgres.Sql,
+  count = 240,
+  options: { flat?: boolean } = {},
+) {
   return connection.begin(async (admin) => {
     const accountId = crypto.randomUUID();
     const workspaceId = crypto.randomUUID();
@@ -51,9 +55,9 @@ export async function seedListingFixture(connection: postgres.Sql, count = 240) 
     SELECT ${accountId},${workspaceId},'workspace',${workspaceId} FROM generate_series(1,${count})`;
     await admin`INSERT INTO knowledge_entry_revisions(account_id,entry_id,number,body,preview,actor)
     SELECT ${accountId},e.id,n,jsonb_build_object('kind','note','title','Member '||e.id,
-      'content',repeat('Representative retained detail ',40),'groupIds',jsonb_build_array(${groupId}::text),
-      'relationships',jsonb_build_array(jsonb_build_object('entryId',${sourceId}::text,'relation','related_to')),
-      'evidence',CASE WHEN dense_rank() OVER (ORDER BY e.id) % 4 = 0 THEN
+      'content',repeat('Representative retained detail ',40),'groupIds',CASE WHEN ${options.flat ?? false} THEN '[]'::jsonb ELSE jsonb_build_array(${groupId}::text) END,
+      'relationships',CASE WHEN ${options.flat ?? false} THEN '[]'::jsonb ELSE jsonb_build_array(jsonb_build_object('entryId',${sourceId}::text,'relation','related_to')) END,
+      'evidence',CASE WHEN NOT ${options.flat ?? false} AND dense_rank() OVER (ORDER BY e.id) % 4 = 0 THEN
         jsonb_build_array(jsonb_build_object('entryId',${sourceId}::text,'revisionId',${sourceRevisionId}::text)) ELSE '[]'::jsonb END),
       'Representative retained detail','{}'
     FROM knowledge_entries e CROSS JOIN generate_series(1,2) n
@@ -65,13 +69,13 @@ export async function seedListingFixture(connection: postgres.Sql, count = 240) 
       AND r.number=CASE WHEN e.id IN (${groupId},${sourceId}) THEN 1 ELSE 2 END`;
     await admin`INSERT INTO knowledge_entry_links(account_id,entry_id,revision_id,ordinal,target_entry_id,relation)
     SELECT account_id,entry_id,id,0,${groupId},'group' FROM knowledge_entry_revisions
-    WHERE account_id=${accountId} AND entry_id NOT IN (${groupId},${sourceId})`;
+    WHERE account_id=${accountId} AND entry_id NOT IN (${groupId},${sourceId}) AND NOT ${options.flat ?? false}`;
     await admin`INSERT INTO knowledge_entry_links(account_id,entry_id,revision_id,ordinal,target_entry_id,target_revision_id,relation)
     SELECT account_id,entry_id,id,1,${sourceId},${sourceRevisionId},'evidence' FROM knowledge_entry_revisions
     WHERE account_id=${accountId} AND jsonb_array_length(body->'evidence')>0`;
     await admin`INSERT INTO knowledge_entry_links(account_id,entry_id,revision_id,ordinal,target_entry_id,relation)
     SELECT account_id,entry_id,id,2,${sourceId},'related_to' FROM knowledge_entry_revisions
-    WHERE account_id=${accountId} AND entry_id NOT IN (${groupId},${sourceId})`;
+    WHERE account_id=${accountId} AND entry_id NOT IN (${groupId},${sourceId}) AND NOT ${options.flat ?? false}`;
     await admin`INSERT INTO knowledge_entry_search(account_id,entry_id,revision_id,chunk_index,search_vector)
     SELECT account_id,entry_id,id,0,to_tsvector('simple',body->>'title') FROM knowledge_entry_revisions WHERE account_id=${accountId}`;
     for (const table of [
@@ -107,10 +111,7 @@ export type ListingFixture = Awaited<ReturnType<typeof seedListingFixture>>;
 
 /** Install historical comparison functions only in the disposable test database. */
 export async function installListingBaseline(connection: postgres.Sql, appUrl: string) {
-  const source = await readFile(
-    new URL("../../drizzle/0461_unified_knowledge.sql", import.meta.url),
-    "utf8",
-  );
+  const source = await historicalKnowledgeSql("knowledge_entry_visible_body", "knowledge_entry_read");
   // Publish the historical bodies and their final security metadata together.
   await connection.begin(async (admin) => {
     const [ownerRow] = await admin`SELECT pg_get_userbyid(p.proowner) AS owner,
@@ -143,7 +144,7 @@ export async function installListingBaseline(connection: postgres.Sql, appUrl: s
       const signature =
         name === "knowledge_entry_read" ? "uuid,uuid,jsonb,jsonb" : "uuid,jsonb,boolean";
       await admin`ALTER FUNCTION ${admin(schema)}.${admin(name + "_baseline")}(${admin.unsafe(signature)}) OWNER TO ${admin(owner)}`;
-      // 0461's final $secure$ block is part of the historical contract too;
+      // The historical migration's final $secure$ block is part of the contract too;
       // extracting only CREATE FUNCTION would benchmark an unhardened routine.
       await admin`ALTER FUNCTION ${admin(schema)}.${admin(name + "_baseline")}(${admin.unsafe(signature)}) SET search_path = ${admin(schema)}, pg_catalog, pg_temp`;
       await admin`REVOKE ALL ON FUNCTION ${admin(schema)}.${admin(name + "_baseline")}(${admin.unsafe(signature)}) FROM PUBLIC`;

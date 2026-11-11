@@ -1,4 +1,9 @@
-import { randomUUID } from "node:crypto";
+import type { z } from "zod";
+import { parseRequestBody } from "../http/request-body";
+import { attachedBrowserViewer } from "../attached-browser-viewer";
+import { createHash, randomUUID } from "node:crypto";
+import sharp from "sharp";
+import { computerCursorIdentity } from "./computer-cursor-identity";
 import {
   resolveFirstPartyDelegationSecret,
   resolveStreamTokenSecret,
@@ -8,12 +13,15 @@ import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_PORT,
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
-  COMPUTER_RFB_WEBSOCKET_PROTOCOL,
+  ComputerNativeCommand,
+  ComputerNativeCallRequest,
   ComputerActionCommand,
+  computerActionSecretTexts,
   ComputerActionRequest,
   ComputerSessionAttachment,
   ComputerSessionAttachmentRequest,
   ComputerSessionHeartbeatResponse,
+  ComputerSessionInputPosture,
   ComputerSessionLifecycleRequest,
   ComputerSessionListResponse,
   ComputerSessionMutationResponse,
@@ -32,6 +40,7 @@ import {
   getSessionAuthorityEpoch,
   acquireLease,
   activateComputerSession,
+  AttachedBrowserDeviceNotFoundError,
   completeComputerSessionEnd,
   ComputerSessionNotFoundError,
   ComputerSessionOperationConflictError,
@@ -43,23 +52,28 @@ import {
   getAttachedBrowserDevice,
   getComputerSessionControlRecord,
   getLiveEnrollmentConnection,
-  getSandbox,
   getSession,
+  interactionControllerGone,
   listComputerSessions,
   prepareComputerSessionCreate,
   prepareComputerSessionEnd,
   releaseLeaseHolder,
   readLease,
   recordLeaseControllerDataPlaneUrl,
-  terminalizeStaleConnectedInteractionPlacement,
+  readActiveSandbox,
   touchComputerSessionController,
   type ComputerSessionControlRecord,
+  type EnrollmentRecord,
   type LeaseSnapshot,
 } from "@opengeni/db";
 import {
+  hasPermission,
   requireAccessGrant,
   requireSessionAuthorization,
+  withSessionAuthorizationReadReuse,
   relayConfigFromSettings,
+  resolveChannelAMachineConnection,
+  getChannelAMachineSandbox,
   resolveSessionSandboxRuntime,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
@@ -95,18 +109,41 @@ import {
   deriveComputerSessionControllerTokens,
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
+import {
+  recordSourcePlacementMove,
+  reconcileListedSourcePlacementMoves,
+  retireFormerPlacementControllers,
+  retireSourceFormerPlacements,
+} from "../former-placement-retirement";
 import { connectedMachineComputerAccessError } from "../connected-machine-computer-access";
+import {
+  captureZoomedComputerFrame,
+  parseComputerFrameRegionQuery,
+  parseComputerFrameSizeQuery,
+  translateZoomedComputerAction,
+} from "../computer-frame-zoom";
 import {
   controllerCacheAllowsHostFetch,
   controllerCachedUrlIsUsable,
+  controllerHasCacheableDataPlane,
   shouldPersistControllerDataPlaneUrl,
   withCachedController,
 } from "../controller-data-plane";
-import { filterInteractionSessionsForGrant } from "../interaction-agent-access";
+import {
+  filterInteractionSessionsForGrant,
+  parseInteractionSessionListQuery,
+} from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
-import { interactionControlApiError } from "../http/interaction-control-error";
+import {
+  interactionActionDeadlineApiError,
+  interactionControlApiError,
+  interactionControlRequestFor,
+  type InteractionControlRequest,
+  legacyInteractionCapacityError,
+} from "../http/interaction-control-error";
 import {
   createInteractionFrameProxyAttachment,
   placementUsesInteractionFrameProxy,
@@ -116,17 +153,50 @@ import {
   observeComputerFrameEvidenceMismatch,
   observeLifecycleResult,
 } from "../interaction-metrics";
-import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
+import {
+  withChannelA,
+  withChannelARead,
+  type ChannelAHandle,
+  type ChannelAOperation,
+} from "../sandbox/channel-a";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
+import {
+  activeRouteUnavailableError,
+  wrongInteractionPlacementMessage,
+  wrongPlacementInsteadOfOffline,
+} from "./interaction-placement-message";
+import {
+  collectStringsDeep,
+  resolveInteractionSecretValues,
+  type InteractionSecretsPort,
+} from "../interaction-secrets";
+import { requirePlacementAcceptsSecretValues } from "../interaction-agent-version";
 
 type ComputerPlacement = {
   placement: InteractionPlacement;
   placementInstanceId: string;
   session: BrowserControlPlacementSession;
   lease: LeaseSnapshot | null;
+  /** Current placement consent, separate from passive viewing authority. */
+  screenControlAllowed?: boolean;
+  /** Where an attached device's Chrome profile is stored: its machine's
+   *  enrollment workspace, which can be another workspace. */
+  attachedDeviceWorkspaceId?: string;
 };
 
+type ActiveComputerControllerCallback<T> = (input: {
+  client: BrowserControlClient;
+  sessionClient: ReturnType<BrowserControlClient["computerSessionClient"]>;
+  record: ComputerSessionControlRecord;
+  binding: NonNullable<ComputerSessionControlRecord["session"]["controller"]>;
+  placement: ComputerPlacement;
+}) => Promise<T>;
+
 const MODEL_COMPUTER_FRAME_MAX_BYTES = 256 * 1024;
+const MODEL_COMPUTER_FRAME_ATTEMPTS = [
+  { format: "jpeg", quality: 55, maxWidth: 1_024, maxHeight: 768 },
+  { format: "jpeg", quality: 30, maxWidth: 640, maxHeight: 480 },
+] as const;
 
 type ComputerFrameCaptureClient = {
   capture(
@@ -151,32 +221,54 @@ export async function captureModelComputerFrame(
   sessionClient: ComputerFrameCaptureClient,
   expected: ExpectedComputerFrameEvidence,
 ): Promise<ComputerControlFrame> {
-  let captured = validateComputerFrameForApi(
-    await sessionClient.capture(expected.targetId, {
-      format: "jpeg",
-      quality: 55,
-      maxWidth: 1_024,
-      maxHeight: 768,
-    }),
-    expected,
-  );
-  if (captured.data.byteLength > MODEL_COMPUTER_FRAME_MAX_BYTES) {
-    captured = validateComputerFrameForApi(
-      await sessionClient.capture(expected.targetId, {
-        format: "jpeg",
-        quality: 30,
-        maxWidth: 640,
-        maxHeight: 480,
-      }),
+  for (const options of MODEL_COMPUTER_FRAME_ATTEMPTS) {
+    const captured = validateComputerFrameForApi(
+      await sessionClient.capture(expected.targetId, options),
       expected,
     );
+    const fitted = await fitModelComputerFrame(captured, expected, options.quality);
+    if (fitted) return fitted;
   }
-  if (captured.data.byteLength > MODEL_COMPUTER_FRAME_MAX_BYTES) {
-    throw new BrowserControlProtocolError(
-      "computer screenshot could not honor the model image byte bound",
-    );
+  throw new ApiHttpError(422, {
+    code: "limit_exceeded",
+    message:
+      "This screen image stays too large for the model even after compression. Observe a smaller window instead.",
+    retryable: false,
+    outcomeUnknown: false,
+  });
+}
+
+/** Some adapters (for example CUA) only produce PNG, which ignores the JPEG
+ * request and can exceed the model bound on photographic content. Re-encode
+ * the exact same pixels as JPEG: frame identity and dimensions are unchanged,
+ * so pointer coordinates bound to this frame stay valid. */
+async function fitModelComputerFrame(
+  frame: ComputerControlFrame,
+  expected: ExpectedComputerFrameEvidence,
+  quality: number,
+): Promise<ComputerControlFrame | null> {
+  if (frame.data.byteLength <= MODEL_COMPUTER_FRAME_MAX_BYTES) return frame;
+  if (frame.mediaType !== "image/png") return null;
+  const jpeg = await sharp(frame.data, { limitInputPixels: 4_096 * 4_096, failOn: "error" })
+    .flatten({ background: "#ffffff" })
+    .jpeg({ quality })
+    .toBuffer({ resolveWithObject: true });
+  if (
+    jpeg.info.width !== frame.metadata.width ||
+    jpeg.info.height !== frame.metadata.height ||
+    jpeg.data.byteLength > MODEL_COMPUTER_FRAME_MAX_BYTES
+  ) {
+    return null;
   }
-  return captured;
+  const data = new Uint8Array(jpeg.data);
+  const metadataHeader = Buffer.from(
+    JSON.stringify({
+      ...frame.metadata,
+      mediaType: "image/jpeg",
+      sha256: createHash("sha256").update(data).digest("hex"),
+    }),
+  ).toString("base64url");
+  return validateComputerFrameForApi({ data, mediaType: "image/jpeg", metadataHeader }, expected);
 }
 
 /** One validated screen frame, served as sandboxed, non-embeddable user content. */
@@ -199,7 +291,12 @@ export function computerScreenshotResponse(
 /** Public ComputerSession resource surface. Physical app/window authority stays
  * in the same placement controller used by BrowserSession; this route owns only
  * durable authorization, placement fencing, lifecycle receipts, and routing. */
-export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
+export function registerComputerSessionRoutes(
+  app: Hono,
+  deps: ApiRouteDeps,
+  options: { interactionSecrets?: InteractionSecretsPort | null } = {},
+): void {
+  const interactionSecrets = options.interactionSecrets ?? null;
   const channelServices = {
     db: deps.db,
     settings: deps.settings,
@@ -210,16 +307,28 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
   app.get("/v1/workspaces/:workspaceId/computer-sessions", async (context) => {
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:read");
-    const listed = await listComputerSessions(deps.db, {
-      accountId: grant.accountId,
-      workspaceId,
-    });
-    return context.json(
-      ComputerSessionListResponse.parse({
+    const list = async () => {
+      const listed = await listComputerSessions(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        ...parseInteractionSessionListQuery(context.req.query()),
+      });
+      return {
         ...listed,
         sessions: await filterInteractionSessionsForGrant(deps, grant, listed.sessions),
-      }),
-    );
+      };
+    };
+    let listed = await list();
+    // A Desktop left behind by its task's move is retired, not reusable.
+    if (
+      await reconcileListedSourcePlacementMoves(channelServices, {
+        grant,
+        sessions: listed.sessions,
+      })
+    ) {
+      listed = await list();
+    }
+    return context.json(ComputerSessionListResponse.parse(listed));
   });
 
   app.get("/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId", async (context) => {
@@ -247,6 +356,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
     const origin = requestOrigin(context, deps.settings);
     const authority = controllerAuthorityRoot(deps);
+    let prepared: Awaited<ReturnType<typeof prepareComputerSessionCreate>> | null = null;
 
     try {
       const existing = await findComputerSessionControlRecordByOperation(deps.db, {
@@ -260,7 +370,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         );
       }
       if (existing) assertCreateReplay(request, existing.session);
-      let prepared = existing
+      prepared = existing
         ? await prepareComputerSessionCreate(
             deps.db,
             computerCreateInput(grant, workspaceId, request, existing.session.placement),
@@ -277,6 +387,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         sourceSession,
         grant,
         existing?.session.placement ?? request.placement ?? null,
+        existing?.deviceWorkspaceId ?? null,
         existing?.session.controller?.placementInstanceId ?? null,
         "computer.create",
         context.req.raw.signal,
@@ -284,7 +395,13 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           if (!prepared) {
             prepared = await prepareComputerSessionCreate(
               deps.db,
-              computerCreateInput(grant, workspaceId, request, placement.placement),
+              computerCreateInput(
+                grant,
+                workspaceId,
+                request,
+                placement.placement,
+                placement.attachedDeviceWorkspaceId,
+              ),
             );
           }
           if (isTerminalOperation(prepared.operation.state)) return prepared;
@@ -334,30 +451,34 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           });
           let physical;
           try {
-            physical = await withComputerCreationController(
-              grant,
-              workspaceId,
-              placement,
-              adminToken,
-              origin,
-              async (client) =>
-                await withInteractionHolderHeartbeat(
-                  deps,
-                  {
-                    grant,
-                    workspaceId,
-                    sandboxGroupId:
-                      placement.placement.kind === "sandbox_group"
-                        ? placement.placement.sandboxGroupId
-                        : null,
-                    holderId: interactionHolderId(preparedSession.id),
-                    operationId: request.operationId,
-                    resourceId: preparedSession.id,
-                    controllerGeneration,
-                  },
-                  async () =>
+            // The heartbeat covers everything after dispatch, including
+            // provisioning the controller, so a slow machine never lets the
+            // transition expire while this request is still working on it.
+            physical = await withInteractionHolderHeartbeat(
+              deps,
+              {
+                grant,
+                workspaceId,
+                sandboxGroupId:
+                  placement.placement.kind === "sandbox_group"
+                    ? placement.placement.sandboxGroupId
+                    : null,
+                holderId: interactionHolderId(preparedSession.id),
+                operationId: request.operationId,
+                resourceId: preparedSession.id,
+                controllerGeneration,
+              },
+              async () =>
+                await withComputerCreationController(
+                  grant,
+                  workspaceId,
+                  placement,
+                  adminToken,
+                  origin,
+                  async (client) =>
                     await client.createComputerSession({
                       computerSessionId: preparedSession.id,
+                      cursorIdentity: await computerCursorIdentity(deps, grant, sourceSession),
                       controllerGeneration,
                       tokenGeneration: record.tokenGeneration,
                       ...tokens,
@@ -426,9 +547,48 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         parsed.operation.state === "completed" && !parsed.operation.replayed ? 201 : 200,
       );
     } catch (error) {
-      throw computerRouteError(error);
+      if (prepared) {
+        // A concurrent dispatch owns its exact binding, even if this request's
+        // placement failed. Settle only the still-undispatched create receipt.
+        await failComputerSessionOperation(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          operationId: request.operationId,
+          computerSessionId: prepared.session.id,
+          onlyIfPreparedCreate: true,
+          error: interactionFailure(error),
+        }).catch(() => undefined);
+      }
+      throw computerRouteError(error, "open");
     }
   });
+
+  app.get(
+    "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/input-posture",
+    async (context) => {
+      const { workspaceId, grant, computerSessionId } = await routePreamble(
+        context,
+        "sessions:read",
+      );
+      const result = await withActiveComputerController(
+        context,
+        grant,
+        workspaceId,
+        computerSessionId,
+        "session.read",
+        "computer.read",
+        async ({ record, binding, placement }) =>
+          ComputerSessionInputPosture.parse({
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            inputAllowed: await authorizeHumanFrameInput(grant, record, placement),
+          }),
+        false,
+      );
+      context.header("cache-control", "no-store");
+      return context.json(result);
+    },
+  );
 
   app.get(
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets",
@@ -484,6 +644,10 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         "sessions:read",
       );
       const targetId = requireOpaqueParam(context, "targetId");
+      const region = parseComputerFrameRegionQuery(context.req.query("region"));
+      const regionFrame = region
+        ? parseComputerFrameSizeQuery(context.req.query("regionFrame"))
+        : null;
       const frame = await withActiveComputerController(
         context,
         grant,
@@ -492,12 +656,22 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         "session.read",
         "computer.read",
         async ({ sessionClient, binding }) => {
+          const expected = {
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            targetId,
+          };
           try {
-            return await captureModelComputerFrame(sessionClient, {
-              computerSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              targetId,
-            });
+            return region
+              ? await captureZoomedComputerFrame(
+                  sessionClient,
+                  targetId,
+                  region,
+                  regionFrame,
+                  MODEL_COMPUTER_FRAME_MAX_BYTES,
+                  (captured) => validateComputerFrameForApi(captured, expected),
+                )
+              : await captureModelComputerFrame(sessionClient, expected);
           } catch (error) {
             if (error instanceof ComputerFrameEvidenceMismatchError) {
               observeComputerFrameEvidenceMismatch(deps.observability, error.reason);
@@ -531,6 +705,68 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
   );
 
   app.post(
+    "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/native-calls",
+    async (context) => {
+      const { workspaceId, grant, computerSessionId } = await routePreamble(
+        context,
+        "sessions:control",
+      );
+      if (grant.principalKind === "agent_attempt") {
+        const selected = grant.metadata?.firstPartyMcpTools;
+        if (!Array.isArray(selected) || !selected.includes("computer_act"))
+          throw new HTTPException(403, {
+            message: "Computer control is not selected for this attempt",
+          });
+      }
+      const request = await parseJsonBody(context, ComputerNativeCallRequest);
+      const result = await withActiveComputerController(
+        context,
+        grant,
+        workspaceId,
+        computerSessionId,
+        "session.control",
+        "computer.action",
+        async ({ sessionClient, binding, record }) => {
+          if (
+            record.session.placement.kind === "sandbox_group" &&
+            deps.settings.sandboxDesktopInteractive === false &&
+            grant.principalKind !== "agent_attempt"
+          )
+            throw new HTTPException(403, { message: "Human desktop input is disabled" });
+          const commandFields = {
+            ...request,
+            protocolVersion: INTERACTION_PROTOCOL_VERSION,
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            targetId: null,
+            actor: interactionActorForGrant(grant),
+          };
+          ComputerNativeCommand.parse(commandFields);
+          const secretValues = await resolveInteractionSecretValues({
+            port: interactionSecrets,
+            grant,
+            texts: collectStringsDeep(request.arguments),
+            use: { surface: "desktop", toolName: request.tool, operationId: request.operationId },
+            beforeResolve: requirePlacementAcceptsSecretValues(
+              deps.db,
+              grant,
+              workspaceId,
+              record.session.placement,
+            ),
+          });
+          return await sessionClient.nativeCall(
+            ComputerNativeCommand.parse({
+              ...commandFields,
+              ...(secretValues === undefined ? {} : { secretValues }),
+            }),
+          );
+        },
+      );
+      return context.json(result);
+    },
+  );
+
+  app.post(
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/actions",
     async (context) => {
       const { workspaceId, grant, computerSessionId } = await routePreamble(
@@ -539,27 +775,68 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       );
       const request = await parseJsonBody(context, ComputerActionRequest);
       const startedAtMs = performance.now();
-      const result = await withActiveComputerController(
+      // The response waits for the whole batch, which may outlast the
+      // server's idle timeout.
+      const result = await withoutRequestIdleTimeout(
         context,
-        grant,
-        workspaceId,
-        computerSessionId,
-        "session.control",
-        "computer.action",
-        async ({ sessionClient, binding }) =>
-          await sessionClient.action(
-            ComputerActionCommand.parse({
-              protocolVersion: INTERACTION_PROTOCOL_VERSION,
-              operationId: request.operationId,
-              computerSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              targetId: request.targetId,
-              expectedTargetGeneration: request.expectedTargetGeneration,
-              expectedObservationId: request.expectedObservationId,
-              expectedFrameId: request.expectedFrameId,
-              actor: interactionActorForGrant(grant),
-              action: request.action,
-            }),
+        async () =>
+          await withActiveComputerController(
+            context,
+            grant,
+            workspaceId,
+            computerSessionId,
+            "session.control",
+            "computer.action",
+            async ({ sessionClient, binding, record }) => {
+              if (
+                record.session.placement.kind === "sandbox_group" &&
+                deps.settings.sandboxDesktopInteractive === false &&
+                grant.principalKind !== "agent_attempt"
+              ) {
+                throw new HTTPException(403, { message: "Human desktop input is disabled" });
+              }
+              // A pointer action on a zoomed frame acts on the native frame
+              // the zoom was cut from, in that frame's pixels.
+              const translated = translateZoomedComputerAction({
+                expectedFrameId: request.expectedFrameId,
+                action: request.action,
+              });
+              const commandFields = {
+                protocolVersion: INTERACTION_PROTOCOL_VERSION,
+                operationId: request.operationId,
+                computerSessionId,
+                controllerGeneration: binding.controllerGeneration,
+                targetId: request.targetId,
+                expectedTargetGeneration: request.expectedTargetGeneration,
+                expectedObservationId: request.expectedObservationId,
+                expectedFrameId: translated.expectedFrameId,
+                actor: interactionActorForGrant(grant),
+                action: translated.action,
+              };
+              ComputerActionCommand.parse(commandFields);
+              const secretValues = await resolveInteractionSecretValues({
+                port: interactionSecrets,
+                grant,
+                texts: computerActionSecretTexts(request.action),
+                use: {
+                  surface: "desktop",
+                  toolName: "computer_act",
+                  operationId: request.operationId,
+                },
+                beforeResolve: requirePlacementAcceptsSecretValues(
+                  deps.db,
+                  grant,
+                  workspaceId,
+                  record.session.placement,
+                ),
+              });
+              return await sessionClient.action(
+                ComputerActionCommand.parse({
+                  ...commandFields,
+                  ...(secretValues === undefined ? {} : { secretValues }),
+                }),
+              );
+            },
           ),
       );
       observeComputerActionResult(deps.observability, startedAtMs, request, result);
@@ -639,11 +916,18 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             grantId,
             expiresAt,
           });
-          await client.createComputerViewGrant(reference, {
+          // Keep the old strict-key request. Human input uses canonical
+          // actions; this grant authorizes only the frame producer. An older
+          // controller's reusable RFB bearer must stay behind the proxy.
+          const viewGrant = await client.createComputerViewGrant(reference, {
             grantId,
             token,
             expiresAt,
           });
+          const managedLinuxPlacement =
+            record.session.placement.kind === "sandbox_group" &&
+            record.session.platform === "linux";
+          const inputAllowed = await authorizeHumanFrameInput(grant, record, placement);
           const relaySecret = placement.session.openComputerFrames
             ? resolveStreamTokenSecret(deps.settings)
             : null;
@@ -662,7 +946,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               ...(request.stream ? { stream: request.stream } : {}),
             });
           } catch (error) {
-            const publicFailure = interactionControlApiError(error, "computer");
+            const publicFailure = interactionControlApiError(error, "computer", "live_view");
             console.error("computer frame relay open failed", {
               computerSessionId,
               targetId: request.targetId,
@@ -687,8 +971,15 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                     "stream authority is unavailable for this session",
                   );
                 }
+                // The machine may be enrolled in another workspace than this
+                // chat; the token is for its exact relay channel.
                 const relayToken = await mintStreamToken(relaySecret!, {
                   workspaceId,
+                  relayChannel: {
+                    workspaceId: relayed.channel.workspaceId,
+                    agentId: relayed.channel.agentId,
+                    channelId: relayed.channel.channelId,
+                  },
                   sessionId: record.sourceSessionId,
                   viewerId: grantId,
                   leaseEpoch: record.tokenGeneration,
@@ -711,58 +1002,47 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                 };
               })()
             : await (async () => {
-                const rfb =
-                  record.session.placement.kind === "sandbox_group" &&
-                  record.session.platform === "linux" &&
-                  target.kind === "screen";
-                const protocols = rfb
-                  ? [
-                      "binary",
-                      COMPUTER_RFB_WEBSOCKET_PROTOCOL,
-                      `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
-                    ]
-                  : [
-                      COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
-                      `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
-                    ];
-                const upstreamUrl = rfb
-                  ? await client.computerRfbStreamUrl(reference, request.targetId)
-                  : await client.computerFrameStreamUrl(
-                      reference,
-                      request.targetId,
-                      request.stream,
-                    );
-                const attachment = placementUsesInteractionFrameProxy(placement.lease?.backend, {
-                  openSandboxSignedEndpoints: deps.settings.openSandboxSignedEndpoints,
-                  ...(typeof deps.settings.openSandboxInteractionFrameProxy === "boolean"
-                    ? {
-                        openSandboxInteractionFrameProxy:
-                          deps.settings.openSandboxInteractionFrameProxy,
-                      }
-                    : {}),
-                })
-                  ? createInteractionFrameProxyAttachment({
-                      requestUrl: context.req.url,
-                      publicBaseUrl: deps.settings.publicBaseUrl,
-                      webBaseUrl: deps.settings.webBaseUrl,
-                      forwardedProto: context.req.header("x-forwarded-proto"),
-                      forwardedHost:
-                        context.req.header("x-forwarded-host") ?? context.req.header("host"),
-                      rootSecret: controllerAuthorityRoot(deps),
-                      upstreamUrl,
-                      upstreamProtocols: protocols,
-                      origin,
-                      expiresAt,
-                    })
-                  : { url: upstreamUrl, protocols };
-                return rfb
-                  ? { kind: "direct_rfb" as const, ...attachment }
-                  : { kind: "direct_websocket" as const, ...attachment };
+                const protocols = [
+                  COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+                  `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
+                ];
+                const upstreamUrl = await client.computerFrameStreamUrl(
+                  reference,
+                  request.targetId,
+                  request.stream,
+                );
+                const attachment =
+                  (!viewGrant.scopedRfbInput && managedLinuxPlacement) ||
+                  placementUsesInteractionFrameProxy(placement.lease?.backend, {
+                    openSandboxSignedEndpoints: deps.settings.openSandboxSignedEndpoints,
+                    ...(typeof deps.settings.openSandboxInteractionFrameProxy === "boolean"
+                      ? {
+                          openSandboxInteractionFrameProxy:
+                            deps.settings.openSandboxInteractionFrameProxy,
+                        }
+                      : {}),
+                  })
+                    ? createInteractionFrameProxyAttachment({
+                        requestUrl: context.req.url,
+                        publicBaseUrl: deps.settings.publicBaseUrl,
+                        webBaseUrl: deps.settings.webBaseUrl,
+                        forwardedProto: context.req.header("x-forwarded-proto"),
+                        forwardedHost:
+                          context.req.header("x-forwarded-host") ?? context.req.header("host"),
+                        rootSecret: controllerAuthorityRoot(deps),
+                        upstreamUrl,
+                        upstreamProtocols: protocols,
+                        origin,
+                        expiresAt,
+                      })
+                    : { url: upstreamUrl, protocols };
+                return { kind: "direct_websocket" as const, ...attachment };
               })();
           return ComputerSessionAttachment.parse({
             computerSessionId,
             controllerGeneration: binding.controllerGeneration,
             targetId: request.targetId,
+            inputAllowed,
             stream,
             expiresAt,
           });
@@ -771,6 +1051,40 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       return context.json(result, 201);
     },
   );
+
+  async function authorizeHumanFrameInput(
+    grant: AccessGrant,
+    record: ComputerSessionControlRecord,
+    placement: ComputerPlacement,
+  ): Promise<boolean> {
+    if (
+      ((record.session.placement.kind === "connected_machine" ||
+        record.session.placement.kind === "attached_device") &&
+        placement.screenControlAllowed !== true) ||
+      (record.session.placement.kind === "sandbox_group" &&
+        deps.settings.sandboxDesktopInteractive === false) ||
+      grant.principalKind === "agent_attempt" ||
+      !hasPermission(grant.permissions, "sessions:control")
+    )
+      return false;
+    try {
+      await requireSessionAuthorization(deps, grant, {
+        sessionId: record.sourceSessionId,
+        operation: "session.control",
+        surface: "http",
+      });
+      return true;
+    } catch (error) {
+      // Input availability cannot invalidate an independently authorized view.
+      // Every action reauthorizes the live source instead of trusting this hint.
+      if (
+        error instanceof SessionAuthorizationDeniedError ||
+        error instanceof SessionAuthorizationUnavailableError
+      )
+        return false;
+      throw error;
+    }
+  }
 
   app.post(
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/heartbeat",
@@ -811,12 +1125,61 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings);
       try {
-        const before = await getComputerSessionControlRecord(deps.db, {
+        let before = await getComputerSessionControlRecord(deps.db, {
           accountId: grant.accountId,
           workspaceId,
           computerSessionId,
         });
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
+        // Still live on a machine its task has since moved away from: record
+        // the move now, so the retirement below ends it there in this call.
+        if (
+          before.session.lifecycle !== "lost" &&
+          before.session.controller &&
+          before.session.placement.kind === "connected_machine" &&
+          (await recordSourcePlacementMove(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            connectedSandboxId: before.session.placement.sandboxId,
+          }))
+        ) {
+          before = await getComputerSessionControlRecord(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            computerSessionId,
+          });
+        }
+        if (
+          before.session.lifecycle === "lost" &&
+          before.session.failureCode === "source_placement_changed" &&
+          before.session.controller &&
+          before.session.placement.kind === "connected_machine"
+        ) {
+          // The task moved away, so its route no longer reaches the machine
+          // this Desktop controller still runs on. Stop it there first; the
+          // end below then has no controller left to reach.
+          const retirement = await retireFormerPlacementControllers(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            connectedSandboxId: before.session.placement.sandboxId,
+            browserSessionIds: [],
+            computerSessionIds: [computerSessionId],
+            origin,
+            waitSignal: context.req.raw.signal,
+          });
+          if (retirement.remaining.length > 0) {
+            throw new ComputerSessionStateError(
+              "This computer session still runs on the Connected Machine its task moved away from, and that machine could not stop it now. Try again when the machine is online.",
+            );
+          }
+          // The machine is reachable again: end anything else this task left
+          // on it too, without making this request wait.
+          void retireSourceFormerPlacements(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            origin: null,
+          });
+        }
         if (before.session.controller) controllerAuthorityRoot(deps);
         const prepared = await prepareComputerSessionEnd(deps.db, {
           accountId: grant.accountId,
@@ -846,13 +1209,28 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           operationId: request.operationId,
         });
         const binding = record.session.controller;
-        if (!binding) {
+        // A computer with no controller, or in a Chrome profile that can never
+        // be reached again, ends here; completing under the bound generation
+        // fences that controller off.
+        if (
+          !binding ||
+          (record.session.placement?.kind === "attached_device" &&
+            (await interactionControllerGone(
+              deps.db,
+              await attachedBrowserViewer(deps, grant, workspaceId),
+              {
+                ...record.session.placement,
+                deviceWorkspaceId: record.deviceWorkspaceId,
+                placementInstanceId: binding.placementInstanceId,
+              },
+            )))
+        ) {
           const completed = await completeComputerSessionEnd(deps.db, {
             accountId: grant.accountId,
             workspaceId,
             operationId: request.operationId,
             computerSessionId,
-            expectedControllerGeneration: null,
+            expectedControllerGeneration: binding?.controllerGeneration ?? null,
           });
           await releaseInteractionHolder(
             grant,
@@ -870,6 +1248,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           sourceSession,
           grant,
           record.session.placement,
+          record.deviceWorkspaceId,
           binding.placementInstanceId,
           "computer.end",
           context.req.raw.signal,
@@ -881,36 +1260,39 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               computerSessionId,
               controllerGeneration: binding.controllerGeneration,
             });
-            const client = await provisionController(grant, record, placement, origin);
-            try {
-              await withInteractionHolderHeartbeat(
-                deps,
-                {
-                  grant,
-                  workspaceId,
-                  sandboxGroupId:
-                    placement.placement.kind === "sandbox_group"
-                      ? placement.placement.sandboxGroupId
-                      : null,
-                  holderId: interactionHolderId(computerSessionId),
-                  operationId: request.operationId,
-                  resourceId: computerSessionId,
-                  controllerGeneration: binding.controllerGeneration,
-                },
-                async () =>
+            // The heartbeat covers everything after dispatch, including
+            // provisioning the controller.
+            await withInteractionHolderHeartbeat(
+              deps,
+              {
+                grant,
+                workspaceId,
+                sandboxGroupId:
+                  placement.placement.kind === "sandbox_group"
+                    ? placement.placement.sandboxGroupId
+                    : null,
+                holderId: interactionHolderId(computerSessionId),
+                operationId: request.operationId,
+                resourceId: computerSessionId,
+                controllerGeneration: binding.controllerGeneration,
+              },
+              async () => {
+                const client = await provisionController(grant, record, placement, origin);
+                try {
                   await client.endComputerSession(
                     {
                       computerSessionId,
                       controllerGeneration: binding.controllerGeneration,
                     },
                     { removeState: true },
-                  ),
-              );
-            } catch (error) {
-              if (!(error instanceof BrowserControlRequestError && error.status === 404)) {
-                throw error;
-              }
-            }
+                  );
+                } catch (error) {
+                  if (!(error instanceof BrowserControlRequestError && error.status === 404)) {
+                    throw error;
+                  }
+                }
+              },
+            );
             const completed = await completeComputerSessionEnd(deps.db, {
               accountId: grant.accountId,
               workspaceId,
@@ -936,10 +1318,46 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     },
   );
 
+  async function routedMachineConnection(
+    handle: ChannelAHandle,
+    grant: AccessGrant,
+    sourceSession: Session,
+    sandboxId: string,
+  ): Promise<EnrollmentRecord | null> {
+    const machineAuthority = await handle.machineAuthority();
+    const sandbox = await getChannelAMachineSandbox(
+      deps.db,
+      {
+        accountId: grant.accountId,
+        workspaceId: sourceSession.workspaceId,
+        sessionId: sourceSession.id,
+      },
+      machineAuthority,
+      sandboxId,
+    );
+    if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
+      throw new ComputerSessionStateError("Connected Machine placement is unavailable");
+    }
+    return await resolveChannelAMachineConnection(
+      deps.db,
+      {
+        accountId: grant.accountId,
+        workspaceId: sourceSession.workspaceId,
+        sessionId: sourceSession.id,
+        machineWorkspaceId: sandbox.workspaceId,
+        enrollmentId: sandbox.enrollmentId,
+      },
+      machineAuthority,
+    );
+  }
+
   async function withComputerPlacement<T>(
     sourceSession: Session,
     grant: AccessGrant,
     expectedPlacement: InteractionPlacement | null,
+    /** An existing session's attached profile workspace, which pins the
+     *  profile copy its controller check uses. */
+    expectedDeviceWorkspaceId: string | null,
     expectedPlacementInstanceId: string | null,
     operation: ChannelAOperation,
     waitSignal: AbortSignal,
@@ -952,19 +1370,17 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     }
     if (expectedPlacement?.kind === "attached_device") {
       waitSignal.throwIfAborted();
+      // Personal machines are controlled only for their owner, as everywhere else.
+      const viewer = await attachedBrowserViewer(deps, grant, sourceSession.workspaceId);
       const device = await getAttachedBrowserDevice(deps.db, {
-        accountId: grant.accountId,
-        workspaceId: sourceSession.workspaceId,
+        ...viewer,
         deviceId: expectedPlacement.deviceId,
+        deviceWorkspaceId: expectedDeviceWorkspaceId,
       });
       if (device.state !== "connected") {
         throw new ComputerSessionStateError("Attached browser machine is disconnected");
       }
-      const enrollment = await getLiveEnrollmentConnection(
-        deps.db,
-        sourceSession.workspaceId,
-        device.enrollmentId,
-      );
+      const enrollment = await getLiveEnrollmentConnection(deps.db, viewer, device.enrollmentId);
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         throw new ComputerSessionStateError("Attached browser machine is unavailable");
       }
@@ -974,7 +1390,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         );
       }
       if (operation !== "computer.end") {
-        assertConnectedMachineComputerAccess(enrollment, operation);
+        await assertConnectedMachineComputerAccess(enrollment, operation);
       }
       const placementInstanceId = attachedEndPlacementInstanceId(
         operation,
@@ -983,6 +1399,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       );
       const built = await buildSelfhostedBackendSession({
         workspaceId: sourceSession.workspaceId,
+        // Addressed where the machine is enrolled, which can be another
+        // workspace its owner allowed it in.
+        controlWorkspaceId: enrollment.workspaceId,
         agentId: device.enrollmentId,
         connectionInstanceId: enrollment.connectionInstanceId,
         workspaceRoot: enrollment.workspaceRoot,
@@ -996,6 +1415,10 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           enrollment.agentCapabilities.operationResourcePolicy === true,
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+        transactionalFsWriteMachineSupported:
+          enrollment.agentCapabilities.transactionalFsWriteMachine === true,
+        browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+        runAsSupported: enrollment.agentCapabilities.runAs === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection
@@ -1004,6 +1427,10 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
                 transport: new NatsOpStreamTransport(
                   async () => deps.bus.getOpStreamConnection?.() ?? null,
                 ),
+                ...(enrollment.agentCapabilities.opRelease === true
+                  ? { outputReleaseSupported: true }
+                  : {}),
+                connectionGeneration: String(enrollment.connectionGeneration),
               },
             }
           : {}),
@@ -1014,6 +1441,8 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         placementInstanceId,
         session: built.session as unknown as BrowserControlPlacementSession,
         lease: null,
+        screenControlAllowed: enrollment.allowScreenControl === true,
+        attachedDeviceWorkspaceId: device.workspaceId,
       });
     }
     const runWithChannelA =
@@ -1023,115 +1452,151 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       operation === "computer.attach"
         ? withChannelARead
         : withChannelA;
-    return await runWithChannelA(
-      channelServices,
-      {
-        accountId: grant.accountId,
-        workspaceId: sourceSession.workspaceId,
-        session: sourceSession,
-        subjectId: grant.subjectId,
-        waitSignal,
-        operation,
-        retryControllerTransport: operation === "computer.read" || operation === "computer.action",
-        ...(expectedPlacementInstanceId && expectedPlacement?.kind === "sandbox_group"
-          ? { retainedInstanceId: expectedPlacementInstanceId }
-          : {}),
-      },
-      async (handle) => {
-        if (expectedPlacement?.kind === "sandbox_group") {
-          if (
-            sourceSession.sandboxGroupId !== expectedPlacement.sandboxGroupId ||
-            !handle.lease?.instanceId
-          ) {
-            throw new ComputerSessionStateError("ComputerSession home placement is unavailable");
-          }
-          assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
-          return await callback({
-            placement: expectedPlacement,
-            placementInstanceId: handle.lease.instanceId,
-            session: handle.homeSession,
-            lease: handle.lease,
-          });
-        }
-
-        const resolved = await handle.routingSession.prime();
-        if (operation !== "computer.end" && resolved.kind === "selfhosted" && resolved.sandboxId) {
-          const sandbox = await getSandbox(deps.db, grant, resolved.sandboxId);
-          if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
-            throw new ComputerSessionStateError("Connected Machine placement is unavailable");
-          }
-          const enrollment = await getLiveEnrollmentConnection(
-            deps.db,
-            grant,
-            sandbox.enrollmentId,
-          );
-          if (!enrollment?.connectionInstanceId) {
-            throw new ComputerSessionStateError("Connected Machine is unavailable");
-          }
-          assertConnectedMachineComputerAccess(enrollment, operation);
-        }
-        if (expectedPlacement?.kind === "connected_machine") {
-          if (
-            resolved.kind !== "selfhosted" ||
-            resolved.sandboxId !== expectedPlacement.sandboxId
-          ) {
-            if (operation === "computer.create") {
-              throw new HTTPException(422, {
-                message:
-                  "The requested Connected Machine is not this session's current placement. Move the session to that machine before creating an interaction resource.",
-              });
+    try {
+      return await runWithChannelA(
+        channelServices,
+        {
+          accountId: grant.accountId,
+          workspaceId: sourceSession.workspaceId,
+          session: sourceSession,
+          subjectId: grant.subjectId,
+          grant,
+          waitSignal,
+          operation,
+          retryControllerTransport:
+            operation === "computer.read" || operation === "computer.action",
+          ...(expectedPlacementInstanceId && expectedPlacement?.kind === "sandbox_group"
+            ? { retainedInstanceId: expectedPlacementInstanceId }
+            : {}),
+        },
+        async (handle) => {
+          if (expectedPlacement?.kind === "sandbox_group") {
+            if (
+              sourceSession.sandboxGroupId !== expectedPlacement.sandboxGroupId ||
+              !handle.lease?.instanceId
+            ) {
+              throw new ComputerSessionStateError("ComputerSession home placement is unavailable");
             }
-            return await throwComputerSourcePlacementChanged(
-              grant,
-              sourceSession.id,
-              expectedPlacement.sandboxId,
-            );
+            assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
+            return await callback({
+              placement: expectedPlacement,
+              placementInstanceId: handle.lease.instanceId,
+              session: handle.homeSession,
+              lease: handle.lease,
+            });
           }
-          const placementInstanceId = resolved.providerInstanceId ?? expectedPlacement.sandboxId;
-          assertPlacementInstance(expectedPlacementInstanceId, placementInstanceId);
-          return await callback({
-            placement: expectedPlacement,
-            placementInstanceId,
-            session: resolved.session as unknown as BrowserControlPlacementSession,
-            lease: null,
-          });
-        }
-        if (resolved.sandboxId === null) {
-          if (!handle.lease?.instanceId) {
-            throw new ComputerSessionStateError("ComputerSession home placement is unavailable");
+
+          const resolved = await handle.routingSession.prime();
+          // A request for another machine than the one this chat is routed to
+          // says so, before anything about the routed machine's own desktop.
+          if (expectedPlacement?.kind === "connected_machine") {
+            if (
+              resolved.kind !== "selfhosted" ||
+              resolved.sandboxId !== expectedPlacement.sandboxId
+            ) {
+              if (operation === "computer.create") {
+                throw new HTTPException(422, {
+                  message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
+                });
+              }
+              throw sourcePlacementElsewhereApiError(
+                "computer_session",
+                expectedPlacement.sandboxId,
+              );
+            }
           }
+          let screenControlAllowed = false;
           if (
-            resolved.providerInstanceId &&
-            resolved.providerInstanceId !== handle.lease.instanceId
+            operation !== "computer.end" &&
+            resolved.kind === "selfhosted" &&
+            resolved.sandboxId
           ) {
-            throw new ComputerSessionStateError("ComputerSession home placement fence changed");
+            // The request already resolved this machine's live runner when it
+            // pinned the route; otherwise look the routed machine up as the
+            // routing did: an agent acts for the person who started its turn, so
+            // a personal (Only me) machine stays reachable, subject to that
+            // attempt's per-chat permission.
+            const enrollment =
+              handle.pinnedMachine?.sandboxId === resolved.sandboxId
+                ? handle.pinnedMachine.enrollment
+                : await routedMachineConnection(handle, grant, sourceSession, resolved.sandboxId);
+            if (!enrollment?.connectionInstanceId) {
+              throw new ComputerSessionStateError("Connected Machine is unavailable");
+            }
+            await assertConnectedMachineComputerAccess(enrollment, operation, async () => {
+              const sandbox = await getChannelAMachineSandbox(
+                deps.db,
+                {
+                  accountId: grant.accountId,
+                  workspaceId: sourceSession.workspaceId,
+                  sessionId: sourceSession.id,
+                },
+                await handle.machineAuthority(),
+                resolved.sandboxId!,
+              );
+              return sandbox?.name ?? null;
+            });
+            screenControlAllowed = enrollment.allowScreenControl === true;
           }
-          return await callback({
-            placement: {
-              kind: "sandbox_group",
-              sandboxGroupId: sourceSession.sandboxGroupId,
-            },
-            placementInstanceId: handle.lease.instanceId,
-            session: handle.homeSession,
-            lease: handle.lease,
-          });
-        }
-        if (resolved.kind === "selfhosted") {
-          return await callback({
-            placement: {
-              kind: "connected_machine",
-              sandboxId: resolved.sandboxId,
-            },
-            placementInstanceId: resolved.providerInstanceId ?? resolved.sandboxId,
-            session: resolved.session as unknown as BrowserControlPlacementSession,
-            lease: null,
-          });
-        }
-        throw new BrowserControlUnsupportedError(
-          "computer creation on a non-home provider sandbox is not supported",
-        );
-      },
-    );
+          if (expectedPlacement?.kind === "connected_machine") {
+            const placementInstanceId = resolved.providerInstanceId ?? expectedPlacement.sandboxId;
+            assertPlacementInstance(expectedPlacementInstanceId, placementInstanceId);
+            return await callback({
+              placement: expectedPlacement,
+              placementInstanceId,
+              session: resolved.session as unknown as BrowserControlPlacementSession,
+              lease: null,
+              screenControlAllowed,
+            });
+          }
+          if (resolved.sandboxId === null) {
+            if (!handle.lease?.instanceId) {
+              throw new ComputerSessionStateError("ComputerSession home placement is unavailable");
+            }
+            if (
+              resolved.providerInstanceId &&
+              resolved.providerInstanceId !== handle.lease.instanceId
+            ) {
+              throw new ComputerSessionStateError("ComputerSession home placement fence changed");
+            }
+            return await callback({
+              placement: {
+                kind: "sandbox_group",
+                sandboxGroupId: sourceSession.sandboxGroupId,
+              },
+              placementInstanceId: handle.lease.instanceId,
+              session: handle.homeSession,
+              lease: handle.lease,
+            });
+          }
+          if (resolved.kind === "selfhosted") {
+            return await callback({
+              placement: {
+                kind: "connected_machine",
+                sandboxId: resolved.sandboxId,
+              },
+              placementInstanceId: resolved.providerInstanceId ?? resolved.sandboxId,
+              session: resolved.session as unknown as BrowserControlPlacementSession,
+              lease: null,
+              screenControlAllowed,
+            });
+          }
+          throw new BrowserControlUnsupportedError(
+            "computer creation on a non-home provider sandbox is not supported",
+          );
+        },
+      );
+    } catch (error) {
+      if (operation !== "computer.create" || expectedPlacement?.kind !== "connected_machine")
+        throw error;
+      throw await wrongPlacementInsteadOfOffline(
+        error,
+        expectedPlacement.sandboxId,
+        async () =>
+          (await readActiveSandbox(deps.db, sourceSession.workspaceId, sourceSession.id))
+            ?.activeSandboxId ?? null,
+      );
+    }
   }
 
   function controllerOnlySession(url: string): BrowserControlPlacementSession {
@@ -1179,7 +1644,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     if (
       placement.placement.kind !== "sandbox_group" ||
       !placement.lease?.instanceId ||
-      !placement.session.resolveExposedPort
+      !controllerHasCacheableDataPlane(placement.session)
     ) {
       return placement;
     }
@@ -1275,14 +1740,37 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     computerSessionId: string,
     authorizationOperation: SessionAuthorizationOperation,
     channelOperation: ChannelAOperation,
-    callback: (input: {
-      client: BrowserControlClient;
-      sessionClient: ReturnType<BrowserControlClient["computerSessionClient"]>;
-      record: ComputerSessionControlRecord;
-      binding: NonNullable<ComputerSessionControlRecord["session"]["controller"]>;
-      placement: ComputerPlacement;
-    }) => Promise<T>,
+    callback: ActiveComputerControllerCallback<T>,
     recoverMissing = true,
+  ): Promise<T> {
+    // The source-session check and the machine-route check that follows it
+    // prove the same live agent attempt; they share those reads. Everything
+    // from the controller call onward reads fresh.
+    return await withSessionAuthorizationReadReuse((authorizationReads) =>
+      withActiveComputerControllerReads(
+        context,
+        grant,
+        workspaceId,
+        computerSessionId,
+        authorizationOperation,
+        channelOperation,
+        callback,
+        recoverMissing,
+        authorizationReads,
+      ),
+    );
+  }
+
+  async function withActiveComputerControllerReads<T>(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    computerSessionId: string,
+    authorizationOperation: SessionAuthorizationOperation,
+    channelOperation: ChannelAOperation,
+    callback: ActiveComputerControllerCallback<T>,
+    recoverMissing: boolean,
+    authorizationReads: { handOffToToolDispatch(): void },
   ): Promise<T> {
     try {
       const record = await getComputerSessionControlRecord(deps.db, {
@@ -1290,14 +1778,22 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         workspaceId,
         computerSessionId,
       });
-      await authorizeSourceSession(deps, grant, record.sourceSessionId, authorizationOperation);
-      let sourceSession: Session | null = null;
+      // Only a cached managed controller can skip the source session; read it
+      // alongside authorization otherwise. A denial still wins.
+      const sourceSessionNeeded = record.session.placement?.kind !== "sandbox_group";
+      const [authorized, sourceRead] = await Promise.allSettled([
+        authorizeSourceSession(deps, grant, record.sourceSessionId, authorizationOperation),
+        sourceSessionNeeded
+          ? requireSourceSession(deps, workspaceId, record.sourceSessionId)
+          : Promise.resolve(null),
+      ]);
+      if (authorized.status === "rejected") throw authorized.reason;
+      if (sourceRead.status === "rejected") throw sourceRead.reason;
+      let sourceSession: Session | null = sourceRead.value;
       if (record.session.placement?.kind === "connected_machine") {
-        sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
-        if (sourceSession.activeSandboxId !== record.session.placement.sandboxId) {
-          return await throwComputerSourcePlacementChanged(
-            grant,
-            record.sourceSessionId,
+        if (sourceSession?.activeSandboxId !== record.session.placement.sandboxId) {
+          throw sourcePlacementElsewhereApiError(
+            "computer_session",
             record.session.placement.sandboxId,
           );
         }
@@ -1316,6 +1812,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         throw new ComputerSessionStateError("ComputerSession controller authority changed");
       }
       const run = async (placement: ComputerPlacement): Promise<T> => {
+        authorizationReads.handOffToToolDispatch();
         // The active controller binding is the provisioning fence. Live
         // input connects to it directly instead of re-ensuring the sidecar.
         const client = connectController(grant, record, placement);
@@ -1349,6 +1846,12 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           if (!recoverMissing || !isMissingComputerControllerSession(error)) throw error;
           await client.createComputerSession({
             computerSessionId,
+            cursorIdentity: await computerCursorIdentity(
+              deps,
+              grant,
+              sourceSession ??
+                (await requireSourceSession(deps, workspaceId, record.sourceSessionId)),
+            ),
             controllerGeneration: binding.controllerGeneration,
             tokenGeneration: record.tokenGeneration,
             ...tokens,
@@ -1387,6 +1890,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         channelOperation,
         context.req.raw.signal,
@@ -1398,27 +1902,8 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           ),
       );
     } catch (error) {
-      throw computerRouteError(error);
+      throw computerRouteError(error, interactionControlRequestFor(channelOperation));
     }
-  }
-
-  async function throwComputerSourcePlacementChanged(
-    grant: AccessGrant,
-    sourceSessionId: string,
-    connectedSandboxId: string,
-  ): Promise<never> {
-    const reconciliation = await terminalizeStaleConnectedInteractionPlacement(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sourceSessionId,
-      connectedSandboxId,
-    });
-    if (reconciliation.sourcePlacementChanged) {
-      throw sourcePlacementChangedApiError("computer_session");
-    }
-    throw new ComputerSessionStateError(
-      "ComputerSession source placement changed during the request; retry",
-    );
   }
 
   async function ensureInteractionHolder(
@@ -1436,6 +1921,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       deps.db,
       deps.settings,
       sourceSession,
+      { grant },
     );
     const acquired = await acquireLease(deps.db, {
       accountId: grant.accountId,
@@ -1451,6 +1937,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       },
       os: placement.lease.os,
       image: sandboxRuntime.image,
+      imagePolicy: "new_creates_only",
       rigVersionId: sourceSession.rigVersionId,
       leaseTtlMs: deps.settings.sandboxLeaseTtlMs,
       expectedEpoch: placement.lease.leaseEpoch,
@@ -1607,17 +2094,19 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
   }
 }
 
-function sourcePlacementChangedApiError(interactionResource: "computer_session"): ApiHttpError {
+function sourcePlacementElsewhereApiError(
+  interactionResource: "computer_session",
+  connectedSandboxId: string,
+): ApiHttpError {
   return new ApiHttpError(409, {
     code: "conflict",
-    message:
-      "This Desktop belonged to a previous task placement and was retired. Open a new Desktop.",
+    message: `This Desktop runs on Connected Machine ${connectedSandboxId}, and this task now runs on another machine. It is kept running there: move this task back to that machine to use it, or open a Desktop here.`,
     retryable: false,
     outcomeUnknown: false,
     details: {
       interactionResource,
-      interactionFailureCode: "source_placement_changed",
-      interactionLifecycle: "lost",
+      interactionFailureCode: "source_placement_elsewhere",
+      connectedSandboxId,
     },
   });
 }
@@ -1627,6 +2116,7 @@ function computerCreateInput(
   workspaceId: string,
   request: CreateComputerSessionRequestValue,
   placement: InteractionPlacement,
+  attachedDeviceWorkspaceId?: string,
 ) {
   return {
     accountId: grant.accountId,
@@ -1636,6 +2126,7 @@ function computerCreateInput(
     actorSubjectId: grant.subjectId,
     name: request.name ?? "Computer",
     placement,
+    attachedDeviceWorkspaceId: attachedDeviceWorkspaceId ?? null,
   };
 }
 
@@ -1753,16 +2244,14 @@ async function authorizeSourceSession(
   }
 }
 
-async function parseJsonBody<T>(
+async function parseJsonBody<Schema extends z.ZodType>(
   context: Context,
-  schema: {
-    safeParse(value: unknown): { success: true; data: T } | { success: false };
-  },
-): Promise<T> {
-  const value = await context.req.json().catch(() => undefined);
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) throw new HTTPException(400, { message: "invalid request body" });
-  return parsed.data;
+  schema: Schema,
+): Promise<z.output<Schema>> {
+  return parseRequestBody(schema, await context.req.json().catch(() => undefined), {
+    status: 400,
+    message: "invalid request body",
+  });
 }
 
 async function parseEmptyJsonBody(context: Context): Promise<void> {
@@ -1838,18 +2327,21 @@ function attachedEndPlacementInstanceId(
   return liveGeneration;
 }
 
-function assertConnectedMachineComputerAccess(
+async function assertConnectedMachineComputerAccess(
   enrollment: {
     hasDisplay: boolean;
     desktopUnavailableReason: string | null;
     allowScreenControl: boolean;
+    os?: string | null;
   },
   operation: ChannelAOperation,
-): void {
-  const error = connectedMachineComputerAccessError(
-    enrollment,
-    operation === "computer.action" || operation === "computer.control",
-  );
+  /** The checked machine's name, read only when access fails. */
+  machineName: () => Promise<string | null> = async () => null,
+): Promise<void> {
+  const requiresControl = operation === "computer.action" || operation === "computer.control";
+  if (!connectedMachineComputerAccessError(enrollment, requiresControl)) return;
+  const name = await machineName().catch(() => null);
+  const error = connectedMachineComputerAccessError(enrollment, requiresControl, name);
   if (!error) return;
   if (error.status === 403) {
     throw new HTTPException(403, { message: error.message });
@@ -1900,14 +2392,28 @@ function interactionFailure(error: unknown) {
   };
 }
 
-function computerRouteError(error: unknown): HTTPException {
-  const connectedMachineError = interactionControlApiError(error, "computer");
+export function computerRouteError(
+  error: unknown,
+  request: InteractionControlRequest = "request",
+): HTTPException {
+  const actionDeadline = interactionActionDeadlineApiError(error);
+  if (actionDeadline) return actionDeadline;
+  const connectedMachineError = interactionControlApiError(error, "computer", request);
   if (connectedMachineError) return connectedMachineError;
+  const routeUnavailable = activeRouteUnavailableError(error);
+  if (routeUnavailable) return routeUnavailable;
   if (error instanceof HTTPException) return error;
   if (error instanceof SandboxPaidComputeAdmissionError)
     return new HTTPException(402, { message: error.message, cause: error });
   if (error instanceof ComputerSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
+  }
+  if (error instanceof AttachedBrowserDeviceNotFoundError) {
+    return new HTTPException(404, {
+      message:
+        "No attached device has this ID. To use a connected machine's screen, use placement kind connected_machine with its sandboxId.",
+      cause: error,
+    });
   }
   if (
     error instanceof ComputerSessionOperationConflictError ||
@@ -1915,6 +2421,8 @@ function computerRouteError(error: unknown): HTTPException {
   ) {
     return new HTTPException(409, { message: error.message, cause: error });
   }
+  const legacyCapacity = legacyInteractionCapacityError(error, "computer");
+  if (legacyCapacity) return legacyCapacity;
   if (error instanceof BrowserControlRequestError) {
     return new HTTPException(error.status as ContentfulStatusCode, {
       message: error.error.message,

@@ -17,6 +17,7 @@ export default defineConfig({
   optimizeDeps: {
     entries: [
       resolve(demoRoot, "artifact-spreadsheet-scroll-fixture.tsx"),
+      resolve(demoRoot, "artifact-spreadsheet-ux-fixture.tsx"),
       resolve(demoRoot, "artifact-document-newline-fixture.tsx"),
     ],
   },

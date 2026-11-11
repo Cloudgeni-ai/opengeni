@@ -1,0 +1,1001 @@
+//! A store in memory, for tests and a fleet of one service replica that
+//! can afford to forget everything when it stops.
+
+use std::collections::{BTreeMap, HashMap};
+use std::future::{Future, ready};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use compute_fleet::{HostEpoch, HostId, HostState, Stamp};
+use compute_protocol::fleet::{Register, Renew, Report, Ruling, Verdict as Wire};
+use compute_protocol::host::{Id, ImageId};
+
+use super::{
+    Admission, Admits, Collector, Counted, Forsaken, Found, Gone, HostRow, Import, Imported,
+    Inserted, LifecycleRow, Linked, LostCopy, PointerRow, RequestRow, Result, SandboxRow, Store,
+    TemplateRow, Write, admits, rule,
+};
+
+mod pointers;
+mod templates;
+
+#[derive(Debug)]
+struct Host {
+    row: HostRow,
+    attempt: u64,
+    answer: Vec<Ruling>,
+    /// When it was given up on, while it is.
+    gone_ms: Option<u64>,
+    /// Whether an operator drained it and has not undrained it since,
+    /// which outlasts its being given up on.
+    drained: bool,
+}
+
+#[derive(Debug, Default)]
+struct Inner {
+    hosts: BTreeMap<HostId, Host>,
+    by_name: HashMap<String, HostId>,
+    sandboxes: BTreeMap<Id, SandboxRow>,
+    keys: HashMap<String, String>,
+    lifecycles: BTreeMap<Id, LifecycleRow>,
+    /// By team, then request id.
+    requests: BTreeMap<(String, String), RequestRow>,
+    /// The image built from each OCI image.
+    built: HashMap<String, ImageId>,
+    /// Which OCI image each name used, the latest last.
+    image_uses: Vec<(String, String)>,
+    /// Templates by team, then id.
+    templates: BTreeMap<(String, String), TemplateRow>,
+    /// Every image captured for a template.
+    captured: HashMap<ImageId, templates::Captured>,
+    pointers: pointers::Pointers,
+    next_host: u64,
+    next_host_epoch: u64,
+    changes: u64,
+}
+
+impl Inner {
+    fn change(&mut self) -> u64 {
+        self.changes += 1;
+        self.changes
+    }
+
+    /// The live or draining host `id` named one of `names`, under `epoch`.
+    fn current(&mut self, id: u64, epoch: u64, names: &[String]) -> Option<&mut HostRow> {
+        let host = self.hosts.get_mut(&HostId(id))?;
+        let row = &mut host.row;
+        (row.epoch == HostEpoch(epoch)
+            && row.state != HostState::Lost
+            && names.contains(&row.info.name))
+        .then_some(row)
+    }
+
+    /// Whether `row` names as owner a host given up on, or one this store
+    /// does not have.
+    fn owner_lost(&self, row: &SandboxRow) -> bool {
+        row.ownership.owner.is_some_and(|owner| {
+            self.hosts
+                .get(&owner)
+                .is_none_or(|host| host.row.state == HostState::Lost)
+        })
+    }
+
+    fn insert(&mut self, row: &SandboxRow) -> Write {
+        if self.template_gone(row) {
+            return Write::TemplateGone;
+        }
+        if self.owner_lost(row) {
+            return Write::OwnerLost;
+        }
+        if self.sandboxes.contains_key(&row.id) {
+            return Write::Conflict;
+        }
+        self.sandboxes.insert(row.id, row.clone());
+        Write::Done
+    }
+}
+
+/// Everything in memory, behind one lock.
+#[derive(Clone, Debug, Default)]
+pub struct MemoryStore {
+    inner: Arc<Mutex<Inner>>,
+    leader: Arc<AtomicBool>,
+    calls: Arc<Calls>,
+}
+
+/// How often a [`MemoryStore`] was asked for some things, for tests that
+/// count what a caller costs the store.
+#[derive(Debug, Default)]
+struct Calls {
+    sandbox_reads: AtomicU64,
+    sandbox_writes: AtomicU64,
+    /// Reads of each pointer, by name.
+    pointer_reads: Mutex<HashMap<String, u64>>,
+}
+
+/// What [`MemoryStore::calls`] counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Called {
+    /// Reads of one sandbox's row.
+    pub sandbox_reads: u64,
+    /// Inserts and replacements of a sandbox's row.
+    pub sandbox_writes: u64,
+}
+
+/// The leadership of a [`MemoryStore`], given up when dropped.
+#[derive(Debug)]
+pub struct MemoryLead(Arc<AtomicBool>);
+
+impl Drop for MemoryLead {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+impl MemoryStore {
+    /// An empty store.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How often it was asked for what [`Called`] counts, so far.
+    #[must_use]
+    pub fn calls(&self) -> Called {
+        Called {
+            sandbox_reads: self.calls.sandbox_reads.load(Ordering::Relaxed),
+            sandbox_writes: self.calls.sandbox_writes.load(Ordering::Relaxed),
+        }
+    }
+
+    /// How often pointer `name` was read, so far.
+    #[must_use]
+    pub fn pointer_reads(&self, name: &str) -> u64 {
+        self.calls
+            .pointer_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn count(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        // Every write completes under the lock, so one that panicked left
+        // nothing half done.
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn register_now(&self, register: &Register) -> Admission {
+        let mut inner = self.lock();
+        if inner.outdated(register.capacity.pointers_in_service) {
+            return Admission::Outdated;
+        }
+        let known = inner.by_name.get(&register.info.name).copied();
+        let row = known
+            .and_then(|id| inner.hosts.get(&id))
+            .map(|host| (host.row.state, host.attempt));
+        match admits(row, register.attempt) {
+            Admits::Again => {
+                let host = &inner.hosts[&known.expect("a row")];
+                return Admission::Registered {
+                    host: host.row.id,
+                    epoch: host.row.epoch,
+                    rulings: host.answer.clone(),
+                };
+            }
+            Admits::StillLive => return Admission::StillLive,
+            Admits::Fresh => {}
+        }
+        let id = known.unwrap_or_else(|| {
+            inner.next_host += 1;
+            HostId(inner.next_host)
+        });
+        inner.next_host_epoch += 1;
+        let epoch = HostEpoch(inner.next_host_epoch);
+        let mut rulings = Vec::with_capacity(register.held.len());
+        for held in &register.held {
+            let row = inner.sandboxes.get(&held.id);
+            let ruled = row.map(|row| (row.ownership, row.lost.as_ref()));
+            let (ruling, change) = rule(id, *held, ruled, register.capacity.sets_aside);
+            if let Some(sandbox) = inner.sandboxes.get_mut(&held.id) {
+                match (change, ruling.verdict) {
+                    // A reclaim: nobody took it since, so nothing was lost.
+                    (Some(change), _) => {
+                        sandbox.ownership = change.set;
+                        sandbox.lost = None;
+                        sandbox.version += 1;
+                    }
+                    (None, Wire::SetAside) => {
+                        if let Some(lost) = &mut sandbox.lost {
+                            lost.set_aside_ms.get_or_insert(crate::service::now_ms());
+                        }
+                        sandbox.version += 1;
+                    }
+                    // Kept as it waited, under the same epoch: raised all
+                    // the same, so a write read before this is refused.
+                    _ if sandbox.ownership.owner == Some(id) => sandbox.version += 1,
+                    _ => {}
+                }
+            }
+            rulings.push(ruling);
+        }
+        // What waited for it that it no longer has goes on from the store.
+        for sandbox in inner.sandboxes.values_mut() {
+            if sandbox.ownership.owner == Some(id)
+                && !register.held.iter().any(|held| held.id == sandbox.id)
+            {
+                sandbox.ownership = sandbox.ownership.lose().set;
+                sandbox.version += 1;
+            }
+        }
+        let (renewals, drained) = inner
+            .hosts
+            .get(&id)
+            .map_or((0, false), |host| (host.row.renewals, host.drained));
+        let renewals = renewals + 1;
+        let changed = inner.change();
+        inner.by_name.insert(register.info.name.clone(), id);
+        inner.hosts.insert(
+            id,
+            Host {
+                row: HostRow {
+                    id,
+                    info: register.info.clone(),
+                    epoch,
+                    state: if drained {
+                        HostState::Draining
+                    } else {
+                        HostState::Live
+                    },
+                    renewals,
+                    seq: 0,
+                    capacity: register.capacity.split().0,
+                    changed,
+                },
+                attempt: register.attempt,
+                answer: rulings.clone(),
+                gone_ms: None,
+                drained,
+            },
+        );
+        Admission::Registered {
+            host: id,
+            epoch,
+            rulings,
+        }
+    }
+}
+
+/// The store's operations, done at once.
+impl MemoryStore {
+    fn renew_now(&self, renew: &Renew, names: &[String]) -> bool {
+        let mut inner = self.lock();
+        if renew
+            .capacity
+            .as_ref()
+            .is_some_and(|capacity| inner.outdated(capacity.pointers_in_service))
+        {
+            return false;
+        }
+        let changed = inner.changes + 1;
+        let Some(row) = inner.current(renew.host, renew.epoch, names) else {
+            return false;
+        };
+        row.renewals += 1;
+        row.seq = row.seq.max(renew.seq);
+        // A renewal without a capacity keeps the one last heard.
+        if let Some(capacity) = &renew.capacity {
+            row.told(capacity);
+        }
+        row.changed = changed;
+        inner.changes = changed;
+        true
+    }
+
+    fn report_now(&self, report: &Report, names: &[String]) -> bool {
+        let mut inner = self.lock();
+        if inner.outdated(report.capacity.pointers_in_service) {
+            return false;
+        }
+        let changed = inner.changes + 1;
+        let Some(row) = inner.current(report.host, report.epoch, names) else {
+            return false;
+        };
+        row.told(&report.capacity);
+        row.changed = changed;
+        inner.changes = changed;
+        true
+    }
+
+    fn hosts_changed_now(&self, after: u64) -> Vec<HostRow> {
+        let inner = self.lock();
+        let mut rows: Vec<HostRow> = inner
+            .hosts
+            .values()
+            .filter(|host| host.row.changed > after)
+            .map(|host| host.row.clone())
+            .collect();
+        rows.sort_by_key(|row| row.changed);
+        rows
+    }
+
+    fn renewals_now(&self) -> Vec<Counted> {
+        let inner = self.lock();
+        inner
+            .hosts
+            .values()
+            .filter(|host| host.row.state != HostState::Lost)
+            .map(|host| Counted {
+                host: host.row.id,
+                renewals: host.row.renewals,
+                boot: host.row.info.boot.clone(),
+            })
+            .collect()
+    }
+
+    fn give_up_now(&self, host: HostId, renewals: u64, at_ms: u64) -> Option<usize> {
+        let mut inner = self.lock();
+        let changed = inner.changes + 1;
+        let entry = inner.hosts.get_mut(&host)?;
+        if entry.row.state == HostState::Lost || entry.row.renewals != renewals {
+            return None;
+        }
+        entry.row.state = HostState::Lost;
+        entry.row.changed = changed;
+        entry.gone_ms = Some(at_ms);
+        inner.changes = changed;
+        // Its sandboxes wait for it.
+        Some(
+            inner
+                .sandboxes
+                .values()
+                .filter(|sandbox| sandbox.ownership.owner == Some(host))
+                .count(),
+        )
+    }
+
+    fn declare_gone_now(&self, host: HostId, why: Gone, at_ms: u64) -> Option<Vec<Forsaken>> {
+        let mut inner = self.lock();
+        let entry = inner.hosts.get(&host)?;
+        if entry.row.state != HostState::Lost {
+            return None;
+        }
+        let name = entry.row.info.name.clone();
+        let owned: Vec<Id> = inner
+            .sandboxes
+            .values()
+            .filter(|sandbox| sandbox.ownership.owner == Some(host))
+            .map(|sandbox| sandbox.id)
+            .collect();
+        let mut forsaken = Vec::with_capacity(owned.len());
+        for id in owned {
+            let saved_ms = inner.saved_ms(&id.to_string());
+            let sandbox = inner.sandboxes.get_mut(&id).expect("listed above");
+            sandbox.ownership = sandbox.ownership.lose().set;
+            sandbox.lost = Some(LostCopy {
+                host: name.clone(),
+                why,
+                at_ms,
+                epoch: sandbox.ownership.epoch.0,
+                saved_ms,
+                set_aside_ms: None,
+            });
+            sandbox.version += 1;
+            forsaken.push(Forsaken { id, saved_ms });
+        }
+        Some(forsaken)
+    }
+
+    fn prune_hosts_now(&self, before_ms: u64) -> u64 {
+        let mut inner = self.lock();
+        let inner = &mut *inner;
+        let before = inner.hosts.len();
+        let sandboxes = &inner.sandboxes;
+        // One a sandbox still waits for is kept.
+        inner.hosts.retain(|id, host| {
+            host.gone_ms.is_none_or(|at| at >= before_ms)
+                || sandboxes
+                    .values()
+                    .any(|sandbox| sandbox.ownership.owner == Some(*id))
+        });
+        let hosts = &inner.hosts;
+        inner.by_name.retain(|_, id| hosts.contains_key(id));
+        u64::try_from(before - inner.hosts.len()).unwrap_or(u64::MAX)
+    }
+
+    fn set_state_now(&self, host: HostId, from: HostState, to: HostState) -> bool {
+        let mut inner = self.lock();
+        let changed = inner.changes + 1;
+        let Some(entry) = inner.hosts.get_mut(&host) else {
+            return false;
+        };
+        let undrained_while_lost = entry.row.state == HostState::Lost
+            && entry.drained
+            && from == HostState::Draining
+            && to == HostState::Live;
+        let marked_apart = entry.row.state == to && entry.drained != (to == HostState::Draining);
+        if entry.row.state != from && !undrained_while_lost && !marked_apart {
+            return false;
+        }
+        if !undrained_while_lost {
+            entry.row.state = to;
+        }
+        entry.drained = to == HostState::Draining;
+        entry.row.changed = changed;
+        inner.changes = changed;
+        true
+    }
+
+    fn try_lead_now(&self) -> Option<MemoryLead> {
+        let taken = self
+            .leader
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        taken.then(|| MemoryLead(Arc::clone(&self.leader)))
+    }
+
+    fn insert_now(&self, row: &SandboxRow) -> Write {
+        let mut inner = self.lock();
+        inner.insert(row)
+    }
+
+    fn insert_requested_now(&self, row: &SandboxRow, request_id: &str) -> Option<Write> {
+        let mut inner = self.lock();
+        let key = (row.team.clone(), request_id.to_owned());
+        if inner.requests.get(&key).is_none_or(RequestRow::gone) {
+            return None;
+        }
+        Some(inner.insert(row))
+    }
+
+    fn sandbox_now(&self, id: Id) -> Option<SandboxRow> {
+        self.lock().sandboxes.get(&id).cloned()
+    }
+
+    fn replace_now(&self, row: &SandboxRow) -> Write {
+        let mut inner = self.lock();
+        if inner.owner_lost(row) {
+            return Write::OwnerLost;
+        }
+        let Some(stored) = inner.sandboxes.get_mut(&row.id) else {
+            return Write::Conflict;
+        };
+        if stored.version != row.version {
+            return Write::Conflict;
+        }
+        let lost = stored.lost.take();
+        *stored = row.clone();
+        stored.lost = lost;
+        stored.version += 1;
+        Write::Done
+    }
+
+    fn respec_now(&self, row: &SandboxRow) -> bool {
+        let mut inner = self.lock();
+        let Some(stored) = inner.sandboxes.get_mut(&row.id) else {
+            return false;
+        };
+        if stored.version != row.version
+            || stored.ownership.owner.is_some()
+            || row.ownership.owner.is_some()
+        {
+            return false;
+        }
+        stored.spec = row.spec.clone();
+        stored.ownership = row.ownership;
+        stored.version += 1;
+        true
+    }
+
+    fn delete_now(&self, id: Id, version: u64, retire_at: Option<u64>) -> bool {
+        let mut inner = self.lock();
+        let Some(row) = inner.sandboxes.get(&id) else {
+            return false;
+        };
+        if row.version != version {
+            return false;
+        }
+        let team = row.team.clone();
+        inner.sandboxes.remove(&id);
+        if let Some(at) = retire_at {
+            for request in inner.requests.values_mut() {
+                if request.id == id && request.team == team && request.gone_ms.is_none() {
+                    request.gone_ms = Some(at);
+                }
+            }
+        }
+        true
+    }
+
+    fn list_now(&self, team: &str, metadata: &BTreeMap<String, String>) -> Vec<SandboxRow> {
+        let inner = self.lock();
+        inner
+            .sandboxes
+            .values()
+            .filter(|row| row.team == team)
+            .filter(|row| {
+                metadata
+                    .iter()
+                    .all(|(key, value)| row.metadata.get(key) == Some(value))
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn owned_by_now(&self, host: HostId) -> Vec<SandboxRow> {
+        let inner = self.lock();
+        inner
+            .sandboxes
+            .values()
+            .filter(|row| row.ownership.owner == Some(host))
+            .cloned()
+            .collect()
+    }
+
+    fn team_of_now(&self, digest: &str) -> Option<String> {
+        self.lock().keys.get(digest).cloned()
+    }
+
+    fn add_key_now(&self, digest: &str, team: &str) {
+        self.lock().keys.insert(digest.to_owned(), team.to_owned());
+    }
+
+    fn claim_request_now(&self, row: &RequestRow) -> RequestRow {
+        self.lock()
+            .requests
+            .entry((row.team.clone(), row.request_id.clone()))
+            .or_insert_with(|| row.clone())
+            .clone()
+    }
+
+    fn prune_requests_now(&self, before_ms: u64) -> u64 {
+        let mut inner = self.lock();
+        let before = inner.requests.len();
+        inner
+            .requests
+            .retain(|_, request| request.gone_ms.is_none_or(|at| at >= before_ms));
+        u64::try_from(before - inner.requests.len()).unwrap_or(u64::MAX)
+    }
+
+    fn insert_lifecycle_now(&self, row: &LifecycleRow) -> bool {
+        let mut inner = self.lock();
+        if inner.lifecycles.contains_key(&row.id) {
+            return false;
+        }
+        inner.lifecycles.insert(row.id, row.clone());
+        true
+    }
+
+    fn replace_lifecycle_now(&self, row: &LifecycleRow) -> bool {
+        let mut inner = self.lock();
+        let Some(stored) = inner.lifecycles.get_mut(&row.id) else {
+            return false;
+        };
+        if stored.version != row.version {
+            return false;
+        }
+        *stored = row.clone();
+        stored.version += 1;
+        true
+    }
+
+    fn delete_lifecycle_now(&self, id: Id, version: u64) -> bool {
+        let mut inner = self.lock();
+        if inner
+            .lifecycles
+            .get(&id)
+            .is_none_or(|row| row.version != version)
+        {
+            return false;
+        }
+        inner.lifecycles.remove(&id);
+        true
+    }
+
+    fn lifecycles_now(&self, team: &str) -> Vec<LifecycleRow> {
+        self.lock()
+            .lifecycles
+            .values()
+            .filter(|row| row.team == team)
+            .cloned()
+            .collect()
+    }
+
+    fn lifecycles_due_now(
+        &self,
+        now_ms: u64,
+        after: Option<(u64, Id)>,
+        limit: usize,
+    ) -> Vec<LifecycleRow> {
+        // Ids compare as the database compares them: as text.
+        let after = after.map(|(due, id)| (due, id.to_string()));
+        let key = |row: &LifecycleRow| (row.record.due_ms(), row.id.to_string());
+        let mut due: Vec<LifecycleRow> = self
+            .lock()
+            .lifecycles
+            .values()
+            .filter(|row| row.record.due_ms() <= now_ms)
+            .filter(|row| after.as_ref().is_none_or(|after| key(row) > *after))
+            .cloned()
+            .collect();
+        due.sort_by_cached_key(key);
+        due.truncate(limit);
+        due
+    }
+
+    fn lifecycles_paused_now(&self, after: Option<Id>, limit: usize) -> Vec<LifecycleRow> {
+        // Ids compare as the database compares them: as text.
+        let after = after.map(|id| id.to_string());
+        let mut paused: Vec<LifecycleRow> = self
+            .lock()
+            .lifecycles
+            .values()
+            .filter(|row| row.record.due_ms() == u64::MAX)
+            .filter(|row| {
+                after
+                    .as_ref()
+                    .is_none_or(|after| row.id.to_string() > *after)
+            })
+            .cloned()
+            .collect();
+        paused.sort_by_cached_key(|row| row.id.to_string());
+        paused.truncate(limit);
+        paused
+    }
+}
+
+impl Store for MemoryStore {
+    type Lead = MemoryLead;
+
+    fn register(&self, register: &Register) -> impl Future<Output = Result<Admission>> + Send {
+        ready(Ok(self.register_now(register)))
+    }
+
+    fn renew(&self, renew: &Renew, names: &[String]) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.renew_now(renew, names)))
+    }
+
+    fn report(
+        &self,
+        report: &Report,
+        names: &[String],
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.report_now(report, names)))
+    }
+
+    fn hosts_changed(&self, after: u64) -> impl Future<Output = Result<Vec<HostRow>>> + Send {
+        ready(Ok(self.hosts_changed_now(after)))
+    }
+
+    fn renewals(&self) -> impl Future<Output = Result<Vec<Counted>>> + Send {
+        ready(Ok(self.renewals_now()))
+    }
+
+    fn give_up(
+        &self,
+        host: HostId,
+        renewals: u64,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<Option<usize>>> + Send {
+        ready(Ok(self.give_up_now(host, renewals, at_ms)))
+    }
+
+    fn declare_gone(
+        &self,
+        host: HostId,
+        why: Gone,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<Option<Vec<Forsaken>>>> + Send {
+        ready(Ok(self.declare_gone_now(host, why, at_ms)))
+    }
+
+    fn prune_hosts(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send {
+        ready(Ok(self.prune_hosts_now(before_ms)))
+    }
+
+    fn set_state(
+        &self,
+        host: HostId,
+        from: HostState,
+        to: HostState,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.set_state_now(host, from, to)))
+    }
+
+    fn try_lead(&self) -> impl Future<Output = Result<Option<MemoryLead>>> + Send {
+        ready(Ok(self.try_lead_now()))
+    }
+
+    fn leads(&self, _lead: &mut MemoryLead) -> impl Future<Output = bool> + Send {
+        ready(true)
+    }
+
+    fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send {
+        Self::count(&self.calls.sandbox_writes);
+        ready(Ok(self.insert_now(row)))
+    }
+
+    fn sandbox(&self, id: Id) -> impl Future<Output = Result<Option<SandboxRow>>> + Send {
+        Self::count(&self.calls.sandbox_reads);
+        ready(Ok(self.sandbox_now(id)))
+    }
+
+    fn insert_requested(
+        &self,
+        row: &SandboxRow,
+        request_id: &str,
+    ) -> impl Future<Output = Result<Option<Write>>> + Send {
+        Self::count(&self.calls.sandbox_writes);
+        ready(Ok(self.insert_requested_now(row, request_id)))
+    }
+
+    fn agents(&self, ids: &[Id]) -> impl Future<Output = Result<Vec<Linked>>> + Send {
+        let inner = self.lock();
+        let found = ids
+            .iter()
+            .filter_map(|id| {
+                let row = inner.sandboxes.get(id)?;
+                Some(Linked {
+                    id: *id,
+                    team: row.team.clone(),
+                    agent: row.spec.agent.clone()?,
+                })
+            })
+            .collect();
+        ready(Ok(found))
+    }
+
+    fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send {
+        Self::count(&self.calls.sandbox_writes);
+        ready(Ok(self.replace_now(row)))
+    }
+
+    fn respec(&self, row: &SandboxRow) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.respec_now(row)))
+    }
+
+    fn delete(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.delete_now(id, version, None)))
+    }
+
+    fn delete_retiring(
+        &self,
+        id: Id,
+        version: u64,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.delete_now(id, version, Some(at_ms))))
+    }
+
+    fn list(
+        &self,
+        team: &str,
+        metadata: &BTreeMap<String, String>,
+    ) -> impl Future<Output = Result<Vec<SandboxRow>>> + Send {
+        ready(Ok(self.list_now(team, metadata)))
+    }
+
+    fn owned_by(&self, host: HostId) -> impl Future<Output = Result<Vec<SandboxRow>>> + Send {
+        ready(Ok(self.owned_by_now(host)))
+    }
+
+    fn team_of(&self, digest: &str) -> impl Future<Output = Result<Option<String>>> + Send {
+        ready(Ok(self.team_of_now(digest)))
+    }
+
+    fn add_key(&self, digest: &str, team: &str) -> impl Future<Output = Result<()>> + Send {
+        self.add_key_now(digest, team);
+        ready(Ok(()))
+    }
+
+    fn claim_request(&self, row: &RequestRow) -> impl Future<Output = Result<RequestRow>> + Send {
+        ready(Ok(self.claim_request_now(row)))
+    }
+
+    fn request(
+        &self,
+        team: &str,
+        request_id: &str,
+    ) -> impl Future<Output = Result<Option<RequestRow>>> + Send {
+        let key = (team.to_owned(), request_id.to_owned());
+        ready(Ok(self.lock().requests.get(&key).cloned()))
+    }
+
+    fn prune_requests(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send {
+        ready(Ok(self.prune_requests_now(before_ms)))
+    }
+
+    fn insert_lifecycle(&self, row: &LifecycleRow) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.insert_lifecycle_now(row)))
+    }
+
+    fn lifecycle(&self, id: Id) -> impl Future<Output = Result<Option<LifecycleRow>>> + Send {
+        ready(Ok(self.lock().lifecycles.get(&id).cloned()))
+    }
+
+    fn replace_lifecycle(&self, row: &LifecycleRow) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.replace_lifecycle_now(row)))
+    }
+
+    fn delete_lifecycle(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.delete_lifecycle_now(id, version)))
+    }
+
+    fn lifecycles(&self, team: &str) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send {
+        ready(Ok(self.lifecycles_now(team)))
+    }
+
+    fn lifecycles_due(
+        &self,
+        now_ms: u64,
+        after: Option<(u64, Id)>,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send {
+        ready(Ok(self.lifecycles_due_now(now_ms, after, limit)))
+    }
+
+    fn lifecycles_paused(
+        &self,
+        after: Option<Id>,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send {
+        ready(Ok(self.lifecycles_paused_now(after, limit)))
+    }
+
+    fn image_built(&self, source: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send {
+        ready(Ok(self.lock().built.get(source).copied()))
+    }
+
+    fn record_built(
+        &self,
+        source: &str,
+        name: &str,
+        image: ImageId,
+        _at_ms: u64,
+    ) -> impl Future<Output = Result<ImageId>> + Send {
+        let mut inner = self.lock();
+        let recorded = *inner.built.entry(source.to_owned()).or_insert(image);
+        inner
+            .image_uses
+            .retain(|(named, used)| named != name || used != source);
+        inner.image_uses.push((name.to_owned(), source.to_owned()));
+        ready(Ok(recorded))
+    }
+
+    fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send {
+        let inner = self.lock();
+        let latest = inner
+            .image_uses
+            .iter()
+            .rev()
+            .find_map(|(named, source)| (named == name).then(|| inner.built.get(source).copied()))
+            .flatten();
+        ready(Ok(latest))
+    }
+
+    fn insert_template(&self, row: &TemplateRow) -> impl Future<Output = Result<Inserted>> + Send {
+        ready(Ok(self.lock().insert_template(row)))
+    }
+
+    fn template(
+        &self,
+        team: &str,
+        key: &str,
+    ) -> impl Future<Output = Result<Option<TemplateRow>>> + Send {
+        ready(Ok(self.lock().template(team, key)))
+    }
+
+    fn templates(&self, team: &str) -> impl Future<Output = Result<Vec<TemplateRow>>> + Send {
+        ready(Ok(self.lock().templates(team)))
+    }
+
+    fn delete_template(&self, team: &str, id: &str) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.lock().delete_template(team, id)))
+    }
+
+    fn unused_images(
+        &self,
+        now_ms: u64,
+        before_ms: u64,
+    ) -> impl Future<Output = Result<Vec<ImageId>>> + Send {
+        ready(Ok(self.lock().unused_images(now_ms, before_ms)))
+    }
+
+    fn collect_image(
+        &self,
+        image: ImageId,
+        before_ms: u64,
+        collector: &Collector,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.lock().collect_image(image, before_ms, collector)))
+    }
+
+    fn collecting(
+        &self,
+        image: ImageId,
+        collector: &str,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.lock().collecting(image, collector)))
+    }
+
+    fn collected(
+        &self,
+        image: ImageId,
+        collector: &str,
+    ) -> impl Future<Output = Result<()>> + Send {
+        self.lock().collected(image, collector);
+        ready(Ok(()))
+    }
+
+    fn registered(
+        &self,
+        epoch: u64,
+        names: &[String],
+    ) -> impl Future<Output = Result<bool>> + Send {
+        let inner = self.lock();
+        ready(Ok(inner.hosts.values().any(|host| {
+            host.row.epoch == HostEpoch(epoch)
+                && host.row.state != HostState::Lost
+                && names.contains(&host.row.info.name)
+        })))
+    }
+
+    fn pointer(&self, name: &str) -> impl Future<Output = Result<Option<PointerRow>>> + Send {
+        *self
+            .calls
+            .pointer_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(name.to_owned())
+            .or_default() += 1;
+        ready(Ok(self.lock().pointer(name)))
+    }
+
+    fn write_pointer(
+        &self,
+        name: &str,
+        owner: Stamp,
+        pointer: &[u8],
+        on: Option<i64>,
+    ) -> impl Future<Output = Result<Option<i64>>> + Send {
+        ready(Ok(self.lock().write_pointer(name, owner, pointer, on)))
+    }
+
+    fn pointer_names(&self) -> impl Future<Output = Result<Vec<String>>> + Send {
+        ready(Ok(self.lock().pointer_names()))
+    }
+
+    fn pointers_imported(&self) -> impl Future<Output = Result<Option<Imported>>> + Send {
+        ready(Ok(self.lock().pointers_imported()))
+    }
+
+    fn adopt_pointers(&self, found: &[Found]) -> impl Future<Output = Result<usize>> + Send {
+        ready(Ok(self.lock().adopt_pointers(found)))
+    }
+
+    fn clock_ms(&self) -> impl Future<Output = Result<u64>> + Send {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+            });
+        ready(Ok(now))
+    }
+
+    fn import_pointers(
+        &self,
+        found: &[Found],
+        from: &str,
+        at_ms: u64,
+        seen: u64,
+    ) -> impl Future<Output = Result<Import>> + Send {
+        ready(Ok(self.lock().import_pointers(found, from, at_ms, seen)))
+    }
+}

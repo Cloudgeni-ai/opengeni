@@ -29,6 +29,7 @@ export {
   type JevScoreAnswer,
   type JevScoreQuestion,
 } from "./client";
+export { createJevDecisionModel } from "./decision-model";
 export {
   JevCircuitBreaker,
   type JevCircuitBreakerOptions,

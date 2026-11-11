@@ -5,8 +5,13 @@
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
-import { codeSearchConfig, JevClient } from "../src";
-import { buildSymbolRequest, JevJudge, PROMPTS, type LeadItem } from "../src/code-search/judge";
+import { codeSearchConfig, JevClient, createJevDecisionModel } from "../src";
+import {
+  buildSymbolRequest,
+  CodeSearchJudge,
+  PROMPTS,
+  type LeadItem,
+} from "../src/code-search/judge";
 import {
   complementRanges,
   fmtRanges,
@@ -1094,7 +1099,11 @@ describe("symbol judge", () => {
         return Response.json({ model: "m", answers, usage: { input_tokens: 1, output_tokens: 0 } });
       },
     });
-    const judge = new JevJudge({ client, config: cfg, signal: new AbortController().signal });
+    const judge = new CodeSearchJudge({
+      client: createJevDecisionModel(client),
+      config: cfg,
+      signal: new AbortController().signal,
+    });
     const scores = await judge.scoreSymbols(items, ctx);
     expect(scores.get("y1000")).toBe(0.8);
     expect(scores.get("y1001")).toBe(0.2);

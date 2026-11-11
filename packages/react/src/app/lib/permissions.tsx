@@ -1,0 +1,509 @@
+import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
+import {
+  Permission,
+  WORKSPACE_ADMIN_ROLE_PERMISSIONS,
+  workspaceAdminDelegates,
+} from "@opengeni/contracts";
+import { organizationAdministrationAccountIds } from "../../organization-model";
+
+import type { AccessContext } from "../types";
+import type { Workspace } from "../types";
+import { personalWorkspaceMembership, type ManagedSelfContext } from "./managed-self-context";
+
+const permissionGroupAssignments: Record<Permission, string> = {
+  "workspace:read": "Workspace",
+  "workspace:create": "Workspace",
+  "sessions:create": "Sessions",
+  "sessions:read": "Sessions",
+  "sessions:control": "Sessions",
+  "stream:view": "Sessions",
+  "stream:control": "Sessions",
+  "stream:acknowledge": "Sessions",
+  "terminal:attach": "Sessions",
+  "codemode:call": "Sessions",
+  "files:upload": "Files & documents",
+  "files:read": "Files & documents",
+  "files:write": "Files & documents",
+  "documents:manage": "Files & documents",
+  "documents:search": "Files & documents",
+  "scheduled_tasks:manage": "Automations",
+  "scheduled_tasks:run": "Automations",
+  "environments:manage": "Secrets",
+  "environments:use": "Secrets",
+  "variable-sets:list": "Secrets",
+  "variable-sets:read": "Secrets",
+  "variable-sets:write": "Secrets",
+  "variable-sets:manage": "Secrets",
+  "variable-sets:attach": "Secrets",
+  "variable-sets:use": "Secrets",
+  "secrets:list": "Secrets",
+  "secrets:read": "Secrets",
+  "secrets:write": "Secrets",
+  "secrets:use": "Secrets",
+  "mcp_servers:attach": "Sessions",
+  "github:manage": "GitHub",
+  "github:use": "GitHub",
+  "goals:manage": "Goals",
+  "rigs:use": "Sandbox Environments",
+  "rigs:manage": "Sandbox Environments",
+  "artifacts:read": "Artifacts",
+  "artifacts:publish": "Artifacts",
+  "enrollments:read": "Machines",
+  "enrollments:manage": "Machines",
+  "workspace:admin": "Admin & account",
+  "api_keys:manage": "Admin & account",
+  "usage_allowances:manage": "Admin & account",
+  "connections:read": "Connections",
+  "connections:write": "Connections",
+  "connections:personal": "Connections",
+  "capabilities:manage": "Connections",
+  "members:manage": "Admin & account",
+  "account:read": "Admin & account",
+  "account:admin": "Admin & account",
+  "billing:read": "Admin & account",
+  "billing:manage": "Admin & account",
+};
+
+const permissionGroupOrder = [
+  "Workspace",
+  "Sessions",
+  "Files & documents",
+  "Automations",
+  "Secrets",
+  "Connections",
+  "Machines",
+  "GitHub",
+  "Goals",
+  "Sandbox Environments",
+  "Artifacts",
+  "Admin & account",
+];
+
+export type PermissionGroup = { label: string; permissions: Permission[] };
+
+// Derived from the contracts Permission enum so pickers can never drift from
+// the API again: every enum value lands in exactly one group.
+export function buildApiKeyPermissionGroups(): PermissionGroup[] {
+  const groups: PermissionGroup[] = [];
+  for (const permission of Permission.options) {
+    const label = permissionGroupAssignments[permission] ?? "Other";
+    const group = groups.find((candidate) => candidate.label === label);
+    if (group) {
+      group.permissions.push(permission);
+    } else {
+      groups.push({ label, permissions: [permission] });
+    }
+  }
+  const rank = (label: string): number => {
+    const index = permissionGroupOrder.indexOf(label);
+    return index === -1 ? permissionGroupOrder.length : index;
+  };
+  return groups.sort((a, b) => rank(a.label) - rank(b.label));
+}
+
+// Lazy on purpose: this module lands in a shared chunk, and an eager
+// module-scope `Permission.options` read crashes the whole chunk with a TDZ
+// error whenever the bundler's chunk graph puts the contracts enum later in
+// the evaluation order (adding a new lazy route re-clusters chunks and did
+// exactly that). Computing on first use is immune to chunk-order changes.
+let cachedApiKeyPermissionGroups: PermissionGroup[] | null = null;
+export function apiKeyPermissionGroups(): PermissionGroup[] {
+  cachedApiKeyPermissionGroups ??= buildApiKeyPermissionGroups();
+  return cachedApiKeyPermissionGroups;
+}
+
+// The API's ensureDelegablePermissions rule (shared through contracts):
+// workspace:admin delegates most workspace scopes, but high-trust scopes require
+// literal grants in the right authority (workspace or organization). Other
+// grants delegate only themselves.
+export function delegableApiKeyPermissions(
+  grantPermissions: readonly string[],
+  accountGrantPermissions: readonly string[] = [],
+): Set<string> {
+  if (grantPermissions.includes("workspace:admin")) {
+    return new Set<string>(
+      Permission.options.filter((permission) =>
+        workspaceAdminDelegates(grantPermissions, accountGrantPermissions, permission),
+      ),
+    );
+  }
+  return new Set<string>(
+    Permission.options.filter((permission) => grantPermissions.includes(permission)),
+  );
+}
+
+export const fixedOrganizationApiKeyPermissions = [
+  "account:read",
+  "workspace:create",
+  "workspace:read",
+  "workspace:admin",
+  "api_keys:manage",
+] as const;
+
+export const defaultApiKeyPermissions = new Set<string>([
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+  "documents:search",
+  "scheduled_tasks:run",
+  "github:use",
+]);
+
+/**
+ * Groups offered for a session's first-party MCP (Opengeni tool) permission
+ * scope — the same grouped idiom as the API key dialog. Account-level scopes
+ * are excluded: a session's Opengeni MCP only ever acts inside its workspace.
+ */
+export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
+  const accountOnly = new Set<string>([
+    "account:read",
+    "account:admin",
+    "members:manage",
+    "billing:read",
+    "billing:manage",
+    "workspace:create",
+    "usage_allowances:manage",
+  ]);
+  const notFirstPartyMcp = new Set<string>(["codemode:call"]);
+  return buildApiKeyPermissionGroups()
+    .map((group) => ({
+      label: group.label,
+      permissions: group.permissions.filter(
+        (permission) => !accountOnly.has(permission) && !notFirstPartyMcp.has(permission),
+      ),
+    }))
+    .filter((group) => group.permissions.length > 0);
+}
+
+// Lazy for the same chunk-evaluation-order reason as apiKeyPermissionGroups.
+let cachedSessionMcpPermissionGroups: PermissionGroup[] | null = null;
+export function sessionMcpPermissionGroups(): PermissionGroup[] {
+  cachedSessionMcpPermissionGroups ??= buildSessionMcpPermissionGroups();
+  return cachedSessionMcpPermissionGroups;
+}
+
+/**
+ * Groups offered when editing a workspace member's permissions. Workspace
+ * scopes only: the account-level scopes (billing, account admin, member
+ * management, workspace creation) are granted on the organization, not on a
+ * per-workspace membership row, so they are excluded here. `members:manage`
+ * and `workspace:admin` stay (they are workspace-scoped membership powers).
+ */
+export function buildWorkspaceMemberPermissionGroups(): PermissionGroup[] {
+  const accountOnly = new Set<string>([
+    "account:read",
+    "account:admin",
+    "billing:read",
+    "billing:manage",
+    "workspace:create",
+    "usage_allowances:manage",
+  ]);
+  // Membership itself is the workspace-access boundary. `workspace:read` is
+  // the baseline capability that lets an admitted human discover and open the
+  // workspace, so the organization editor includes it automatically instead
+  // of presenting it as an optional fine-grained choice.
+  const automaticBaseline = new Set<string>(["workspace:read"]);
+  return buildApiKeyPermissionGroups()
+    .map((group) => ({
+      label: group.label,
+      permissions: group.permissions.filter(
+        (permission) => !accountOnly.has(permission) && !automaticBaseline.has(permission),
+      ),
+    }))
+    .filter((group) => group.permissions.length > 0);
+}
+
+// Lazy for the same chunk-evaluation-order reason as apiKeyPermissionGroups.
+let cachedWorkspaceMemberPermissionGroups: PermissionGroup[] | null = null;
+export function workspaceMemberPermissionGroups(): PermissionGroup[] {
+  cachedWorkspaceMemberPermissionGroups ??= buildWorkspaceMemberPermissionGroups();
+  return cachedWorkspaceMemberPermissionGroups;
+}
+
+/**
+ * The default permission set for a newly-added workspace member: everything a
+ * Viewer holds plus full teammate access (live control, terminal, file edits,
+ * own connections, Sandbox Environments, Connected Machine picking, artifacts),
+ * minus the settings/management powers an admin grants deliberately. Mirrors
+ * the server's named `member` preset (migration 0865) exactly, order included.
+ */
+export const defaultWorkspaceMemberPermissions = new Set<string>([
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "stream:view",
+  "stream:control",
+  "stream:acknowledge",
+  "terminal:attach",
+  "codemode:call",
+  "files:upload",
+  "files:read",
+  "files:write",
+  "documents:manage",
+  "documents:search",
+  "scheduled_tasks:manage",
+  "scheduled_tasks:run",
+  "github:use",
+  "connections:read",
+  "connections:write",
+  "secrets:list",
+  "secrets:write",
+  "secrets:use",
+  "mcp_servers:attach",
+  "goals:manage",
+  "rigs:use",
+  "rigs:manage",
+  "enrollments:read",
+  "artifacts:read",
+  "artifacts:publish",
+]);
+
+export type WorkspaceAccessLevel = "viewer" | "member" | "admin";
+
+export type WorkspaceAccessLevelDefinition = {
+  role: WorkspaceAccessLevel;
+  label: string;
+  description: string;
+  permissions: readonly string[];
+};
+
+/**
+ * Named workspace roles. These mirror the server catalog
+ * (`opengeni_private.workspace_member_role_permissions`, returned as the
+ * organization overview `roles`) exactly, labels and descriptions included;
+ * keep them in sync when a migration changes a preset.
+ */
+export const workspaceAccessLevels: ReadonlyArray<WorkspaceAccessLevelDefinition> = [
+  {
+    role: "viewer",
+    label: "Viewer",
+    description: "Can view shared workspace sessions, files, and approved knowledge.",
+    permissions: [
+      "workspace:read",
+      "sessions:read",
+      "stream:view",
+      "files:read",
+      "documents:search",
+      "secrets:list",
+      "connections:read",
+      "rigs:use",
+      "artifacts:read",
+    ],
+  },
+  {
+    role: "member",
+    label: "Member",
+    description: "Can create sessions and contribute shared workspace content.",
+    permissions: [...defaultWorkspaceMemberPermissions],
+  },
+  {
+    role: "admin",
+    label: "Workspace admin",
+    description: "Can manage shared workspace settings, access, and integrations.",
+    // A getter, never a module-scope read of contracts (chunk evaluation order).
+    get permissions() {
+      return WORKSPACE_ADMIN_ROLE_PERMISSIONS;
+    },
+  },
+];
+
+export function hasWorkspacePermission(
+  context: AccessContext | null,
+  workspaceId: string,
+  permission: string,
+): boolean {
+  const grant = context?.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+  return Boolean(
+    grant &&
+    (permissionSetCovers(grant.permissions, permission) ||
+      (permission !== "secrets:read" && grant.permissions.includes("workspace:admin"))),
+  );
+}
+
+/**
+ * Whether the viewer may add integrations here: install plugins and API
+ * integrations, add MCP servers and turn on an integration that is not on yet.
+ * Members hold `connections:write`; integration admins hold
+ * `capabilities:manage`. An organization can keep this for admins
+ * (`memberIntegrationSetup: "admins"`). A member's add never changes what is
+ * already set up; see {@link canChangeWorkspaceIntegrations}.
+ */
+export function canAddWorkspaceIntegrations(
+  context: AccessContext | null,
+  workspaceId: string,
+  memberIntegrationSetup?: "members" | "admins",
+): boolean {
+  return (
+    canChangeWorkspaceIntegrations(context, workspaceId) ||
+    (canManageWorkspaceIntegrations(context, workspaceId) && memberIntegrationSetup !== "admins")
+  );
+}
+
+/**
+ * Whether the viewer may remove plugins and integrations and configure an
+ * integration's sources here, whatever the organization's setup policy. The
+ * same rule as the API's (`INTEGRATION_SETUP_PERMISSION`).
+ */
+export function canManageWorkspaceIntegrations(
+  context: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  return (
+    hasWorkspacePermission(context, workspaceId, "capabilities:manage") ||
+    hasWorkspacePermission(context, workspaceId, "connections:write")
+  );
+}
+
+/**
+ * Whether the viewer may change an integration that is already set up: update
+ * a plugin, check a custom API for updates, or reconnect a shared account.
+ * Integration admin work (`capabilities:manage`), like tool approval rules,
+ * auto-approval and turning an integration off for everyone.
+ */
+export function canChangeWorkspaceIntegrations(
+  context: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  return hasWorkspacePermission(context, workspaceId, "capabilities:manage");
+}
+
+/**
+ * Whether the chat's connect card may sign in a workspace-owned account for an
+ * OAuth MCP server. Admins may for any server. Members (`connections:write`)
+ * may only turn on a server that is not on yet, when their organization lets
+ * members turn integrations on: their setup never changes a server that is
+ * already on, so a new account for one would go unused.
+ */
+export function canConnectWorkspaceMcpFromChat(
+  context: AccessContext | null,
+  workspaceId: string,
+  item: { enabled?: boolean | undefined } | undefined,
+  memberIntegrationSetup?: "members" | "admins",
+): boolean {
+  if (!hasWorkspacePermission(context, workspaceId, "connections:write")) return false;
+  if (hasWorkspacePermission(context, workspaceId, "capabilities:manage")) return true;
+  return item?.enabled !== true && memberIntegrationSetup !== "admins";
+}
+
+/**
+ * True only when the viewer's loaded grant for this workspace provably lacks
+ * `permission`. A missing grant (still loading, local mode, or no access at
+ * all) is not evidence of a narrower role.
+ */
+export function lacksWorkspacePermission(
+  context: AccessContext | null,
+  workspaceId: string,
+  permission: string,
+): boolean {
+  return (
+    Boolean(context?.workspaceGrants?.some((grant) => grant.workspaceId === workspaceId)) &&
+    !hasWorkspacePermission(context, workspaceId, permission)
+  );
+}
+
+/** An authorization failure needs an access explanation, not a retry prompt. */
+export function isWorkspacePermissionDenied(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "status" in error && error.status === 403);
+}
+
+export function hasAccountPermission(
+  context: AccessContext | null,
+  accountId: string,
+  permission: string,
+): boolean {
+  const grant = context?.accountGrants.find((candidate) => candidate.accountId === accountId);
+  return Boolean(
+    grant &&
+    (grant.permissions.includes(permission) || grant.permissions.includes("account:admin")),
+  );
+}
+
+/** UI affordance only. The API independently authenticates Personal ownership. */
+export function canManageWorkspaceSettings(
+  context: AccessContext | null,
+  workspace: Pick<Workspace, "id" | "accountId" | "kind"> | null,
+  selfContext: ManagedSelfContext | null,
+): boolean {
+  if (!context || !workspace) return false;
+  if (hasWorkspacePermission(context, workspace.id, "workspace:admin")) return true;
+  return Boolean(
+    context.mode === "managed" &&
+    workspace.kind === "personal" &&
+    selfContext?.identity.subjectId === context.subjectId &&
+    selfContext.identity.subjectId === `user:${selfContext.identity.managedUserId}` &&
+    hasWorkspacePermission(context, workspace.id, "workspace:read") &&
+    personalWorkspaceMembership(workspace, selfContext),
+  );
+}
+
+/**
+ * Shared content of a workspace that everyone who works there may change for
+ * everyone, like a shared Skill: its instructions and the review of the
+ * agent's proposed changes to them, a shared workspace's name and its custom
+ * model entries. Whoever manages the workspace's settings
+ * may; otherwise a person of the organization who can start chats here
+ * (`sessions:create`), signed in as themselves (see {@link isSignedInPerson}).
+ * Mirrors the API's `requireWorkspaceContributorGrant`. UI affordance only.
+ */
+export function canContributeWorkspaceContent(
+  context: AccessContext | null,
+  workspace: Pick<Workspace, "id" | "accountId" | "kind"> | null,
+  selfContext: ManagedSelfContext | null,
+): boolean {
+  if (!context || !workspace) return false;
+  if (canManageWorkspaceSettings(context, workspace, selfContext)) return true;
+  const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspace.id);
+  return Boolean(
+    grant &&
+    grant.accountId === workspace.accountId &&
+    isSignedInPerson(context, workspace.id) &&
+    hasWorkspacePermission(context, workspace.id, "sessions:create"),
+  );
+}
+
+/**
+ * The signed-in person themself, not a key, a delegated credential or an
+ * agent: an Opengeni account (`user:`) or the local install's person (`dev`).
+ * Mirrors the API's rule for Only me machines and shared workspace content;
+ * the API still decides.
+ */
+export function isSignedInPerson(context: AccessContext | null, workspaceId: string): boolean {
+  if (!context || context.credential) return false;
+  const person =
+    context.mode === "local" ? context.subjectId === "dev" : context.subjectId.startsWith("user:");
+  const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+  return Boolean(
+    person &&
+    grant &&
+    grant.subjectId === context.subjectId &&
+    grant.principalKind === "human_session" &&
+    grant.metadata?.delegated !== true &&
+    !grant.serviceInitiator,
+  );
+}
+
+/**
+ * A shared workspace's Members surface: the viewer's own members:manage grant,
+ * or (in a managed browser session) an active organization owner or admin of
+ * the workspace's organization, with or without a grant here. The API applies
+ * the same organization authority; Personal workspaces never qualify.
+ */
+export function canManageWorkspaceMembers(
+  context: AccessContext | null,
+  workspace: Pick<Workspace, "id" | "accountId" | "kind"> | null,
+  managedSession: boolean,
+): boolean {
+  if (!context || !workspace) return false;
+  if (hasWorkspacePermission(context, workspace.id, "members:manage")) return true;
+  return (
+    managedSession &&
+    workspace.kind === "shared" &&
+    organizationAdministrationAccountIds(context).includes(workspace.accountId)
+  );
+}
+
+export { organizationAdministrationAccountIds };

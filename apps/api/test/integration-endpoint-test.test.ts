@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { DestinationPolicyError } from "@opengeni/network";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   credentialProviderTestSummary,
   integrationTestNetworkError,

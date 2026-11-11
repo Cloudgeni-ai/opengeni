@@ -1,0 +1,299 @@
+import * as primitives from "./primitives";
+import { defineSchema } from "./define-schema";
+import { z } from "zod";
+
+/** Gmail's batch modify limit: one review never selects more messages than this. */
+export const TOOL_REVIEW_SELECTION_LABELS_MAX = 1000;
+/** One selected item described by trusted provider metadata, never by agent arguments. */
+const ToolReviewSelectionLabel = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().max(256),
+      title: z.string().max(256),
+      subtitle: z.string().max(256).optional(),
+      provenance: z.literal("provider_metadata"),
+    })
+    .strict(),
+);
+
+/** Trusted adapter hints, never read from agent arguments or tool output. */
+export const ToolReviewContext = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      kind: z.enum(["generic", "gmail", "api"]).default("generic"),
+      title: z.string().max(256).optional(),
+      accountLabel: z.string().max(256).optional(),
+      fieldLabels: z.record(primitives.string, z.string().max(256)).optional(),
+      protectedFields: z.array(primitives.string).optional(),
+      email: z
+        .object({
+          from: z.string().max(4096),
+          to: z.string().max(32768),
+          cc: z.string().max(32768),
+          bcc: z.string().max(32768),
+          subject: z.string().max(32768),
+          textBody: z.string().max(262144),
+          htmlBody: z.string().max(262144),
+          contentSha256: primitives.string.regex(/^[0-9a-f]{64}$/),
+          attachments: z
+            .array(
+              z
+                .object({
+                  name: z.string().max(1024),
+                  mediaType: z.string().max(256),
+                  bytes: primitives.nonnegativeInteger,
+                })
+                .strict(),
+            )
+            .max(100),
+        })
+        .strict()
+        .optional(),
+      samples: z.array(ToolReviewSelectionLabel).max(3).optional(),
+      /**
+       * What an app action changes, as facts the server read from its own
+       * records when the approval was prepared ("Connection: Gmail",
+       * "Account: anna@example.com"); never text from the call's arguments.
+       * Other first-party calls the worker reviews state their target the
+       * same way ("Repository", "Branch"), under fixed labels. When present,
+       * the card lists these facts and the raw arguments stay in Details.
+       */
+      targetFacts: z
+        .array(
+          z
+            .object({
+              label: z.string().max(64),
+              value: z.string().max(256),
+            })
+            .strict(),
+        )
+        .max(12)
+        .optional(),
+      /**
+       * Provider metadata for the whole selection, read when the review was
+       * prepared. Only the details page reads it; entries may be missing.
+       */
+      selectionLabels: z
+        .array(ToolReviewSelectionLabel)
+        .max(TOOL_REVIEW_SELECTION_LABELS_MAX)
+        .optional(),
+    })
+    .strict(),
+);
+export type ToolReviewContext = z.infer<typeof ToolReviewContext>;
+
+// Names are exact saved identities, never display labels. A name protected by
+// any reachable schema stays protected at every depth (conservative for sibling
+// properties with the same name). Never truncate this set and expose its tail.
+function schemaProtectedFields(root: Record<string, unknown>): string[] {
+  const protectedFields = new Set<string>();
+  const seen = new WeakMap<object, Set<string | undefined>>();
+  let visited = 0;
+  const object = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  const refuse = () => {
+    throw new Error("Tool review schema cannot be safely displayed");
+  };
+  const visit = (node: unknown, owner?: string, depth = 0): void => {
+    if (!object(node)) return;
+    const owners = seen.get(node) ?? new Set<string | undefined>();
+    if (owners.has(owner)) return;
+    owners.add(owner);
+    seen.set(node, owners);
+    if (++visited > 20000 || depth > 100) refuse();
+    if (node.$dynamicRef !== undefined || node.$recursiveRef !== undefined) refuse();
+    // A nested resource identifier changes the resolution base of local refs.
+    if (node !== root && node.$id !== undefined) refuse();
+    if (node.writeOnly === true) {
+      if (owner === undefined) refuse();
+      protectedFields.add(owner!);
+    }
+    if (node.contentSchema !== undefined) {
+      // Encoded content is one opaque argument value. Nested privacy annotations
+      // cannot be applied to its string without decoding and changing the bytes.
+      if (owner === undefined) refuse();
+      protectedFields.add(owner!);
+    }
+    if (typeof node.$ref === "string") {
+      if (node.$ref !== "#" && !node.$ref.startsWith("#/")) refuse();
+      let target: unknown = root;
+      if (node.$ref !== "#")
+        for (const part of node.$ref.slice(2).split("/")) {
+          const key = part.replaceAll("~1", "/").replaceAll("~0", "~");
+          if (!object(target) || !Object.hasOwn(target, key)) refuse();
+          target = (target as Record<string, unknown>)[key];
+        }
+      if (!object(target) && typeof target !== "boolean") refuse();
+      visit(target, owner, depth + 1);
+    }
+    if (object(node.properties))
+      for (const [key, schema] of Object.entries(node.properties)) visit(schema, key, depth + 1);
+    for (const key of [
+      "items",
+      "additionalItems",
+      "additionalProperties",
+      "unevaluatedItems",
+      "unevaluatedProperties",
+      "contains",
+      "if",
+      "then",
+      "else",
+      "not",
+    ]) {
+      const value = node[key];
+      if (Array.isArray(value)) for (const child of value) visit(child, owner, depth + 1);
+      else visit(value, owner, depth + 1);
+    }
+    for (const key of ["allOf", "anyOf", "oneOf", "prefixItems"]) {
+      if (Array.isArray(node[key])) for (const child of node[key]) visit(child, owner, depth + 1);
+    }
+    // A pattern cannot be represented by this exact-name privacy contract.
+    // Protect its containing object if any branch declares a private value.
+    for (const key of ["patternProperties", "dependentSchemas", "dependencies"]) {
+      if (object(node[key]))
+        for (const child of Object.values(node[key])) visit(child, owner, depth + 1);
+    }
+  };
+  try {
+    visit(root);
+    return [...protectedFields];
+  } catch {
+    // Review formatting must not change Allow/Block execution. Unsupported
+    // schema privacy is conservative: display no values, never guess a key.
+    return ["*"];
+  }
+}
+
+export function toolReviewContextFromSchema(
+  inputSchema: unknown,
+  hints: Omit<ToolReviewContext, "fieldLabels" | "protectedFields">,
+): ToolReviewContext {
+  const schema =
+    inputSchema && typeof inputSchema === "object" ? (inputSchema as Record<string, unknown>) : {};
+  const properties =
+    schema.properties && typeof schema.properties === "object"
+      ? Object.entries(schema.properties)
+      : [];
+  const clean = (text: string) =>
+    text
+      .replaceAll("\u0000", "")
+      .replace(/\p{Surrogate}/gu, "�")
+      .slice(0, 256);
+  return {
+    kind: hints.kind,
+    ...(hints.title ? { title: clean(hints.title) } : {}),
+    ...(hints.accountLabel ? { accountLabel: clean(hints.accountLabel) } : {}),
+    fieldLabels: Object.fromEntries(
+      properties
+        .slice(0, 128)
+        .flatMap(([key, value]) =>
+          value && typeof value === "object" && typeof value.title === "string"
+            ? [[key, clean(value.title)]]
+            : [],
+        ),
+    ),
+    protectedFields: schemaProtectedFields(schema),
+  };
+}
+
+export const ToolReviewStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "pending",
+    "approved",
+    "executing",
+    "completed",
+    "partial",
+    "unknown",
+    "rejected",
+    "cancelled",
+    "expired",
+    "revoked",
+    "blocked",
+    "stale",
+    "failed",
+    "unavailable",
+  ]),
+);
+export type ToolReviewStatus = z.infer<typeof ToolReviewStatus>;
+export const ToolReviewField = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      path: primitives.string,
+      label: primitives.string,
+      preview: primitives.string,
+      count: z.number().int().nonnegative().optional(),
+      truncated: primitives.boolean,
+      protected: primitives.optionalBoolean,
+    })
+    .strict(),
+);
+export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      id: primitives.string,
+      actionDigest: primitives.string,
+      revision: primitives.string,
+      status: ToolReviewStatus,
+      title: primitives.string,
+      accountLabel: z.string().optional(),
+      consequence: z.string().optional(),
+      effects: z.array(primitives.string),
+      selectionCount: z.number().int().nonnegative().optional(),
+      selectionKind: z.enum(["messages", "threads"]).optional(),
+      samples: ToolReviewContext.shape.samples,
+      fields: z.array(ToolReviewField),
+      moreFields: primitives.nonnegativeInteger,
+      reason: primitives.string,
+      createdAt: primitives.string,
+      updatedAt: primitives.string,
+      approveLabel: primitives.string,
+      availableActions: z.array(z.enum(["approve", "reject"])),
+      /**
+       * Who alone can approve this waiting action, when not everyone who can
+       * control the chat may: it runs on someone's own (Only me) account.
+       * `account_owner` means another person, so this viewer can only decline;
+       * `you` means the viewer, shown in chats shared with the workspace.
+       */
+      approvedBy: z.enum(["you", "account_owner"]).optional(),
+      /** The account owner's name, with `approvedBy: "account_owner"`, when known. */
+      accountOwnerLabel: z.string().optional(),
+      detailsAvailable: primitives.boolean,
+    })
+    .strict(),
+);
+export type ToolActionReview = z.infer<typeof ToolActionReview>;
+export const ToolReviewDetailsPage = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      id: primitives.string,
+      actionDigest: primitives.string,
+      path: primitives.string,
+      items: z.array(
+        z
+          .object({
+            label: primitives.string,
+            value: primitives.string,
+            /** A secondary line, such as a selected message's sender and identifier. */
+            detail: z.string().optional(),
+            path: z.string().optional(),
+            truncated: primitives.optionalBoolean,
+          })
+          .strict(),
+      ),
+      total: primitives.nonnegativeInteger,
+      nextOffset: z.number().int().nonnegative().nullable(),
+    })
+    .strict(),
+);
+export type ToolReviewDetailsPage = z.infer<typeof ToolReviewDetailsPage>;
+
+export {
+  decodeReviewArguments,
+  safeReviewValue,
+  toolReviewAction,
+  toolReviewDetails,
+  toolReviewFieldLabel,
+  toolReviewFields,
+} from "./tool-review-presentation";

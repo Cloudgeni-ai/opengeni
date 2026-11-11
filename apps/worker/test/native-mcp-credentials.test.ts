@@ -5,7 +5,7 @@ import type {
   ResolveConnectionCredentialResult,
   SessionTurnForExecution,
 } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { bindNativeConnectionCredentialsToTurn } from "../src/activities/mcp-credentials";
 
 const connectionId = "22222222-2222-4222-8222-222222222222";

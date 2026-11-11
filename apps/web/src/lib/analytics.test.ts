@@ -1,6 +1,6 @@
-import { beginAnalyticsRequest as observeRequest } from "./analytics-observer";
-import { noteSuccessfulLogin } from "./analytics-login";
-import { observeSessionTurnEvents } from "./analytics-observer";
+import { beginAnalyticsRequest as observeRequest } from "@opengeni/react/app/lib/analytics-observer";
+import { noteSuccessfulLogin } from "@opengeni/react/app/lib/analytics-login";
+import { observeSessionTurnEvents } from "@opengeni/react/app/lib/analytics-observer";
 import { resetSignupAttributionForTests, retainSignupAttribution } from "./signup-attribution";
 import { describe, expect, mock, test } from "bun:test";
 
@@ -18,7 +18,7 @@ import {
   persistAnalyticsConsent,
   storedAnalyticsConsent,
   takePendingAnalyticsPreferencesOpen,
-} from "./analytics-consent";
+} from "@opengeni/react/app/lib/analytics-consent";
 
 describe("analytics consent", () => {
   test("recognizes only configured provider adapters", () => {
@@ -216,6 +216,78 @@ describe("analytics providers", () => {
     }
   });
 
+  test("a chat share page loads neither GA4 nor Reo, since its address is the key to the conversation", async () => {
+    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+    const shareId = "Zq3secretShareKey0000000";
+    const scripts: string[] = [];
+    const reoInits: unknown[] = [];
+    const fakeWindow: Record<string, unknown> & { localStorage: Storage } = {
+      localStorage: { getItem: () => "granted", setItem: () => undefined } as unknown as Storage,
+      location: { origin: "https://app.opengeni.ai", pathname: `/share/${shareId}` },
+      setTimeout: globalThis.setTimeout,
+      clearTimeout: globalThis.clearTimeout,
+    };
+    Object.defineProperty(globalThis, "window", { configurable: true, value: fakeWindow });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: {
+        getElementById: () => null,
+        createElement: () => {
+          const listeners = new Map<string, () => void>();
+          return {
+            id: "",
+            async: false,
+            src: "",
+            listeners,
+            addEventListener: (type: string, listener: () => void) => listeners.set(type, listener),
+            remove: () => undefined,
+          };
+        },
+        head: {
+          append: (script: { src: string; listeners: Map<string, () => void> }) => {
+            scripts.push(script.src);
+            if (script.src.includes("reo.dev")) {
+              fakeWindow.Reo = {
+                init: (config: unknown) => reoInits.push(config),
+                unload: () => undefined,
+              };
+              queueMicrotask(() => script.listeners.get("load")?.());
+            }
+          },
+        },
+      },
+    });
+
+    try {
+      const config = {
+        consentRequired: true,
+        providers: {
+          ga4: { measurementId: "G-TEST123" },
+          reo: { clientId: "reo_client-1" },
+        },
+      };
+      syncAnalytics(config, `/share/${shareId}`);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(scripts).toEqual([]);
+      expect(reoInits).toEqual([]);
+      expect(fakeWindow.gtag).toBeUndefined();
+
+      // Anywhere else in the app the same providers load as before.
+      syncAnalytics(config, "/workspaces");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(scripts.some((src) => src.includes("googletagmanager.com"))).toBe(true);
+      expect(reoInits).toHaveLength(1);
+      expect(JSON.stringify(fakeWindow.dataLayer ?? [])).not.toContain(shareId);
+
+      persistAnalyticsConsent("denied", fakeWindow.localStorage);
+      applyAnalyticsConsent("denied");
+    } finally {
+      restoreGlobal("window", originalWindow);
+      restoreGlobal("document", originalDocument);
+    }
+  });
+
   test("identifies only by internal IDs and delivers lifecycle events after PostHog loads", async () => {
     const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
     const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
@@ -353,6 +425,18 @@ describe("analytics providers", () => {
         },
       });
       expect(JSON.stringify(projected)).not.toMatch(/sensitive|private/);
+      // A chat share page's address never reaches PostHog either.
+      const sharePage = beforeSend?.({
+        uuid: "3",
+        event: "$pageview",
+        properties: {
+          $current_url: "https://app.opengeni.ai/share/Zq3secretShareKey0000000",
+          $pathname: "/share/Zq3secretShareKey0000000",
+          page: "other",
+        },
+      });
+      expect(JSON.stringify(sharePage)).not.toContain("Zq3secretShareKey");
+      expect(sharePage?.properties.page).toBe("other");
       expect(projected?.properties.token).toBe("project-key");
       // Consented campaign tokens and referring domains survive the projection.
       expect(projected?.properties).toMatchObject({
@@ -449,11 +533,24 @@ describe("analytics providers", () => {
       beginAnalyticsRequest("/v1/billing/checkout", "POST")(200);
       beginAnalyticsRequest("/v1/auth/organization-onboarding", "POST")(200);
       beginAnalyticsRequest("/v1/auth/organization-onboarding", "GET")(200);
+      const organizationKeys = "/v1/organizations/33333333-3333-4333-8333-333333333333/api-keys";
+      beginAnalyticsRequest(organizationKeys, "POST")(429);
+      beginAnalyticsRequest(organizationKeys, "POST")(201);
       await new Promise((resolve) => setTimeout(resolve, 0));
       const captured = (event: string) =>
         calls.filter(([method, name]) => method === "capture" && name === event);
       expect(captured("checkout_started")).toHaveLength(1);
       expect(captured("organization_setup_completed")).toHaveLength(1);
+      expect(captured("api_key_created")).toEqual([
+        [
+          "capture",
+          "api_key_created",
+          expect.objectContaining({
+            scope: "organization",
+            account_id: "33333333-3333-4333-8333-333333333333",
+          }),
+        ],
+      ]);
 
       // Only the first completed turn of a session this page started is reported.
       const sessionId = "22222222-2222-4222-8222-222222222222";

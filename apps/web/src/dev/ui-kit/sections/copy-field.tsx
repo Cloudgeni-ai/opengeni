@@ -1,10 +1,10 @@
 import { KeyRoundIcon } from "lucide-react";
 
-import { CopyField } from "@/components/ui/copy-field";
-import { Field } from "@/components/ui/field";
-import { ListRow, RowList } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { SettingRow } from "@/components/ui/setting-row";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import { Field } from "@opengeni/react/ui/field";
+import { ListRow, RowList } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { KitBlock, KitCanvas, KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
 import { apiKeys, currentWorkspace, newApiKeySecret, organization } from "../fixtures";
 

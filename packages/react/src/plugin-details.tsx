@@ -3,16 +3,17 @@ import { pluginMcpUnavailableReason, type PluginDiscoveryItem } from "@opengeni/
 import { BoxesIcon } from "lucide-react";
 import { Markdown } from "./components/markdown";
 import { ConnectionLogo } from "./connection-logo";
+import { useOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
-const componentLabels: Record<string, string> = {
-  skills: "Skills",
-  mcp: "MCP connections",
-  apps: "Hosted apps",
-  hooks: "Hooks",
-  agents: "Agents",
-  commands: "Commands",
-  lsp: "Language servers",
-};
+const componentLabels = (t: OpenGeniText): Record<string, string> => ({
+  skills: t("pluginDetails.skills"),
+  mcp: t("pluginDetails.mcpConnections"),
+  apps: t("pluginDetails.hostedApps"),
+  hooks: t("pluginDetails.hooks"),
+  agents: t("pluginDetails.agents"),
+  commands: t("pluginDetails.commands"),
+  lsp: t("pluginDetails.languageServers"),
+});
 
 const EMPTY_CONNECTIONS: Record<string, boolean> = {};
 
@@ -25,6 +26,7 @@ export function PluginDetails({
   error,
   connections = EMPTY_CONNECTIONS,
   onConnect,
+  showIdentity = true,
 }: {
   item: PluginDiscoveryItem;
   onInstall?: () => void;
@@ -33,7 +35,10 @@ export function PluginDetails({
   error?: string | null;
   connections?: Record<string, boolean>;
   onConnect?: (server: { name: string; endpoint: string | null }) => void;
+  /** False when the host already shows the plugin's name, logo and author. */
+  showIdentity?: boolean;
 }) {
+  const t = useOpenGeniText();
   const supported = (server: NonNullable<PluginDiscoveryItem["mcpServers"]>[number]) =>
     pluginMcpUnavailableReason(server) === null;
   const contentsUnknown = item.skills == null || item.mcpServers == null;
@@ -46,23 +51,27 @@ export function PluginDetails({
   const lengthy = description.length > 700;
   const registryLabel =
     item.provider === "openai"
-      ? "OpenAI plugin registry"
+      ? t("pluginDetails.openaiPluginRegistry")
       : item.provider === "anthropic"
-        ? "Anthropic plugin registry"
-        : "Custom source";
+        ? t("pluginDetails.anthropicPluginRegistry")
+        : t("pluginDetails.customSource");
   return (
     <article className="og-plugin-details">
-      <header className="og-plugin-details-header">
-        <ConnectionLogo
-          src={item.logoUrl}
-          name={item.displayName}
-          fallback={<BoxesIcon aria-hidden="true" />}
-        />
-        <div>
-          <h2>{item.displayName.replace(/-/g, " ")}</h2>
-          {item.author?.name ? <p>By {item.author.name}</p> : null}
-        </div>
-      </header>
+      {showIdentity ? (
+        <header className="og-plugin-details-header">
+          <ConnectionLogo
+            src={item.logoUrl}
+            name={item.displayName}
+            fallback={<BoxesIcon aria-hidden="true" />}
+          />
+          <div>
+            <h2>{item.displayName.replace(/-/g, " ")}</h2>
+            {item.author?.name ? (
+              <p>{t("pluginDetails.byName", { name: item.author.name })}</p>
+            ) : null}
+          </div>
+        </header>
+      ) : null}
       <div className="og-plugin-details-meta">
         <span>{registryLabel}</span>
         {item.category ? <span>{item.category}</span> : null}
@@ -70,7 +79,7 @@ export function PluginDetails({
       </div>
       <section className="og-plugin-details-members">
         <h3>
-          Skills <span>{item.skills?.length ?? "—"}</span>
+          {t("pluginDetails.skills")} <span>{item.skills?.length ?? "—"}</span>
         </h3>
         {item.skills?.length ? (
           <ul>
@@ -86,12 +95,12 @@ export function PluginDetails({
         ) : (
           <p>
             {item.skills
-              ? "No bundled skills."
-              : "Contents haven’t been indexed for this repository."}
+              ? t("pluginDetails.noBundledSkills")
+              : t("pluginDetails.contentsHavenTBeenIndexed")}
           </p>
         )}
         <h3>
-          MCP servers <span>{item.mcpServers?.length ?? "—"}</span>
+          {t("pluginDetails.mcpServers")} <span>{item.mcpServers?.length ?? "—"}</span>
         </h3>
         {item.mcpServers?.length ? (
           <ul>
@@ -108,12 +117,12 @@ export function PluginDetails({
                     <strong>{server.name}</strong>
                     {!unavailableReason && onConnect ? (
                       <button type="button" disabled={busy} onClick={() => onConnect(server)}>
-                        {connected ? "Manage" : "Connect"}
+                        {connected ? t("pluginDetails.manage") : t("pluginDetails.connect")}
                       </button>
                     ) : null}
                   </div>
                   <small>
-                    {connected ? "Connected · " : ""}
+                    {connected ? `${t("pluginDetails.connectedPrefix")} ` : ""}
                     {unavailableReason ?? server.endpoint}
                   </small>
                 </li>
@@ -122,20 +131,22 @@ export function PluginDetails({
           </ul>
         ) : (
           <p>
-            {item.mcpServers ? "No bundled MCP servers." : "Server details haven’t been indexed."}
+            {item.mcpServers
+              ? t("pluginDetails.noBundledMcpServers")
+              : t("pluginDetails.serverDetailsHavenTBeen")}
           </p>
         )}
         {item.components?.some((component) => !["skills", "mcp"].includes(component)) ? (
           <div className="og-plugin-details-other">
-            Not installed here:{" "}
+            {t("pluginDetails.notInstalledHere")}{" "}
             {item.components
               .filter((component) => !["skills", "mcp"].includes(component))
-              .map((component) => componentLabels[component] ?? component)
+              .map((component) => componentLabels(t)[component] ?? component)
               .join(", ")}
           </div>
         ) : null}
       </section>
-      <section className="og-plugin-details-overview" aria-label="Overview">
+      <section className="og-plugin-details-overview" aria-label={t("pluginDetails.overview")}>
         <div className={lengthy && !expanded ? "og-plugin-details-excerpt" : undefined}>
           <Markdown>{description}</Markdown>
         </div>
@@ -146,14 +157,14 @@ export function PluginDetails({
             aria-expanded={expanded}
             onClick={() => setExpanded((value) => !value)}
           >
-            {expanded ? "Show less" : "Read more"}
+            {expanded ? t("pluginDetails.showLess") : t("pluginDetails.readMore")}
           </button>
         ) : null}
       </section>
       <footer>
         {item.sourceUrl ? (
           <a href={item.sourceUrl} target="_blank" rel="noopener noreferrer">
-            View repository <span aria-hidden="true">↗</span>
+            {t("pluginDetails.viewRepository")} <span aria-hidden="true">↗</span>
           </a>
         ) : null}
         {onInstall ? (
@@ -163,21 +174,22 @@ export function PluginDetails({
             disabled={!installable || busy || installed}
             onClick={onInstall}
           >
-            {installed ? "Installed" : busy ? "Installing…" : "Install plugin"}
+            {installed
+              ? t("pluginDetails.installed")
+              : busy
+                ? t("pluginDetails.installing")
+                : t("pluginDetails.installPlugin")}
           </button>
         ) : null}
         {error ? <p role="alert">{error}</p> : null}
         {exceedsInstallLimit ? (
-          <p>This plugin exceeds the current 64-component installation limit.</p>
+          <p>{t("pluginDetails.thisPluginExceedsTheCurrent")}</p>
         ) : contentsUnknown ? (
-          <p>
-            Plugin contents are unavailable. Installation is disabled until the repository can be
-            inspected.
-          </p>
+          <p>{t("pluginDetails.pluginContentsAreUnavailableInstallation")}</p>
         ) : !installable ? (
-          <p>No installable skills or remote MCP servers.</p>
+          <p>{t("pluginDetails.noInstallableSkillsOrRemote")}</p>
         ) : (
-          <p>Installs skills and adds connection references. Connect each server separately.</p>
+          <p>{t("pluginDetails.installsSkillsAndAddsConnection")}</p>
         )}
       </footer>
     </article>

@@ -133,6 +133,58 @@ OPENGENI_INSTALL_DIR="$newer_install_dir" OPENGENI_NO_SERVICE=1 OPENGENI_ALLOW_D
 }
 echo "install-smoke OK: explicit downgrade override honored"
 
+# An agent this machine cannot start (here one failing like a binary whose
+# shared libraries are missing) is refused before it replaces the installed
+# agent (exit 8), and the reason carries its exit status.
+broken_mock="$work/broken/agent/latest"
+mkdir -p "$broken_mock"
+printf '%s\n' '#!/bin/sh' "echo 'error while loading shared libraries' >&2" 'exit 127' \
+  > "$broken_mock/$asset"
+minisign -S -W -s "$work/k.key" -m "$broken_mock/$asset" >/dev/null 2>&1
+( cd "$broken_mock" && sha256_line "$asset" > "$asset.sha256" )
+cp "$mock/OpenGeni-Agent.icns" "$broken_mock/"
+set +e
+refusal="$(HOME="$install_home" OPENGENI_INSTALL_BASE_URL="file://$work/broken" \
+  OPENGENI_INSTALL_DIR="$work/bin" OPENGENI_NO_SERVICE=1 \
+  sh "$work/install.sh" </dev/null 2>&1)"
+rc=$?
+set -e
+[ "$rc" -eq 8 ] || { echo "an agent that cannot start was NOT refused (rc=$rc, expected 8): $refusal" >&2; exit 1; }
+case "$refusal" in
+  *"exit status 127"*) ;;
+  *) echo "the refusal does not name the exit status: $refusal" >&2; exit 1 ;;
+esac
+[ "$("$work/bin/opengeni-agent" --version)" = "$("$built" --version)" ] || {
+  echo "the refused agent replaced the installed one" >&2
+  exit 1
+}
+if ls -A "$work/bin" | grep -q '^\.opengeni-agent\.new'; then
+  echo "the refused agent was left staged in the install directory" >&2
+  exit 1
+fi
+echo "install-smoke OK: an agent that cannot start is refused (rc=8)"
+
+# An installed agent that cannot report its version is repaired by the verified
+# candidate instead of blocking it.
+repair_home="$work/repair-home"
+repair_install_dir="$work/repair-bin"
+if [ "$os" = "Darwin" ]; then
+  repair_installed="$repair_home/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent"
+else
+  repair_installed="$repair_install_dir/opengeni-agent"
+fi
+mkdir -p "$(dirname "$repair_installed")"
+printf '%s\n' '#!/bin/sh' 'exit 127' > "$repair_installed"
+chmod 0755 "$repair_installed"
+HOME="$repair_home" OPENGENI_INSTALL_BASE_URL="file://$work/mock" \
+OPENGENI_INSTALL_DIR="$repair_install_dir" OPENGENI_NO_SERVICE=1 \
+  sh "$work/install.sh" </dev/null
+[ "$("$repair_install_dir/opengeni-agent" --version)" = "$("$built" --version)" ] || {
+  echo "an installed agent that cannot start was not repaired" >&2
+  exit 1
+}
+echo "install-smoke OK: an installed agent that cannot start is repaired"
+
 # A tampered artifact MUST be rejected (exit 5).
 echo TAMPER >> "$mock/$asset"
 ( cd "$mock" && sha256_line "$asset" > "$asset.sha256" )

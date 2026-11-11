@@ -1,59 +1,92 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import type { ApiRouteDeps } from "@opengeni/core";
+import { AttachedBrowserDeviceNotFoundError } from "@opengeni/db";
+import { Hono } from "hono";
+
+import { registeredApiRoutes } from "../../../scripts/public-api/action-catalog";
+import surface from "../../../scripts/public-api/surface.gen.json";
+import { computerRouteError, registerComputerSessionRoutes } from "../src/routes/computer-sessions";
 
 const routeUrl = new URL("../src/routes/computer-sessions.ts", import.meta.url);
-const appUrl = new URL("../src/app.ts", import.meta.url);
+const computerSessionRoot = "/v1/workspaces/:workspaceId/computer-sessions";
+type Route = { method: string; path: string };
+
+function isComputerSessionRoute(route: Route): boolean {
+  return route.path === computerSessionRoot || route.path.startsWith(`${computerSessionRoot}/`);
+}
+
+function routeKey(route: Route): string {
+  return `${route.method} ${route.path}`;
+}
+
+function assertComputerRouteSurface(actual: readonly Route[], expected: readonly Route[]): void {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const route of actual) {
+    const key = routeKey(route);
+    if (seen.has(key)) duplicates.add(key);
+    seen.add(key);
+  }
+  expect(duplicates).toEqual(new Set());
+  expect(seen).toEqual(new Set(expected.map(routeKey)));
+}
 
 describe("ComputerSession route discipline", () => {
-  test("registers the complete truthful lifecycle, control, receipt, and frame surface", async () => {
-    const source = await readFile(routeUrl, "utf8");
-    for (const route of [
-      '"/v1/workspaces/:workspaceId/computer-sessions"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/screenshot"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/clipboard"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/actions"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/operations/:operationId"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/heartbeat"',
-      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/end"',
-    ]) {
-      expect(source).toContain(route);
+  test("an unknown attached device is a 404 that names the connected-machine placement", () => {
+    const error = computerRouteError(
+      new AttachedBrowserDeviceNotFoundError("Attached browser not found"),
+      "open",
+    );
+    expect(error.status).toBe(404);
+    expect(error.message).toContain("connected_machine");
+    expect(error.message).toContain("sandboxId");
+  });
+
+  test("registers the entire public ComputerSession contract in the module and composed API", () => {
+    const app = new Hono();
+    // Registration must not perform resource access or start a controller.
+    registerComputerSessionRoutes(app, {} as ApiRouteDeps);
+    const expected = surface.routes.filter(isComputerSessionRoute);
+    expect(expected).not.toEqual([]);
+    assertComputerRouteSurface(app.routes, expected);
+    assertComputerRouteSurface(registeredApiRoutes().filter(isComputerSessionRoute), expected);
+  });
+
+  test("route coverage rejects missing, wrong-method, uncontracted and duplicate handlers", () => {
+    const expected = surface.routes.filter(isComputerSessionRoute);
+    expect(expected).not.toEqual([]);
+    // Every published operation, including input posture, must be registered;
+    // a path with the wrong verb or a shadowed handler is not equivalent.
+    for (const removed of expected) {
+      expect(() =>
+        assertComputerRouteSurface(
+          expected.filter((route) => routeKey(route) !== routeKey(removed)),
+          expected,
+        ),
+      ).toThrow();
     }
-    expect(source).not.toContain("/computer-sessions/:computerSessionId/suspend");
-    expect(source).not.toContain("/computer-sessions/:computerSessionId/resume");
-    expect(source).toContain('kind: "direct_websocket"');
-    expect(source).toContain('kind: "direct_rfb"');
-    expect(source).toContain('kind: "relay"');
-    expect(source).toContain("openRelayedComputerFrameStream");
-    expect(source).toContain("COMPUTER_CONTROL_WEBSOCKET_PROTOCOL");
-    const attachment = source.slice(
-      source.indexOf(
-        '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments"',
-      ),
-      source.indexOf(
-        '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/heartbeat"',
-      ),
-    );
-    expect(attachment).toContain("requestOrigin(context, deps.settings)");
-    expect(attachment).toContain("client.addAllowedOrigins([origin])");
-    expect(attachment).toContain("sessionClient.listTargets()");
-    expect(attachment).toContain('target.kind === "screen"');
-    expect(attachment).toContain('record.session.platform === "linux"');
-    expect(attachment).toContain("client.computerRfbStreamUrl");
-    expect(attachment).toContain("COMPUTER_RFB_WEBSOCKET_PROTOCOL");
-    expect(attachment).toContain("placementUsesInteractionFrameProxy(placement.lease?.backend, {");
-    expect(attachment).toContain(
-      "openSandboxSignedEndpoints: deps.settings.openSandboxSignedEndpoints",
-    );
-    expect(attachment).toContain("createInteractionFrameProxyAttachment");
-    expect(attachment).toContain("publicBaseUrl: deps.settings.publicBaseUrl");
-    expect(attachment).toContain('context.req.header("x-forwarded-proto")');
-    expect(await readFile(appUrl, "utf8")).toContain(
-      "registerComputerSessionRoutes(app, routeDeps)",
-    );
+    const operation = expected[0]!;
+    for (const invalid of [
+      expected.map((route) => (route === operation ? { ...route, method: "UNSUPPORTED" } : route)),
+      [...expected, { method: "POST", path: `${computerSessionRoot}/uncontracted` }],
+      [...expected, operation],
+    ]) {
+      expect(() => assertComputerRouteSurface(invalid, expected)).toThrow();
+    }
+    // Route registration order is not a public lifecycle or control invariant.
+    assertComputerRouteSurface([...expected].reverse(), expected);
+  });
+
+  test("unsupported suspend and resume do not become public lifecycle operations", async () => {
+    const app = new Hono();
+    registerComputerSessionRoutes(app, {} as ApiRouteDeps);
+    const resource = computerSessionRoot.replace(":workspaceId", "workspace") + "/computer";
+    for (const operation of ["suspend", "resume"]) {
+      for (const method of ["GET", "POST"]) {
+        expect((await app.request(`${resource}/${operation}`, { method })).status).toBe(404);
+      }
+    }
   });
 
   test("authenticates before parsing and derives physical facts only from controller output", async () => {
@@ -88,6 +121,13 @@ describe("ComputerSession route discipline", () => {
     expect(source).toContain("holderId: interactionHolderId(computerSessionId)");
     expect(source).toContain("return `computer-session:${computerSessionId}`");
     expect(source).toContain("expectedPlacementInstanceId");
+    const holder = source.slice(
+      source.indexOf("async function ensureInteractionHolder"),
+      source.indexOf("async function releaseInteractionHolder"),
+    );
+    expect(holder).toContain('imagePolicy: "new_creates_only"');
+    expect(holder).toContain("expectedEpoch: placement.lease.leaseEpoch");
+    expect(holder).toContain("rigVersionId: sourceSession.rigVersionId");
   });
 
   test("routes attached-device ComputerSessions through the exact connected agent fence", async () => {
@@ -107,7 +147,7 @@ describe("ComputerSession route discipline", () => {
     expect(source).toContain('operation === "computer.end" && expectedPlacementInstanceId');
   });
 
-  test("retires a stale Connected Machine placement instead of advertising a retryable 409", async () => {
+  test("keeps a Desktop its task left on another machine, with a final 409 that says where it is", async () => {
     const source = await readFile(routeUrl, "utf8");
     const placement = source.slice(
       source.indexOf("async function withComputerPlacement"),
@@ -117,14 +157,59 @@ describe("ComputerSession route discipline", () => {
       source.indexOf("async function withActiveComputerController"),
       source.indexOf("async function ensureInteractionHolder"),
     );
-    expect(placement).toContain("throwComputerSourcePlacementChanged");
-    expect(active).toContain("terminalizeStaleConnectedInteractionPlacement");
-    expect(active.indexOf("terminalizeStaleConnectedInteractionPlacement")).toBeLessThan(
-      active.indexOf('sourcePlacementChangedApiError("computer_session")'),
-    );
-    expect(source).toContain('interactionFailureCode: "source_placement_changed"');
-    expect(source).toContain('interactionLifecycle: "lost"');
+    // Using it while the task runs elsewhere must not end or retire it: the
+    // task gets it back when it returns to that machine.
+    expect(placement).toContain("sourcePlacementElsewhereApiError(");
+    expect(active).toContain("sourcePlacementElsewhereApiError(");
+    expect(source).not.toContain("terminalizeStaleConnectedInteractionPlacement");
+    expect(source).toContain('interactionFailureCode: "source_placement_elsewhere"');
     expect(source).toContain("retryable: false");
+  });
+
+  test("reports a request for another machine before the routed machine's desktop state", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const placement = source.slice(
+      source.indexOf("async function withComputerPlacement"),
+      source.indexOf("async function withActiveComputerController"),
+    );
+    const routed = placement.slice(placement.indexOf("handle.routingSession.prime()"));
+    // A locked or display-less routed machine must not answer for the machine
+    // the request named.
+    expect(routed.indexOf("wrongInteractionPlacementMessage(")).toBeGreaterThan(-1);
+    expect(routed.indexOf("wrongInteractionPlacementMessage(")).toBeLessThan(
+      routed.indexOf("assertConnectedMachineComputerAccess("),
+    );
+    expect(routed.indexOf("sourcePlacementElsewhereApiError(")).toBeLessThan(
+      routed.indexOf("assertConnectedMachineComputerAccess("),
+    );
+  });
+
+  test("resolves a routed Connected Machine with the turn's machine authority, not the agent grant", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const placement = source.slice(
+      source.indexOf("async function withComputerPlacement"),
+      source.indexOf("async function withActiveComputerController"),
+    );
+    const routed = placement.slice(placement.indexOf("handle.routingSession.prime()"));
+    // The machine this request pinned was already resolved under the turn's
+    // machine authority; any other routed machine is looked up the same way.
+    expect(routed).toContain("handle.pinnedMachine?.sandboxId === resolved.sandboxId");
+    expect(routed).toContain("routedMachineConnection(handle, grant, sourceSession");
+    expect(routed.indexOf("routedMachineConnection(")).toBeLessThan(
+      routed.indexOf("assertConnectedMachineComputerAccess("),
+    );
+    const lookup = source.slice(
+      source.indexOf("async function routedMachineConnection"),
+      source.indexOf("async function withComputerPlacement"),
+    );
+    // An agent's tool calls carry a worker subject. A personal (Only me)
+    // machine is visible only to the person who started the turn, so the
+    // routed lookup must use the same authority as routing itself.
+    expect(lookup).toContain("await handle.machineAuthority()");
+    expect(lookup).toContain("getChannelAMachineSandbox(");
+    expect(lookup).toContain("sessionId: sourceSession.id");
+    expect(lookup).toContain("resolveChannelAMachineConnection(");
+    expect(lookup).not.toContain("getSandbox(deps.db, grant");
   });
 
   test("dispatches lifecycle authority before physical mutation and preserves unknown outcomes", async () => {
@@ -158,5 +243,28 @@ describe("ComputerSession route discipline", () => {
     expect(dispatched.indexOf("client.endComputerSession")).toBeLessThan(
       dispatched.indexOf("completeComputerSessionEnd"),
     );
+  });
+
+  test("ends a computer in a Chrome profile nobody here can reach in the control plane", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const route = source.slice(
+      source.indexOf('"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/end"'),
+      source.indexOf("async function withComputerPlacement"),
+    );
+    const gone = route.indexOf("interactionControllerGone(");
+    expect(gone).toBeGreaterThan(route.indexOf("const binding = record.session.controller"));
+    // Checked before any controller dispatch, pinned to the session's stored
+    // profile workspace and bound Chrome generation.
+    expect(gone).toBeLessThan(route.indexOf("dispatchComputerSessionOperation"));
+    expect(gone).toBeLessThan(route.indexOf("withComputerPlacement("));
+    const check = route.slice(gone, route.indexOf("completeComputerSessionEnd", gone));
+    expect(check).toContain("deviceWorkspaceId: record.deviceWorkspaceId");
+    expect(check).toContain("placementInstanceId: binding.placementInstanceId");
+    // Completion keeps the bound generation so that controller stays fenced.
+    const completion = route.slice(gone, route.indexOf("requireSourceSession", gone));
+    expect(completion).toContain(
+      "expectedControllerGeneration: binding?.controllerGeneration ?? null",
+    );
+    expect(completion).toContain("releaseInteractionHolder");
   });
 });

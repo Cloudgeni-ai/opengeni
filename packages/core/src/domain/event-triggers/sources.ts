@@ -1,0 +1,955 @@
+import { randomUUID } from "node:crypto";
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  currentWebhookAdapter,
+  type ParsedCreateEventSourceRequest,
+  type CreateEventSourceResponse,
+  type EventDelivery,
+  type EventSource,
+  type EventTypeDescriptor,
+  type ParsedSendTestEventRequest,
+  type SendTestEventResponse,
+  type UpdateEventSourceRequest,
+  type WebhookFormat,
+} from "@opengeni/contracts";
+import {
+  createEventSource,
+  decryptEnvironmentValue,
+  deleteEventSource,
+  encryptEnvironmentValue,
+  eventSourceVisibleTo,
+  getEventDeliveryForReplay,
+  getEventSource,
+  getInboundEvents,
+  getScheduledTask,
+  listMcpEventStreamKeys,
+  listRecentEventTypes,
+  recordEventDelivery,
+  resolveEventIngressRoute,
+  updateEventSource,
+  type Database,
+  type EventSourceRecord,
+  type EventStatusReason,
+} from "@opengeni/db";
+import { HTTPException } from "hono/http-exception";
+import { scheduledTaskAccess, type ScheduledTaskViewer } from "../scheduled-task-audience";
+import {
+  readDelivery,
+  retainedSourceHeaders,
+  sha256Hex,
+  type DeliveryOutcome,
+} from "./delivery-intake";
+import { webhookEventTypeCatalog } from "./event-type-catalog";
+import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
+import {
+  createGitHubEventSource,
+  githubSourceEventTypes,
+  type GitHubAppWebhookPort,
+} from "./github-source";
+import { gmailDeliveryEvents, gmailEventTypeCatalog } from "./gmail-events";
+import { createGmailEventSource } from "./gmail-source";
+import { eventMatchesTrigger } from "./matching";
+import { boundEvent, type NormalizedEventInput } from "./normalize";
+import { slackEventTypeCatalog } from "./slack-events";
+import { createSlackEventSource } from "./slack-source";
+import { redactableSecret, webhookAdapterFor, withoutSecretHeaders } from "./webhook-adapters";
+import { workspaceDeliveryEvents, workspaceEventTypeCatalog } from "./workspace-events";
+import { createWorkspaceEventSource } from "./workspace-source";
+import {
+  withMcpEventSourceClient,
+  mcpServerDisplayName,
+  type McpEventSourceClientDeps,
+  type McpEventsFetch,
+} from "./mcp-event-source-client";
+import { mcpDeliveryEvents, receiveMcpEventWebhook } from "./mcp-event-subscriptions";
+import {
+  forgetMcpSourceEventTypes,
+  mcpEventTypeDescriptor,
+  mcpSourceEventTypes,
+  mcpWebhookBaseUrl,
+  McpServerWithoutEventsError,
+} from "./mcp-event-types";
+import { serverOffersMcpEvents } from "./mcp-events-protocol";
+import {
+  ed25519PublicKey,
+  generateStandardWebhookSecret,
+  standardWebhookSecretKey,
+} from "./webhook-signatures";
+import { eventSourceWebhookUrl } from "./webhook-url";
+import { errorMessage } from "@opengeni/contracts/values";
+import type { BillingOrigin } from "@opengeni/contracts";
+import { fundedBillingOrigin } from "../../billing-origin";
+
+/**
+ * Event sources and the webhook intake. A webhook source is a URL a person
+ * pastes into another app; every delivery to it is verified against the
+ * source's secret, stored, deduplicated and normalized into events, and the
+ * events queue on the automations whose triggers match.
+ */
+
+export function eventTriggersEnabled(settings: Pick<Settings, "eventTriggersEnabled">): boolean {
+  return settings.eventTriggersEnabled === true;
+}
+
+/** Event source routes answer as if they did not exist while the feature is off. */
+export function requireEventTriggersEnabled(
+  settings: Pick<Settings, "eventTriggersEnabled">,
+): void {
+  if (!eventTriggersEnabled(settings)) {
+    throw new HTTPException(404, {
+      message: "Event triggers are not enabled on this deployment",
+    });
+  }
+}
+
+/** Who is asking: a person (subjectId) or a workspace-level caller such as an API key (null). */
+export type EventSourceViewer = Pick<ScheduledTaskViewer, "subjectId" | "admin">;
+
+/**
+ * `manage`: change, rotate, test, replay and delete. `use`: see it, read its
+ * events and deliveries, and point triggers at it. A private source is
+ * invisible to everyone but its owner. A shared or workspace source is managed
+ * by its owner, by admins, and by workspace-level callers.
+ */
+export function eventSourceAccess(
+  viewer: EventSourceViewer,
+  source: Pick<EventSourceRecord, "visibility" | "ownerSubjectId">,
+): "manage" | "use" | "none" {
+  if (!eventSourceVisibleTo(source, viewer.subjectId)) return "none";
+  if (source.ownerSubjectId !== null && source.ownerSubjectId === viewer.subjectId) return "manage";
+  return viewer.admin || viewer.subjectId === null ? "manage" : "use";
+}
+
+export async function requireEventSource(
+  db: Database,
+  viewer: EventSourceViewer,
+  workspaceId: string,
+  sourceId: string,
+  need: "use" | "manage",
+): Promise<EventSourceRecord> {
+  const source = await getEventSource(db, workspaceId, sourceId);
+  const access = source ? eventSourceAccess(viewer, source) : "none";
+  if (!source || access === "none") {
+    throw new HTTPException(404, { message: "event source not found" });
+  }
+  if (need === "manage" && access !== "manage") {
+    throw new HTTPException(403, {
+      message: "Only the source's owner or a workspace admin can change it",
+    });
+  }
+  return source;
+}
+
+export function eventSourceForClient(source: EventSourceRecord, baseUrl: string): EventSource {
+  return {
+    id: source.id,
+    workspaceId: source.workspaceId,
+    kind: source.kind,
+    adapter: source.adapter,
+    format: source.format,
+    name: source.name,
+    ownerSubjectId: source.ownerSubjectId,
+    visibility: source.visibility,
+    status: source.status,
+    statusReason: source.statusReason,
+    statusReasonCode: source.statusReasonCode,
+    statusReasonDetail: source.statusReasonDetail,
+    webhookUrl:
+      source.kind === "webhook" && source.routeId
+        ? eventSourceWebhookUrl(baseUrl, source.routeId)
+        : null,
+    awaitingSigningSecret: source.kind === "webhook" && source.secretEncrypted === null,
+    mcp:
+      source.kind === "mcp" && source.mcpServerId
+        ? {
+            serverId: source.mcpServerId,
+            connectionId: source.connectionId,
+            ...(source.mcpServerUrl ? { url: source.mcpServerUrl } : {}),
+          }
+        : null,
+    lastDeliveryAt: source.lastDeliveryAt?.toISOString() ?? null,
+    createdAt: source.createdAt.toISOString(),
+    updatedAt: source.updatedAt.toISOString(),
+  };
+}
+
+function requireEncryptionKey(settings: Settings): Uint8Array {
+  const key = environmentsEncryptionKeyBytes(settings);
+  if (!key) {
+    throw new HTTPException(503, {
+      message: "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required for webhook event sources",
+    });
+  }
+  return key;
+}
+
+export async function createEventSourceForViewer(
+  input: {
+    db: Database;
+    settings: Settings;
+    accountId: string;
+    workspaceId: string;
+    /** The caller's grant subject, recorded as the creator. */
+    createdBySubjectId: string;
+    viewer: EventSourceViewer;
+    request: ParsedCreateEventSourceRequest;
+    baseUrl: string;
+    /**
+     * Who creates it: an API caller holding a webhook's secret, or naming a
+     * workspace MCP source's URL, makes its deliveries API use.
+     */
+    billingOrigin?: BillingOrigin;
+  } & McpEventSourceNetwork &
+    GitHubEventSourceAccess,
+): Promise<CreateEventSourceResponse> {
+  const request = input.request;
+  if (request.kind === "mcp") {
+    const source = await addMcpEventSource({
+      ...input,
+      ownerSubjectId: input.viewer.subjectId,
+      viewerIsAdmin: input.viewer.admin,
+      serverId: request.serverId,
+      connectionId: request.connectionId,
+      url: request.url,
+      name: request.name,
+      billingOrigin: input.billingOrigin,
+    });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
+  if (request.kind === "github") {
+    const source = await createGitHubEventSource({ ...input, name: request.name });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
+  if (request.kind === "slack") {
+    const source = await createSlackEventSource({ ...input, name: request.name });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
+  if (request.kind === "gmail") {
+    const source = await createGmailEventSource({
+      ...input,
+      ownerSubjectId: input.viewer.subjectId,
+      connectionId: request.connectionId,
+      name: request.name,
+    });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
+  if (request.kind === "workspace") {
+    const source = await createWorkspaceEventSource({
+      ...input,
+      ownerSubjectId: input.viewer.subjectId,
+      name: request.name,
+    });
+    return { source: eventSourceForClient(source, input.baseUrl) };
+  }
+  if (request.kind !== "webhook") {
+    throw new HTTPException(422, {
+      message: `${request.kind} event sources are not available on this deployment yet`,
+    });
+  }
+  const key = requireEncryptionKey(input.settings);
+  // `linear` and `sentry` are older names for a custom webhook with that preset.
+  const { adapter, format } = currentWebhookAdapter({
+    adapter: request.adapter,
+    format: request.format ?? null,
+  });
+  const generated = adapter === "standard" ? generateStandardWebhookSecret() : null;
+  const secret = generated ?? request.signingSecret;
+  if (request.signingSecret !== undefined) {
+    assertSecretFitsFormat(request.signingSecret, format);
+  }
+  // A workspace-level caller owns nothing, so its sources are the workspace's.
+  const owner = input.viewer.subjectId;
+  const { source } = await createEventSource(input.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    createdBySubjectId: input.createdBySubjectId,
+    kind: "webhook",
+    adapter: adapter ?? "standard",
+    ...(adapter === "custom" && format ? { format } : {}),
+    name: request.name,
+    ownerSubjectId: owner,
+    visibility: owner === null ? "workspace" : request.visibility,
+    // Linear, Sentry and many other apps show their secret only once they have
+    // the URL, so a source without one waits, blocked, until it is pasted.
+    ...(secret
+      ? { secretEncrypted: encryptEnvironmentValue(key, secret) }
+      : { status: "blocked" as const, statusReason: awaitingSecretReason(format) }),
+    // A secret, or the format that says how deliveries are verified and read.
+    ...(secret || format !== null ? secretHolder(input.billingOrigin) : {}),
+  });
+  return {
+    source: eventSourceForClient(source, input.baseUrl),
+    ...(generated ? { signingSecret: generated } : {}),
+  };
+}
+
+/**
+ * Whoever holds a webhook's signing secret can sign deliveries to its public
+ * URL. An API caller that sets or receives it, or sets the format that says
+ * how deliveries are verified and read, marks the source in the same write,
+ * so every delivery it verifies is API use (see `receiveEventWebhook`). A
+ * person's write never clears the mark.
+ */
+function secretHolder(origin: BillingOrigin | undefined): { secretBillingOrigin?: "api" } {
+  return origin === "api" ? { secretBillingOrigin: "api" } : {};
+}
+
+/** Apps whose preset names them in the "paste the secret" reason. */
+const PRESET_APP_NAMES: Record<string, string> = {
+  linear: "Linear",
+  sentry: "Sentry",
+  tailscale: "Tailscale",
+};
+
+/** Why a pasted webhook waits: the sending app's secret or key is not pasted yet. */
+function awaitingSecretReason(format: WebhookFormat | null): EventStatusReason {
+  const app =
+    format?.preset && Object.hasOwn(PRESET_APP_NAMES, format.preset)
+      ? PRESET_APP_NAMES[format.preset]
+      : undefined;
+  if (format?.signature.scheme === "ed25519") {
+    return eventStatusReason(
+      "awaiting_secret",
+      "Paste the public key the app shows for its webhooks. Until then its deliveries are refused.",
+    );
+  }
+  if (format?.signature.scheme === "url_token") {
+    return eventStatusReason(
+      "awaiting_secret",
+      "Set the secret the address carries. Until then its deliveries are refused.",
+    );
+  }
+  return eventStatusReason(
+    "awaiting_secret",
+    app
+      ? `Paste the signing secret ${app} shows for this webhook. Until then its deliveries are refused.`
+      : "Paste the webhook's signing secret, the one the app shows or the one you set there. Until then its deliveries are refused.",
+  );
+}
+
+/**
+ * A Standard Webhooks app signs with a `whsec_` secret, and an Ed25519 one
+ * with a key pair whose public key is the secret; any other value could never
+ * verify. A secret in the webhook address must be long and URL-safe.
+ */
+function assertSecretFitsFormat(secret: string, format: WebhookFormat | null): void {
+  if (format?.signature.scheme === "standard_webhooks" && !standardWebhookSecretKey(secret)) {
+    throw new HTTPException(422, {
+      message: "This app signs with Standard Webhooks, so its secret starts with whsec_",
+    });
+  }
+  if (format?.signature.scheme === "ed25519" && !ed25519PublicKey(secret)) {
+    throw new HTTPException(422, {
+      message:
+        "This app signs with Ed25519, so its secret is the app's public key: 32 bytes in hex or base64, or a PEM public key",
+    });
+  }
+  // The address carries this secret as it is, so it must be long and need no
+  // escaping there.
+  if (format?.signature.scheme === "url_token" && !/^[A-Za-z0-9._~-]{24,}$/u.test(secret)) {
+    throw new HTTPException(422, {
+      message:
+        "This secret goes in the webhook address, so it must be at least 24 letters, digits, '-', '_', '.' or '~'",
+    });
+  }
+}
+
+/** Network access for MCP sources; tests replace the transport. */
+export type McpEventSourceNetwork = {
+  fetch?: McpEventsFetch;
+  /** Replaces the credential provider transport, for tests. */
+  providerFetch?: McpEventSourceClientDeps["providerFetch"];
+};
+
+/**
+ * The deployment's GitHub App webhook settings, for GitHub sources. Null when
+ * the App's host manages its webhook itself.
+ */
+export type GitHubEventSourceAccess = { githubApp?: GitHubAppWebhookPort | null };
+
+/**
+ * Turn a failure to reach an MCP source's server into the answer a person
+ * sees: what to fix, or that the server could not be reached right now.
+ */
+export function mcpSourceHttpError(error: unknown, serverName: string): HTTPException {
+  if (error instanceof HTTPException) return error;
+  if (error instanceof EventSourceBlockedError) {
+    return new HTTPException(422, { message: error.message });
+  }
+  const message = errorMessage(error);
+  return new HTTPException(503, {
+    message: `Couldn't reach ${serverName} to read its events (${message.slice(0, 200)}). Try again shortly.`,
+  });
+}
+
+/**
+ * An MCP source listens to one connector with its creator's own sign-in, so
+ * it is always private to that person. The server must offer events. Adding
+ * it again returns the source the person already has.
+ *
+ * With `url`, it is the workspace's source instead: it listens to that server
+ * signed in by the workspace credential provider, has no owner, and only a
+ * workspace-level caller or an admin adds it.
+ */
+export async function addMcpEventSource(
+  input: {
+    db: Database;
+    settings: Settings;
+    accountId: string;
+    workspaceId: string;
+    createdBySubjectId: string;
+    ownerSubjectId: string | null;
+    viewerIsAdmin?: boolean | undefined;
+    serverId: string;
+    connectionId?: string | undefined;
+    url?: string | undefined;
+    name?: string | undefined;
+    /**
+     * Who adds it: an API caller that names the server a workspace source
+     * listens to by URL makes the automations its events fire API use.
+     */
+    billingOrigin?: BillingOrigin | undefined;
+  } & McpEventSourceNetwork,
+): Promise<EventSourceRecord> {
+  const url = input.url ?? null;
+  if (url !== null && input.ownerSubjectId !== null && !input.viewerIsAdmin) {
+    throw new HTTPException(403, {
+      message: "Only a workspace admin can add a workspace MCP source that listens by URL",
+    });
+  }
+  const owner = url === null ? input.ownerSubjectId : null;
+  if (url === null && !owner) {
+    throw new HTTPException(422, {
+      message:
+        "An MCP event source listens with a person's own sign-in. Create it as that person, or give the server's url.",
+    });
+  }
+  const target = {
+    kind: "mcp" as const,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    ownerSubjectId: owner,
+    mcpServerId: input.serverId,
+    connectionId: url === null ? (input.connectionId ?? null) : null,
+    mcpServerUrl: url,
+  };
+  let connection: { name: string; connectionId: string | null };
+  try {
+    connection = await withMcpEventSourceClient(
+      {
+        db: input.db,
+        settings: input.settings,
+        ...(input.fetch ? { fetch: input.fetch } : {}),
+        ...(input.providerFetch ? { providerFetch: input.providerFetch } : {}),
+      },
+      target,
+      async (client, { server, connectionId }) => {
+        const name = mcpServerDisplayName(server);
+        if (!(await serverOffersMcpEvents(client, { timeout: 20_000 }))) {
+          throw new McpServerWithoutEventsError(name);
+        }
+        return { name, connectionId };
+      },
+    );
+  } catch (error) {
+    throw mcpSourceHttpError(error, input.serverId);
+  }
+  const { source, created } = await createEventSource(input.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    createdBySubjectId: input.createdBySubjectId,
+    kind: "mcp",
+    name: input.name ?? connection.name,
+    ownerSubjectId: owner,
+    visibility: url === null ? "private" : "workspace",
+    mcpServerId: input.serverId,
+    mcpServerUrl: url,
+    connectionId: connection.connectionId,
+    // Like a webhook's secret: whoever chose the URL controls what it sends.
+    // Adding one that already exists changes nothing, so it marks nothing.
+    ...(url !== null ? secretHolder(input.billingOrigin) : {}),
+  });
+  if (!created && url !== null && source.mcpServerUrl !== url) {
+    throw new HTTPException(409, {
+      message: `The workspace already listens to "${input.serverId}" at another URL. Delete that source first.`,
+    });
+  }
+  forgetMcpSourceEventTypes(source.id);
+  return source;
+}
+
+export async function updateEventSourceForViewer(input: {
+  db: Database;
+  settings: Settings;
+  source: EventSourceRecord;
+  request: UpdateEventSourceRequest;
+  baseUrl: string;
+  /** Who changes it: an API caller pasting a secret or a format makes its deliveries API use. */
+  billingOrigin?: BillingOrigin;
+}): Promise<EventSource> {
+  const { source, request } = input;
+  if (request.visibility !== undefined && source.ownerSubjectId === null) {
+    throw new HTTPException(422, {
+      message: "This source belongs to the workspace, so everyone in it can already use it",
+    });
+  }
+  if (
+    request.visibility === "workspace" &&
+    (source.kind === "mcp" || source.kind === "gmail" || source.kind === "workspace")
+  ) {
+    throw new HTTPException(422, {
+      message:
+        source.kind === "gmail"
+          ? "A Gmail source reads your own mailbox, so it stays private to you"
+          : source.kind === "workspace"
+            ? "This source shows what you may see in the workspace, so it stays private to you"
+            : "An MCP source listens with your own sign-in, so it stays private to you",
+    });
+  }
+  if (
+    request.signingSecret !== undefined &&
+    (source.kind !== "webhook" || source.adapter === "standard")
+  ) {
+    throw new HTTPException(422, {
+      message:
+        source.adapter === "standard"
+          ? "Opengeni makes this source's secret. Rotate it instead."
+          : "This source has no signing secret to replace",
+    });
+  }
+  if (request.format !== undefined && source.adapter !== "custom") {
+    throw new HTTPException(422, { message: "Only a custom webhook has a format to change" });
+  }
+  if (request.signingSecret !== undefined) {
+    assertSecretFitsFormat(request.signingSecret, request.format ?? source.format);
+  } else if (request.format !== undefined && source.secretEncrypted !== null) {
+    assertSecretFitsFormat(
+      decryptEnvironmentValue(requireEncryptionKey(input.settings), source.secretEncrypted),
+      request.format,
+    );
+  }
+  // The first pasted secret is what a waiting webhook source was blocked on.
+  if (
+    request.status === "active" &&
+    request.signingSecret === undefined &&
+    source.kind === "webhook" &&
+    source.secretEncrypted === null
+  ) {
+    throw new HTTPException(422, {
+      message: "Paste the signing secret first, then the source can receive events",
+    });
+  }
+  const unblocks =
+    request.signingSecret !== undefined &&
+    source.secretEncrypted === null &&
+    source.status === "blocked";
+  const status = request.status ?? (unblocks ? "active" : undefined);
+  const updated = await updateEventSource(input.db, source.workspaceId, source.id, {
+    ...(request.name !== undefined ? { name: request.name } : {}),
+    ...(request.visibility !== undefined ? { visibility: request.visibility } : {}),
+    ...(request.format !== undefined
+      ? { format: request.format, ...secretHolder(input.billingOrigin) }
+      : {}),
+    ...(status !== undefined
+      ? {
+          status,
+          statusReason:
+            status === "disabled" ? eventStatusReason("turned_off", "Turned off") : null,
+        }
+      : {}),
+    ...(request.signingSecret !== undefined
+      ? {
+          secretEncrypted: encryptEnvironmentValue(
+            requireEncryptionKey(input.settings),
+            request.signingSecret,
+          ),
+          ...secretHolder(input.billingOrigin),
+        }
+      : {}),
+  });
+  if (!updated) throw new HTTPException(404, { message: "event source not found" });
+  return eventSourceForClient(updated, input.baseUrl);
+}
+
+/** A new secret for a standard webhook source. The old one stops working at once. */
+export async function rotateEventSourceSecret(input: {
+  db: Database;
+  settings: Settings;
+  source: EventSourceRecord;
+  /** Who rotates: an API caller receiving the new secret makes its deliveries API use. */
+  billingOrigin?: BillingOrigin;
+}): Promise<{ signingSecret: string }> {
+  if (input.source.kind !== "webhook" || input.source.adapter !== "standard") {
+    throw new HTTPException(422, {
+      message: "Only standard webhook sources have a secret Opengeni makes",
+    });
+  }
+  const signingSecret = generateStandardWebhookSecret();
+  const updated = await updateEventSource(input.db, input.source.workspaceId, input.source.id, {
+    secretEncrypted: encryptEnvironmentValue(requireEncryptionKey(input.settings), signingSecret),
+    ...secretHolder(input.billingOrigin),
+  });
+  if (!updated) throw new HTTPException(404, { message: "event source not found" });
+  return { signingSecret };
+}
+
+export async function deleteEventSourceForViewer(input: {
+  db: Database;
+  source: EventSourceRecord;
+}): Promise<void> {
+  const result = await deleteEventSource(input.db, input.source.workspaceId, input.source.id);
+  if (result.kind === "in_use") {
+    const count = result.taskIds.length;
+    throw new HTTPException(409, {
+      message: `${count === 1 ? "An automation still uses" : `${count}${count >= 20 ? "+" : ""} automations still use`} this source. Remove its triggers first.`,
+    });
+  }
+}
+
+/**
+ * `gone` and `challenge` answer MCP servers: a delivery for a subscription
+ * that ended (410, do not retry) and a webhook verification handshake.
+ */
+export type WebhookIntakeResult =
+  | { outcome: "not_found" }
+  | { outcome: "gone" }
+  | { outcome: "rejected"; reason: string }
+  | { outcome: "challenge"; challenge: string }
+  | { outcome: "stored"; delivery: EventDelivery; duplicate: boolean };
+
+/**
+ * One delivery to a webhook URL. Nothing is parsed before the signature is
+ * checked over the exact raw body. The sender gets a success status only once
+ * the delivery is stored, so a crash before that is retried by the sender.
+ */
+export async function receiveEventWebhook(input: {
+  db: Database;
+  settings: Settings;
+  routeId: string;
+  headers: Headers;
+  body: Uint8Array;
+  /** The address's query, for an app that sends its secret there. Never stored. */
+  query?: URLSearchParams;
+  receivedAt?: Date;
+}): Promise<WebhookIntakeResult> {
+  if (!eventTriggersEnabled(input.settings)) return { outcome: "not_found" };
+  const route = await resolveEventIngressRoute(input.db, input.routeId);
+  if (route?.kind === "mcp") {
+    return await receiveMcpEventWebhook({
+      deps: { db: input.db, settings: input.settings },
+      route: { routeId: input.routeId, workspaceId: route.workspaceId },
+      headers: input.headers,
+      body: input.body,
+      receivedAt: input.receivedAt ?? new Date(),
+    });
+  }
+  if (!route && input.headers.has("x-mcp-subscription-id")) return { outcome: "gone" };
+  if (!route || route.kind !== "webhook") return { outcome: "not_found" };
+  const source = await getEventSource(input.db, route.workspaceId, route.sourceId);
+  if (!source || source.kind !== "webhook" || !source.adapter) {
+    return { outcome: "not_found" };
+  }
+  const receivedAt = input.receivedAt ?? new Date();
+  const bodySha256 = sha256Hex(input.body);
+  // Before its secret is pasted, a delivery is refused but still logged, so
+  // the person setting it up sees the app is sending.
+  const secret = source.secretEncrypted
+    ? decryptEnvironmentValue(requireEncryptionKey(input.settings), source.secretEncrypted)
+    : null;
+  const verification = secret
+    ? webhookAdapterFor(source).verify({
+        secret,
+        headers: input.headers,
+        body: input.body,
+        ...(input.query ? { query: input.query } : {}),
+        nowSeconds: receivedAt.getTime() / 1000,
+      })
+    : ({ ok: false, reason: "No signing secret yet: paste the one the app shows" } as const);
+  const base = {
+    accountId: source.accountId,
+    workspaceId: source.workspaceId,
+    sourceId: source.id,
+    bodyBytes: input.body.byteLength,
+    bodySha256,
+    match: eventMatchesTrigger,
+  };
+  if (!verification.ok) {
+    // Logged without its body: an unverified body is never kept or read.
+    await recordEventDelivery(input.db, {
+      ...base,
+      status: "rejected",
+      reason: verification.reason,
+      dedupeKey: `rejected:${randomUUID()}`,
+      body: null,
+      headers: {},
+      events: [],
+    });
+    return { outcome: "rejected", reason: verification.reason };
+  }
+  // The secret never reaches what is kept and readable: not a header that
+  // carries it (a proxy's copy of an address holding `?token=<secret>`), not
+  // an app's echo of it in the body, not an id read from either.
+  const headers = withoutSecretHeaders(input.headers, secret);
+  const body = withoutSecret(input.body, secret);
+  // The size and digest describe the body as kept.
+  const keptBody =
+    body === input.body ? {} : { bodyBytes: body.byteLength, bodySha256: sha256Hex(body) };
+  const outcome = readDelivery({
+    source,
+    settings: input.settings,
+    headers,
+    body,
+    receivedAt,
+    refire: false,
+  });
+  const recorded = await recordEventDelivery(input.db, {
+    ...base,
+    ...keptBody,
+    ...outcome,
+    dedupeKey:
+      verification.deliveryKey && !(secret && verification.deliveryKey.includes(secret))
+        ? verification.deliveryKey
+        : `sha256:${keptBody.bodySha256 ?? bodySha256}`,
+    body,
+    headers: retainedSourceHeaders(source, headers),
+    // The secret and its holder come from the same row: a delivery verified
+    // with a secret an API caller set or received fires its automations as
+    // API use. An internal (legacy) account stays app.
+    ...(source.secretBillingOrigin === "api"
+      ? { billingOrigin: fundedBillingOrigin(source.accountId, "api") }
+      : {}),
+  });
+  return {
+    outcome: "stored",
+    delivery: recorded.delivery,
+    duplicate: recorded.duplicate,
+  };
+}
+
+/**
+ * The body with every copy of the secret replaced by `[secret]`, for an app
+ * that echoes the address it posts to. Byte for byte, so a body that isn't
+ * UTF-8 is otherwise kept exactly.
+ */
+function withoutSecret(body: Uint8Array, secret: string | null): Uint8Array {
+  const redacted = redactableSecret(secret);
+  if (!redacted) return body;
+  const bytes = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+  const needle = Buffer.from(redacted, "utf8");
+  let found = bytes.indexOf(needle);
+  if (found < 0) return body;
+  const parts: Buffer[] = [];
+  let from = 0;
+  while (found >= 0) {
+    parts.push(bytes.subarray(from, found), SECRET_MARK);
+    from = found + needle.length;
+    found = bytes.indexOf(needle, from);
+  }
+  parts.push(bytes.subarray(from));
+  return new Uint8Array(Buffer.concat(parts));
+}
+
+const SECRET_MARK = Buffer.from("[secret]", "utf8");
+
+/** Sources whose stored deliveries can be read again. */
+const REPLAYABLE_SOURCE_KINDS: ReadonlySet<EventSourceRecord["kind"]> = new Set([
+  "webhook",
+  "mcp",
+  "github",
+  "slack",
+  "gmail",
+  "workspace",
+]);
+
+/** Run a stored delivery through intake again; its events fire again even if seen before. */
+export async function replayEventDelivery(input: {
+  db: Database;
+  settings: Settings;
+  source: EventSourceRecord;
+  deliveryId: string;
+  /** Who replays: an API caller makes the automations it fires API use. */
+  billingOrigin?: BillingOrigin;
+}): Promise<EventDelivery> {
+  const { source } = input;
+  const stored = await getEventDeliveryForReplay(
+    input.db,
+    source.workspaceId,
+    source.id,
+    input.deliveryId,
+  );
+  if (!stored) throw new HTTPException(404, { message: "event delivery not found" });
+  if (!stored.body || !REPLAYABLE_SOURCE_KINDS.has(source.kind)) {
+    throw new HTTPException(409, {
+      message:
+        stored.delivery.status === "rejected"
+          ? "A rejected delivery was never verified, so it cannot be replayed"
+          : "This delivery's body is no longer kept, so it cannot be replayed",
+    });
+  }
+  if (source.status !== "active") {
+    throw new HTTPException(409, {
+      message: "Turn the source on before replaying a delivery",
+    });
+  }
+  const receivedAt = new Date();
+  let outcome: DeliveryOutcome;
+  if (source.kind === "mcp" || source.kind === "gmail" || source.kind === "workspace") {
+    const events =
+      source.kind === "mcp"
+        ? mcpDeliveryEvents(stored.body, stored.streamKey, receivedAt)
+        : (source.kind === "gmail"
+            ? gmailDeliveryEvents(stored.body, receivedAt)
+            : workspaceDeliveryEvents(stored.body, source.ownerSubjectId)
+          ).map((event) => ({
+            ...boundEvent(event, receivedAt),
+            externalId: null,
+          }));
+    if (events.length === 0) {
+      throw new HTTPException(409, { message: "This delivery carried no events to replay" });
+    }
+    outcome = { status: "accepted", reason: null, events };
+  } else {
+    outcome = readDelivery({
+      source,
+      settings: input.settings,
+      headers: new Headers(stored.headers),
+      body: stored.body,
+      receivedAt,
+      refire: true,
+    });
+  }
+  const recorded = await recordEventDelivery(input.db, {
+    accountId: source.accountId,
+    workspaceId: source.workspaceId,
+    sourceId: source.id,
+    streamKey: stored.streamKey,
+    ...outcome,
+    dedupeKey: `replay:${randomUUID()}`,
+    body: stored.body,
+    bodyBytes: stored.body.byteLength,
+    bodySha256: sha256Hex(stored.body),
+    headers: stored.headers,
+    replayOfDeliveryId: stored.delivery.id,
+    match: eventMatchesTrigger,
+    ...(input.billingOrigin ? { billingOrigin: input.billingOrigin } : {}),
+  });
+  return recorded.delivery;
+}
+
+/**
+ * Send a made-up event through a source as if it had arrived, so a person can
+ * watch their automation run without touching the other app.
+ */
+export async function sendTestEvent(input: {
+  db: Database;
+  viewer: ScheduledTaskViewer;
+  source: EventSourceRecord;
+  request: ParsedSendTestEventRequest;
+  /** Who sends it: an API caller makes the automations it fires API use. */
+  billingOrigin?: BillingOrigin;
+}): Promise<SendTestEventResponse> {
+  const { source } = input;
+  if (source.status !== "active") {
+    throw new HTTPException(409, {
+      message: "Turn the source on before sending a test event",
+    });
+  }
+  const receivedAt = new Date();
+  const event: NormalizedEventInput = {
+    externalId: null,
+    type: input.request.type,
+    occurredAt: receivedAt,
+    subject: null,
+    summary: `Test event (${input.request.type})`,
+    url: null,
+    actor: { kind: "person", name: null },
+    data: input.request.data,
+  };
+  const body = JSON.stringify({
+    type: input.request.type,
+    data: input.request.data,
+  });
+  // An MCP event belongs to one subscription stream: send it on each stream
+  // an automation listens to for this type, so each of them can fire.
+  const streamKeys =
+    source.kind === "mcp"
+      ? await listMcpEventStreamKeys(input.db, source.workspaceId, source.id, input.request.type)
+      : [""];
+  if (streamKeys.length === 0) {
+    throw new HTTPException(422, {
+      message: `No automation listens for "${input.request.type}" on this source yet`,
+    });
+  }
+  const bounded = boundEvent(event, receivedAt);
+  const recorded = await recordEventDelivery(input.db, {
+    accountId: source.accountId,
+    workspaceId: source.workspaceId,
+    sourceId: source.id,
+    status: "accepted",
+    reason: "Test event sent from Opengeni",
+    dedupeKey: `test:${randomUUID()}`,
+    body: null,
+    bodyBytes: Buffer.byteLength(body, "utf8"),
+    bodySha256: sha256Hex(body),
+    headers: {},
+    events: streamKeys.map((streamKey) => ({ ...bounded, streamKey })),
+    match: eventMatchesTrigger,
+    ...(input.billingOrigin ? { billingOrigin: input.billingOrigin } : {}),
+  });
+  const [stored] = await getInboundEvents(input.db, source.workspaceId, recorded.eventIds);
+  if (!stored) throw new Error("test event was not stored");
+  const visible: string[] = [];
+  for (const taskId of recorded.matchedTaskIds) {
+    const task = await getScheduledTask(input.db, source.workspaceId, taskId);
+    if (task && scheduledTaskAccess(input.viewer, task) === "full") visible.push(taskId);
+  }
+  return { event: stored, matchedAutomationIds: visible };
+}
+
+/** The event types a trigger on this source can name. */
+export async function listEventSourceTypes(
+  input: {
+    db: Database;
+    settings: Settings;
+    source: EventSourceRecord;
+  } & McpEventSourceNetwork &
+    GitHubEventSourceAccess,
+): Promise<EventTypeDescriptor[]> {
+  if (input.source.kind === "mcp") {
+    const webhookAvailable = mcpWebhookBaseUrl(input.settings) !== null;
+    try {
+      return await withMcpEventSourceClient(
+        { db: input.db, settings: input.settings, ...(input.fetch ? { fetch: input.fetch } : {}) },
+        input.source,
+        async (client, { server }) =>
+          (
+            await mcpSourceEventTypes(client, input.source, mcpServerDisplayName(server), {
+              fresh: true,
+            })
+          ).map((type) => mcpEventTypeDescriptor(type, webhookAvailable)),
+      );
+    } catch (error) {
+      throw mcpSourceHttpError(error, input.source.name);
+    }
+  }
+  const recent = await listRecentEventTypes(input.db, input.source.workspaceId, input.source.id);
+  if (input.source.kind === "github") {
+    return await githubSourceEventTypes(recent, input.githubApp ?? null);
+  }
+  if (input.source.kind === "slack") return slackEventTypeCatalog();
+  if (input.source.kind === "gmail") return gmailEventTypeCatalog();
+  if (input.source.kind === "workspace") return workspaceEventTypeCatalog();
+  if (input.source.kind === "webhook") {
+    return webhookEventTypeCatalog(input.source, recent);
+  }
+  return recent.map((entry) => ({
+    type: entry.type,
+    description: `Received ${entry.count} time${entry.count === 1 ? "" : "s"} recently`,
+    fields: [],
+    argumentsSchema: null,
+    available: true,
+    unavailableReason: null,
+    unavailableReasonCode: null,
+    unavailableReasonDetail: null,
+  }));
+}

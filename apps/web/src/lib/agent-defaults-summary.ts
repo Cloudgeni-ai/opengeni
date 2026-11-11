@@ -4,7 +4,7 @@ import {
   capabilityAvailability,
   capabilitySummary,
   workspaceAgentDefaultsDraft,
-} from "@/lib/agent-capabilities";
+} from "@opengeni/react/app/lib/agent-capabilities";
 
 /** The muted value next to Settings > General > Agent: "All capabilities". */
 export function workspaceAgentDefaultsSummary(

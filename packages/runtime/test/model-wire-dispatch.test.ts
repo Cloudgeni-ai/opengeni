@@ -1,0 +1,338 @@
+import { describe, expect, test } from "bun:test";
+import { withModelTransportStartedObserver } from "../src/model-preparation-diagnostics";
+import { configureRuntimeMetricsHooks, instrumentedModelFetch } from "../src/model-provider-client";
+import { withModelCallLifecycle } from "../src/model-request-capture";
+import { withClaudeUsageObserver } from "../src/claude-subscription-usage";
+import {
+  responsesTransport,
+  OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+} from "@opengeni/network/responses-websocket";
+
+type Clock = { dispatchedAtUnixMs: number; monotonicTimeMs: number };
+
+function held<T = void>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+const request = ["https://provider.invalid/v1/responses", { method: "POST", body: "{}" }] as const;
+
+describe("model transport handoff diagnostic", () => {
+  test.each([null, undefined])(
+    "HTTP fallback reports dispatch when socket support is %s",
+    async (createSocket) => {
+      const order: string[] = [];
+      const transport = responsesTransport(
+        async () => {
+          order.push("fetch");
+          return new Response("{}");
+        },
+        { endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT, createSocket },
+      );
+      const fetcher = instrumentedModelFetch("openai", transport as typeof fetch, true);
+      await withModelTransportStartedObserver(
+        undefined,
+        () => fetcher(...request),
+        () => {
+          order.push("dispatch");
+        },
+      );
+      expect(order).toEqual(["dispatch", "fetch"]);
+    },
+  );
+
+  test("dispatch waits for credential custody and precedes the physical fetch without an async gap", async () => {
+    const custody = held();
+    const entered = held();
+    const order: string[] = [];
+    const fetcher = instrumentedModelFetch("organization-claude-subscription", (async () => {
+      order.push("fetch");
+      return new Response("{}");
+    }) as typeof globalThis.fetch);
+    const pending = withClaudeUsageObserver(
+      () => undefined,
+      () =>
+        withModelTransportStartedObserver(
+          () => {
+            order.push("audit");
+          },
+          () => fetcher("https://api.anthropic.com/v1/messages", { method: "POST", body: "{}" }),
+          () => {
+            order.push("dispatch");
+            queueMicrotask(() => order.push("preparation"));
+          },
+        ),
+      async (_provider, headers) => ({
+        headers,
+        observe: () => undefined,
+        custody: {
+          admit: async () => {
+            order.push("custody-start");
+            entered.resolve();
+            await custody.promise;
+            order.push("custody-complete");
+          },
+          responded: async (response) => response,
+          failed: async () => undefined,
+        },
+      }),
+    );
+    await entered.promise;
+    expect(order).toEqual(["audit", "custody-start"]);
+    custody.resolve();
+    await pending;
+    expect(order).toEqual([
+      "audit",
+      "custody-start",
+      "custody-complete",
+      "dispatch",
+      "fetch",
+      "preparation",
+    ]);
+  });
+
+  test("captures after the held audit and synchronously before underlying fetch", async () => {
+    const audit = held();
+    const entered = held();
+    const order: string[] = [];
+    let clock: Clock | undefined;
+    const fetch = instrumentedModelFetch("azure", (async () => {
+      order.push("fetch");
+      expect(clock).toBeDefined();
+      expect(clock!.monotonicTimeMs).toBeLessThanOrEqual(performance.now());
+      expect(clock!.dispatchedAtUnixMs).toBeLessThanOrEqual(Date.now());
+      return new Response("{}");
+    }) as typeof globalThis.fetch);
+    const pending = withModelTransportStartedObserver(
+      async () => {
+        order.push("audit-start");
+        entered.resolve();
+        await audit.promise;
+        order.push("audit-complete");
+      },
+      () => fetch(...request),
+      (observed: Clock) => {
+        clock = observed;
+        order.push("dispatch-clock");
+      },
+    );
+    await entered.promise;
+    expect(order).toEqual(["audit-start"]);
+    expect(clock).toBeUndefined();
+    audit.resolve();
+    await pending;
+    expect(order).toEqual(["audit-start", "audit-complete", "dispatch-clock", "fetch"]);
+  });
+
+  test("audit refusal emits neither a clock nor a physical dispatch", async () => {
+    const refusal = new Error("audit fenced");
+    let observations = 0;
+    let wireCalls = 0;
+    const fetch = instrumentedModelFetch("azure", (async () => {
+      wireCalls += 1;
+      return new Response("{}");
+    }) as typeof globalThis.fetch);
+    await expect(
+      withModelTransportStartedObserver(
+        () => {
+          throw refusal;
+        },
+        () => fetch(...request),
+        () => {
+          observations += 1;
+        },
+      ),
+    ).rejects.toBe(refusal);
+    expect(observations).toBe(0);
+    expect(wireCalls).toBe(0);
+  });
+
+  test("producer admission failure reaches neither audit, clock nor fetch", async () => {
+    const refusal = new Error("allowance refused");
+    const order: string[] = [];
+    const fetch = instrumentedModelFetch("azure", (async () => {
+      order.push("fetch");
+      return new Response("{}");
+    }) as typeof globalThis.fetch);
+    await expect(
+      withModelCallLifecycle(
+        {
+          beforeModelRequest: async () => {
+            throw refusal;
+          },
+        },
+        () =>
+          withModelTransportStartedObserver(
+            () => {
+              order.push("audit");
+            },
+            () => fetch(...request),
+            () => {
+              order.push("clock");
+            },
+          ),
+      ),
+    ).rejects.toBe(refusal);
+    expect(order).toEqual([]);
+  });
+
+  test("diagnostic errors and returned promises cannot delay or fail fetch", async () => {
+    let wireCalls = 0;
+    let observations = 0;
+    const neverJoined = held();
+    const fetch = instrumentedModelFetch("azure", (async () => {
+      wireCalls += 1;
+      return new Response("{}");
+    }) as typeof globalThis.fetch);
+    for (const observer of [
+      () => {
+        observations += 1;
+        throw new Error("diagnostic only");
+      },
+      () => {
+        observations += 1;
+        return neverJoined.promise;
+      },
+      async () => {
+        observations += 1;
+        throw new Error("async diagnostic only");
+      },
+    ]) {
+      expect(
+        (await withModelTransportStartedObserver(undefined, () => fetch(...request), observer)).ok,
+      ).toBe(true);
+    }
+    expect(observations).toBe(3);
+    expect(wireCalls).toBe(3);
+    neverJoined.resolve();
+  });
+
+  test("concurrent attempts sharing a transport keep their own observer", async () => {
+    const audits = [held(), held()];
+    const entered = [held(), held()];
+    const clocks: number[] = [];
+    const fetch = instrumentedModelFetch(
+      "azure",
+      (async () => new Response("{}")) as typeof globalThis.fetch,
+    );
+    const pending = audits.map((audit, index) =>
+      withModelTransportStartedObserver(
+        async () => {
+          entered[index]!.resolve();
+          await audit.promise;
+        },
+        () => fetch(...request),
+        () => clocks.push(index),
+      ),
+    );
+    await Promise.all(entered.map((gate) => gate.promise));
+    audits[1]!.resolve();
+    await pending[1];
+    expect(clocks).toEqual([1]);
+    audits[0]!.resolve();
+    await pending[0];
+    expect(clocks).toEqual([1, 0]);
+  });
+
+  test("non-model fetches do not emit model dispatch diagnostics", async () => {
+    let observations = 0;
+    const fetch = instrumentedModelFetch(
+      "azure",
+      (async () => new Response("{}")) as typeof globalThis.fetch,
+    );
+    await withModelTransportStartedObserver(
+      () => {
+        throw new Error("not a model request");
+      },
+      () => fetch("https://provider.invalid/v1/files"),
+      () => {
+        observations += 1;
+      },
+    );
+    expect(observations).toBe(0);
+  });
+});
+
+test("model call metrics carry provider HTTP status without consuming the error body", async () => {
+  const observed: Array<{ outcome: string; httpStatus?: number }> = [];
+  configureRuntimeMetricsHooks({ onModelCall: (value) => observed.push(value) });
+  try {
+    for (const status of [200, 400, 429, 503]) {
+      const fetcher = instrumentedModelFetch(
+        "organization-openrouter",
+        (async () => new Response("provider body", { status })) as typeof fetch,
+      );
+      const response = await fetcher("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        body: "{}",
+      });
+      expect(await response.text()).toBe("provider body");
+    }
+    expect(observed.map(({ outcome, httpStatus }) => ({ outcome, httpStatus }))).toEqual([
+      { outcome: "completed", httpStatus: 200 },
+      { outcome: "failed", httpStatus: 400 },
+      { outcome: "failed", httpStatus: 429 },
+      { outcome: "failed", httpStatus: 503 },
+    ]);
+  } finally {
+    configureRuntimeMetricsHooks(null);
+  }
+});
+
+const BYOK_RESTRICTED_404_BODY = JSON.stringify({
+  error: {
+    message:
+      "No endpoints found that can be served by your own provider keys. This workspace is restricted to BYOK capacity and has no provider key eligible for this request. Add provider keys at https://openrouter.ai/workspaces/default/byok",
+    code: 404,
+  },
+});
+
+test("a 404 is attributed to the provider account only from the provider's own restriction body", async () => {
+  const observed: Array<{ httpStatus?: number; providerAccountRefusal?: string }> = [];
+  let resolveAll!: () => void;
+  const done = new Promise<void>((resolve) => (resolveAll = resolve));
+  configureRuntimeMetricsHooks({
+    onModelCall: ({ httpStatus, providerAccountRefusal }) => {
+      observed.push({
+        ...(httpStatus !== undefined ? { httpStatus } : {}),
+        ...(providerAccountRefusal ? { providerAccountRefusal } : {}),
+      });
+      if (observed.length === 3) resolveAll();
+    },
+  });
+  try {
+    for (const body of [
+      BYOK_RESTRICTED_404_BODY,
+      JSON.stringify({ error: { message: "No endpoints found for some/model.", code: 404 } }),
+      "not found",
+    ]) {
+      const fetcher = instrumentedModelFetch(
+        "organization-openrouter",
+        (async () => new Response(body, { status: 404 })) as typeof fetch,
+      );
+      const response = await fetcher("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        body: "{}",
+      });
+      // The caller still reads the untouched provider body.
+      expect(await response.text()).toBe(body);
+    }
+    await done;
+    // Classification runs off-path, so emission order is not part of the contract.
+    expect(observed).toHaveLength(3);
+    expect(observed.filter((value) => value.providerAccountRefusal)).toEqual([
+      { httpStatus: 404, providerAccountRefusal: "byok_capacity_restricted" },
+    ]);
+    expect(observed.filter((value) => !value.providerAccountRefusal)).toEqual([
+      { httpStatus: 404 },
+      { httpStatus: 404 },
+    ]);
+  } finally {
+    configureRuntimeMetricsHooks(null);
+  }
+});

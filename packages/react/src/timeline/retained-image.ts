@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import type { ToolRendererProps } from "./registry";
+import { useOpenGeniText } from "../messages/runtime";
 type RetainedImageState =
   | { kind: "loading" }
   | { kind: "ready"; url: string }
@@ -13,6 +14,7 @@ export function useRetainedImageObjectUrl(
   artifact: RetainedArtifactReference,
   load: ToolRendererProps["loadRetainedArtifact"],
 ): RetainedImageState & { retry: () => void } {
+  const t = useOpenGeniText();
   const [state, setState] = useState<RetainedImageState>({ kind: "loading" });
   const [retrievalAttempt, setRetrievalAttempt] = useState(0);
   // Retry only the immutable retained artifact; never issue a new capture or
@@ -29,7 +31,10 @@ export function useRetainedImageObjectUrl(
   const stableArtifact = stableArtifactRef.current.artifact;
   useEffect(() => {
     if (!load) {
-      setState({ kind: "unavailable", label: "retrieval is not configured" });
+      setState({
+        kind: "unavailable",
+        label: t("timeline.retainedImage.retrievalIsNotConfigured"),
+      });
       return;
     }
     const controller = new AbortController();
@@ -39,12 +44,12 @@ export function useRetainedImageObjectUrl(
       .then((source) => {
         if (controller.signal.aborted) return;
         if (!source) {
-          setState({ kind: "unavailable", label: "bytes are unavailable" });
+          setState({ kind: "unavailable", label: t("timeline.retainedImage.bytesAreUnavailable") });
           return;
         }
         if (!(source instanceof Uint8Array)) {
           if (!source.url.trim()) {
-            setState({ kind: "unavailable", label: "URL is unavailable" });
+            setState({ kind: "unavailable", label: t("timeline.retainedImage.urlIsUnavailable") });
             return;
           }
           setState({ kind: "ready", url: source.url });
@@ -65,15 +70,15 @@ export function useRetainedImageObjectUrl(
           status === 404
             ? { kind: "unavailable", label: "deleted" }
             : status === 410
-              ? { kind: "unavailable", label: "expired or unavailable" }
-              : { kind: "error", message: "retrieval failed" },
+              ? { kind: "unavailable", label: t("timeline.retainedImage.expiredOrUnavailable") }
+              : { kind: "error", message: t("timeline.retainedImage.retrievalFailed") },
         );
       });
     return () => {
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [stableArtifact, load, retrievalAttempt]);
+  }, [stableArtifact, load, retrievalAttempt, t]);
   return { ...state, retry };
 }
 

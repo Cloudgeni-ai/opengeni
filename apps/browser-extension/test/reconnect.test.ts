@@ -28,6 +28,8 @@ function harness() {
   const ports: any[] = [];
   const onMessage = event();
   const storage: Record<string, unknown> = {};
+  let reloads = 0;
+  let updateChecks = 0;
   const chrome = {
     runtime: {
       getManifest: () => ({ version: "0.1.0" }),
@@ -35,6 +37,14 @@ function harness() {
       getPlatformInfo: async () => ({ os: "mac", arch: "arm64" }),
       onInstalled: event(),
       onStartup: event(),
+      onUpdateAvailable: event(),
+      reload: () => {
+        reloads += 1;
+      },
+      requestUpdateCheck: async () => {
+        updateChecks += 1;
+        return { status: "no_update" };
+      },
       lastError: undefined,
       connectNative: () => {
         const port = {
@@ -54,6 +64,13 @@ function harness() {
         return port;
       },
     },
+    alarms: {
+      onAlarm: event(),
+      created: [] as { name: string; info: object }[],
+      async create(name: string, info: object) {
+        this.created.push({ name, info });
+      },
+    },
     storage: {
       local: {
         get: async () => ({ ...storage }),
@@ -65,7 +82,12 @@ function harness() {
       setBadgeBackgroundColor: async () => {},
       setTitle: async () => {},
     },
-    debugger: { onEvent: event(), onDetach: event() },
+    debugger: {
+      onEvent: event(),
+      onDetach: event(),
+      attach: async () => {},
+      detach: async () => {},
+    },
     tabs: Object.fromEntries(
       [
         "onCreated",
@@ -80,6 +102,16 @@ function harness() {
     ) as any,
   };
   chrome.tabs.query = async () => [];
+  chrome.tabs.get = async (id: number) => ({
+    id,
+    windowId: 1,
+    index: 0,
+    title: "Page",
+    url: "https://example.com/",
+    active: false,
+    pinned: false,
+    incognito: false,
+  });
   new Function("chrome", "navigator", "setTimeout", "clearTimeout", worker)(
     chrome,
     { userAgent: "Chrome/153.0.0.0" },
@@ -93,6 +125,8 @@ function harness() {
   return {
     chrome,
     ports,
+    reloads: () => reloads,
+    updateChecks: () => updateChecks,
     status() {
       let result: any;
       onMessage.emit({ type: "status" }, {}, (r: unknown) => {
@@ -109,10 +143,204 @@ function harness() {
     hasTimer(delay: number) {
       return [...timers.values()].some((t) => t.delay === delay);
     },
+    timerDelays() {
+      return [...timers.values()].map((t) => t.delay);
+    },
   };
 }
 
+async function readyPort(h: ReturnType<typeof harness>) {
+  await flush();
+  const port = h.ports[0];
+  const hello = port.messages[0];
+  port.onMessage.emit({
+    type: "ready",
+    protocolVersion: 1,
+    deviceId: hello.device.id,
+    connectionGeneration: hello.device.connectionGeneration,
+  });
+  await flush();
+  return (payload: object) =>
+    port.onMessage.emit({
+      type: "command",
+      protocolVersion: 1,
+      requestId: crypto.randomUUID(),
+      deviceId: hello.device.id,
+      connectionGeneration: hello.device.connectionGeneration,
+      payload,
+    });
+}
+
+describe("extension updates", () => {
+  test("an extension-update refusal starts Chrome's update check and keeps the useful diagnosis", async () => {
+    const h = harness();
+    await flush();
+    const port = h.ports[0];
+    expect(port.messages[0].device.capabilities.paymentFieldPrivacy).toBe(true);
+    port.onMessage.emit({
+      type: "unavailable",
+      protocolVersion: 1,
+      reason: "extension_outdated",
+      agentVersion: "1.0.0",
+      detail: "browser extension update is required for protected page reads",
+    });
+    await flush();
+    expect(h.updateChecks()).toBe(1);
+    expect(port.disconnected).toBe(true);
+    expect(h.status().title).toBe("Update this extension");
+    expect(h.status().detail).toContain("Chrome is updating it now");
+  });
+  test("a downloaded update is applied at once when no agent is driving a tab", async () => {
+    const h = harness();
+    await readyPort(h);
+    h.chrome.runtime.onUpdateAvailable.emit({ version: "0.2.0" });
+    expect(h.reloads()).toBe(1);
+  });
+
+  test("an attached tab defers the update until it is released", async () => {
+    const h = harness();
+    const command = await readyPort(h);
+    command({ type: "debugger.attach", tabId: "7" });
+    await flush();
+    h.chrome.runtime.onUpdateAvailable.emit({ version: "0.2.0" });
+    expect(h.reloads()).toBe(0);
+    // An idle-attachment check is armed instead of reloading under the agent.
+    expect(h.timerDelays().some((delay) => delay > 14 * 60_000)).toBe(true);
+    command({ type: "debugger.detach", tabId: "7" });
+    await flush();
+    expect(h.reloads()).toBe(1);
+  });
+});
+
 describe("native bridge reconnection", () => {
+  test("a wake-up alarm reconnects a worker whose connection dropped", async () => {
+    const h = harness();
+    await flush();
+    expect(h.chrome.alarms.created).toEqual([
+      { name: "reconnect", info: { periodInMinutes: 0.5 } },
+    ]);
+    // While connected, the alarm leaves the live port alone.
+    h.chrome.alarms.onAlarm.emit({ name: "reconnect" });
+    await flush();
+    expect(h.ports).toHaveLength(1);
+    // Chrome stopped the worker's timers with it; only the alarm is left.
+    h.ports[0].onDisconnect.emit();
+    await flush();
+    h.chrome.alarms.onAlarm.emit({ name: "reconnect" });
+    await flush();
+    expect(h.ports).toHaveLength(2);
+    expect(h.ports[1].messages[0].type).toBe("hello");
+    // Other alarms are not ours.
+    h.ports[1].onDisconnect.emit();
+    await flush();
+    h.chrome.alarms.onAlarm.emit({ name: "something-else" });
+    await flush();
+    expect(h.ports).toHaveLength(2);
+  });
+
+  test("a native reconnect keeps the worker's state generation on a new port generation", async () => {
+    const h = harness();
+    await flush();
+    const first = h.ports[0].messages[0];
+    expect(first.type).toBe("hello");
+    expect(typeof first.device.stateGeneration).toBe("string");
+    expect(first.device.stateGeneration).not.toBe(first.device.connectionGeneration);
+    h.ports[0].onDisconnect.emit();
+    await flush();
+    h.tick(500);
+    await flush();
+    expect(h.ports).toHaveLength(2);
+    const second = h.ports[1].messages[0];
+    expect(second.device.stateGeneration).toBe(first.device.stateGeneration);
+    expect(second.device.connectionGeneration).not.toBe(first.device.connectionGeneration);
+    // A restarted worker (fresh module instance) has lost its live state.
+    const restarted = harness();
+    await flush();
+    expect(restarted.ports[0].messages[0].device.stateGeneration).not.toBe(
+      first.device.stateGeneration,
+    );
+  });
+  test("renaming the profile preserves the ready connection and publishes metadata", async () => {
+    const h = harness();
+    await flush();
+    const port = h.ports[0];
+    const hello = port.messages[0];
+    port.onMessage.emit({
+      type: "ready",
+      protocolVersion: 1,
+      deviceId: hello.device.id,
+      connectionGeneration: hello.device.connectionGeneration,
+    });
+    let response: unknown;
+    h.chrome.runtime.onMessage.emit(
+      { type: "set_profile_label", profileLabel: "  Work browser  " },
+      {},
+      (result: unknown) => {
+        response = result;
+      },
+    );
+    await flush();
+    expect(response).toEqual({ saved: true, profileLabel: "Work browser" });
+    expect(h.ports).toHaveLength(1);
+    expect(port.disconnected).toBe(false);
+    expect(h.status()).toMatchObject({
+      connected: true,
+      connectionGeneration: hello.device.connectionGeneration,
+      profileLabel: "Work browser",
+    });
+    expect(port.messages.at(-1)).toMatchObject({
+      type: "inventory",
+      deviceId: hello.device.id,
+      connectionGeneration: hello.device.connectionGeneration,
+      profile: { profileLabel: "Work browser" },
+    });
+    const revisions = port.messages
+      .filter((message: any) => message.type === "inventory")
+      .map((message: any) => message.inventoryRevision);
+    expect(
+      revisions.every(
+        (revision: number, index: number) => index === 0 || revision > revisions[index - 1],
+      ),
+    ).toBe(true);
+  });
+  test("a rename during the handshake waits for readiness on the original port", async () => {
+    const h = harness();
+    await flush();
+    const port = h.ports[0];
+    const hello = port.messages[0];
+    h.chrome.runtime.onMessage.emit(
+      { type: "set_profile_label", profileLabel: "New label" },
+      {},
+      () => {},
+    );
+    await flush();
+    expect(h.ports).toHaveLength(1);
+    expect(port.messages.map((message: any) => message.type)).toEqual(["hello"]);
+    port.onMessage.emit({
+      type: "ready",
+      protocolVersion: 1,
+      deviceId: hello.device.id,
+      connectionGeneration: hello.device.connectionGeneration,
+    });
+    await flush();
+    expect(port.messages.at(-1)).toMatchObject({
+      type: "inventory",
+      connectionGeneration: hello.device.connectionGeneration,
+      profile: { profileLabel: "New label" },
+    });
+    expect(h.status().connected).toBe(true);
+    h.chrome.runtime.onMessage.emit(
+      { type: "set_profile_label", profileLabel: null },
+      {},
+      () => {},
+    );
+    await flush();
+    expect(port.messages.at(-1)).toMatchObject({
+      type: "inventory",
+      profile: { profileLabel: null },
+    });
+    expect(port.disconnected).toBe(false);
+  });
   test("a handshake timeout reconnects without a local onDisconnect event", async () => {
     const h = harness();
     await flush();

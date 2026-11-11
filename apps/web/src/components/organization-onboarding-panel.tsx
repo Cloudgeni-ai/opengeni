@@ -8,12 +8,15 @@ import {
   MailIcon,
   RefreshCwIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { ChatClient } from "@opengeni/sdk";
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { toast } from "sonner";
 import type { ClientModel } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import {
+  AuthApiError,
+  changeSignupUseCase,
   completeSelfServiceOrganizationSetup,
   getSelfServiceOrganizationOnboardingStatus,
   type SelfServiceOrganizationOnboardingState,
@@ -22,16 +25,27 @@ import {
   ModelAccessOnboardingPanel,
   type IncludedOnboardingModel,
 } from "@/components/model-access-onboarding";
-import { Button } from "@/components/ui/button";
-import { TechnicalDetails } from "@/components/ui/error-message";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import {
+  DeveloperSetupStep,
+  type OnboardingDestination,
+} from "@/components/onboarding/developer-setup-step";
+import { OnboardingUseCaseStep } from "@/components/onboarding/use-case-step";
+import { Button } from "@opengeni/react/ui/button";
+import { TechnicalDetails } from "@opengeni/react/ui/error-message";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
 import {
   apiErrorTechnicalFacts,
   userErrorText,
   userErrorTextWithoutReference,
-} from "@/lib/api-error";
-import { includedDefaultModel } from "@/lib/model-access-onboarding";
+} from "@opengeni/react/ui/api-error";
+import { includedDefaultModel } from "@opengeni/react/app/lib/model-access-onboarding";
+import { onboardingJourney, useOnboardingStep } from "@/lib/onboarding-analytics";
+import {
+  storeOnboardingUseCase,
+  storedOnboardingUseCase,
+  type OnboardingUseCase,
+} from "@opengeni/react/app/lib/onboarding-use-case";
 import {
   loadModelAccessOnboarding,
   type StartingCreditsOnboarding,
@@ -41,7 +55,29 @@ import {
   storeOrganizationInvitationContinuation,
   type OrganizationInvitationContinuation,
 } from "@/lib/organization-invitation-continuation";
-import type { OrganizationInvitation } from "@/types";
+import type { OrganizationInvitation } from "@opengeni/react/app/types";
+import {
+  clearPendingDeveloperSetup,
+  rememberPendingDeveloperSetup,
+} from "@/lib/pending-developer-setup";
+import { rememberSignupUseCase } from "@opengeni/react/app/lib/signup-starter-set";
+import { personalOrganizationName } from "@/lib/personal-organization-name";
+
+/**
+ * The per-network limit on new organizations explains what to do instead
+ * (try later or ask for an invitation), so show the server's sentence.
+ * Every other failure becomes the usual advice.
+ */
+export function organizationSetupErrorText(error: unknown): string {
+  if (
+    error instanceof AuthApiError &&
+    error.code === "organization_setup_rate_limited" &&
+    error.message
+  ) {
+    return error.message;
+  }
+  return userErrorText(error);
+}
 
 export function OrganizationOnboardingPanel({
   onComplete,
@@ -54,13 +90,16 @@ export function OrganizationOnboardingPanel({
   modelDefaults = null,
   previewState,
   activeEmail = null,
+  activeName = null,
   invitation = null,
   onUseInvitedAccount,
   onSignOut,
   onUseAnotherAccount,
+  initialUseCase,
 }: {
-  onComplete: () => void;
-  client?: OpenGeniBrowserClient;
+  /** Leaves onboarding; a destination opens that chat instead of the home page. */
+  onComplete: (destination?: OnboardingDestination) => void;
+  client?: ChatClient<OpenGeniBrowserClient>;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;
@@ -74,12 +113,19 @@ export function OrganizationOnboardingPanel({
   modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   previewState?: SelfServiceOrganizationOnboardingState;
   activeEmail?: string | null;
+  /** The signed-in person's name; an individual's organization is named after them. */
+  activeName?: string | null;
   invitation?: OrganizationInvitationContinuation | null;
   onUseInvitedAccount?: (targetEmail: string) => void;
   /** Leaves onboarding for the signed-out page, so the person can pick another account. */
   onSignOut?: () => Promise<void> | void;
   /** Adds or selects a different browser account without signing this one out. */
   onUseAnotherAccount?: () => void;
+  /**
+   * Skip the "How do you want to use Opengeni?" question with this answer
+   * (previews and embedders). Omitted asks it before the organization name.
+   */
+  initialUseCase?: OnboardingUseCase;
 }) {
   const [state, setState] = useState<SelfServiceOrganizationOnboardingState | null>(
     previewState ?? null,
@@ -88,6 +134,15 @@ export function OrganizationOnboardingPanel({
   const [statusRequest, setStatusRequest] = useState(0);
   const [organizationName, setOrganizationName] = useState("");
   const [busy, setBusy] = useState(false);
+  // Someone using Opengeni on their own ("Get help with everyday things" or
+  // "Run agents in the cloud") is not asked to invent an organization: one
+  // named after them is created right away. The name form shows only for the
+  // developer path, or if that fails.
+  const personalSetupStarted = useRef(false);
+  const [personalSetupFailed, setPersonalSetupFailed] = useState(false);
+  // Named automatically, so the model step says what it's called and offers
+  // a way back to the first question.
+  const [personalOrganization, setPersonalOrganization] = useState(false);
   const [invitations, setInvitations] = useState<OrganizationInvitation[]>([]);
   const [invitationLoading, setInvitationLoading] = useState(false);
   const [invitationError, setInvitationError] = useState<string | null>(null);
@@ -99,6 +154,26 @@ export function OrganizationOnboardingPanel({
     organizationId: string;
     personalWorkspaceId: string;
   } | null>(null);
+  const [useCase, setUseCaseState] = useState<OnboardingUseCase | null>(
+    () => initialUseCase ?? (previewState ? null : storedOnboardingUseCase()),
+  );
+  const setUseCase = (choice: OnboardingUseCase | null) => {
+    if (!previewState) storeOnboardingUseCase(choice);
+    setUseCaseState(choice);
+  };
+  // A changed answer after the organization exists is saved on the server; the
+  // app's first load after onboarding waits for it so the new chat follows it.
+  const useCaseChange = useRef<Promise<unknown> | null>(null);
+  const finishOnboarding = (destination?: OnboardingDestination) => {
+    const pending = useCaseChange.current;
+    if (!pending) {
+      onComplete(destination);
+      return;
+    }
+    void pending.finally(() => onComplete(destination));
+  };
+  // "Add AI agents to my product" continues past the model step to developer setup.
+  const [modelStepDone, setModelStepDone] = useState(false);
   const operationId = useRef(crypto.randomUUID());
   const invitationOperationIds = useRef(new Map<string, string>());
   // An explicit `includedModel` or `startingCredits` (previews, embedders) is
@@ -123,6 +198,18 @@ export function OrganizationOnboardingPanel({
     includedModel: IncludedOnboardingModel | null;
     startingCredits: StartingCreditsOnboarding | null;
   } | null>(null);
+  // Consent-gated onboarding journey; the model step reports itself.
+  useOnboardingStep(
+    state === null || state === "unavailable" || createdSetup
+      ? null
+      : state === "invitation_pending" || invitation
+        ? "invitation"
+        : useCase === null
+          ? "use_case"
+          : "organization_name",
+    undefined,
+    !previewState,
+  );
   const confirmingOrganizationId = createdSetup?.organizationId ?? null;
   const confirmingWorkspaceId = createdSetup?.personalWorkspaceId ?? null;
 
@@ -150,33 +237,45 @@ export function OrganizationOnboardingPanel({
   }, [createdSetup, previewState, onComplete, statusRequest]);
 
   useEffect(() => {
-    if (!liveCheckKey || !confirmingOrganizationId || !confirmingWorkspaceId) return;
+    if (!liveCheckKey || !confirmingOrganizationId || !confirmingWorkspaceId || modelStepDone)
+      return;
     const unconfirmed = { includedModel: null, startingCredits: null };
     if (!client) {
       setLiveModelAccess({ key: liveCheckKey, workspaceId: confirmingWorkspaceId, ...unconfirmed });
       return;
     }
     let active = true;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     const check = JSON.parse(liveCheckKey) as {
       includedCandidate: IncludedOnboardingModel | null;
       checkStartingCredits: boolean;
     };
-    void loadModelAccessOnboarding(client, {
-      organizationId: confirmingOrganizationId,
-      workspaceId: confirmingWorkspaceId,
-      billingMode: check.checkStartingCredits ? "stripe" : "disabled",
-      includedCandidate: check.includedCandidate,
-    })
-      // Unverifiable is not included: fall back to the ordinary choice screen.
-      .catch(() => unconfirmed)
-      .then((result) => {
-        if (active)
+    const refresh = () => {
+      void loadModelAccessOnboarding(client, {
+        organizationId: confirmingOrganizationId,
+        workspaceId: confirmingWorkspaceId,
+        billingMode: check.checkStartingCredits ? "stripe" : "disabled",
+        includedCandidate: check.includedCandidate,
+      })
+        // Unverifiable is not included: fall back to the ordinary choice screen.
+        .catch(() => unconfirmed)
+        .then((result) => {
+          if (!active) return;
           setLiveModelAccess({ key: liveCheckKey, workspaceId: confirmingWorkspaceId, ...result });
-      });
+          // Monthly Free funding is asynchronous. Re-read both the catalog and
+          // balance: the default model can change when maintenance issues it.
+          // Never infer funds from eligibility or an unreadable balance.
+          if (check.checkStartingCredits && !result.startingCredits?.balance) {
+            refreshTimer = setTimeout(refresh, 15_000);
+          }
+        });
+    };
+    refresh();
     return () => {
       active = false;
+      clearTimeout(refreshTimer);
     };
-  }, [client, confirmingOrganizationId, confirmingWorkspaceId, liveCheckKey]);
+  }, [client, confirmingOrganizationId, confirmingWorkspaceId, liveCheckKey, modelStepDone]);
 
   useEffect(() => {
     if ((state !== "invitation_pending" && !invitation) || !client) return;
@@ -234,6 +333,7 @@ export function OrganizationOnboardingPanel({
       });
       invitationOperationIds.current.delete(selectedInvitation.id);
       clearOrganizationInvitationContinuation();
+      onboardingJourney().completed("invitation", "joined");
       onComplete();
     } catch (error) {
       setInvitationError(userErrorText(error));
@@ -242,11 +342,12 @@ export function OrganizationOnboardingPanel({
     }
   }
 
-  async function submit() {
-    const normalizedName = organizationName.trim();
+  /** Creates the organization; true once it exists. */
+  async function submit(name: string = organizationName): Promise<boolean> {
+    const normalizedName = name.trim();
     if (!normalizedName) {
       toast.error("Enter your organization name");
-      return;
+      return false;
     }
     setBusy(true);
     try {
@@ -254,25 +355,65 @@ export function OrganizationOnboardingPanel({
         const created = await completeSelfServiceOrganizationSetup({
           organizationName: normalizedName,
           operationId: operationId.current,
+          ...(useCase ? { useCase } : {}),
         });
+        onboardingJourney().completed("organization_name", "created");
+        // Durable from here on (signup use case + pending developer setup).
+        storeOnboardingUseCase(null);
+        // The new-chat page leads with suggestions for the answer.
+        if (useCase && activeEmail) {
+          rememberSignupUseCase({
+            account: activeEmail,
+            organizationId: created.organizationId,
+            useCase,
+          });
+        }
+        if (useCase === "embed" && activeEmail) {
+          rememberPendingDeveloperSetup({
+            account: activeEmail,
+            organizationId: created.organizationId,
+            organizationName: normalizedName,
+          });
+        }
         setCreatedSetup({
           organizationId: created.organizationId,
           personalWorkspaceId: created.personalWorkspaceId,
         });
-        return;
+        return true;
       }
       setCreatedSetup({
         organizationId: "preview-organization",
         personalWorkspaceId: "preview-workspace",
       });
+      return true;
     } catch (error) {
       toast.error("Couldn't set up the organization", {
-        description: userErrorText(error),
+        description: organizationSetupErrorText(error),
       });
+      return false;
     } finally {
       setBusy(false);
     }
   }
+
+  const personalSetup =
+    state === "required" &&
+    (useCase === "everyday" || useCase === "cloud") &&
+    !invitation &&
+    !createdSetup &&
+    !personalSetupFailed;
+  useEffect(() => {
+    if (!personalSetup || personalSetupStarted.current) return;
+    personalSetupStarted.current = true;
+    const name = personalOrganizationName(activeName, activeEmail);
+    setOrganizationName(name);
+    void submit(name).then((created) => {
+      if (created) setPersonalOrganization(true);
+      else setPersonalSetupFailed(true);
+    });
+    // `submit` reads only this render's values; it runs once per sign-in.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [personalSetup]);
 
   const frame = (content: ReactNode) => (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
@@ -364,7 +505,7 @@ export function OrganizationOnboardingPanel({
               We couldn't update your invitations. {invitationError}
             </p>
           ) : wrongAccount ? (
-            <div className="mt-4 rounded-md border border-border bg-surface-subtle p-3">
+            <div className="mt-4 rounded-md border border-border bg-surface-2 p-3">
               <p className="text-sm text-fg-subtle">
                 Use the account for {invitation?.targetEmail}. The invitation remains available
                 while you switch.
@@ -428,7 +569,9 @@ export function OrganizationOnboardingPanel({
     );
   }
 
-  if (createdSetup) {
+  // Back from the model step shows the first question again; the
+  // organization stays, and the answer only shapes the steps after it.
+  if (createdSetup && useCase !== null) {
     const live =
       liveModelAccess?.key === liveCheckKey &&
       liveModelAccess.workspaceId === createdSetup.personalWorkspaceId
@@ -445,6 +588,16 @@ export function OrganizationOnboardingPanel({
       includedModel !== undefined ? includedModel : (live?.includedModel ?? null);
     const effectiveStartingCredits =
       startingCredits !== undefined ? startingCredits : (live?.startingCredits ?? null);
+    const developerSetup = useCase === "embed";
+    if (developerSetup && modelStepDone)
+      return frame(
+        <DeveloperSetupStep
+          client={client}
+          organizationId={createdSetup.organizationId}
+          organizationName={organizationName.trim() || undefined}
+          onComplete={finishOnboarding}
+        />,
+      );
     return frame(
       <ModelAccessOnboardingPanel
         client={client}
@@ -456,7 +609,28 @@ export function OrganizationOnboardingPanel({
         supergrokEnabled={supergrokEnabled}
         includedModel={effectiveIncludedModel}
         startingCredits={effectiveStartingCredits}
-        onComplete={onComplete}
+        continueToNextStep={developerSetup}
+        footer={
+          personalOrganization ? (
+            <div className="mt-5 grid justify-items-start gap-1 border-t border-border pt-4">
+              <p className="m-0 min-w-0 text-xs leading-5 text-fg-muted">
+                Your organization is called {organizationName.trim()}. You can rename it any time in
+                Organization settings.
+              </p>
+              {/* Flush with the line above: the ghost button's padding sits outside it. */}
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="-ml-3 text-fg-muted"
+                onClick={() => setUseCase(null)}
+              >
+                Back
+              </Button>
+            </div>
+          ) : undefined
+        }
+        onComplete={developerSetup ? () => setModelStepDone(true) : () => finishOnboarding()}
       />,
     );
   }
@@ -478,6 +652,55 @@ export function OrganizationOnboardingPanel({
     );
   }
 
+  if (useCase === null) {
+    return frame(
+      <OnboardingUseCaseStep
+        onChoose={(choice) => {
+          if (!previewState) onboardingJourney().completed("use_case", choice);
+          // Back from the model step: the organization exists, so the new
+          // answer becomes the person's current one on the server (the
+          // new-chat suggestions follow it on every device), and the developer
+          // path skips its name and resumes after a reload like one that
+          // started there. Nothing goes to this tab's pre-organization
+          // storage, which would otherwise outlive a sign-out.
+          if (createdSetup && !previewState) {
+            const organizationId = createdSetup.organizationId;
+            useCaseChange.current = changeSignupUseCase({ organizationId, useCase: choice }).catch(
+              () => {
+                // Only the new-chat suggestions depend on it; the browser copy
+                // below still covers this device.
+              },
+            );
+            if (activeEmail) {
+              rememberSignupUseCase({ account: activeEmail, organizationId, useCase: choice });
+              if (choice === "embed") {
+                rememberPendingDeveloperSetup({
+                  account: activeEmail,
+                  organizationId,
+                  organizationName: organizationName.trim(),
+                });
+              } else {
+                clearPendingDeveloperSetup();
+              }
+            }
+            setUseCaseState(choice);
+            return;
+          }
+          setUseCase(choice);
+        }}
+      />,
+    );
+  }
+
+  if (personalSetup) {
+    return frame(
+      <section className="flex flex-1 items-center justify-center gap-2" role="status">
+        <Loader2Icon className="size-5 animate-spin text-fg-subtle" />
+        <span className="text-sm text-fg-muted">Setting up your workspace…</span>
+      </section>,
+    );
+  }
+
   return frame(
     <section className="og-page-glow flex flex-1 items-center justify-center px-4">
       <form
@@ -493,7 +716,11 @@ export function OrganizationOnboardingPanel({
           </span>
           <div>
             <h1 className="text-base font-semibold">Create your organization</h1>
-            <p className="text-sm text-fg-subtle">This is the company or team you work with.</p>
+            <p className="text-sm text-fg-subtle">
+              {useCase === "embed"
+                ? "This is the company or team you work with."
+                : "Your own name works. You can rename it later."}
+            </p>
           </div>
         </div>
         <Label htmlFor="organization-onboarding-name">Organization name</Label>
@@ -516,8 +743,53 @@ export function OrganizationOnboardingPanel({
           )}
           Create organization
         </Button>
+        {initialUseCase === undefined ? (
+          <Button
+            type="button"
+            variant="ghost"
+            className="mt-2 w-full text-fg-muted"
+            disabled={busy}
+            onClick={() => setUseCase(null)}
+          >
+            Back
+          </Button>
+        ) : null}
       </form>
     </section>,
+  );
+}
+
+/**
+ * The developer setup step again after a reload, a closed tab or another
+ * device: the person chose "Add AI agents to my product" and has not picked
+ * an option or skipped yet. It reuses a live setup key (its token was shown
+ * once) and offers to replace it rather than minting another.
+ */
+export function ResumedDeveloperSetup({
+  client,
+  organizationId,
+  organizationName,
+  activeEmail,
+  onSignOut,
+  onComplete,
+}: {
+  client: ComponentProps<typeof DeveloperSetupStep>["client"];
+  organizationId: string;
+  organizationName?: string | undefined;
+  activeEmail: string | null;
+  onSignOut?: (() => Promise<void> | void) | undefined;
+  onComplete: (destination?: OnboardingDestination) => void;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <OnboardingAccountHeader email={activeEmail} onSignOut={onSignOut} />
+      <DeveloperSetupStep
+        client={client}
+        organizationId={organizationId}
+        organizationName={organizationName}
+        onComplete={onComplete}
+      />
+    </div>
   );
 }
 
@@ -576,7 +848,7 @@ export function OnboardingAccountHeader({
 }
 
 async function listAllOrganizationInvitations(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
 ): Promise<OrganizationInvitation[]> {
   const invitations: OrganizationInvitation[] = [];
   const seenCursors = new Set<string>();

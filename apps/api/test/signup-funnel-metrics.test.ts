@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createObservability, type Observability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 
 import {
   runManagedAuthAttempt,
@@ -53,6 +53,7 @@ describe("sign-up funnel metrics", () => {
     expect(await series(observability, "opengeni_organization_setup_total")).toEqual([
       'opengeni_organization_setup_total{outcome="created"} 0',
       'opengeni_organization_setup_total{outcome="failed"} 0',
+      'opengeni_organization_setup_total{outcome="rate_limited"} 0',
     ]);
   });
 

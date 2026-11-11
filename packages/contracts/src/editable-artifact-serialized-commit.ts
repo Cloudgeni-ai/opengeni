@@ -94,7 +94,11 @@ export type EditableArtifactSerializedCommitSummary = Readonly<{
 export function encodeEditableArtifactSerializedCommit(
   input: EditableArtifactSerializedCommitInput,
 ): Uint8Array {
-  const normalized = normalizeSerializedCommit(input);
+  return encodeNormalizedSerializedCommit(normalizeSerializedCommit(input));
+}
+
+/** Encodes a commit whose fields `normalizeSerializedCommit` already validated. */
+function encodeNormalizedSerializedCommit(normalized: NormalizedSerializedCommit): Uint8Array {
   const payload = new ArtifactBinaryWriter(
     EDITABLE_ARTIFACT_SERIALIZED_COMMIT_MAX_BYTES -
       EDITABLE_ARTIFACT_BINARY_HEADER_BYTES -
@@ -206,7 +210,9 @@ export function decodeEditableArtifactSerializedCommit(
     intentBytes,
     nativeReceiptBytes,
   });
-  const canonical = encodeEditableArtifactSerializedCommit(normalized);
+  // The fields were just normalized; re-encoding them proves canonical bytes
+  // without decoding and validating the nested intent and receipt twice.
+  const canonical = encodeNormalizedSerializedCommit(normalized);
   if (!equalBytes(bytes, canonical)) {
     throw new TypeError("serialized commit is not canonically encoded");
   }

@@ -1,0 +1,451 @@
+//! Periodic sampling of host memory and disk, and of VM processor use and
+//! traffic; the checks of running guests start from it too (see
+//! [`super::check`]).
+
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+use compute_core::{DiskSpace, Input, Level, SandboxId, Step};
+use compute_engine::{Engine, PageSize};
+use tokio::time::Instant;
+
+use crate::cpu_share::ProcessorShare;
+use crate::observe::{Alarm, alarm_event};
+use crate::step::Reading;
+use crate::store::Store;
+
+use super::{BusyRule, HostAgent};
+
+/// How often the VMs' processor share is read again: groups beside them
+/// that start holding processes take their share from then on.
+const SHARE_EVERY: Duration = Duration::from_secs(5);
+
+/// The VMs' processor share and the processor time the host last told
+/// its core it guarantees with it (see [`crate::cpu_share`]).
+#[derive(Debug)]
+pub(super) struct ShareCheck {
+    share: ProcessorShare,
+    capacity: Option<u64>,
+    next: Instant,
+    failing: bool,
+}
+
+impl ShareCheck {
+    /// Checks `share`, if any, from a while from now on: the agent read it
+    /// as it started and guarantees `capacity` with it.
+    pub(super) fn of(share: Option<ProcessorShare>, capacity: Option<u64>) -> Option<Self> {
+        Some(Self {
+            share: share?,
+            capacity,
+            next: Instant::now() + SHARE_EVERY,
+            failing: false,
+        })
+    }
+
+    /// When due, reads the share again, sets the VMs' group's weight and
+    /// returns the processor time to guarantee if it changed. Blocks.
+    fn check(&mut self, now: Instant) -> Option<u64> {
+        if now < self.next {
+            return None;
+        }
+        self.next = now + SHARE_EVERY;
+        let share = match self.share.apply() {
+            Ok(share) => share,
+            Err(error) => {
+                // What it set last stays in place.
+                if !self.failing {
+                    tracing::warn!(%error, "reading the VMs' processor share");
+                }
+                self.failing = true;
+                return None;
+            }
+        };
+        self.failing = false;
+        if self.capacity == Some(share.capacity) {
+            return None;
+        }
+        if share.capacity < self.share.budget() {
+            tracing::warn!(
+                capacity_millis = share.capacity,
+                budget_millis = self.share.budget(),
+                weight = share.weight,
+                "groups beside the VMs now take more of the processors than the host keeps \
+                 back; guaranteeing what the VMs get"
+            );
+        } else {
+            tracing::info!(
+                capacity_millis = share.capacity,
+                weight = share.weight,
+                "the VMs get their whole processor budget again"
+            );
+        }
+        self.capacity = Some(share.capacity);
+        Some(share.capacity)
+    }
+}
+
+/// Readings of the local disk handed to the agent one at a time, in place
+/// of its own of the state root's filesystem (see
+/// [`super::HostConfig::disk_reading`]): each one given is taken by the
+/// next sample, and samples take none until the next is given. Tests
+/// decide with it what the disk holds and when work waiting for a reading
+/// is decided, and what changes as it is read.
+#[derive(Clone, Default)]
+pub struct DiskGauge {
+    next: Arc<Mutex<Option<Next>>>,
+}
+
+/// A reading given to a [`DiskGauge`], and what changes just before it.
+struct Next {
+    available: DiskSpace,
+    change: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl std::fmt::Debug for DiskGauge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let next = self.lock().as_ref().map(|next| next.available);
+        f.debug_struct("DiskGauge").field("next", &next).finish()
+    }
+}
+
+impl DiskGauge {
+    /// Has the next sample read `available`.
+    pub fn give(&self, available: DiskSpace) {
+        *self.lock() = Some(Next {
+            available,
+            change: None,
+        });
+    }
+
+    /// Has the next sample read `available` just after `change` is made,
+    /// as what a guest does while the agent reads the disk: the sample
+    /// reads what its VMs wrote before, and their disks after.
+    pub fn give_after(&self, change: impl FnOnce() + Send + 'static, available: DiskSpace) {
+        *self.lock() = Some(Next {
+            available,
+            change: Some(Box::new(change)),
+        });
+    }
+
+    /// Whether a sample has taken the reading last given.
+    #[must_use]
+    pub fn taken(&self) -> bool {
+        self.lock().is_none()
+    }
+
+    fn take(&self) -> Option<DiskSpace> {
+        // Made under the lock, so it is made once the reading is taken.
+        let mut given = self.lock();
+        let next = given.take()?;
+        if let Some(change) = next.change {
+            change();
+        }
+        drop(given);
+        Some(next.available)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Next>> {
+        self.next.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl<E: Engine, S: Store> HostAgent<E, S> {
+    pub(super) async fn sample(&mut self) {
+        let huge = self.engine.memory_profile().pages == PageSize::Huge;
+        // A new guest gets no more than the VMs' limit leaves, however
+        // much the host has free: at the limit, relief runs.
+        self.available_memory =
+            crate::host_memory::available(huge).map(|available| match self.engine.memory_room() {
+                Ok(room) => room.map_or(available, |room| available.min(room)),
+                Err(error) => {
+                    tracing::warn!(%error, "could not read what the VMs hold together");
+                    available
+                }
+            });
+        // That counts the VMs' droppable cache as available: the reserve
+        // the levels keep for sandboxes growing within their request is
+        // made free memory, so none of them waits to drop it.
+        if let Some(memory) = &self.memory_policy {
+            match self.engine.keep_memory_room(memory.low_watermark) {
+                compute_engine::RoomKept::Free => {}
+                compute_engine::RoomKept::Dropping(bytes) => tracing::debug!(
+                    mib = bytes >> 20,
+                    "dropping the VMs' page cache to keep their reserve free"
+                ),
+                compute_engine::RoomKept::Unsupported => tracing::warn!(
+                    "this kernel cannot drop page cache alone (memory.reclaim swappiness=0 needs \
+                     Linux 6.9): a sandbox growing within its request into the VMs' reserve may \
+                     wait while the kernel drops their cache at their limit"
+                ),
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(fetcher) = &self.fetcher {
+            fetcher.forget_old();
+        }
+        let mut batch: Vec<Input> = match self.busy {
+            Some(rule) => self
+                .sample_busy(rule)
+                .into_iter()
+                .map(|sandbox| Input::Busy { sandbox })
+                .collect(),
+            None => Vec::new(),
+        };
+        // Creates still waiting for their image or a disk reading keep the
+        // room they hold for as long as they wait.
+        batch.extend(self.held_rooms());
+        // Resident sizes always, so the status can report reclaimable
+        // memory; they go in before the host total so relief is planned
+        // from fresh numbers. The whole sweep is one batch, so no sleep
+        // timer fires between two readings taken at the same moment.
+        batch.extend(self.slots.iter().filter_map(|(id, slot)| {
+            let live = slot.vm.as_ref()?;
+            let bytes = self.engine.resident_bytes(&live.vm).ok()?;
+            Some(Input::Resident {
+                sandbox: *id,
+                bytes,
+            })
+        }));
+        // Ready sandboxes too, which count against the same budget.
+        batch.extend(self.spare_readings());
+        // How each running VM pages, read with its resident size and
+        // before the host total, which bounds them from it (ADR 24).
+        let use_readings = self.memory_use(&batch);
+        batch.extend(use_readings);
+        self.check_oom_kills();
+        if self.memory_policy.is_some()
+            && let Some(available) = self.available_memory
+        {
+            batch.push(Input::Memory { available });
+        }
+        // What running VMs have written and which memory images are still
+        // being filled, then the disk reading that shows what they took,
+        // then what each disk may still grow by as that reading saw it.
+        // The core ignores them without a disk policy.
+        let before = self.disk_readings();
+        let disk = match &self.disk_gauge {
+            Some(gauge) => gauge.take(),
+            None => read_disk(&self.root),
+        };
+        batch.extend(self.disk_growth_readings(before).await);
+        if let Some(available) = disk {
+            batch.push(Input::Disk { available });
+        }
+        if let Some(millis) = self
+            .processor_share
+            .as_mut()
+            .and_then(|share| share.check(Instant::now()))
+        {
+            batch.push(Input::CpuBudget { millis });
+        }
+        let resident: Vec<(Level, u64)> = batch
+            .iter()
+            .filter_map(|input| match input {
+                Input::Resident { sandbox, bytes } => {
+                    Some((self.core.sandbox(*sandbox)?.state.level, *bytes))
+                }
+                _ => None,
+            })
+            .collect();
+        self.inputs(batch);
+        if disk.is_some() {
+            self.resume_after_reading();
+        }
+        let gauges = self.gauges(resident.into_iter());
+        self.observer.metrics().set_gauges(&gauges);
+        self.summarize();
+        self.retire_unused();
+        self.retire_unused_images();
+        self.measure_relief();
+        self.check_guests();
+        self.refill();
+    }
+
+    /// Finds running sandboxes whose guests count as busy by `rule` (see
+    /// [`super::usage`]): the agent reads each VM that simply runs, and a
+    /// checkpoint lends what it reads of the VM it holds. How many
+    /// sandboxes count as busy because nothing could be read goes into the
+    /// host's status.
+    pub(super) fn sample_busy(&mut self, rule: BusyRule) -> Vec<SandboxId> {
+        let now = Instant::now();
+        let mut busy = Vec::new();
+        for (id, slot) in &mut self.slots {
+            let view = self.core.sandbox(*id);
+            let own = match (&slot.vm, view) {
+                (Some(live), Some(view))
+                    if view.state.level == Level::Running && view.step.is_none() =>
+                {
+                    Some(Reading {
+                        incarnation: live.incarnation,
+                        at: now,
+                        cpu: rule
+                            .watches_cpu()
+                            .then(|| self.engine.cpu_time(&live.vm).ok())
+                            .flatten(),
+                        io: rule
+                            .watches_io()
+                            .then(|| self.engine.io_bytes(&live.vm).ok())
+                            .flatten(),
+                        last_before_pause: false,
+                    })
+                }
+                (None, Some(view)) if view.runs() && view.step == Some(Step::Checkpoint) => None,
+                _ => {
+                    slot.usage.stopped();
+                    continue;
+                }
+            };
+            if slot.usage.sample(own, rule) {
+                busy.push(*id);
+            }
+        }
+        let unseen = self
+            .slots
+            .values()
+            .filter(|slot| slot.usage.unseen())
+            .count();
+        if unseen > self.unseen_activity {
+            tracing::warn!(
+                sandboxes = unseen,
+                "activity of running sandboxes cannot be read; they count as busy"
+            );
+        }
+        self.unseen_activity = unseen;
+        busy
+    }
+}
+
+impl<E: Engine, S: Store> HostAgent<E, S> {
+    /// Reads how each running VM uses memory beyond its resident size in
+    /// `batch`: what of it is compressed or swapped, and how long all its
+    /// threads stalled on memory lately, for the host's memory rule
+    /// (ADR 24), and keeps the most it used for its summary. On an engine
+    /// that never compresses a running VM, warns when one was compressed
+    /// between two samples anyway: the sandbox would slow down unnoticed
+    /// while it pages back in.
+    ///
+    /// The reading is kept for the sandbox's summary (see
+    /// [`HostAgent::summarize`]).
+    fn memory_use(&mut self, batch: &[Input]) -> Vec<Input> {
+        let may_compress = self.engine.compresses_running();
+        let resident: std::collections::HashMap<SandboxId, u64> = batch
+            .iter()
+            .filter_map(|input| match input {
+                Input::Resident { sandbox, bytes } => Some((*sandbox, *bytes)),
+                _ => None,
+            })
+            .collect();
+        let mut readings = Vec::new();
+        for (id, slot) in &mut self.slots {
+            let running = self
+                .core
+                .sandbox(*id)
+                .is_some_and(|view| view.state.level == Level::Running && view.step.is_none());
+            let Some(live) = slot.vm.as_ref().filter(|_| running) else {
+                slot.stats = None;
+                continue;
+            };
+            let Ok(stats) = self.engine.memory_stats(&live.vm) else {
+                continue;
+            };
+            if !may_compress
+                && let Some((incarnation, before)) = slot.stats
+                && incarnation == live.incarnation
+                && stats.zswpout > before.zswpout
+            {
+                tracing::warn!(
+                    sandbox = %crate::protocol::Id(*id),
+                    pages = stats.zswpout - before.zswpout,
+                    "a running VM's memory was compressed into zswap"
+                );
+            }
+            slot.stats = Some((live.incarnation, stats));
+            let compressed = stats.compressed.unwrap_or(0);
+            let swapped = stats.swapped.unwrap_or(0);
+            if let Some(bytes) = resident.get(id) {
+                let demand = bytes.saturating_sub(compressed).saturating_add(swapped);
+                slot.peak = slot.peak.max(demand);
+            }
+            readings.push(Input::MemoryUse {
+                sandbox: *id,
+                compressed,
+                swapped,
+                stall: stall_thousandths(stats.pressure_full_avg10),
+                high: stats.high,
+                bringing_down: self.engine.bringing_down(&live.vm),
+            });
+        }
+        readings
+    }
+
+    /// Raises [`Alarm::OomKilled`] for VM processes the kernel's
+    /// out-of-memory killer ended since the last sample: the memory rule
+    /// exists so that it never does. Each such VM is lost, and its own
+    /// alarm names the sandbox once the agent sees it end.
+    fn check_oom_kills(&mut self) {
+        let kills = match self.engine.oom_kills() {
+            Ok(Some(kills)) => kills,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::debug!(%error, "could not read the VMs' out-of-memory kills");
+                return;
+            }
+        };
+        // Kills before the agent started were before its time.
+        if let Some(before) = self.oom_kills.replace(kills)
+            && kills > before
+        {
+            let ended = kills - before;
+            tracing::error!(
+                processes = ended,
+                "the kernel's out-of-memory killer ended VM processes"
+            );
+            self.observer.alarms(
+                Alarm::OomKilled,
+                ended,
+                alarm_event("the kernel's out-of-memory killer ended VM processes"),
+            );
+        }
+    }
+}
+
+/// Thousandths of a stall share given in percent, as the core counts it.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn stall_thousandths(percent: Option<f64>) -> u16 {
+    // Clamped first, so the cast neither wraps nor loses a sign.
+    percent.map_or(0, |percent| {
+        (percent * 10.0).round().clamp(0.0, 1000.0) as u16
+    })
+}
+
+/// What the filesystem holding the state root has available to the agent.
+/// One without a fixed number of inodes, such as btrfs, reports none, and
+/// never runs out of them.
+fn read_disk(root: &std::path::Path) -> Option<DiskSpace> {
+    let stat = rustix::fs::statvfs(root).ok()?;
+    Some(DiskSpace {
+        bytes: stat.f_bavail.saturating_mul(stat.f_frsize),
+        inodes: if stat.f_files == 0 {
+            u64::MAX
+        } else {
+            stat.f_favail
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stall_thousandths;
+
+    #[test]
+    fn stalls_are_read_in_thousandths() {
+        assert_eq!(stall_thousandths(None), 0);
+        assert_eq!(stall_thousandths(Some(0.0)), 0);
+        assert_eq!(stall_thousandths(Some(1.25)), 13);
+        assert_eq!(stall_thousandths(Some(40.0)), 400);
+        assert_eq!(stall_thousandths(Some(100.0)), 1000);
+        // A kernel's rounding never makes more than all of the time.
+        assert_eq!(stall_thousandths(Some(100.4)), 1000);
+        assert_eq!(stall_thousandths(Some(-1.0)), 0);
+    }
+}

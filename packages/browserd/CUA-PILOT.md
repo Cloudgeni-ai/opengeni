@@ -1,0 +1,462 @@
+# CUA desktop adapter
+
+The macOS and Linux adapters use CUA Driver source revision
+`473b859de3e2b1c313d8764acc22e610605cb407`: upstream `cua-driver-rs-v0.37.0`
+(`2d2f9922`, including its non-invalidating preview capture and cursor support)
+plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
+cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
+step reports that keep the windows each step opened, and a `run_steps` option
+(`refind_stale:false`) that stops a batch at a stale element token instead of
+acting on a lookalike found again by role and label, or re-sending a refused
+menu-bar token click as `invoke_menu`, and a macOS launch of an app that is
+already running that sends a reopen (`aevt/rapp`) instead of a second open
+event, so a running document app with no window shows its window or Open panel
+again, in the background. On macOS it also focuses an element on its own (a
+`click` with `action:"focus"` sets `AXFocused` and reads it back, refusing with
+`focus_refused`), and lists app windows at the floating and modal-panel levels
+(3 and 8) as well as normal windows, so a first-run modal dialog is visible.
+Its macOS waits wake on time (a kqueue timed wait instead of `nanosleep`, which
+woke a 25 ms poll up to 150 ms late on a busy Mac), and a batch of background
+presses on one window makes that window key once instead of before every press.
+A press that puts the caret in a text field reports a confirmed effect when the
+field then holds the keyboard focus, instead of an unconfirmed click.
+It also carries the macOS follow-ups of `cu-macos-followups` (`03323b47`) and,
+on top, Return pressing the default button of a background app's sheet
+(`cu-sheet-default-button`), a press that closes its own window counting as
+done (`cu-office-menus`), and an accessibility action on an item of an app's
+menu bar that no longer depends on the addressed window
+(`cu-menu-bar-after-window-closes`): the menu bar hangs off the app, so a batch
+whose earlier step closed or hid its window can still open the app's menu.
+A `run_steps` step addressed to a window that reads no elements and is closed
+or off screen fails at once (`window_not_on_screen`) instead of waiting out
+its timeout.
+In the background, `type_text` types into a Chromium browser's own field (the
+address bar) with keystrokes posted to the browser, not an accessibility
+insert: the field shows inserted text but never takes it, so Return after it
+loaded nothing (`cu-browser-field-keys`). Each `run_steps` step reports the
+`effect` its tool could confirm, so a batch's key press that was only sent
+can be told from one the app was seen to take.
+Popup options are chosen without pressing their items (`cu-popup-options`,
+below).
+A background pixel click is checked against the element under the point in
+its own window (`cu-window-hit-test`): the app's accessibility hit test answers
+with the element of whichever of its windows is on top there, so a click on a
+web `<select>` in a browser window behind another of the browser's windows
+was not refused and opened the select's menu.
+On macOS keys addressed to a window that is not its app's main window make it
+main first (`cu-main-window-keys`): an app's shortcuts go to its main window
+whatever window has focus, so a background `cmd+L` focused another Chrome
+window's address bar, and the typed address was appended to the addressed
+window's current address instead of replacing it. The window stays main, as
+after a background press, and comes to the top of its app's own windows, which
+stay behind the person's app. When the app is the person's front app, or the
+window does not become main, the keys are refused with `window_not_main`
+before any is sent.
+On macOS keys to the iOS Simulator are physical keys (`cu-forwarder-keys`):
+the Simulator passes key presses on to the device by key code, as Screen
+Sharing does, and rebuilds modifiers from modifier key presses. Background
+text used to arrive as "aaaa" (each character was a Unicode payload on the A
+key) and `cmd+v` as nothing, since its Command was only a flag on the `v`.
+Each character is now its own US-keyboard key with real Shift presses, a
+chord presses its modifier keys, and text with a character that has no such
+key fails before any key is sent.
+On macOS `set_value` writes a text field's value as text even when it reads as
+a number (Chrome accepts a number written to a web text field and ignores it).
+In web content it writes any number as text: Chrome empties a number field
+(`<input type=number>`, an AXIncrementor) given a CFNumber. A number field a
+write leaves empty gets its previous value back, and the write is refused as
+not applied. A control that takes a value write but keeps its value (a web
+range input) is stepped to the value with its increment and decrement actions;
+a value outside the range it reports is refused before any step, and a run
+that stops short fails with `value_not_reached` and what it reads now.
+`write_not_applied` always means the control holds what it held before (a
+number field a value emptied reports `write_cleared`), so Opengeni maps it to
+a definite failure.
+These refusals never repeat the value given, since it may be a secret such as a
+PIN in a number field.
+On macOS an element of a bubble or popover that a window lists as its own (Chrome's
+Save password?, translate, site permission and download bubbles are separate
+windows whose content the browser window lists among its accessibility
+children) takes accessibility actions (a press, `set_value`) through that
+window. Pointer and key input to it is refused with
+`element_in_attached_window` before anything is sent, since it would land on
+the window under the bubble, and a coordinate click over a bubble never
+presses it. An element of an unrelated window of the app is still refused, now
+naming the window it belongs to. An element scroll proves the pointer route
+before scrolling the element into view, and a wheel refused after that reveal
+reports a partial effect.
+On macOS a sheet (an Open or Save panel, an alert shown on a window) is read
+and used through the window it is attached to, also when that window leaves
+the sheet out of its own accessibility children (Firefox's windows keep only
+their own content there, so its file panel could not be read at all). Keys
+addressed to that window reach an alert or prompt sheet that holds the app's
+focus instead of being refused as `window_not_key`; an Open or Save panel
+(`open-panel`, `save-panel`) drops keys posted to a background app, so keys
+stay refused there and its controls take accessibility actions. A sheet on
+another window of the app is neither read nor given keys through this window.
+A sheet takes keys only when the app's focused element is the sheet or its
+top-level element is the sheet (AppKit names the host window as the
+`AXWindow` of a sheet's controls, and of a sheet with only buttons that holds
+the focus itself): a panel whose contents another process serves, as a file
+panel's are, shows no focused element, so keys stay refused there whatever
+the panel calls itself.
+Return (or Enter) without modifiers, addressed to a window of a background
+app whose focus is in a sheet attached to that window, presses the sheet's
+default button through accessibility: AppKit looks for the default button's
+key equivalent through the app's key window, which is nil while the app is not
+active, so a posted Return reaches the sheet and does nothing. It is posted as
+before when the app is active, a menu of the app is open, the focus is in a
+text area, or the sheet has no enabled default button, and always in an
+ordinary window, where a field with an action, a combo box, a table or a
+search field handles Return itself. The press is confirmed when the sheet
+leaves the app's focus; when the press does not complete and the sheet stays
+open, the result says it may not have been pressed. Escape needs nothing of
+the kind: it reaches the cancel button through the sheet's cancel operation.
+Finding the window a sheet belongs to is bounded by the window read's own
+deadline; a lookup cut short adds no sheet. Before background keys, each
+reading of the app's focus (its focused window, the window of its focused
+element, the sheet it may be) has 1 s in all; what it could not ask in time
+counts as unknown, and keys are refused. When the app named no focused
+window at all, the refusal says where keys would go is unknown
+(`key_focus_unknown`) instead of naming another window.
+When `set_value` refuses after opening a menu it could not tell for the
+select's, Escape follows `AXCancel` only while WindowServer still shows a menu
+window opened since, so it cannot land in the app's window; when a menu could
+not be seen to close, the refusal says it may still be open.
+On macOS an accessibility press the app answers with "cannot complete"
+(`kAXErrorCannotComplete`) is done when the window it was sent to then leaves
+the screen within a second (a dialog's Allow or OK button that closes the
+dialog before the app answers), and the result says so. No other error
+counts: an element already gone, or a request that never reached the app,
+says the press was not taken, so a window closing then closed for another
+reason.
+A focus read-back waits up to 300 ms, since Chrome moves the focus to a web
+control a moment after the write.
+A `run_steps` lookup or check may set `exact: true`, so its name must be the
+element's whole label rather than the start of a word in it.
+A `run_steps` lookup or presence check for a button or link that finds nothing
+of that role uses the one element of the other of the two with that exact name
+(button and link are pressed alike, and on the web models often confuse them),
+and its step report and `role_note` say which element it used and to name its
+role next time. It never does so for a pick by position, a text write or a
+drag, nor for a toggle button or anything with a pressed or checked state, and
+a true match in any window wins. It takes the stand-in only from a complete
+reading of the window (never one cut at the 2,000-element cap) whose content
+has stayed the same for 1.5 s, so a button an earlier step brings up wins over
+a link of its name. Several such elements never hold a wait or a lookup: once
+the window's content has stayed the same for 1.5 s the step fails as
+`ambiguous`, naming them. A window that never settles before the step's
+deadline fails as it did before, and a name shown only on an element of an
+unrelated role waits its whole time.
+On macOS a window's accessibility reading asks the app for each element's
+attributes in one request (`AXUIElementCopyMultipleAttributeValues`) instead of
+one request per attribute, and bounds each request by what is left of the
+read's `timeout_ms`, so a slow app costs a few requests per element instead of
+about fifteen and cannot hold a read past its budget. An element whose request
+fails for another reason is read one attribute at a time, as before; the
+reading is the same. The first `get_window_state` of a process after an action
+on it (outside a `run_steps` batch) waits only while the read window is
+changing: an action returns when the app has taken it, not when its result is
+on screen, and a read at once showed the screen before it or one half way. With
+no accessibility notification for the read window within 100 ms of the action's
+end, the read goes ahead at once. Otherwise it waits until the window's
+notifications (layout
+changes, created elements, focus and selection changes, row counts, new windows
+and sheets, opened menus) have stopped for 200 ms, counted from the last one,
+and goes ahead 1 s after the action at the latest. Value and title changes do
+not count, so a window that keeps updating numbers or text (a clock, a progress
+bar, a terminal, a process monitor) does not hold the read. A window whose
+notifications show it changed while it was read (an app can pause in the middle
+of a change) is read again once quiet, at most three reads in all and not past
+that 1 s. Notifications of the process's other windows do not count (the iOS
+Simulator shows every booted device in one process). The read reports what it
+waited for as `settle`, with the number of reads.
+On macOS the requests that find the read window (the app's children and
+windows, and each one's role) are bounded by the read's `timeout_ms` too. An
+app that does not answer them in time (busy on its main thread, as some are
+while they show a menu) gets `degraded_reason` `ax_app_unresponsive` and an
+empty tree, keeps its last snapshot and element tokens, and Opengeni shows the
+reading as cut short because the app answered too slowly, with the screenshot,
+instead of failing it after 7 s. Refs of the last reading still act through
+it, but keys are refused on it, since it shows no focused element, and so are
+keys based on it once a later reading has answered. Top-level
+children the lookup had no time to ask about are left out of the walk, as they
+may be other windows. A web `<select>` in a WebKit view (apps that
+embed a WKWebView) lists its open menu in the window's tree with no parent and
+no window: the menu's items are now the window's to press through
+accessibility when the menu is open over that window (pointer and key input to
+them is refused with
+`element_in_open_menu`), and `set_value` chooses an option from that menu,
+whether it opened the menu itself or found it open, and closes a menu it
+opened even though the button always reads as not expanded. Neither the
+button's expanded nor focused state says whose menu is open, so a menu found
+open counts as the button's only when its chosen item (the one item it marks
+as chosen, or, in a menu that marks none, the one item reading as selected,
+which follows the highlight) matches what the button shows and lies over the
+button (AppKit lays the chosen item over its button); another select's menu
+open over it is not used. When `set_value` opened a menu and then refuses, it
+also closes any menu opened since, even one it could not tell for the
+button's. After pressing an item of such a menu, `set_value`
+reads the button's value back and fails plainly if it does not show the
+option.
+Pressing a Chromium `<select>`'s option through accessibility both chooses it
+and toggles the menu: an item of its open menu leaves the menu open again, and
+the one item a closed `<select>` lists (the option it shows) opens the menu,
+raising the browser window, and can bring the browser down. So a press on any
+pop-up button's option (an item of its open menu, or that listed item) chooses
+the option on the button as `set_value` does, and a menu still open after a
+choice is closed. An option with no text to choose it by is refused in the
+background (`popup_option_without_text`) instead of being pressed. `set_value` chooses a Chromium `<select>`'s option by
+type-ahead also while the browser is the front app with the select in another
+of its windows, instead of opening the menu, which ordered that window above
+the one in front. A background pixel click on the option a closed `<select>`
+shows is refused like one on the select. None of these refusals applies when
+the window is already the front window (its app is active and it is that app's
+topmost window), where the menu brings nothing forward, or to an ARIA menu
+button (`aria-haspopup`): Chromium gives it the same role, but it lists no
+options and its menu is drawn in the page. On a native combo box, `set_value`
+confirms the new value (`AXConfirm`, as Return does), so the app takes it as
+chosen; Opengeni shows such a box as a `combobox` that takes `set_value`.
+The walk asks an element once more when its one-request read times out with
+time left, and in a read with a time limit counts one that does not answer
+twice as unread, so the read reports truncation; a walk without a time limit
+keeps it as an empty row. WebKit times out the first request made of the
+element hosting a WKWebView's web content, which made the first read of such
+a window omit the whole page. The window-number request made of each of the
+app's windows while finding the target window is bounded by the same deadline,
+and none is made once it has passed: the windows left count as unread.
+`@trycua/cua-driver` 0.37.0
+supplies the private-worker transport; the source-built executable performs
+desktop operations. Windows uses the published SDK's native runtime in process.
+A `computer_act` batch runs as one `run_steps` call only where the worker offers
+`refind_stale`, so every step stays bound to the observation the batch was
+checked against. The exception is a later action whose role, label or text
+locator the observation does not show (an earlier action brings it up): it is
+sent by role and name, and CUA finds it when the step runs after waiting up to
+10 s for it to appear and enable. So is a first action that names a button or
+link the observation does not show when it shows an element of the other of the
+two with that name: CUA's stand-in above decides whether it is the one meant.
+Every element-targeted action after it is
+then found by name too, because CUA's lookup re-reads the window and retires the
+observation's tokens. On Windows a batch's actions are sent one at a time. CUA is the
+default on macOS, on Windows and for explicitly selected isolated Linux
+desktops. Linux host desktops retain the native default.
+
+`ComputerBackend` retains the legacy desktop projection and exposes native CUA calls. The existing `ComputerDriver`
+continues to handle Opengeni sessions, operation receipts and frame streaming.
+There is no second authorization system or operation journal. Structured browser
+control, attached Chrome and browser profiles are unchanged.
+
+## Runtime and packaging
+
+macOS and Windows configuration select CUA with the existing desktop. Linux configuration
+retains the existing native desktop unless
+`OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux` is explicitly selected;
+that mode defaults to CUA and requires the Linux desktop dependencies listed below.
+The incompatible CUA/existing-Linux combination is still refused.
+`OPENGENI_BROWSERD_COMPUTER_BACKEND=native` preserves the native backend on every
+platform. These choices do not alter browser control.
+
+On macOS, upstream's `createPrivateWorker` owns the child and
+its AppKit cursor event loop. The child has no reconnectable endpoint and exits
+when its SDK owner closes. A second session cannot take this process's physical
+desktop while the first owns it. Separate visual cursors do not isolate focus or
+application state.
+
+On Linux, each ComputerSession receives its own Xvfb display, accessibility bus,
+home and application profile directories. The worker uses that allocated X11
+seat even when the host has Wayland or Xauthority settings. Its private process
+group is stopped before those directories are removed. This cleans up ordinary
+launched children; programs that deliberately detach into another process session
+are outside that group. Display/profile separation is not an OS security sandbox:
+process inspection and app management retain the host user's authority.
+
+Existing macOS accessibility and screen-recording permissions are required. The
+host application owns permission prompts; CUA does not raise a second prompt.
+The adapter selects Standard authorization and does not bypass CUA refusals.
+Background input targets the selected window without requesting foreground focus.
+Unsupported operations return their limitation rather than switching to foreground.
+
+`stage-cua-runtime.ts` builds the fixed upstream revision, bundles the SDK and
+stages its matching native transport package, worker executable and source
+receipt. Everything joins the existing immutable embedded helper generation.
+Compiled controllers load only their adjacent assets, with no runtime downloads.
+For source development, run the staging command first. An operator can supply an
+unmodified checkout at that exact revision with `OPENGENI_CUA_SOURCE_DIR` during
+build, or an absolute worker path with `OPENGENI_CUA_DRIVER_BINARY` during local
+execution. Neither setting is an agent tool argument.
+
+```sh
+bun scripts/stage-cua-runtime.ts
+bun run typecheck
+bun test test/cua-backend.test.ts
+OPENGENI_CUA_E2E=1 bun test test/cua-computer.e2e.test.ts
+OPENGENI_CUA_E2E=1 bun test test/cua-linux.e2e.test.ts
+OPENGENI_CUA_PACKAGING_E2E=1 bun test test/cua-runtime-packaging.e2e.test.ts
+```
+
+The opt-in desktop test creates one disposable AppKit window. It checks text
+replacement, semantic clicks, replay without a second click, PNG streaming,
+semantic input while streaming, pixel clicks and repeated scrolling against
+independently written fixture state. It closes only its own window. The packaging
+test builds the real compiled loader and verifies that missing adjacent assets
+cannot be replaced by an ambient installation. Stage first to keep compilation
+outside the test timeout. Building both macOS architectures requires their Rust
+targets and Xcode tools.
+Linux builds require the X11, XTest, XRandR, XFixes, XInput, XRecord and DBus
+development libraries; execution requires Xvfb, an accessibility-enabled desktop,
+DBus, XFWM4, xterm, x11vnc and util-linux `setsid`. The Linux test checks two
+independent displays, cursor and clipboard state, native batches, viewer captures
+and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm64.
+
+## Current limits
+
+- Mac background drag is refused before input. The legacy action projection remains
+  limited; native CUA tools expose app launch, desktop capture, clipboard and cursor
+  controls with upstream arguments and results. Foreground activation is explicit.
+- Background support depends on the target application's native controls. It
+  does not make every desktop application fully operable in the background.
+- Mac background input never makes the window focused, so pages that need a
+  focused document (passkey and other WebAuthn prompts, some clipboard reads)
+  refuse what it sends. A background pixel click is delivered as an
+  accessibility press on the element under the point, once. When the element
+  lists no press and is part of Chromium's own window controls, which accept
+  any press and ignore it (a point on a tab hits the tab strip, not the tab),
+  the routed pixel click is sent instead; that click takes about 1.3 to 1.7 s
+  against about 0.7 s for the press. Chromium sometimes answers the hit test
+  for a point on a page with the window itself (seen in a background window
+  after switching tabs); the page then runs neither a press nor the routed
+  click, and the result reports the input as unconfirmed. Chromium lists no
+  AXPress on page elements in the accessibility mode the adapter enables, but
+  performs it on any of them; CUA reports such an app, and its page controls
+  (not its selects, which take set_value) are invoked by role. Keys for a shortcut
+  whose menu item is disabled while the app is in the background (Terminal's
+  Close Window) are reported as a likely no-op.
+- A batch acts on one window. On macOS, when an earlier action closes or hides
+  that window (a start screen's Cancel), a later action on an item of the app's
+  menu bar still runs, as it would through another window of the app; a later
+  action on an element of the window itself is refused before anything is sent,
+  reported as not run, and the refusal says to act on one of the app's windows
+  that is shown.
+- A focus action on a macOS window brings it to the front and leaves it there
+  (CUA's `bring_to_front`), for what works only in the active app, and is
+  reported done only once the window is the front app's focused window. It is
+  refused before anything is sent while someone other than Opengeni used the
+  keyboard, mouse or trackpad within the last minute (the reading listings
+  report as `personInputSecondsAgo`), since the front app is the one they are
+  working in. On Windows and Linux a focus action is refused: input there acts
+  on a window without it.
+- On every CUA adapter (macOS, Windows, and isolated Linux desktops), a single
+  click, double-click, key press or element invoke the driver reports as
+  unverifiable, with no element changed after it, is reported as possibly not
+  taken effect. An app in the background can take an accessibility press and
+  do nothing: some toolbar buttons that open a flyout do so only while their
+  app is active, and show no sign of a menu to tell them by (a plain button
+  with only a press), while the same command in the app's menu bar works in
+  the background.
+  The native Linux helper (the default for Linux host desktops) does not report
+  unconfirmed input, so its results never carry that line.
+- A macOS window named by its id is a target even when the listing of every
+  app leaves it out because its app raised it above the levels of working
+  windows (a sign-in or other dialog): CUA reads any window by its id, and the
+  adapter looks it up in its app's own listing.
+- A failed read of a window that is still listed on screen (CUA answering a
+  tree read or a capture with text only, or with a capture that does not
+  match) is tried once more half a second later: CUA can fail the first read
+  of a window that is changing size and read it at once afterwards, while a
+  busy or even stopped app's window still reads (slowly, or with a partial
+  tree). A second failure is refused as `unavailable` with what to do next,
+  instead of a driver failure that callers see as an internal error; a window
+  that closed meanwhile is `target_not_found`.
+- On macOS, listings and observations say when someone other than Opengeni
+  used the keyboard, mouse or trackpad within the last minute
+  (`personInputSecondsAgo` on each target), from CoreGraphics'
+  per-event-type HID timers: input agents send to apps in the background
+  resets `HIDIdleTime` and the any-event timer, but not these. Input sent in
+  the foreground or to the whole desktop does move them, so browserd notes
+  when such input it forwarded (a native call asking for the foreground or
+  the desktop anywhere, or a script) last ended, across every computer
+  session it serves, and reports only input that came more than half a
+  second after it. Reading the timers takes no screenshot and no permission.
+- Linux supports semantic background actions within its isolated X11 seat;
+  foreground pointer input stays inside that seat. Unsupported native background
+  pointer requests are refused. Web/application acceptance is still required.
+- Windows requires an unlocked interactive session on `WinSta0/Default`;
+  Session 0 is refused. Window capture, semantic UIA actions, pointer input
+  (click, scroll, drag) and keyboard input (typing and key chords with
+  ctrl/alt/shift/win) are admitted. Semantic actions run in the background;
+  pointer and keyboard input use foreground delivery, which briefly fronts
+  the window and restores the previous foreground, because background
+  PostMessage input is dropped by Chromium, Electron and WinUI surfaces. Raw
+  native CUA tool calls are not offered on Windows yet. Edit values and labels
+  copied from those values are redacted when password metadata is absent.
+  `cua-windows.e2e.test.ts` drives a real window on a hosted Windows runner.
+- Release staging includes macOS, Linux and Windows x64. Runtime defaults take effect only in
+  an installed release containing this change; server deployment alone does not
+  update a connected machine's installed helpers. macOS still requires OS consent.
+
+Pointer frames supply coordinate dimensions, not one-shot action permission.
+Repeated gestures may use the same displayed frame. Passive captures use
+`display_only` to preserve both accessibility tokens and native pixel/zoom state.
+Viewer pointer input takes a fresh capture under the serialized worker queue,
+translates coordinates, and refuses resized windows. The adapter requests structured elements
+for semantic observations. Unknown input outcomes are never automatically replayed.
+
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/473b859de3e2b1c313d8764acc22e610605cb407/libs/cua-driver).
+The two commits on top of upstream carry the X11 coordinate corrections proposed in
+[CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
+Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
+decorations rebuild element bounds from Window coordinates. Upstream 0.37 does
+not include them; without them GTK4 controls are misplaced after a window move,
+which the isolated Linux end-to-end tests catch.
+
+## Native agent interface
+
+The release catalog comes from the bundled worker's `listToolsJson()` via
+`bun packages/browserd/scripts/generate-cua-desktop-tools.ts`. It admits desktop
+workflow tools; lifecycle, escalation, configuration, updates and browser tools
+stay outside this interface. macOS, Linux and Windows each have a generated
+catalog, produced by running the script on that platform after every CUA pin
+change; macOS defines the admitted set, and a platform whose driver lacks a tool
+omits it. Each catalog records the CUA version it was generated from, and a
+browserd test fails unless every catalog names the `@trycua/cua-driver` version
+browserd pins, so a catalog left on an older CUA release shows up before its
+runtime refuses calls. Agent schemas preserve the union of the native
+variants, and the selected runtime checks its exact platform schema.
+Each admitted tool's input/output schemas are checked against the running worker.
+
+Agents use `interaction__cua_<upstream_name>` or Code Mode
+`computer.<upstream_name>`. Arguments remain native snake_case, with
+`computerSessionId` replacing the host-owned CUA `session`. Existing
+`computer_open` and `computer_act` selection plus computer control permission
+are required, including for read-like tools that can write screenshot files.
+No tool-enable UI or separate permission system is added.
+
+`run_steps` retains upstream batching, per-step waits and checks, and optional
+final observation diff; `run_script` runs upstream's sandboxed script engine, whose
+only API is the same CUA session, with no filesystem, network or process access;
+`get_window_state` retains compact Markdown, query limits and diff reads.
+
+A `computer_act` batch (semantic and keyboard actions on one window) is one
+operation on CUA: the adapter checks every action against the observation the
+batch names, sends them as one `run_steps` call, which paces all but the last
+step for a batch, and observes the window once at the end, or the window CUA
+reports the last action opened. A batch CUA stops part way records how many
+actions completed in its receipt's error details. A keyboard action after the
+first carries no element token, since earlier actions may have moved the focus.
+MCP content, structured results and images survive the journal. Responses larger
+than 12 MiB carry an explicit bounded projection, retained operation status and
+no-replay guidance; the original stays in the controller journal. Failed
+or uncertain calls also retain their native evidence and explicit no-replay
+status. Native and legacy calls share one operation-ID namespace. The SDK exposes
+`callNativeComputerTool` and `computers.get(id).callNativeTool`; the native receipt accessor is `getNativeComputerToolReceipt` or
+`nativeReceipt`. Existing legacy receipt methods keep their public types.
+
+After native calls begin, ordinary web-view observation polling returns geometry
+and pixels without minting a new accessibility snapshot. This preserves the
+agent's element tokens; human keyboard input retains a matching observation
+fence. Native tools use their own CUA session identity: after actual viewer
+pointer input changes the pixel frame, stale native pixel/zoom input is refused
+until a new native observation. The native tool result owns the semantic tree.
+The disposable Mac test covers native batching, replay, differently scaled
+preview polling, pixel and zoom clicks, and keyboard/pointer takeover.

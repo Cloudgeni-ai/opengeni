@@ -37,7 +37,7 @@ describe("GitHub action policy projection", () => {
     expect(projectGitHubActionPolicyActor([], actor)).toEqual({
       kind: "workspace_app",
       installationId: 71,
-      label: "OpenGeni bot on Cloudgeni-ai",
+      label: "Opengeni bot on Cloudgeni-ai",
       groups: { routine: "allow", review: "allow", merge: "allow" },
     });
   });

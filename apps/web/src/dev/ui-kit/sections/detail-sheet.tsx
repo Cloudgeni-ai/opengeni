@@ -15,8 +15,8 @@ import {
   UsersIcon,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { CopyField } from "@/components/ui/copy-field";
+import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
 import {
   DetailBody,
   DetailFooter,
@@ -27,34 +27,32 @@ import {
   DetailSheetPreview,
   DetailSkeleton,
   useDetailPresentation,
-} from "@/components/ui/detail-sheet";
+} from "@opengeni/react/ui/detail-sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 import {
   DetailAside,
   DetailAsideItem,
   DetailPageBody,
   DetailPageHeader,
-} from "@/components/ui/detail-page";
-import { DestructiveConfirmPanel } from "@/components/ui/destructive-confirm";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { LineTabsLink, LineTabsNav } from "@/components/ui/line-tabs";
-import { ListRow, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { PageHeader } from "@/components/ui/page-header";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { Switch } from "@/components/ui/switch";
-import { UsageMeter } from "@/components/ui/usage-meter";
-import { AddVariableRow } from "@/components/variable-sets/variable-set-forms";
-import type { WorkspaceVariableSet } from "@/types";
+} from "@opengeni/react/ui/detail-page";
+import { DestructiveConfirmPanel } from "@opengeni/react/app/components/ui/destructive-confirm";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { LineTabsLink, LineTabsNav } from "@opengeni/react/ui/line-tabs";
+import { ListRow, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Switch } from "@opengeni/react/ui/switch";
+import { UsageMeter } from "@opengeni/react/ui/usage-meter";
 
 import {
   KIT_NOW,
@@ -230,17 +228,6 @@ function VariableSetMenu({ set }: { set: VariableSet }) {
   );
 }
 
-/** As in the product: one variable is added inline under the list. */
-function AddVariableInline({ set }: { set: VariableSet }) {
-  return (
-    <AddVariableRow
-      set={set as unknown as WorkspaceVariableSet}
-      onAdd={() => new Promise<void>((resolve) => setTimeout(resolve, 500))}
-      onPaste={() => {}}
-    />
-  );
-}
-
 function scopeText(set: VariableSet): string {
   return set.scope === "organization"
     ? `Everyone in ${organization.name}`
@@ -305,7 +292,6 @@ function VariableSetPage({ set, onBack }: { set: VariableSet; onBack: () => void
             description="Secrets are write-only. Agents get them in their sandbox."
           >
             <VariablesList set={set} table />
-            <AddVariableInline set={set} />
           </DetailSection>
         ) : (
           <DetailSection
@@ -337,7 +323,6 @@ function VariableSetCompact({ set }: { set: VariableSet }) {
       <DetailBody>
         <DetailSection title={`Variables (${set.variables.length})`}>
           <VariablesList set={set} />
-          <AddVariableInline set={set} />
         </DetailSection>
         <DetailSection title="Used by">
           <UsedByList set={set} />

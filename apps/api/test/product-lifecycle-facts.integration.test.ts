@@ -2,12 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ManagedEmailMessage, ManagedEmailTransport } from "@opengeni/core";
 import { createDb, type DbClient } from "@opengeni/db";
 import { createObservability, type Observability } from "@opengeni/observability";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+
+import { OPENGENI_USER_ACTIVITY_ACTIVE, OPENGENI_USER_ACTIVITY_HEADER } from "@opengeni/contracts";
+import { createUserPresenceRecorder } from "@opengeni/core";
 
 import { createApp } from "../src/app";
 import { createManagedAuth } from "../src/auth/managed-auth";
@@ -120,10 +120,13 @@ describe("product lifecycle facts from managed auth", () => {
   test("email sign-up, verification, sign-in and organization setup each write one fact", async () => {
     if (!shared || !client) return;
     const { messages, transport } = captureTransport();
+    // A long flush delay: the test flushes explicitly, like a process tick.
+    const userPresence = createUserPresenceRecorder({ db: client.db, flushDelayMs: 600_000 });
     const app = createApp({
       settings: runtimeSettings(),
       db: client.db,
       observability: quietObservability(),
+      userPresence,
       managedEmailTransport: transport,
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
@@ -147,7 +150,8 @@ describe("product lifecycle facts from managed auth", () => {
     });
     expect(await factsFor(subjectId)).toHaveLength(1);
 
-    const verification = messages.find((message) => message.kind === "email_verification");
+    // Only the newest sign-up's link verifies the address.
+    const verification = messages.findLast((message) => message.kind === "email_verification");
     const link = new URL(verification!.text.match(/https?:\/\/\S+/)![0]);
     const verificationPath = `${link.pathname}${link.search}`;
     const verified = await app.request(verificationPath, { headers: requestHeaders() });
@@ -187,8 +191,37 @@ describe("product lifecycle facts from managed auth", () => {
       ["organization.setup", "created", organizationId],
       ["auth.sign_in", "email", null],
     ]);
+    // A request the console did not mark as human activity (background
+    // polling, an idle tab, a stream) records no presence.
+    const idle = await app.request("/v1/workspaces", {
+      headers: requestHeaders(cookiePairs(signIn)),
+    });
+    expect(idle.status).toBe(200);
+    await userPresence.flush();
+    expect(
+      await shared.admin`
+        select 1 from opengeni_private.user_activity_presence where subject_id = ${subjectId}`,
+    ).toHaveLength(0);
+    // An active browser request records presence once per throttle window,
+    // and the first activity of the UTC day is one `user.active` fact.
+    for (let index = 0; index < 3; index += 1) {
+      const workspaces = await app.request("/v1/workspaces", {
+        headers: {
+          ...requestHeaders(cookiePairs(signIn)),
+          [OPENGENI_USER_ACTIVITY_HEADER]: OPENGENI_USER_ACTIVITY_ACTIVE,
+        },
+      });
+      expect(workspaces.status).toBe(200);
+      await userPresence.flush();
+    }
+    const presence = await shared.admin<{ subject_id: string }[]>`
+      select subject_id from opengeni_private.user_activity_presence
+      where subject_id = ${subjectId}`;
+    expect(presence).toHaveLength(1);
+    expect(summary((await factsFor(subjectId)).slice(5))).toEqual([["user.active", null, null]]);
+
     // Nothing that identifies the person beyond the opaque subject id.
-    const exported = JSON.stringify(facts);
+    const exported = JSON.stringify(await factsFor(subjectId));
     expect(exported).not.toContain(email);
     expect(exported).not.toContain("Lifecycle Human");
     expect(exported).not.toContain("Lifecycle Org");
@@ -219,8 +252,8 @@ describe("product lifecycle facts from managed auth", () => {
     const accountId = crypto.randomUUID();
     const email = `social-lifecycle-${accountId}@example.test`;
     google.getUserInfo = async () => ({
-      user: { id: accountId, name: "Provider Human", email, emailVerified: true },
-      data: {},
+      user: { name: "Provider Human", email, emailVerified: true },
+      data: { sub: accountId },
     });
     const start = await app.request("/v1/auth/sign-in/social", {
       method: "POST",

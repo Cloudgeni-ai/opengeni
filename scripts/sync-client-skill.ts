@@ -7,6 +7,12 @@ const source = join(root, ".agents/skills/opengeni-client");
 const destination = join(root, "packages/runtime/src/bundled_default_skills/opengeni-client");
 /** Public docs mirror, so agents can read the Skill from docs.opengeni.ai without git. */
 const docsMirror = join(root, "docs-site/reference/opengeni-client-skill.mdx");
+const pluginClientMirror = join(
+  root,
+  "plugins/opengeni/skills/build-with-opengeni/opengeni-client",
+);
+const setupSource = join(root, ".agents/skills/opengeni-setup");
+const pluginSetupMirror = join(root, "plugins/opengeni/skills/opengeni-setup");
 
 async function files(directory: string): Promise<Map<string, string>> {
   const result = new Map<string, string>();
@@ -70,6 +76,55 @@ async function checkDocsMirror(expected: Map<string, string>): Promise<void> {
     );
 }
 
+/** Only cross-skill links change: the packaged client lives inside the build skill. */
+export function renderPluginSetupSkillFile(path: string, text: string): string {
+  if (!path.endsWith(".md")) return text;
+  for (const prefix of ["../", "../../"])
+    text = text.replaceAll(
+      `](${prefix}opengeni-client/SKILL.md)`,
+      `](${prefix}build-with-opengeni/opengeni-client/SKILL.md)`,
+    );
+  return text;
+}
+
+async function checkMirror(expected: Map<string, string>, directory: string): Promise<void> {
+  const actual = await files(directory).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT")
+      throw new Error(
+        `Generated Skill mirror is missing: ${relative(root, directory)}; run bun run sync:client-skill`,
+      );
+    throw error;
+  });
+  if (
+    expected.size !== actual.size ||
+    [...expected].some(([path, text]) => actual.get(path) !== text)
+  )
+    throw new Error(
+      `Generated Skill mirror is stale: ${relative(root, directory)}; run bun run sync:client-skill`,
+    );
+}
+
+export async function checkPluginSkillMirrors(): Promise<void> {
+  await checkMirror(await files(source), pluginClientMirror);
+  const expected = new Map(
+    [...(await files(setupSource))].map(([path, text]) => [
+      path,
+      renderPluginSetupSkillFile(path, text),
+    ]),
+  );
+  await checkMirror(expected, pluginSetupMirror);
+}
+
+async function writeMirror(expected: Map<string, string>, directory: string): Promise<void> {
+  // These exact directories are generated outputs, never the authored sources/wrapper.
+  await rm(directory, { recursive: true, force: true });
+  for (const [path, text] of expected) {
+    const target = join(directory, path);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, text);
+  }
+}
+
 /** The repository guide is the sole authored copy. Runtime assets and the docs mirror are generated. */
 export async function checkClientSkill(): Promise<void> {
   const expected = await files(source);
@@ -88,18 +143,21 @@ export async function checkClientSkill(): Promise<void> {
     [...expected].some(([path, text]) => actual.get(path) !== text)
   )
     throw new Error("Bundled client Skill is stale; run bun run sync:client-skill");
+  await checkPluginSkillMirrors();
 }
 
 export async function syncClientSkill(): Promise<void> {
   const expected = await files(source);
-  // Only this generated directory is replaced, including obsolete references.
-  await rm(destination, { recursive: true, force: true });
-  for (const [path, text] of expected) {
-    const target = join(destination, path);
-    await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, text);
-  }
+  await writeMirror(expected, destination);
   await writeFile(docsMirror, renderClientSkillDocsPage(expected));
+  await writeMirror(expected, pluginClientMirror);
+  const setup = new Map(
+    [...(await files(setupSource))].map(([path, text]) => [
+      path,
+      renderPluginSetupSkillFile(path, text),
+    ]),
+  );
+  await writeMirror(setup, pluginSetupMirror);
 }
 
 if (import.meta.main) {

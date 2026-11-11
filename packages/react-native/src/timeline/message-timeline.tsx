@@ -1,0 +1,1905 @@
+import type {
+  DraftTimelineAnnotation,
+  SessionEvent,
+  SessionStatus,
+  TimelineAnnotationSource,
+} from "@opengeni/sdk";
+import {
+  automationRunOutcomesOnly,
+  buildTimeline,
+  groupTimeline,
+  useTimelinePauses,
+  type AgentMessageItem,
+  type AuthNeededItem,
+  type HumanInputItem,
+  type TimelineGroup,
+  type TimelineAnnotationSourceDescriptor,
+  type TimelineItem,
+  type TimelineLivePause,
+  type UserMessageItem,
+} from "@opengeni/react/session";
+import {
+  agentWorkHumanInputSummary,
+  automationRunLine,
+  compactedLandmarkCount,
+  durationBetween,
+  flattenActivityItems,
+  formatClockTime,
+  formatRelativeTime,
+  isAgentWorkHumanInput,
+  isAutomationRunBatch,
+  isPreparingWork,
+  timelineTurnsWithOutput,
+  noticeDisplayText,
+  noticeIsResolvedApproval,
+  noticeTone,
+  QUESTION_NAV_MARGIN_PX,
+  recordedWaitSummaryText,
+  questionNavTarget,
+  readableWorkDefaultOpen,
+  readableWorkIsEmpty,
+  readableWorkShowsPreview,
+  readableWorkStatus,
+  SESSION_STATUS_PRESENTATION,
+  sessionStatusItemDisplayStatus,
+  timelineGroupContainsPresentedImage,
+  timelineGroupIndexAtSequence,
+  type TurnSummaryFacetConfiguration,
+  type TurnSummaryLiveMarkState,
+} from "@opengeni/react/timeline-model";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentRef,
+  type MutableRefObject,
+  type ReactNode,
+} from "react";
+import {
+  ActivityIndicator,
+  Keyboard,
+  Pressable,
+  ScrollView,
+  Text,
+  View,
+  type LayoutChangeEvent,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+  type StyleProp,
+  type TextStyle,
+  type ViewStyle,
+} from "react-native";
+import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
+import { NativeActivityOptionsProvider, type NativeActivityOptions } from "./activity";
+import { Icon } from "./icon";
+import { ActivityDisclosure, ReleaseFollowProvider, withAlpha } from "./primitives";
+import { NativeAuthNeededRow } from "./in-chat-connect";
+import { humanInputAnswerLines } from "./secret-field-model";
+import { answerReadingOffset } from "./reading-position";
+import { fontStyle, useNativeTimelineTheme } from "./theme";
+import {
+  ActivityRail,
+  FoldMemoryProvider,
+  StickyWorkHeaderProvider,
+  type StickyWorkHeader,
+  RollingActivity,
+  TurnRailFrame,
+  TurnSummary,
+  type NativeTurnStatus,
+  type PreparingProps,
+} from "./turn";
+import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
+import { resolveAgentSignals, type AgentSignals } from "@opengeni/react/session-agents-model";
+import { TurnStepsLoader } from "./turn-steps";
+import { useNativeTimelineMessages } from "./messages";
+import { collectLiveNotes, foldedLiveNotes, liveFoldShift } from "./live-notes";
+import {
+  AnnotationSourcesContext,
+  AnnotationSourceView,
+  SentAnnotationCards,
+  draftMarkersBySource,
+  type AnnotationFlash,
+  type AnnotationReveal,
+  type AnnotationSourceNode,
+} from "./annotations";
+import { measureQuoteAnchors, useNativeTextAnnotation } from "./text-selection";
+import {
+  InlineInputFocusContext,
+  type InlineInputFocus,
+  type InlineInputNode,
+} from "./inline-input-focus";
+
+/** Room kept above a focused card field, so its label and card stay in view. */
+const INLINE_INPUT_CONTEXT_PX = 96;
+
+/* ----------------------------------------------------------------------------
+   Native MessageTimeline: the web MessageTimeline (components/message-timeline)
+   in its rolling readable-turn configuration, drawn with native primitives.
+   Grouping, fold defaults, statuses and facets come from the shared model.
+   -------------------------------------------------------------------------- */
+
+export type NativeMarkdownRenderer = (
+  text: string,
+  options: {
+    tone: "body" | "muted";
+    streaming?: boolean | undefined;
+    /** Overrides the body text style, for Markdown inside compact card chrome. */
+    textStyle?: TextStyle | undefined;
+  },
+) => ReactNode;
+
+/** Start fetching older history this far before the reader reaches the top. */
+const OLDER_HISTORY_PREFETCH_PX = 600;
+/** Web's phone clamp for long user messages (max-h-56). */
+const USER_MESSAGE_COLLAPSED_PX = 224;
+/** The vertical gap between top-level rows (the scroll content's `gap`). */
+const ROW_GAP_PX = 20;
+
+export interface NativeMessageTimelineProps extends NativeActivityOptions {
+  /** Projected items (preferred) or raw durable events. */
+  items?: TimelineItem[] | undefined;
+  events?: SessionEvent[] | undefined;
+  status?: SessionStatus | null | undefined;
+  /**
+   * The session's live Pause (`timelineLivePause(session.effectiveControl)`).
+   * A turn still open under a pause reads "Paused" with its clock stopped.
+   */
+  pause?: TimelineLivePause | null | undefined;
+  facets?: TurnSummaryFacetConfiguration | undefined;
+  /**
+   * Show how the agent works on each turn row. Defaults to true. With `false`
+   * a row is only its plain status ("Working · 8s", "Worked for 8s"): no live
+   * step under it and no step facets (yours included). The steps stay behind
+   * the row for anyone who opens it. An object reads only its `turnDetail`
+   * switch. `NativeSessionScreen` passes its own `agentSignals` here.
+   */
+  agentSignals?: AgentSignals | undefined;
+  /**
+   * Your own mark (a small animated logo or mascot) at the leading edge of the
+   * live "Working" / "Waiting" / "Paused" row. Called with the row's state
+   * while the turn is live, and no longer once it settles. Draw it about the
+   * row's height (20pt); it is hidden from screen readers, so the row's words
+   * still say what is happening. Default: nothing.
+   */
+  renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
+  renderMarkdown?: NativeMarkdownRenderer | undefined;
+  /** Replace the preparing visual (the web orb) — e.g. a product character. */
+  renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
+  /** Extra actions beside copy under a message (feedback, share, …). */
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  /** Files sent with a user message, shown above its bubble (images as previews). */
+  renderUserAttachments?: ((item: UserMessageItem) => ReactNode) | undefined;
+  /**
+   * Draw a connection request (an agent asking the person to connect an
+   * account, or a lapsed connection). Return undefined for the default row.
+   * `NativeSessionScreen` supplies the in-chat connect cards.
+   */
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode) | undefined;
+  onCopy?: ((text: string) => void) | undefined;
+  /** Rendered after the last group (pending questions, approvals, errors). */
+  trailing?: ReactNode;
+  emptyState?: ReactNode;
+  header?: ReactNode;
+  /**
+   * Older durable history exists before the loaded window. When the reader
+   * scrolls near the top (or the loaded window doesn't fill the screen), the
+   * timeline calls `onLoadOlder` and keeps the reader's place as rows arrive.
+   */
+  hasOlder?: boolean | undefined;
+  loadingOlder?: boolean | undefined;
+  onLoadOlder?: (() => unknown) | undefined;
+  /**
+   * A durable event sequence to open on (an inbox item's or a notification's
+   * moment): the timeline loads older history until it holds that moment,
+   * then lands on its row, or the nearest row before it, once.
+   */
+  focusSequence?: number | null | undefined;
+  contentInsetTop?: number | undefined;
+  contentInsetBottom?: number | undefined;
+  /** Height of host chrome floating over the timeline's bottom edge (a floating composer). */
+  overlayInsetBottom?: number | undefined;
+  /**
+   * Changes whenever the reader sends: the timeline resumes following the
+   * latest row, so a message sent while reading (or annotating) older
+   * history comes into view.
+   */
+  followLatestSignal?: number | undefined;
+  /**
+   * Add note on selected message text (iOS): receives the quote as a draft
+   * annotation, as the web timeline's selection popover does.
+   */
+  onAnnotate?: ((annotation: DraftTimelineAnnotation) => void) | undefined;
+  /** The draft's annotations, marked on the messages they quote. */
+  draftAnnotations?: readonly DraftTimelineAnnotation[] | undefined;
+  /** A draft marker was tapped: review that annotation. */
+  onDraftAnnotationSelect?: ((id: string) => void) | undefined;
+  /** Receives a function that scrolls a quoted message into view and highlights it. */
+  annotationRevealRef?: MutableRefObject<AnnotationReveal | null> | undefined;
+  style?: StyleProp<ViewStyle>;
+}
+
+/** Each message's annotation source, by source key (its durable event id). */
+function annotationSources(
+  items: readonly TimelineItem[],
+): Map<string, TimelineAnnotationSourceDescriptor> {
+  const sources = new Map<string, TimelineAnnotationSourceDescriptor>();
+  for (const item of items) {
+    if (item.kind !== "user-message" && item.kind !== "agent-message") continue;
+    const source = item.annotationSource;
+    if (source) sources.set(source.eventId, source);
+  }
+  return sources;
+}
+
+export function MessageTimeline(props: NativeMessageTimelineProps) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
+  const turnDetail = resolveAgentSignals(props.agentSignals).turnDetail;
+  const items = useMemo(() => {
+    const built = props.items ?? buildTimeline(t, props.events ?? []);
+    // A person who never sees the agent's work reads an automation run as
+    // its line and its answer only.
+    return turnDetail ? built : automationRunOutcomesOnly(built);
+  }, [t, props.items, props.events, turnDetail]);
+  const pauses = useTimelinePauses(props.events, props.pause);
+  const groups = useMemo(
+    () => groupTimeline(t, items, { readableTurns: true, pauses }),
+    [t, items, pauses],
+  );
+  const turnsWithOutput = useMemo(() => timelineTurnsWithOutput(items), [items]);
+  const sources = useMemo(() => annotationSources(items), [items]);
+  useNativeTextAnnotation(sources, props.onAnnotate);
+  const foldMemory = useRef(new Map<string, "open" | "closed">()).current;
+  const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
+  // Opening on a moment starts away from the tip; the landing decides where.
+  const following = useRef(!props.focusSequence);
+  const followTail = useRef(false);
+  const latestPrompt = useRef<string | null>(null);
+  const latestPromptGroup = groups.findLast(
+    (group) => group.kind === "item" && group.item.kind === "user-message",
+  );
+  latestPrompt.current = latestPromptGroup ? groupKey(latestPromptGroup) : null;
+  // Only reader gestures change follow intent; layout-driven scroll events
+  // (content growing before the first scroll-to-end) must not unstick it.
+  const readerScrolling = useRef(false);
+  const [showJump, setShowJump] = useState(false);
+  // "Back to your message": prompt rows' content offsets, read on scroll.
+  const promptFrames = useRef(new Map<string, { top: number; bottom: number }>()).current;
+  const [questionNav, setQuestionNav] = useState<string | null>(null);
+  // A field in a card is being filled in: room for the keyboard below the
+  // content (the composer floats over the timeline, so it does not shrink),
+  // and no floating buttons over the card.
+  const [inlineInput, setInlineInput] = useState<{ keyboard: number } | null>(null);
+  const inlineNode = useRef<InlineInputNode | null>(null);
+  // Expanded outer turn headers, for the pinned copy (web: sticky in its section).
+  const stickyHeaders = useRef(new Map<string, StickyWorkHeader>()).current;
+  const scrollY = useRef(0);
+  const sourceNodes = useRef(new Map<string, AnnotationSourceNode>()).current;
+  const [flash, setFlash] = useState<AnnotationFlash | null>(null);
+  const registerSource = useCallback(
+    (sourceKey: string, node: AnnotationSourceNode | null) => {
+      if (node) sourceNodes.set(sourceKey, node);
+      else sourceNodes.delete(sourceKey);
+    },
+    [sourceNodes],
+  );
+  const revealSource = useCallback<AnnotationReveal>(
+    (source: TimelineAnnotationSource, quote) => {
+      const node = sourceNodes.get(source.eventId);
+      const scroller = scrollRef.current?.getNativeScrollRef?.();
+      if (!node || !scroller) return false;
+      following.current = false;
+      // Reading the source, not writing: the keyboard would hide it.
+      const keyboardGone = Keyboard.isVisible()
+        ? new Promise<void>((resolve) => {
+            const done = () => {
+              subscription.remove();
+              clearTimeout(timer);
+              // The composer re-measures as it drops back down.
+              setTimeout(resolve, 60);
+            };
+            const subscription = Keyboard.addListener("keyboardDidHide", done);
+            const timer = setTimeout(done, 600);
+            Keyboard.dismiss();
+          })
+        : Promise.resolve();
+      const located = quote
+        ? measureQuoteAnchors(source.eventId, [quote]).then(([anchor]) => anchor ?? null)
+        : Promise.resolve(null);
+      void Promise.all([located, keyboardGone]).then(([anchor]) => {
+        scroller.measureInWindow((_scrollX, scrollTop) => {
+          node.measureInWindow((_x, top, _width, height) => {
+            // Center the message in the space the composer leaves; a message
+            // taller than that centers the quote instead, or shows its top.
+            const y = scrollY.current + top - scrollTop;
+            const visible = viewportHeight.current || 600;
+            const first = anchor?.boxes[0];
+            const last = anchor?.boxes[anchor.boxes.length - 1];
+            const span =
+              height < visible - 32 || !first || !last
+                ? { top: y, height }
+                : { top: y + first.y, height: last.y + last.height - first.y };
+            const target =
+              span.height < visible - 32 ? span.top - (visible - span.height) / 2 : span.top - 16;
+            const end = Math.max(0, contentHeight.current - (viewportHeight.current || 0));
+            scrollY.current = Math.min(Math.max(0, target), end || Number.POSITIVE_INFINITY);
+            scrollRef.current?.scrollTo({ y: scrollY.current, animated: true });
+            // Flash once the scroll is under way, so the reader sees it land.
+            setFlash((current) => ({
+              sourceKey: source.eventId,
+              token: (current?.token ?? 0) + 1,
+              ...(quote ? { quote } : {}),
+            }));
+          });
+        });
+      });
+      return true;
+    },
+    [sourceNodes],
+  );
+  if (props.annotationRevealRef) props.annotationRevealRef.current = revealSource;
+  const revealInlineInput = useCallback((keyboard: { screenY: number; height: number }) => {
+    setInlineInput({ keyboard: keyboard.height });
+    // Once the room for the keyboard is laid out, scroll just enough to show
+    // the field above the keyboard and the composer, its label and card above it.
+    setTimeout(() => {
+      const node = inlineNode.current;
+      const scroller = scrollRef.current?.getNativeScrollRef?.();
+      if (!node || !scroller) return;
+      scroller.measureInWindow((_scrollX, scrollTop, _scrollWidth, scrollHeight) => {
+        node.measureInWindow((_x, top, _width, height) => {
+          const bottom = Math.min(scrollTop + scrollHeight, keyboard.screenY) - 12;
+          const above = scrollTop + INLINE_INPUT_CONTEXT_PX;
+          let delta = 0;
+          if (top + height > bottom) delta = Math.min(top + height - bottom, top - scrollTop - 8);
+          else if (top < above) delta = top - above;
+          if (Math.abs(delta) < 1) return;
+          scrollY.current = Math.max(0, scrollY.current + delta);
+          scrollRef.current?.scrollTo({ y: scrollY.current, animated: true });
+        });
+      });
+    }, 80);
+  }, []);
+  const inlineInputFocus = useMemo<InlineInputFocus>(
+    () => ({
+      focused(node) {
+        inlineNode.current = node;
+        // The reader is filling in a card; new content must not scroll it away.
+        following.current = false;
+        setInlineInput((current) => current ?? { keyboard: 0 });
+        const metrics = Keyboard.isVisible() ? Keyboard.metrics() : undefined;
+        if (metrics) revealInlineInput(metrics);
+      },
+      blurred(node) {
+        if (inlineNode.current !== node) return;
+        inlineNode.current = null;
+        setInlineInput(null);
+      },
+    }),
+    [revealInlineInput],
+  );
+  const editingInline = inlineInput !== null;
+  useEffect(() => {
+    if (!editingInline) return;
+    const shown = Keyboard.addListener("keyboardDidShow", (event) =>
+      revealInlineInput(event.endCoordinates),
+    );
+    const hidden = Keyboard.addListener("keyboardDidHide", () =>
+      setInlineInput((current) => (current ? { keyboard: 0 } : current)),
+    );
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, [editingInline, revealInlineInput]);
+  const draftMarkers = useMemo(
+    () => draftMarkersBySource(props.draftAnnotations),
+    [props.draftAnnotations],
+  );
+  const annotationSourcesValue = useMemo(
+    () => ({
+      register: registerSource,
+      flash,
+      drafts: draftMarkers,
+      onSelectDraft: props.onDraftAnnotationSelect,
+    }),
+    [draftMarkers, flash, props.onDraftAnnotationSelect, registerSource],
+  );
+  const [pinned, setPinned] = useState<{ key: string; offset: number; height: number } | null>(
+    null,
+  );
+  const updatePinned = useCallback(() => {
+    const y = scrollY.current;
+    let next: { key: string; offset: number; height: number } | null = null;
+    for (const [key, entry] of stickyHeaders) {
+      const end = entry.top + entry.height - entry.headerHeight;
+      if (entry.headerHeight > 0 && entry.top < y && y < end) {
+        next = { key, offset: Math.min(0, end - y), height: entry.headerHeight };
+      }
+    }
+    setPinned((current) =>
+      current?.key === next?.key &&
+      current?.offset === next?.offset &&
+      current?.height === next?.height
+        ? current
+        : next,
+    );
+  }, [stickyHeaders]);
+  const releaseFollow = useCallback(() => {
+    following.current = false;
+  }, []);
+  // Live progress notes fold away above an open work row (see live-notes.ts).
+  const liveNotes = useMemo(() => collectLiveNotes(groups), [groups]);
+  const liveNotesRef = useRef(liveNotes);
+  liveNotesRef.current = liveNotes;
+  const [openLiveWork, setOpenLiveWork] = useState<ReadonlySet<string>>(() => new Set());
+  const openLiveWorkRef = useRef(openLiveWork);
+  // Last laid-out height of each live note row, and the scroll correction owed
+  // once folding or restoring them changes the content above the work row.
+  const liveNoteHeights = useRef(new Map<string, number>()).current;
+  const liveFoldOffset = useRef(0);
+  const reportLiveFold = useCallback(
+    (workId: string, open: boolean) => {
+      const current = openLiveWorkRef.current;
+      if (current.has(workId) === open) return;
+      const next = new Set(current);
+      if (open) next.add(workId);
+      else next.delete(workId);
+      openLiveWorkRef.current = next;
+      // The notes sit above the row the reader just toggled: keep that row
+      // where it is by moving the offset with the folded height.
+      liveFoldOffset.current += liveFoldShift(
+        liveNotesRef.current,
+        workId,
+        open,
+        liveNoteHeights,
+        ROW_GAP_PX,
+      );
+      setOpenLiveWork(next);
+    },
+    [liveNoteHeights],
+  );
+  const foldedNotes = useMemo(
+    () => foldedLiveNotes(liveNotes, openLiveWork),
+    [liveNotes, openLiveWork],
+  );
+  // Older history: latest values for scroll callbacks without re-binding them.
+  const history = useRef({
+    hasOlder: false,
+    loading: false,
+    load: undefined as (() => unknown) | undefined,
+  });
+  history.current = {
+    hasOlder: props.hasOlder === true,
+    loading: props.loadingOlder === true,
+    load: props.onLoadOlder,
+  };
+  const viewportHeight = useRef(0);
+  // Older rows arrive above the reader. Keep the reader's place by moving the
+  // offset by the added height (UIKit's maintainVisibleContentPosition fights
+  // the reader's drag while live rows re-lay out, so it isn't used).
+  const contentHeight = useRef(0);
+  const followAnswer = useCallback(
+    (animated = false) => {
+      if (!following.current) return;
+      const prompt = latestPrompt.current ? promptFrames.get(latestPrompt.current) : undefined;
+      // A durable prompt replacing its pending row lays out just after content
+      // size changes. Keep the current position until its frame is known.
+      if (!followTail.current && latestPrompt.current && !prompt) return;
+      const y = answerReadingOffset({
+        contentHeight: contentHeight.current,
+        viewportHeight: viewportHeight.current,
+        prompt,
+        followTail: followTail.current,
+      });
+      scrollY.current = y;
+      readerScrolling.current = false;
+      scrollRef.current?.scrollTo({ y, animated });
+      setShowJump(contentHeight.current - viewportHeight.current - y > 240);
+    },
+    [promptFrames],
+  );
+  const firstGroupKey = useRef<string | null>(null);
+  const prepended = useRef(false);
+  const nextFirstKey = groups[0] ? groupKey(groups[0]) : null;
+  if (nextFirstKey !== firstGroupKey.current) {
+    const previous = firstGroupKey.current;
+    if (previous !== null && groups.some((group) => groupKey(group) === previous)) {
+      prepended.current = true;
+    }
+    firstGroupKey.current = nextFirstKey;
+  }
+  const requestOlder = useCallback(() => {
+    const { hasOlder, loading, load } = history.current;
+    if (!hasOlder || loading || !load) return;
+    history.current = { ...history.current, loading: true };
+    void Promise.resolve(load()).catch(() => undefined);
+  }, []);
+  const registerSticky = useMemo(
+    () => ({
+      register: (key: string, entry: StickyWorkHeader | null) => {
+        if (entry) stickyHeaders.set(key, entry);
+        else stickyHeaders.delete(key);
+      },
+      reveal: (top: number) => {
+        // Collapsing from the pinned copy leaves the reader on that turn's row.
+        following.current = false;
+        setPinned(null);
+        scrollY.current = Math.max(0, top - 8);
+        scrollRef.current?.scrollTo({ y: scrollY.current, animated: false });
+      },
+    }),
+    [stickyHeaders],
+  );
+  const measure = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    return contentSize.height - layoutMeasurement.height - contentOffset.y;
+  }, []);
+  const onScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const distance = measure(event);
+      // Mid-drag only releases follow; the drag's end decides whether to resume it.
+      if (readerScrolling.current && distance >= 48) following.current = false;
+      setShowJump(distance > 240 && (!following.current || !followTail.current));
+      const { contentOffset, layoutMeasurement } = event.nativeEvent;
+      scrollY.current = contentOffset.y;
+      // The reader is approaching the oldest loaded row: fetch the window before it.
+      // Momentum after a fling counts too, so this keys on follow, not the drag.
+      if (!following.current && contentOffset.y < OLDER_HISTORY_PREFETCH_PX) requestOlder();
+      updatePinned();
+      const prompts = [...promptFrames.entries()]
+        .map(([key, frame]) => ({ key, ...frame }))
+        .sort((a, b) => a.top - b.top);
+      const next = questionNavTarget(prompts, {
+        top: contentOffset.y,
+        height: layoutMeasurement.height,
+      });
+      setQuestionNav((current) => (current === next ? current : next));
+    },
+    [measure, promptFrames, requestOlder, updatePinned],
+  );
+  const onScrollEnd = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      // UIKit also reports momentum completion for our animated scrolls. Only
+      // a person's gesture can switch from reading the answer to following its tail.
+      if (!readerScrolling.current) return;
+      following.current = measure(event) < 48;
+      followTail.current = following.current;
+    },
+    [measure],
+  );
+  const onContentSizeChange = useCallback(
+    (_width: number, height: number) => {
+      const added = height - contentHeight.current;
+      contentHeight.current = height;
+      if (prepended.current) {
+        prepended.current = false;
+        if (!following.current && added > 0) {
+          scrollY.current += added;
+          scrollRef.current?.scrollTo({ y: scrollY.current, animated: false });
+          return;
+        }
+      }
+      if (liveFoldOffset.current !== 0) {
+        const shift = liveFoldOffset.current;
+        liveFoldOffset.current = 0;
+        if (!following.current) {
+          scrollY.current = Math.max(0, scrollY.current + shift);
+          scrollRef.current?.scrollTo({ y: scrollY.current, animated: false });
+        }
+      }
+      followAnswer();
+      // A short window can't be scrolled, so it could never reach the top: keep loading.
+      if (viewportHeight.current > 0 && height < viewportHeight.current + OLDER_HISTORY_PREFETCH_PX)
+        requestOlder();
+    },
+    [requestOlder, followAnswer],
+  );
+  const followLatestSignal = props.followLatestSignal ?? 0;
+  useEffect(() => {
+    if (!followLatestSignal) return;
+    following.current = true;
+    followTail.current = false;
+    setShowJump(false);
+    followAnswer(true);
+  }, [followLatestSignal, followAnswer]);
+  // Landing on a moment: each group's offset, read as it lays out.
+  const groupTops = useRef(new Map<string, number>()).current;
+  const landed = useRef<number | null>(null);
+  const [layoutPass, setLayoutPass] = useState(0);
+  const focusSequence = props.focusSequence ?? null;
+  const focusIndex = useMemo(
+    () => (focusSequence ? timelineGroupIndexAtSequence(groups, focusSequence) : -1),
+    [focusSequence, groups],
+  );
+  useEffect(() => {
+    if (!focusSequence || landed.current === focusSequence) return;
+    following.current = false;
+    if (focusIndex < 0) {
+      // Older than the loaded window: fetch the window before it, else give up
+      // and show the latest.
+      if (history.current.hasOlder) requestOlder();
+      else if (!history.current.loading && groups.length > 0) {
+        landed.current = focusSequence;
+        following.current = true;
+        scrollRef.current?.scrollToEnd({ animated: false });
+      }
+      return;
+    }
+    const top = groupTops.get(groupKey(groups[focusIndex]!));
+    if (top === undefined) return;
+    landed.current = focusSequence;
+    scrollY.current = Math.max(0, top - 12);
+    scrollRef.current?.scrollTo({ y: scrollY.current, animated: false });
+  }, [focusSequence, focusIndex, groups, groupTops, layoutPass, requestOlder]);
+  const activityOptions = useMemo<NativeActivityOptions>(
+    () => ({
+      toolRenderers: props.toolRenderers,
+      renderTool: props.renderTool,
+      computeLabel: props.computeLabel,
+      renderMarkdown: props.renderMarkdown,
+      onOpenSession: props.onOpenSession,
+    }),
+    [
+      props.toolRenderers,
+      props.renderTool,
+      props.computeLabel,
+      props.renderMarkdown,
+      props.onOpenSession,
+    ],
+  );
+  const context: GroupContext = {
+    turnsWithOutput,
+    // Without turn detail a turn row is only its status ("Working · 8s").
+    facets: turnDetail ? props.facets : STATUS_ONLY_FACETS,
+    agentSignals: turnDetail,
+    renderLiveMark: props.renderLiveMark,
+    renderMarkdown: props.renderMarkdown,
+    renderPreparing: props.renderPreparing,
+    renderMessageActions: props.renderMessageActions,
+    renderUserAttachments: props.renderUserAttachments,
+    renderAuthNeeded: props.renderAuthNeeded,
+    onCopy: props.onCopy,
+    reportLiveFold,
+    onRevealAnnotation: revealSource,
+  };
+  return (
+    <AnnotationSourcesContext.Provider value={annotationSourcesValue}>
+      <InlineInputFocusContext.Provider value={inlineInputFocus}>
+        <NativeActivityOptionsProvider value={activityOptions}>
+          <FoldMemoryProvider value={foldMemory}>
+            <StickyWorkHeaderProvider value={registerSticky}>
+              <ReleaseFollowProvider value={releaseFollow}>
+                <View
+                  style={[
+                    {
+                      flex: 1,
+                      backgroundColor: theme.colors.bg,
+                      paddingBottom: props.overlayInsetBottom ?? 0,
+                    },
+                    props.style,
+                  ]}
+                >
+                  <ScrollView
+                    ref={scrollRef}
+                    style={{ flex: 1 }}
+                    onScroll={onScroll}
+                    onScrollBeginDrag={() => {
+                      readerScrolling.current = true;
+                      // The reader takes over: a live turn re-lays out the content many
+                      // times a second, and snapping to the end on each pass would undo
+                      // the drag before it got far. Follow is re-decided when it ends.
+                      following.current = false;
+                    }}
+                    onScrollEndDrag={onScrollEnd}
+                    onMomentumScrollEnd={(event) => {
+                      onScrollEnd(event);
+                      readerScrolling.current = false;
+                    }}
+                    onLayout={(event: LayoutChangeEvent) => {
+                      viewportHeight.current = event.nativeEvent.layout.height;
+                      followAnswer();
+                    }}
+                    scrollEventThrottle={32}
+                    onContentSizeChange={onContentSizeChange}
+                    keyboardDismissMode="interactive"
+                    keyboardShouldPersistTaps="handled"
+                    contentContainerStyle={{
+                      paddingTop: props.contentInsetTop ?? 16,
+                      paddingHorizontal: 16,
+                      paddingBottom:
+                        Math.max(
+                          0,
+                          (props.contentInsetBottom ?? 24) - (props.overlayInsetBottom ?? 0),
+                        ) + (inlineInput?.keyboard ?? 0),
+                      gap: ROW_GAP_PX,
+                      flexGrow: 1,
+                    }}
+                  >
+                    <View>
+                      {props.hasOlder ? (
+                        <OlderHistoryRow
+                          loading={props.loadingOlder === true}
+                          onPress={requestOlder}
+                        />
+                      ) : null}
+                      {props.header}
+                    </View>
+                    {groups.length === 0 && props.emptyState ? props.emptyState : null}
+                    {groups.map((group, index) => {
+                      const key = groupKey(group);
+                      const prompt = group.kind === "item" && group.item.kind === "user-message";
+                      // Agent messages keep one wrapper so a progress note can fold
+                      // (stay mounted, out of layout) without remounting.
+                      const noteId =
+                        group.kind === "item" && group.item.kind === "agent-message"
+                          ? group.item.id
+                          : null;
+                      const liveNote = noteId !== null && liveNotes.notes.has(noteId);
+                      const folded = noteId !== null && foldedNotes.has(noteId);
+                      // The landing row keeps one wrapper for its life, so landing never remounts it.
+                      const landing = focusSequence !== null && index === focusIndex;
+                      return prompt || landing || noteId !== null ? (
+                        <View
+                          key={key}
+                          style={folded ? { display: "none" } : undefined}
+                          onLayout={(event) => {
+                            const { y, height } = event.nativeEvent.layout;
+                            if (prompt) {
+                              promptFrames.set(key, { top: y, bottom: y + height });
+                              followAnswer();
+                            }
+                            if (liveNote && !folded && height > 0) {
+                              liveNoteHeights.set(noteId, height);
+                            }
+                            if (landing && landed.current !== focusSequence) {
+                              groupTops.set(key, y);
+                              setLayoutPass((pass) => pass + 1);
+                            }
+                          }}
+                        >
+                          <TimelineGroupView group={group} context={context} />
+                        </View>
+                      ) : (
+                        <TimelineGroupView key={key} group={group} context={context} />
+                      );
+                    })}
+                    {props.trailing}
+                  </ScrollView>
+                  {pinned && stickyHeaders.get(pinned.key) ? (
+                    <View
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        paddingHorizontal: 16,
+                        backgroundColor: theme.colors.bg,
+                        transform: [{ translateY: pinned.offset }],
+                      }}
+                    >
+                      {stickyHeaders.get(pinned.key)!.render()}
+                    </View>
+                  ) : null}
+                  {/* Navigation owns a lane outside the reading viewport, above the composer. */}
+                  <View
+                    style={{
+                      height: 44,
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 12,
+                    }}
+                  >
+                    {questionNav && !editingInline ? (
+                      <NavButton
+                        icon="arrow-up"
+                        label={m.backToYourMessage}
+                        onPress={() => {
+                          const frame = promptFrames.get(questionNav);
+                          if (!frame) return;
+                          following.current = false;
+                          scrollRef.current?.scrollTo({
+                            y: Math.max(0, frame.top - QUESTION_NAV_MARGIN_PX),
+                            animated: true,
+                          });
+                        }}
+                      />
+                    ) : null}
+                    {showJump && !editingInline ? (
+                      <NavButton
+                        icon="arrow-down"
+                        label={m.jumpToLatest}
+                        onPress={() => {
+                          following.current = true;
+                          followTail.current = true;
+                          followAnswer(true);
+                        }}
+                      />
+                    ) : null}
+                  </View>
+                </View>
+              </ReleaseFollowProvider>
+            </StickyWorkHeaderProvider>
+          </FoldMemoryProvider>
+        </NativeActivityOptionsProvider>
+      </InlineInputFocusContext.Provider>
+    </AnnotationSourcesContext.Provider>
+  );
+}
+
+/**
+ * The web timeline's navigation button (NAV_BUTTON_CLASS): 32pt round, surface-3
+ * at 90% with a border and shadow, a 16pt fg-muted arrow, and a 44pt touch target.
+ */
+function NavButton(props: { icon: "arrow-up" | "arrow-down"; label: string; onPress: () => void }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <Animated.View entering={FadeIn.duration(150)} exiting={FadeOut.duration(150)}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={props.label}
+        onPress={props.onPress}
+        hitSlop={6}
+        style={({ pressed }) => ({
+          width: 32,
+          height: 32,
+          borderRadius: 16,
+          alignItems: "center",
+          justifyContent: "center",
+          borderWidth: 1,
+          borderColor: pressed ? c["border-strong"] : c.border,
+          backgroundColor: withAlpha(c["surface-3"], 0.9),
+          shadowColor: "#000",
+          shadowOpacity: 0.1,
+          shadowRadius: 6,
+          shadowOffset: { width: 0, height: 2 },
+          elevation: 3,
+        })}
+      >
+        {({ pressed }) => (
+          <Icon name={props.icon} size={16} color={pressed ? c.fg : c["fg-muted"]} />
+        )}
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+const STATUS_ONLY_FACETS: TurnSummaryFacetConfiguration = { replace: [] };
+
+type GroupContext = {
+  turnsWithOutput: ReadonlySet<string>;
+  facets?: TurnSummaryFacetConfiguration | undefined;
+  agentSignals: boolean;
+  renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
+  renderMarkdown?: NativeMarkdownRenderer | undefined;
+  renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
+  renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  renderUserAttachments?: ((item: UserMessageItem) => ReactNode) | undefined;
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode) | undefined;
+  onCopy?: ((text: string) => void) | undefined;
+  /** A live work row reports its open state, so its progress notes above fold. */
+  reportLiveFold?: ((workId: string, open: boolean) => void) | undefined;
+  onRevealAnnotation?: AnnotationReveal | undefined;
+};
+
+/** A wait's one quiet secondary line under its work row. */
+function WaitDetail({ text }: { text: string }) {
+  const theme = useNativeTimelineTheme();
+  return (
+    <Text
+      numberOfLines={2}
+      style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: theme.colors["fg-subtle"] }}
+    >
+      {text}
+    </Text>
+  );
+}
+
+function groupKey(group: TimelineGroup): string {
+  switch (group.kind) {
+    case "item":
+      return group.item.kind === "user-message" && group.item.reconciliationKey
+        ? `user-${group.item.reconciliationKey}`
+        : group.item.id;
+    default:
+      return group.id;
+  }
+}
+
+function TimelineGroupView({
+  group,
+  context,
+  insideTurn = false,
+}: {
+  group: TimelineGroup;
+  context: GroupContext;
+  insideTurn?: boolean;
+}) {
+  const t = useOpenGeniText();
+  switch (group.kind) {
+    case "activity": {
+      const startupDismissed =
+        insideTurn ||
+        group.items.some((item) => item.turnId && context.turnsWithOutput.has(item.turnId));
+      if (
+        !insideTurn &&
+        startupDismissed &&
+        group.items.every(
+          (item) =>
+            item.kind === "startup-phase" &&
+            item.status !== "failed" &&
+            item.status !== "cancelled",
+        )
+      )
+        return null;
+      if (group.work) {
+        if (!context.agentSignals && readableWorkIsEmpty(group)) return null;
+        if (isPreparingWork(group, { startupDetails: false, startupDismissed })) {
+          return (
+            <ActivityRail
+              items={group.items}
+              startupActive
+              renderPreparing={context.renderPreparing}
+            />
+          );
+        }
+        const base = readableWorkStatus(t, { ...group, work: group.work });
+        const status: NativeTurnStatus =
+          base.kind === "working"
+            ? {
+                kind: "working",
+                since: base.since,
+                label: base.label,
+                preview:
+                  context.agentSignals && readableWorkShowsPreview(group) ? (
+                    <RollingActivity items={group.items} showCount={false} />
+                  ) : undefined,
+              }
+            : base.kind === "waiting"
+              ? {
+                  kind: "waiting",
+                  since: base.since,
+                  label: base.label,
+                  waitingOn: base.waitingOn,
+                  preview: base.detail ? <WaitDetail text={base.detail} /> : undefined,
+                }
+              : base.kind === "paused"
+                ? { kind: "paused", durationMs: base.durationMs, label: base.label }
+                : { kind: "worked", durationMs: base.durationMs, label: base.label };
+        return (
+          <TurnSummary
+            items={group.items}
+            status={status}
+            renderLiveMark={context.renderLiveMark}
+            outcome={group.outcome}
+            failureText={group.failureText}
+            foldKey={group.id}
+            defaultOpen={readableWorkDefaultOpen(group)}
+            unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
+            facets={context.facets}
+            contextCompactionCount={compactedLandmarkCount(group.work.details)}
+            onOpenStateChange={
+              // Always wired at the top level: a row opened before its first
+              // note arrives must still fold that note when it does.
+              !insideTurn && context.reportLiveFold
+                ? (open) => context.reportLiveFold?.(group.id, open)
+                : undefined
+            }
+          >
+            <TurnRailFrame compact>
+              {group.work.steps ? (
+                <TurnStepsLoader
+                  steps={group.work.steps}
+                  autoLoad={!readableWorkDefaultOpen(group)}
+                />
+              ) : null}
+              <FoldedGroups groups={group.work.details} context={context} />
+            </TurnRailFrame>
+          </TurnSummary>
+        );
+      }
+      const preparationOnly =
+        !insideTurn &&
+        !group.outcome &&
+        group.items.every(
+          (item) =>
+            item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
+        );
+      if (preparationOnly) {
+        return (
+          <ActivityRail
+            items={group.items}
+            startupActive={startupDismissed ? false : undefined}
+            renderPreparing={context.renderPreparing}
+          />
+        );
+      }
+      if (insideTurn) {
+        return <ActivityRail items={group.items} startupActive={false} />;
+      }
+      const image = timelineGroupContainsPresentedImage(group);
+      return (
+        <TurnSummary
+          items={group.items}
+          outcome={group.outcome}
+          failureText={group.failureText}
+          defaultOpen={group.outcome === "failed" || image ? true : undefined}
+          liveHeader={
+            context.agentSignals && !image && !group.outcome ? (
+              <RollingActivity items={group.items} />
+            ) : undefined
+          }
+          foldKey={group.id}
+          facets={context.facets}
+        >
+          <TurnRailFrame>
+            <ActivityRail items={group.items} startupActive={false} />
+          </TurnRailFrame>
+        </TurnSummary>
+      );
+    }
+    case "turn": {
+      const activityItems = flattenActivityItems(group.groups);
+      const image = timelineGroupContainsPresentedImage(group);
+      return (
+        <TurnSummary
+          items={activityItems}
+          outcome={group.outcome}
+          failureText={insideTurn ? undefined : group.failureText}
+          durationMs={durationBetween(group.startedAt, group.endedAt)}
+          defaultOpen={!insideTurn && (group.outcome === "failed" || image) ? true : undefined}
+          bare={insideTurn}
+          foldKey={group.id}
+          facets={context.facets}
+          contextCompactionCount={group.contextCompactionCount}
+        >
+          {insideTurn ? (
+            <View style={{ gap: 16 }}>
+              <FoldedGroups groups={group.groups} context={context} />
+            </View>
+          ) : (
+            <TurnRailFrame>
+              <FoldedGroups groups={group.groups} context={context} />
+            </TurnRailFrame>
+          )}
+        </TurnSummary>
+      );
+    }
+    case "item":
+      return <TimelineRow item={group.item} context={context} />;
+  }
+}
+
+/** Rows in a turn's work details that stack like tool steps, without a gap. */
+function isWorkRow(group: TimelineGroup | undefined): boolean {
+  return (
+    group?.kind === "activity" || (group?.kind === "item" && isAgentWorkHumanInput(group.item))
+  );
+}
+
+function FoldedGroups({
+  groups,
+  context,
+}: {
+  groups: readonly TimelineGroup[];
+  context: GroupContext;
+}) {
+  return (
+    <>
+      {groups.map((child, index) => (
+        <View
+          key={groupKey(child)}
+          style={
+            index > 0 && !(isWorkRow(child) && isWorkRow(groups[index - 1]))
+              ? { marginTop: 12 }
+              : undefined
+          }
+        >
+          <TimelineGroupView group={child} context={context} insideTurn />
+        </View>
+      ))}
+    </>
+  );
+}
+
+function TimelineRow({ item, context }: { item: TimelineItem; context: GroupContext }) {
+  const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
+  switch (item.kind) {
+    case "user-message":
+      return <UserMessageRow item={item} context={context} />;
+    case "agent-message":
+      return <AgentMessageRow item={item} context={context} />;
+    case "human-input":
+      return isAgentWorkHumanInput(item) ? (
+        <AgentWorkHumanInputRow item={item} />
+      ) : (
+        <HumanInputRow
+          item={item}
+          onCopy={context.onCopy}
+          renderMarkdown={context.renderMarkdown}
+        />
+      );
+    case "session-status": {
+      const meta = SESSION_STATUS_PRESENTATION(t)[sessionStatusItemDisplayStatus(item)];
+      return (
+        <SeparatorRow
+          dot={item.resolvedAt ? undefined : theme.colors[`status-${meta.tone}`]}
+          text={`${item.resolvedAt ? t("messageTimeline.workResumed") : meta.label.toLowerCase()} · ${formatRelativeTime(t, item.resolvedAt ?? item.occurredAt)}`}
+        />
+      );
+    }
+    case "context-compaction":
+      return <SeparatorRow text="context compacted" />;
+    case "notice":
+      return <NoticeRow item={item} />;
+    case "goal":
+      return item.text ? (
+        <SeparatorRow text={`goal ${item.action} · ${item.text}`} />
+      ) : (
+        <SeparatorRow text={`goal ${item.action}`} />
+      );
+    case "worker-completion":
+      return (
+        <View
+          style={{
+            borderLeftWidth: 2,
+            borderLeftColor: theme.colors.border,
+            paddingLeft: 12,
+            gap: 4,
+          }}
+        >
+          <Text
+            style={{ ...fontStyle(theme, 500), fontSize: theme.size.base, color: theme.colors.fg }}
+          >
+            {t("native.timeline.messageTimeline.workerReportedBack")}
+          </Text>
+          <Text
+            numberOfLines={3}
+            style={{
+              ...fontStyle(theme),
+              fontSize: theme.size.sm,
+              lineHeight: 18,
+              color: theme.colors["fg-muted"],
+            }}
+          >
+            {item.text}
+          </Text>
+        </View>
+      );
+    case "auth-needed":
+      // An agent's connect request becomes a card the person can finish
+      // here; anything else (a lapsed account, unavailable tools) is a row.
+      return context.renderAuthNeeded?.(item) ?? <NativeAuthNeededRow item={item} />;
+    case "machine-input-batch":
+      // An automation that acted here says what happened in one line; other
+      // machine updates stay out of the native chat.
+      return isAutomationRunBatch(item.members) ? <AutomationRunRow item={item} /> : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * An automation acted in this chat: one quiet line saying what happened,
+ * above the agent's answer, never the automation's instructions. As on web.
+ */
+function AutomationRunRow({
+  item,
+}: {
+  item: Extract<TimelineItem, { kind: "machine-input-batch" }>;
+}) {
+  const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
+  const line = automationRunLine(t, item.members);
+  const event = item.members.some((member) => (member.automation?.eventCount ?? 0) > 0);
+  return (
+    <View
+      accessible
+      accessibilityLabel={`${line}, ${t("messageTimeline.receivedClocktime", { clockTime: nativeClockTime(t, item.occurredAt) })}`}
+      style={{
+        flexDirection: "row",
+        alignItems: "flex-start",
+        justifyContent: "center",
+        gap: 6,
+        paddingHorizontal: 12,
+      }}
+    >
+      <Icon name={event ? "zap" : "calendar-clock"} size={14} color={theme.colors["fg-subtle"]} />
+      <Text
+        numberOfLines={2}
+        style={{
+          ...fontStyle(theme),
+          flexShrink: 1,
+          textAlign: "center",
+          fontSize: theme.size.sm,
+          color: theme.colors["fg-muted"],
+        }}
+      >
+        {line}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * The web footer stamp. Hermes/iOS ICU joins date and time with " at " where the
+ * browser's ICU uses ", "; normalize to the web form.
+ */
+function nativeClockTime(t: OpenGeniText, iso: string): string {
+  return formatClockTime(t, iso).replace(" at ", ", ");
+}
+
+function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }) {
+  const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
+  const c = theme.colors;
+  const [open, setOpen] = useState(false);
+  // An agent's own wait is ordinary progress, not a warning: a quiet line that
+  // discloses the reason, as on web. So is an attempt a Retry reopened: the
+  // turn's outcome carries the failure that still matters.
+  if (item.recordedOutcome || item.retriedAttempt) {
+    return (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        onPress={() => setOpen((value) => !value)}
+        style={{ paddingVertical: 4 }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}>
+            <Icon name="chevron-right" size={14} color={c["fg-muted"]} />
+          </View>
+          {item.retriedAttempt ? (
+            <View
+              style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: c["status-failed"] }}
+            />
+          ) : null}
+          <Text style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: c["fg-muted"] }}>
+            {item.retriedAttempt
+              ? t("messageTimeline.attemptFailedRetried")
+              : recordedWaitSummaryText(t, item).replace(" at ", ", ")}
+          </Text>
+        </View>
+        {open ? (
+          <Text
+            style={{
+              ...fontStyle(theme),
+              marginTop: 4,
+              paddingLeft: 22,
+              fontSize: theme.size.sm,
+              lineHeight: 19,
+              color: c["fg-muted"],
+            }}
+          >
+            {item.retriedAttempt && typeof item.details?.value === "string"
+              ? `${noticeDisplayText(t, item)}\n\n${item.details.value}`
+              : item.retriedAttempt
+                ? noticeDisplayText(t, item)
+                : item.text}
+          </Text>
+        ) : null}
+      </Pressable>
+    );
+  }
+  const tone = noticeTone(item);
+  const accent =
+    tone === "failed"
+      ? c["status-failed"]
+      : tone === "waiting"
+        ? c["status-waiting"]
+        : c["fg-muted"];
+  return (
+    <View
+      accessibilityRole="text"
+      style={{
+        flexDirection: "row",
+        alignItems: "flex-start",
+        gap: 10,
+        borderRadius: theme.radius.md,
+        borderWidth: 1,
+        paddingHorizontal: 14,
+        paddingVertical: 10,
+        borderColor: tone === "neutral" ? c.border : withAlpha(accent, 0.35),
+        backgroundColor: tone === "neutral" ? c["surface-1"] : withAlpha(accent, 0.1),
+      }}
+    >
+      <View style={{ marginTop: 2, opacity: item.tone === "cancelled" ? 0.6 : 1 }}>
+        {noticeIsResolvedApproval(item) ? (
+          <Icon name="check" size={16} color={accent} />
+        ) : (
+          <Icon name="triangle-alert" size={16} color={accent} />
+        )}
+      </View>
+      <Text style={{ ...fontStyle(theme), flex: 1, fontSize: 14, lineHeight: 20, color: accent }}>
+        {noticeDisplayText(t, item)}
+      </Text>
+    </View>
+  );
+}
+
+function SeparatorRow({ text, dot }: { text: string; dot?: string | undefined }) {
+  const theme = useNativeTimelineTheme();
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+      <View style={{ height: 1, flex: 1, backgroundColor: theme.colors.border }} />
+      {dot ? (
+        <View
+          style={{ width: 4, height: 4, borderRadius: 2, marginRight: -6, backgroundColor: dot }}
+        />
+      ) : null}
+      <Text
+        numberOfLines={1}
+        style={{
+          ...fontStyle(theme),
+          maxWidth: "70%",
+          fontSize: theme.size.xs,
+          color: theme.colors["fg-subtle"],
+        }}
+      >
+        {text}
+      </Text>
+      <View style={{ height: 1, flex: 1, backgroundColor: theme.colors.border }} />
+    </View>
+  );
+}
+
+/** Copy + time under a message: the web CopyHoverFrame footer at coarse pointer. */
+function MessageFooter({
+  text,
+  occurredAt,
+  align,
+  actions,
+  onCopy,
+}: {
+  text: string;
+  occurredAt: string;
+  align: "start" | "end";
+  actions?: ReactNode;
+  onCopy?: ((text: string) => void) | undefined;
+}) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
+  const [copied, setCopied] = useState(false);
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        alignSelf: align === "end" ? "flex-end" : "flex-start",
+        gap: 6,
+        height: 44,
+      }}
+    >
+      {onCopy ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={m.copyMessage}
+          onPress={() => {
+            onCopy(text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1400);
+          }}
+          style={{
+            width: 44,
+            height: 44,
+            alignItems: "center",
+            justifyContent: "center",
+            borderRadius: theme.radius.sm,
+          }}
+        >
+          <Icon name={copied ? "check" : "copy"} size={14} color={theme.colors["fg-subtle"]} />
+        </Pressable>
+      ) : null}
+      {actions}
+      <Text
+        style={{
+          ...fontStyle(theme),
+          fontSize: theme.size.xs,
+          color: theme.colors["fg-subtle"],
+          fontVariant: ["tabular-nums"],
+        }}
+      >
+        {nativeClockTime(t, occurredAt)}
+      </Text>
+    </View>
+  );
+}
+
+/**
+ * Web's long-message disclosure: a sent message taller than the phone clamp
+ * shows its top with a fade and "Show more"; the full text stays mounted.
+ */
+function CollapsibleUserText({ children }: { children: ReactNode }) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const [height, setHeight] = useState(0);
+  const [expanded, setExpanded] = useState(false);
+  // A little slack so a message just over the clamp isn't hidden behind a control.
+  const collapsible = height > USER_MESSAGE_COLLAPSED_PX + 48;
+  const collapsed = collapsible && !expanded;
+  const surface = theme.colors["surface-2"];
+  return (
+    <View>
+      <View style={collapsed ? { maxHeight: USER_MESSAGE_COLLAPSED_PX, overflow: "hidden" } : null}>
+        {/* Measure only while unclipped: inside the clip the content is laid out
+            shorter, and re-measuring there would flip collapse on and off. */}
+        <View
+          onLayout={(event) => {
+            if (!collapsed) setHeight(event.nativeEvent.layout.height);
+          }}
+        >
+          {children}
+        </View>
+        {collapsed ? (
+          <View
+            pointerEvents="none"
+            style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 48 }}
+          >
+            {[0.25, 0.5, 0.75, 0.95].map((alpha) => (
+              <View key={alpha} style={{ flex: 1, backgroundColor: withAlpha(surface, alpha) }} />
+            ))}
+          </View>
+        ) : null}
+      </View>
+      {collapsible ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded }}
+          hitSlop={8}
+          onPress={() => setExpanded((value) => !value)}
+          style={{ alignSelf: "flex-start", paddingTop: 6 }}
+        >
+          <Text
+            style={{
+              ...fontStyle(theme, 500),
+              fontSize: theme.size.sm,
+              color: theme.colors["fg-muted"],
+            }}
+          >
+            {expanded ? m.showLess : m.showMore}
+          </Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+/** Top of the loaded window: a spinner while older history loads, else a manual control. */
+function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () => void }) {
+  const t = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  return (
+    <View style={{ alignItems: "center", paddingVertical: 8 }}>
+      {loading ? (
+        <ActivityIndicator color={theme.colors["fg-muted"]} accessibilityLabel={m.loadingEarlier} />
+      ) : (
+        <Pressable accessibilityRole="button" hitSlop={8} onPress={onPress}>
+          <Text
+            style={{
+              ...fontStyle(theme, 500),
+              fontSize: theme.size.sm,
+              color: theme.colors["fg-muted"],
+            }}
+          >
+            {t("native.timeline.messageTimeline.loadEarlierMessages")}
+          </Text>
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
+function UserMessageRow({ item, context }: { item: UserMessageItem; context: GroupContext }) {
+  const t = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const failed = item.delivery?.state === "failed";
+  const annotations = item.annotations ?? [];
+  const sourceKey = item.annotationSource?.eventId;
+  return (
+    <Animated.View entering={FadeIn.duration(180)} style={{ alignItems: "flex-end" }}>
+      <View style={{ maxWidth: "85%", alignItems: "flex-end", gap: 6 }}>
+        {item.resources.some((resource) => resource.kind === "file")
+          ? context.renderUserAttachments?.(item)
+          : null}
+        {item.text || annotations.length > 0 ? (
+          <View
+            style={{
+              backgroundColor: theme.colors["surface-2"],
+              borderWidth: 1,
+              borderColor: theme.colors.border,
+              borderTopLeftRadius: 14,
+              borderTopRightRadius: 14,
+              borderBottomLeftRadius: 14,
+              borderBottomRightRadius: 4,
+              paddingHorizontal: 16,
+              paddingVertical: 10,
+            }}
+          >
+            {item.text ? (
+              <CollapsibleUserText>
+                <AnnotationSourceView
+                  sourceKey={sourceKey}
+                  style={{ marginHorizontal: -6, paddingHorizontal: 6 }}
+                >
+                  {context.renderMarkdown ? (
+                    context.renderMarkdown(item.text, { tone: "body" })
+                  ) : (
+                    <Text
+                      selectable
+                      style={{
+                        ...fontStyle(theme),
+                        fontSize: theme.size.md,
+                        lineHeight: 28,
+                        color: theme.colors.fg,
+                      }}
+                    >
+                      {item.text}
+                    </Text>
+                  )}
+                </AnnotationSourceView>
+              </CollapsibleUserText>
+            ) : null}
+            {annotations.length > 0 ? (
+              <View style={item.text ? { marginTop: 10, marginBottom: 2 } : { paddingVertical: 2 }}>
+                <SentAnnotationCards
+                  annotations={annotations}
+                  onReveal={context.onRevealAnnotation}
+                />
+              </View>
+            ) : null}
+          </View>
+        ) : null}
+        <MessageFooter
+          text={item.text}
+          occurredAt={item.occurredAt}
+          align="end"
+          actions={context.renderMessageActions?.(item)}
+          onCopy={context.onCopy}
+        />
+        {failed ? (
+          <View
+            style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 4 }}
+          >
+            <Icon name="triangle-alert" size={14} color={theme.colors["status-failed"]} />
+            <Text
+              style={{
+                ...fontStyle(theme),
+                fontSize: theme.size.xs,
+                color: theme.colors["status-failed"],
+              }}
+            >
+              {item.delivery?.error || m.messageNotSent}
+            </Text>
+            {item.delivery?.onRetry ? (
+              <Pressable onPress={item.delivery.onRetry} accessibilityRole="button">
+                <Text
+                  style={{
+                    ...fontStyle(theme, 500),
+                    fontSize: theme.size.xs,
+                    color: theme.colors["status-failed"],
+                    textDecorationLine: "underline",
+                  }}
+                >
+                  {t("native.timeline.messageTimeline.retry")}
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
+      </View>
+    </Animated.View>
+  );
+}
+
+function AgentMessageRow({ item, context }: { item: AgentMessageItem; context: GroupContext }) {
+  const theme = useNativeTimelineTheme();
+  return (
+    <Animated.View entering={FadeIn.duration(180)} style={{ minWidth: 0 }}>
+      <AnnotationSourceView
+        sourceKey={item.annotationSource?.eventId}
+        style={{ marginHorizontal: -8, paddingHorizontal: 8 }}
+      >
+        {context.renderMarkdown ? (
+          context.renderMarkdown(item.text, { tone: "body", streaming: item.streaming })
+        ) : (
+          <Text
+            selectable
+            style={{
+              ...fontStyle(theme),
+              fontSize: theme.size.md,
+              lineHeight: 28,
+              color: theme.colors.fg,
+            }}
+          >
+            {item.text}
+          </Text>
+        )}
+      </AnnotationSourceView>
+      {item.streaming ? null : (
+        <MessageFooter
+          text={item.text}
+          occurredAt={item.occurredAt}
+          align="start"
+          actions={context.renderMessageActions?.(item)}
+          onCopy={context.onCopy}
+        />
+      )}
+    </Animated.View>
+  );
+}
+
+/**
+ * A question an agent (such as a sub-session's parent) answered or skipped: one
+ * quiet work row that opens to the full question and answer, as on web.
+ */
+function AgentWorkHumanInputRow({ item }: { item: HumanInputItem }) {
+  const t = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const multiple = Math.max(item.questions.length, item.answers.length) > 1;
+  const skipped = item.response.outcome === "skipped";
+  // Host overrides of the outcome copy (`timelineMessages`) still apply here.
+  const byLine = skipped
+    ? (m.humanInputOutcome.agentSkipped ?? m.humanInputOutcome.skipped)
+    : (m.humanInputOutcome.agentAnswered ?? m.humanInputOutcome.answered);
+  const summary = agentWorkHumanInputSummary(item, {
+    answered: t("messageTimeline.answered"),
+    skipped: t("messageTimeline.skipped"),
+    secretSaved: (secret) => m.humanInputSecretSaved(secret.vaultName, secret.itemName),
+  });
+  const answers = humanInputAnswerLines(
+    item.answers,
+    item.response,
+    m.humanInputSecretSaved,
+    multiple,
+  );
+  const text = (color: string, size = theme.size.sm, weight?: 500) => ({
+    ...fontStyle(theme, weight),
+    fontSize: size,
+    lineHeight: size === theme.size.xs ? 16 : 20,
+    color,
+  });
+  return (
+    <ActivityDisclosure
+      icon="message-circle-question"
+      title={t("messageTimeline.asked")}
+      preview={summary}
+      // Screen readers would announce the arrow; speak a plain separator instead.
+      accessibilityLabel={`${t("messageTimeline.asked")}: ${summary.split(" → ").join(": ")}`}
+    >
+      <View style={{ gap: 12 }}>
+        {item.questions.map((question, index) => (
+          <View key={question.id}>
+            {question.label ? (
+              <Text style={text(theme.colors.fg, theme.size.sm, 500)}>
+                {multiple ? `${index + 1}. ` : ""}
+                {question.label}
+              </Text>
+            ) : null}
+            <Text selectable style={text(theme.colors["fg-muted"])}>
+              {!question.label && multiple ? `${index + 1}. ` : ""}
+              {question.prompt}
+            </Text>
+          </View>
+        ))}
+        <View>
+          <Text style={text(theme.colors["fg-subtle"], theme.size.xs, 500)}>{byLine}</Text>
+          {answers.map((line) => (
+            <Text key={line.questionId} selectable style={text(theme.colors.fg)}>
+              {line.text || t("messageTimeline.answered")}
+            </Text>
+          ))}
+        </View>
+      </View>
+    </ActivityDisclosure>
+  );
+}
+
+function HumanInputRow({
+  item,
+  onCopy,
+  renderMarkdown,
+}: {
+  item: HumanInputItem;
+  onCopy?: ((text: string) => void) | undefined;
+  renderMarkdown?: NativeMarkdownRenderer | undefined;
+}) {
+  const t = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const multiple = Math.max(item.questions.length, item.answers.length) > 1;
+  const settled =
+    item.response.outcome === "answered"
+      ? m.humanInputOutcome.answered
+      : item.response.outcome === "skipped"
+        ? item.response.agentDecides
+          ? (m.humanInputOutcome.agentDecides ?? m.humanInputOutcome.skipped)
+          : m.humanInputOutcome.skipped
+        : item.response.outcome === "expired"
+          ? m.humanInputOutcome.expired
+          : m.humanInputOutcome.cancelled;
+  const lines = humanInputAnswerLines(
+    item.answers,
+    item.response,
+    m.humanInputSecretSaved,
+    multiple,
+  );
+  const answerText = lines
+    .filter((line) => !line.secret)
+    .map((line) => line.text)
+    .join("\n");
+  const savedLines = lines.filter((line) => line.secret);
+  const copyText = lines.map((line) => line.text).join("\n");
+  // The prompt reads as the web row does: inline Markdown in the card's type style.
+  const promptStyles = useMemo(() => {
+    const style = (labelled: boolean): TextStyle => ({
+      ...fontStyle(theme),
+      fontSize: labelled ? theme.size.sm : theme.size.md,
+      lineHeight: labelled ? 18 : 24,
+      color: labelled ? theme.colors["fg-muted"] : theme.colors.fg,
+    });
+    return { labelled: style(true), plain: style(false) };
+  }, [theme]);
+  const promptStyle = (labelled: boolean): TextStyle =>
+    labelled ? promptStyles.labelled : promptStyles.plain;
+  return (
+    <View style={{ gap: 10 }}>
+      <View
+        style={{
+          maxWidth: "90%",
+          flexDirection: "row",
+          alignItems: "flex-start",
+          gap: 12,
+          borderWidth: 1,
+          borderColor: theme.colors.border,
+          backgroundColor: theme.colors["surface-1"],
+          borderTopLeftRadius: theme.radius.lg,
+          borderTopRightRadius: theme.radius.lg,
+          borderBottomRightRadius: theme.radius.lg,
+          borderBottomLeftRadius: theme.radius.xs,
+          paddingHorizontal: 14,
+          paddingVertical: 12,
+        }}
+      >
+        <View
+          style={{
+            marginTop: 2,
+            width: 32,
+            height: 32,
+            borderRadius: theme.radius.md,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: withAlpha(theme.colors["status-waiting"], 0.1),
+          }}
+        >
+          <Icon name="message-circle-question" size={16} color={theme.colors["status-waiting"]} />
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text
+            style={{
+              ...fontStyle(theme, 500),
+              fontSize: theme.size.xs,
+              color: theme.colors["fg-subtle"],
+            }}
+          >
+            {t("native.timeline.messageTimeline.agentAsked")}
+          </Text>
+          <View style={{ marginTop: 6, gap: 12 }}>
+            {item.questions.map((question, index) => (
+              <View key={question.id}>
+                {question.label ? (
+                  <Text
+                    style={{
+                      ...fontStyle(theme, 600),
+                      fontSize: theme.size.sm,
+                      color: theme.colors.fg,
+                    }}
+                  >
+                    {multiple ? `${index + 1}. ` : ""}
+                    {question.label}
+                  </Text>
+                ) : null}
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "flex-start",
+                    marginTop: question.label ? 2 : 0,
+                  }}
+                >
+                  {!question.label && multiple ? (
+                    <Text style={{ ...promptStyle(false), color: theme.colors["fg-muted"] }}>
+                      {`${index + 1}. `}
+                    </Text>
+                  ) : null}
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    {renderMarkdown ? (
+                      renderMarkdown(question.prompt, {
+                        tone: question.label ? "muted" : "body",
+                        textStyle: promptStyle(Boolean(question.label)),
+                      })
+                    ) : (
+                      <Text style={promptStyle(Boolean(question.label))}>{question.prompt}</Text>
+                    )}
+                  </View>
+                </View>
+              </View>
+            ))}
+          </View>
+        </View>
+      </View>
+      <View style={{ alignItems: "flex-end" }}>
+        <View
+          style={{
+            maxWidth: "85%",
+            backgroundColor: theme.colors["surface-2"],
+            borderWidth: 1,
+            borderColor: theme.colors.border,
+            borderTopLeftRadius: 14,
+            borderTopRightRadius: 14,
+            borderBottomLeftRadius: 14,
+            borderBottomRightRadius: 4,
+            paddingHorizontal: 16,
+            paddingVertical: 10,
+          }}
+        >
+          <Text
+            style={{
+              ...fontStyle(theme, 500),
+              fontSize: theme.size.xs,
+              color: theme.colors["fg-subtle"],
+            }}
+          >
+            {settled}
+          </Text>
+          {answerText ? (
+            <Text
+              style={{
+                ...fontStyle(theme),
+                marginTop: 2,
+                fontSize: theme.size.md,
+                lineHeight: 24,
+                color: theme.colors.fg,
+              }}
+            >
+              {answerText}
+            </Text>
+          ) : null}
+          {savedLines.map((line) => (
+            <View
+              key={line.questionId}
+              style={{ marginTop: 4, flexDirection: "row", alignItems: "center", gap: 6 }}
+            >
+              <Icon name="key-round" size={14} color={theme.colors["fg-muted"]} />
+              <Text
+                style={{
+                  ...fontStyle(theme),
+                  flexShrink: 1,
+                  fontSize: theme.size.sm,
+                  lineHeight: 20,
+                  color: theme.colors.fg,
+                }}
+              >
+                {line.text}
+              </Text>
+            </View>
+          ))}
+        </View>
+        <MessageFooter
+          text={copyText || settled}
+          occurredAt={item.occurredAt}
+          align="end"
+          onCopy={onCopy}
+        />
+      </View>
+    </View>
+  );
+}

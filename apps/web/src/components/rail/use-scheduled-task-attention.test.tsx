@@ -2,7 +2,7 @@ import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import type { ScheduledTaskAccessAttention } from "@/types";
+import type { ScheduledTaskAccessAttention } from "@opengeni/react/app/types";
 
 GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -33,7 +33,7 @@ const list = mock(
 );
 let permissions = ["scheduled_tasks:run"];
 const client = { listScheduledTaskAccessAttention: list };
-mock.module("@/context", () => ({
+mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
     client,
     accessContext: {

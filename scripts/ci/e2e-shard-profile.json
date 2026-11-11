@@ -1,0 +1,627 @@
+{
+  "schemaVersion": 1,
+  "tier": "e2e",
+  "units": "milliseconds",
+  "evidence": {
+    "repository": "Cloudgeni-ai/opengeni",
+    "targetSha": "e35ec52bfb8c4fb8c497710609776e7d3cce1e97",
+    "measurement": "Elapsed log timestamps between successive file starts or the shard pass marker; includes every browser engine and runner overhead. Only files in successful shard jobs that completed every file are used; killed or failed files are never used.",
+    "selection": "Every successful Impacted E2E shard job on main or a merge-batcher batch since the current bun.lock and browser runner (7400009bdd, Oct 27) whose source has this file's exact content and the same bun.lock, .bun-version and browser runner. Each weight is the lower-median observed interval for that file; fileSources names the job that observed it.",
+    "sources": [
+      {
+        "runId": 40601787830,
+        "attempt": 1,
+        "sourceSha": "48e825df923d4ff8f77891ae0515eb6258ef0269",
+        "jobIds": [122532367051, 122532367067, 122532367107, 122532367150]
+      },
+      {
+        "runId": 40622580233,
+        "attempt": 1,
+        "sourceSha": "c87022bc4b0facd6c6d3486ae88c4242de295197",
+        "jobIds": [122600622319, 122600622325, 122600622422]
+      },
+      {
+        "runId": 40634782900,
+        "attempt": 1,
+        "sourceSha": "cf0ab33c4cd704e85b6bd54d1671b21f939a3504",
+        "jobIds": [122639851414, 122639851459, 122639851524]
+      },
+      {
+        "runId": 40640531559,
+        "attempt": 1,
+        "sourceSha": "389a9dd011d4baa7049ac8e1cb464fb0de50da40",
+        "jobIds": [122658023117, 122658023160, 122658023212]
+      },
+      {
+        "runId": 40647313338,
+        "attempt": 1,
+        "sourceSha": "a639211c54bc65169db242b3458c293102436676",
+        "jobIds": [122680295853, 122680295858, 122680295895, 122680295975]
+      },
+      {
+        "runId": 40649224426,
+        "attempt": 1,
+        "sourceSha": "e307c4930b3b5efabea8b9b3d6090491ee879ee8",
+        "jobIds": [122685941403, 122685941429, 122685941455, 122685941592]
+      },
+      {
+        "runId": 40682434818,
+        "attempt": 1,
+        "sourceSha": "c882e3b7b24c93c2922025ae56543bd5d5cf4a6b",
+        "jobIds": [122797254007, 122797254020, 122797254121, 122797254275]
+      },
+      {
+        "runId": 40747935590,
+        "attempt": 1,
+        "sourceSha": "e35ec52bfb8c4fb8c497710609776e7d3cce1e97",
+        "jobIds": [123028491732, 123028491739, 123028491817]
+      },
+      {
+        "runId": 40749825092,
+        "attempt": 1,
+        "sourceSha": "87b41006271dda99abbe27d9702e2625f4a3e40c",
+        "jobIds": [123034311179, 123034311226, 123034311261]
+      },
+      {
+        "runId": 40749825092,
+        "attempt": 2,
+        "sourceSha": "87b41006271dda99abbe27d9702e2625f4a3e40c",
+        "jobIds": [123042759601, 123042786912, 123042790168]
+      },
+      {
+        "runId": 40753412807,
+        "attempt": 1,
+        "sourceSha": "ab42e67d5bd0fff26f896d8ce7a6e59c40837a59",
+        "jobIds": [123047345318, 123047345494]
+      }
+    ],
+    "fileSources": {
+      "packages/react/test/timeline-search.browser.e2e.ts": {
+        "jobId": 122639851414,
+        "observations": 10
+      },
+      "test/e2e/ai-gateway-connection.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 11
+      },
+      "test/e2e/annotation-scroll.browser.e2e.ts": {
+        "jobId": 123028491739,
+        "observations": 10
+      },
+      "test/e2e/appearance.browser.e2e.ts": {
+        "jobId": 123047345318,
+        "observations": 10
+      },
+      "test/e2e/artifact-desktop.browser.e2e.ts": {
+        "jobId": 122685941429,
+        "observations": 6
+      },
+      "test/e2e/artifact-library.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 11
+      },
+      "test/e2e/capability-catalog.browser.e2e.ts": {
+        "jobId": 122532367107,
+        "observations": 11
+      },
+      "test/e2e/capability-details.browser.e2e.ts": {
+        "jobId": 123047345318,
+        "observations": 11
+      },
+      "test/e2e/chat-media-entry.browser.e2e.ts": {
+        "jobId": 123042790168,
+        "observations": 10
+      },
+      "test/e2e/claude-subscription.browser.e2e.ts": {
+        "jobId": 123047345318,
+        "observations": 11
+      },
+      "test/e2e/code-editor.browser.e2e.ts": {
+        "jobId": 122532367107,
+        "observations": 10
+      },
+      "test/e2e/codex-account.browser.e2e.ts": {
+        "jobId": 122797254020,
+        "observations": 11
+      },
+      "test/e2e/compact-session-view.browser.e2e.ts": {
+        "jobId": 123047345318,
+        "observations": 11
+      },
+      "test/e2e/composer-focus-handoff.browser.e2e.ts": {
+        "jobId": 122600622325,
+        "observations": 7
+      },
+      "test/e2e/composer-keyboard.browser.e2e.ts": {
+        "jobId": 123042790168,
+        "observations": 10
+      },
+      "test/e2e/composer-menus.browser.e2e.ts": {
+        "jobId": 122685941429,
+        "observations": 4
+      },
+      "test/e2e/composer-pane.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 4
+      },
+      "test/e2e/composer-responsive.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 4
+      },
+      "test/e2e/connected-machine-removal.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 11
+      },
+      "test/e2e/connector-accounts.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 11
+      },
+      "test/e2e/crypto-random-uuid.browser.e2e.ts": {
+        "jobId": 123028491739,
+        "observations": 8
+      },
+      "test/e2e/desktop-corner.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 3
+      },
+      "test/e2e/desktop-rail.browser.e2e.ts": {
+        "jobId": 122797254020,
+        "observations": 9
+      },
+      "test/e2e/developer-settings.browser.e2e.ts": {
+        "jobId": 122797254020,
+        "observations": 11
+      },
+      "test/e2e/embedded-artifact-viewer.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 4
+      },
+      "test/e2e/error-branding.browser.e2e.ts": {
+        "jobId": 123042790168,
+        "observations": 10
+      },
+      "test/e2e/external-vaults.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 9
+      },
+      "test/e2e/failed-session-recovery.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 11
+      },
+      "test/e2e/lossless-message.browser.e2e.ts": {
+        "jobId": 122658023117,
+        "observations": 10
+      },
+      "test/e2e/managed-actor-response.browser.e2e.ts": {
+        "jobId": 123042790168,
+        "observations": 9
+      },
+      "test/e2e/member-connection-access.browser.e2e.ts": {
+        "jobId": 122680295975,
+        "observations": 6
+      },
+      "test/e2e/new-conversation.browser.e2e.ts": {
+        "jobId": 123034311179,
+        "observations": 10
+      },
+      "test/e2e/onepassword-catalog.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 9
+      },
+      "test/e2e/organization-recovery.browser.e2e.ts": {
+        "jobId": 122680295895,
+        "observations": 10
+      },
+      "test/e2e/organization-workspace-administration.browser.e2e.ts": {
+        "jobId": 122680295975,
+        "observations": 11
+      },
+      "test/e2e/personal-github-identity.browser.e2e.ts": {
+        "jobId": 122600622325,
+        "observations": 11
+      },
+      "test/e2e/personal-resource-attachments.browser.e2e.ts": {
+        "jobId": 122532367067,
+        "observations": 10
+      },
+      "test/e2e/personal-workspace-accessibility.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 8
+      },
+      "test/e2e/plugin-discovery.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 4
+      },
+      "test/e2e/plugin-removal.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 11
+      },
+      "test/e2e/preview-loading.browser.e2e.ts": {
+        "jobId": 122600622325,
+        "observations": 11
+      },
+      "test/e2e/project-rename.browser.e2e.ts": {
+        "jobId": 122600622325,
+        "observations": 11
+      },
+      "test/e2e/react-compiled-css.browser.e2e.ts": {
+        "jobId": 123042759601,
+        "observations": 9
+      },
+      "test/e2e/restored-attachment-preview.browser.e2e.ts": {
+        "jobId": 122532367107,
+        "observations": 5
+      },
+      "test/e2e/secrets-fake-login-suite.browser.e2e.ts": {
+        "jobId": 122532367067,
+        "observations": 7
+      },
+      "test/e2e/secrets-fake-login.browser.e2e.ts": {
+        "jobId": 122797254020,
+        "observations": 11
+      },
+      "test/e2e/session-artifact-navigation.browser.e2e.ts": {
+        "jobId": 123042790168,
+        "observations": 10
+      },
+      "test/e2e/session-capability-cards.browser.e2e.ts": {
+        "jobId": 123042759601,
+        "observations": 5
+      },
+      "test/e2e/session-conversation-controller.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 9
+      },
+      "test/e2e/session-lazy-panels.browser.e2e.ts": {
+        "jobId": 123028491817,
+        "observations": 10
+      },
+      "test/e2e/session-loading-startup.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 4
+      },
+      "test/e2e/session-rail-row-metadata.browser.e2e.ts": {
+        "jobId": 122685941429,
+        "observations": 4
+      },
+      "test/e2e/session-sidebar.browser.e2e.ts": {
+        "jobId": 123034311179,
+        "observations": 8
+      },
+      "test/e2e/session-skill-review.browser.e2e.ts": {
+        "jobId": 122532367150,
+        "observations": 7
+      },
+      "test/e2e/session-usage-limit.browser.e2e.ts": {
+        "jobId": 122600622325,
+        "observations": 11
+      },
+      "test/e2e/setup-account-token.browser.e2e.ts": {
+        "jobId": 123042759601,
+        "observations": 10
+      },
+      "test/e2e/signed-out-page.browser.e2e.ts": {
+        "jobId": 123034311179,
+        "observations": 8
+      },
+      "test/e2e/site-conversations.browser.e2e.ts": {
+        "jobId": 122658023212,
+        "observations": 11
+      },
+      "test/e2e/site-navigation.browser.e2e.ts": {
+        "jobId": 122797254121,
+        "observations": 4
+      },
+      "test/e2e/skill-review.browser.e2e.ts": {
+        "jobId": 122680295975,
+        "observations": 10
+      },
+      "test/e2e/slack-access-link.browser.e2e.ts": {
+        "jobId": 123042790168,
+        "observations": 10
+      },
+      "test/e2e/slack-installation-binding.browser.e2e.ts": {
+        "jobId": 123028491732,
+        "observations": 11
+      },
+      "test/e2e/slack-settings.browser.e2e.ts": {
+        "jobId": 122600622325,
+        "observations": 11
+      },
+      "test/e2e/teams-approval.browser.e2e.ts": {
+        "jobId": 123042759601,
+        "observations": 5
+      },
+      "test/e2e/usage-allowances.browser.e2e.ts": {
+        "jobId": 122532367051,
+        "observations": 7
+      },
+      "test/e2e/workspace-pause-timers.browser.e2e.ts": {
+        "jobId": 122680295858,
+        "observations": 4
+      },
+      "test/e2e/workspace-switcher-trigger.browser.e2e.ts": {
+        "jobId": 122600622325,
+        "observations": 7
+      }
+    }
+  },
+  "environment": {
+    "platform": "linux",
+    "architecture": "x64",
+    "bunVersion": "1.4.4",
+    "bunVersionFileSha256": "d03d8b268b4171328ac2458ce8ca82d69a1fde38469d4e4faae4f8fa8d8a5e35",
+    "dependencyLockSha256": "d2c3cf396abb764b81b61d6d854e34ff1f5e1e4f6d269c92c9facc231750626f",
+    "browserRunnerSha256": "fa23a85fd82fe71098a3248ffd8986ec6900d369d2784d1067e762312bbac67e"
+  },
+  "entries": {
+    "packages/react/test/timeline-search.browser.e2e.ts": {
+      "sha256": "860e21875ef397d16a6f93b57e7961e033ea468747f9291d0aa7250113c12ca8",
+      "planningWeight": 14826
+    },
+    "test/e2e/ai-gateway-connection.browser.e2e.ts": {
+      "sha256": "45cd2a9e1a68cf1b86796e8fc600233bd9fbcdd55226ea03b3a55af194ac0b3b",
+      "planningWeight": 42646
+    },
+    "test/e2e/annotation-scroll.browser.e2e.ts": {
+      "sha256": "42eb2cfed4e51d3895127db55f82e3c79a1e1454daa334402b140b4e4d881bfd",
+      "planningWeight": 48870
+    },
+    "test/e2e/appearance.browser.e2e.ts": {
+      "sha256": "484f670b072df1740541ead379c64c38b987540392e4952ba7041053b2a71098",
+      "planningWeight": 14226
+    },
+    "test/e2e/artifact-desktop.browser.e2e.ts": {
+      "sha256": "00a7683e00c22173a70fb432babe4f6ae1978e6cb564d33da8faa60318d4dd39",
+      "planningWeight": 46730
+    },
+    "test/e2e/artifact-library.browser.e2e.ts": {
+      "sha256": "637783d55e8f0ab99c4e66c5bad9cf30469c6b305bfe4161962deb49e5f2bd87",
+      "planningWeight": 91431
+    },
+    "test/e2e/capability-catalog.browser.e2e.ts": {
+      "sha256": "ee27b243f609080b775ade67117ea4c8c9c9e60e3c7f0f1756c7000dba93ba16",
+      "planningWeight": 12185
+    },
+    "test/e2e/capability-details.browser.e2e.ts": {
+      "sha256": "59667d180ff8b79b328bef5fa376492593c1b47f88daae6218cc1deaae05a644",
+      "planningWeight": 22611
+    },
+    "test/e2e/chat-media-entry.browser.e2e.ts": {
+      "sha256": "a48ee85739acb57327734ca067c96269e6d5ff49f52637dd08b57b49371b6fcb",
+      "planningWeight": 13399
+    },
+    "test/e2e/claude-subscription.browser.e2e.ts": {
+      "sha256": "47cbdb252845fc2bda8170ec22605e6b170d2a48d8c2ac706bdecbb3dd059ddc",
+      "planningWeight": 75419
+    },
+    "test/e2e/code-editor.browser.e2e.ts": {
+      "sha256": "4d14a79ccd7512120a9b91da9a9fc1635cfd6948b4315d85c9c42c4ab60ec7fa",
+      "planningWeight": 6088
+    },
+    "test/e2e/codex-account.browser.e2e.ts": {
+      "sha256": "0a239fe00d340d9733ae3fdec47cee89b9d44b8529f7b819e878fb6429bbea1b",
+      "planningWeight": 10717
+    },
+    "test/e2e/compact-session-view.browser.e2e.ts": {
+      "sha256": "6cc0a580b09709b1c472249600b556aec9a8c07a17f655428d8818d5eaec6975",
+      "planningWeight": 186490
+    },
+    "test/e2e/composer-focus-handoff.browser.e2e.ts": {
+      "sha256": "0d92661c153cc97b847eb75406fb63d4279f12e465392bafb2fe066ec5f44b2b",
+      "planningWeight": 10959
+    },
+    "test/e2e/composer-keyboard.browser.e2e.ts": {
+      "sha256": "2f902803dd77fa4c5cceee934ecbb632bc11c6bbfc356f249df82ca14a0dff1d",
+      "planningWeight": 39148
+    },
+    "test/e2e/composer-menus.browser.e2e.ts": {
+      "sha256": "e91eadddaa437da05b474fc986a5caa0f0d125f7bb348f2c781fd7019c61b061",
+      "planningWeight": 18084
+    },
+    "test/e2e/composer-pane.browser.e2e.ts": {
+      "sha256": "491f86ab25208ac4b584f25a00329f20c7273c89bde181f8f5b370cf013bbc40",
+      "planningWeight": 12374
+    },
+    "test/e2e/composer-responsive.browser.e2e.ts": {
+      "sha256": "c614378cc5ab4d269dfc086449987eb7ef05f9aadae15d95f1370a42711a422b",
+      "planningWeight": 100547
+    },
+    "test/e2e/connected-machine-removal.browser.e2e.ts": {
+      "sha256": "a7902f1bcbefc004e6c07fe52dd2c2b85139416a64ff5ea9d30092201aa549c9",
+      "planningWeight": 33348
+    },
+    "test/e2e/connector-accounts.browser.e2e.ts": {
+      "sha256": "25c68216a436530abc5ef55e4d27ab15b9b8750727f8cc1e51a6cbcca2153a53",
+      "planningWeight": 13777
+    },
+    "test/e2e/crypto-random-uuid.browser.e2e.ts": {
+      "sha256": "6f35470f9ee8ed6ac6343cf10d0d91388be9f16338c246c9b8c2927e64474d1d",
+      "planningWeight": 2016
+    },
+    "test/e2e/desktop-corner.browser.e2e.ts": {
+      "sha256": "0ba726291adc28e5faed2ab33adcf495c52d660cee592f6f0f356d7513ea60d6",
+      "planningWeight": 36914
+    },
+    "test/e2e/desktop-rail.browser.e2e.ts": {
+      "sha256": "2e139aa3b1bdcf89dab48e6206a7789832482a94d60824c1018cb79185313052",
+      "planningWeight": 22681
+    },
+    "test/e2e/developer-settings.browser.e2e.ts": {
+      "sha256": "b28380f8082c134d41a0d5b14b63dab16220e0fcb9adcc82e948da8bba658eab",
+      "planningWeight": 19966
+    },
+    "test/e2e/embedded-artifact-viewer.browser.e2e.ts": {
+      "sha256": "7d98cac024242e5a7f6cfb6eed1f195f68f1062bc67dd38a5c1f04c4952d2d80",
+      "planningWeight": 21962
+    },
+    "test/e2e/error-branding.browser.e2e.ts": {
+      "sha256": "28d8ca874d00a970cc87a9253b4d702172257af30f928612ec1de2a4c669fdab",
+      "planningWeight": 39623
+    },
+    "test/e2e/external-vaults.e2e.ts": {
+      "sha256": "1dada50fe35ced1dd8fa918a3904a4c6a06683fc88648750cf20cb77f7c4db64",
+      "planningWeight": 1271
+    },
+    "test/e2e/failed-session-recovery.browser.e2e.ts": {
+      "sha256": "62d644991cff3cbf01bd6410c20849a360c664dc84e804ec6943493cd391d552",
+      "planningWeight": 64480
+    },
+    "test/e2e/lossless-message.browser.e2e.ts": {
+      "sha256": "18e842d955b0b2ea42a4400656e008507c6da9a92e8f33860424d15aa59e5f24",
+      "planningWeight": 7728
+    },
+    "test/e2e/managed-actor-response.browser.e2e.ts": {
+      "sha256": "4b95d278da5998f937342b551346902fc09f82ffde4b3ce4ce4a13d045f848d3",
+      "planningWeight": 4203
+    },
+    "test/e2e/member-connection-access.browser.e2e.ts": {
+      "sha256": "3ea75a03e3c7054283a4f90df5499e07576e2c3d244e8d4506bd330906751f04",
+      "planningWeight": 6164
+    },
+    "test/e2e/new-conversation.browser.e2e.ts": {
+      "sha256": "c2246fba4276304ed8a87b633ee4c6ce192f0548c7ee26906e4b1c23ac256aa8",
+      "planningWeight": 7742
+    },
+    "test/e2e/onepassword-catalog.browser.e2e.ts": {
+      "sha256": "2c3c4266aeb5c1d1b5acc62f7c0faf43e5fad749e2a8132dd5392675796ef8d2",
+      "planningWeight": 8584
+    },
+    "test/e2e/organization-recovery.browser.e2e.ts": {
+      "sha256": "e25a3f06781259dce7c88136d5f438415019e34bbcb9714c64fafa3e242bebe2",
+      "planningWeight": 88680
+    },
+    "test/e2e/organization-workspace-administration.browser.e2e.ts": {
+      "sha256": "79f5882a4e26e284fc96db9cc91241edfd478a720749b966112cd42cff2dffa8",
+      "planningWeight": 18136
+    },
+    "test/e2e/personal-github-identity.browser.e2e.ts": {
+      "sha256": "73c64b5ff730deb770fa01292b6a7d54834c332754b6fbdd7d9370a36e6e7db2",
+      "planningWeight": 4947
+    },
+    "test/e2e/personal-resource-attachments.browser.e2e.ts": {
+      "sha256": "f188155bd82a82ef6b18dba6da1cd57b74309c0dc8e2b82c2b68b39226c370ec",
+      "planningWeight": 11368
+    },
+    "test/e2e/personal-workspace-accessibility.browser.e2e.ts": {
+      "sha256": "24517ac0c056cbc139960e45604cc3a29965410531633573424200417339de97",
+      "planningWeight": 5712
+    },
+    "test/e2e/plugin-discovery.browser.e2e.ts": {
+      "sha256": "c68f2922a6de77482623b63c3ea633dd16bbe066d481412d87306215a5d83326",
+      "planningWeight": 23243
+    },
+    "test/e2e/plugin-removal.browser.e2e.ts": {
+      "sha256": "557e96aa3aa0398284edd2ababd43ab27c66aa0067cf7c502937325fa24f2902",
+      "planningWeight": 107735
+    },
+    "test/e2e/preview-loading.browser.e2e.ts": {
+      "sha256": "25621b08f91efd7dd8f28647f01aa98f6895236e14f7255b92c3fe0fd73734d4",
+      "planningWeight": 6290
+    },
+    "test/e2e/project-rename.browser.e2e.ts": {
+      "sha256": "af958df00c5b541da0252ee0a35edb44b9422322eca1c0ea53b7616a6d705b5e",
+      "planningWeight": 37439
+    },
+    "test/e2e/react-compiled-css.browser.e2e.ts": {
+      "sha256": "066988a198296ca90e74435f2b97ad7d850d620651467ee159faaa7ff6cd0712",
+      "planningWeight": 685
+    },
+    "test/e2e/restored-attachment-preview.browser.e2e.ts": {
+      "sha256": "1f48370e89b3291112ca64fd396583b1d14ef52a52a2b6957b69784d86331eaa",
+      "planningWeight": 5522
+    },
+    "test/e2e/secrets-fake-login-suite.browser.e2e.ts": {
+      "sha256": "3e1993b61f16a68460bda295bb32747ce00bc2f048390e242003162021809bb8",
+      "planningWeight": 3946
+    },
+    "test/e2e/secrets-fake-login.browser.e2e.ts": {
+      "sha256": "db734e512da5fd0fcf340c25e91f98028cc44f29d5946d18ce37fa84aa1781ef",
+      "planningWeight": 12619
+    },
+    "test/e2e/session-artifact-navigation.browser.e2e.ts": {
+      "sha256": "70ee1d9cd4aa29c4f7fb0827f6c05c5f41741acfe053fd462167e0c67ab9ad49",
+      "planningWeight": 58357
+    },
+    "test/e2e/session-capability-cards.browser.e2e.ts": {
+      "sha256": "ff2d86f6606c5f1d282db285804f54c0fcd0d5483e4dfd0751f0b9edc13b224f",
+      "planningWeight": 34350
+    },
+    "test/e2e/session-conversation-controller.browser.e2e.ts": {
+      "sha256": "320d130049b79a1f20b1b6dfeb5d3c4aeb77ced8dafac36766848bfbdeabaeeb",
+      "planningWeight": 6249
+    },
+    "test/e2e/session-lazy-panels.browser.e2e.ts": {
+      "sha256": "7181ceb5dcb6408e734308cb726a22281b12b671ab4da785bc1622773c139077",
+      "planningWeight": 25737
+    },
+    "test/e2e/session-loading-startup.browser.e2e.ts": {
+      "sha256": "e9908830851c0e77f0d91177c865668e1a08845196c7bb27272a04023bae7655",
+      "planningWeight": 313939
+    },
+    "test/e2e/session-rail-row-metadata.browser.e2e.ts": {
+      "sha256": "0b97b31d00c1ed3b0a7da4ce1f13f6cef22dbb24d854703b7aedb1cdd049ed16",
+      "planningWeight": 15840
+    },
+    "test/e2e/session-sidebar.browser.e2e.ts": {
+      "sha256": "39e9c8679eb561e5531e058cd10bff45536d8293469a21f0be927cdf3cd60212",
+      "planningWeight": 110301
+    },
+    "test/e2e/session-skill-review.browser.e2e.ts": {
+      "sha256": "a39771fe1257a867eca281d3bf454bdca6050aa5df9b535bf6f5fafe6209fdbb",
+      "planningWeight": 4632
+    },
+    "test/e2e/session-usage-limit.browser.e2e.ts": {
+      "sha256": "d0b17022993314963b0eb086bbb5ddf56b0650e991434da9e445f8dac6bf43aa",
+      "planningWeight": 49864
+    },
+    "test/e2e/setup-account-token.browser.e2e.ts": {
+      "sha256": "24c368a435ba8d8f26809bf1533388e4dad62f6bce7f2a49483f2462946324f4",
+      "planningWeight": 6820
+    },
+    "test/e2e/signed-out-page.browser.e2e.ts": {
+      "sha256": "45f2bb2a559e8870119d1299ea66c85472a78a0ddecc7e01c4cc550bc5eebc53",
+      "planningWeight": 24594
+    },
+    "test/e2e/site-conversations.browser.e2e.ts": {
+      "sha256": "c79a706b79c298dd3ebcc0bd6418fa07a29152dbb083fd5e07629c221eb571ca",
+      "planningWeight": 6722
+    },
+    "test/e2e/site-navigation.browser.e2e.ts": {
+      "sha256": "6230efa6cb97d121bb89344a9f39f8d8e8b33f9baaa9e9f3401fa60d2d3a1aed",
+      "planningWeight": 9015
+    },
+    "test/e2e/skill-review.browser.e2e.ts": {
+      "sha256": "c5f824997642a1a13bbb5ee8d9878eb3239f7bcc496c7a5ada98d7db1f59fd0c",
+      "planningWeight": 11349
+    },
+    "test/e2e/slack-access-link.browser.e2e.ts": {
+      "sha256": "97bfea077797dcd0575d89f6dd487b5d075ac7d6f0ce120292a9156611636348",
+      "planningWeight": 30411
+    },
+    "test/e2e/slack-installation-binding.browser.e2e.ts": {
+      "sha256": "f20eca82da4c18018c87af09564a85aa9787b01a1e044b761915c3a2c4c84f31",
+      "planningWeight": 17635
+    },
+    "test/e2e/slack-settings.browser.e2e.ts": {
+      "sha256": "7e8afe7e0c74f1dfe98e4c82363466a43ad0e56df67610c14cd2155b98583157",
+      "planningWeight": 53295
+    },
+    "test/e2e/teams-approval.browser.e2e.ts": {
+      "sha256": "9e82e257f2d0ff235c8034c59ce8132b677ac8e820be168e92aa9935e2cba4b7",
+      "planningWeight": 4058
+    },
+    "test/e2e/usage-allowances.browser.e2e.ts": {
+      "sha256": "86e39b1619d010e0b63c80d4978c70b89df9a7ab2c504b09904556be33bc021d",
+      "planningWeight": 9066
+    },
+    "test/e2e/workspace-pause-timers.browser.e2e.ts": {
+      "sha256": "c02603da0ebdd83406c00d491e7f3580fa092c5fe43fc192f6d1931e37ac9c93",
+      "planningWeight": 42467
+    },
+    "test/e2e/workspace-switcher-trigger.browser.e2e.ts": {
+      "sha256": "302b5f1368bf60f289edd45e728d02eb2ae1fda74057065d9618afd74bb837e4",
+      "planningWeight": 8306
+    }
+  }
+}

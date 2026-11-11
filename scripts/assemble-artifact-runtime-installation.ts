@@ -36,6 +36,7 @@ import {
   type VerifiedArtifactRuntimeLocation,
 } from "../packages/artifact-tool/src/runtime-cli";
 import { renderArtifactSkillFacadeBootstrap } from "./materialize-artifact-kernel-packages";
+import { isRecord } from "@opengeni/contracts/values";
 
 const RELEASE_MANIFEST = "artifact-runtime-release-manifest.json";
 const PACKAGE_MANIFEST = "artifact-kernel-manifest.json";
@@ -380,10 +381,6 @@ function sha256(bytes: Uint8Array): `sha256:${string}` {
 
 function comparePath(left: Readonly<{ path: string }>, right: Readonly<{ path: string }>): number {
   return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function sameJson(left: unknown, right: unknown): boolean {

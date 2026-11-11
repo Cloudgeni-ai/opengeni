@@ -1,3 +1,4 @@
+import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { createHash } from "node:crypto";
 import type { McpServerConfig } from "@opengeni/config";
 import {
@@ -18,22 +19,13 @@ export function mcpAccountRouteId(serverId: string, connectionId: string): strin
 }
 
 function accountLabel(connection: ConnectionMetadata): string {
-  const metadata = connection.metadata;
-  const text = (value: unknown): string | undefined =>
-    typeof value === "string" && value.trim()
-      ? value
-          .replace(/[\u0000-\u001f\u007f]/gu, " ")
-          .trim()
-          .slice(0, 180)
-      : undefined;
-  const name = [metadata.email, metadata.displayName, metadata.accountName, metadata.name]
-    .map(text)
-    .find(Boolean);
-  const workspace = [metadata.slackTeamName, metadata.teamName, metadata.workspaceName]
-    .map(text)
-    .find(Boolean);
-  const scope = connection.subjectId === null ? "This workspace" : "Only me";
-  return [...new Set([name, workspace, scope].filter(Boolean))].join(" · ");
+  const identity = connectionAccountIdentityLabel(
+    connection.metadata,
+    `${connection.providerDomain} account`,
+  );
+  // "Yours" is the person the agent acts for; "Shared" is everyone in the workspace.
+  const scope = connection.subjectId === null ? "Shared" : "Yours";
+  return `${identity} · ${scope}`;
 }
 
 function canonicalResource(value: string): string {
@@ -56,8 +48,6 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
   servers: McpServerConfig[];
   connections: ConnectionMetadata[];
   selections?: McpConnectionAccountSelection[];
-  /** The complete accepted set, including an explicitly empty set. */
-  selectionsFrozen?: boolean;
 }): McpConnectionAccountBinding[] {
   const remaining = new Set(
     (input.selections ?? []).map((selection) =>
@@ -85,7 +75,7 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
         (ref.resource &&
           (typeof connection.metadata.resource !== "string" ||
             canonicalResource(connection.metadata.resource) !== canonicalResource(ref.resource))) ||
-        ((input.selectionsFrozen || selectedIds.size > 0) && !selectedIds.has(connection.id))
+        (selectedIds.size > 0 && !selectedIds.has(connection.id))
       )
         continue;
       const personal = connection.subjectId !== null;

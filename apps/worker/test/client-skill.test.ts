@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { buildOpenGeniAgent, persistentAgentInstructionInspectionFor } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { loadConfiguredBundledSkills } from "../src/activities/agent-turn/skill-selection";
 
 test("ordinary integration guidance is discoverable on every compute shape without loading its body", () => {
@@ -25,7 +25,7 @@ test("ordinary integration guidance is discoverable on every compute shape witho
         },
       );
       const instructions = persistentAgentInstructionInspectionFor(agent).composed;
-      expect(instructions.includes('"id":"builtin:opengeni-client"')).toBe(
+      expect(instructions.includes('{"name":"opengeni-client"')).toBe(
         bundledSkillIds === undefined,
       );
       expect(instructions).not.toContain("## Choose the product experience before the transport");

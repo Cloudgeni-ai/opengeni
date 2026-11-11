@@ -1,0 +1,184 @@
+import { describe, expect, test } from "bun:test";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { isolatedGitEnvironment } from "../../packages/runtime/test/isolated-git-home-fixture";
+import { publishableWorkspacePackages } from "../publishable-workspaces";
+import {
+  LOCKSTEP_RESET_VERSION,
+  RETIRED_PRE_RESET_VERSIONS,
+  lockstepCanaryBase,
+  nextFreeLockstepVersion,
+  retiredVersionSet,
+  retitleChangelog,
+  setManifestVersion,
+  sharedLockstepVersion,
+} from "./lockstep-version";
+
+const root = fileURLToPath(new URL("../../", import.meta.url));
+
+describe("lockstep package versioning", () => {
+  test("both clean-worktree CI reproductions disable runtime auto-install", async () => {
+    const workflow = await readFile(join(root, ".github/workflows/ci.yml"), "utf8");
+    expect(
+      workflow.match(
+        /bun --no-install "\$GITHUB_WORKSPACE\/node_modules\/@changesets\/cli\/bin\.js" version/g,
+      ),
+    ).toHaveLength(2);
+    expect(workflow).not.toContain(
+      'bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version',
+    );
+  });
+
+  test("every published package is in one fixed Changesets group at one version", async () => {
+    const config = await Bun.file(join(root, ".changeset/config.json")).json();
+    const published = publishableWorkspacePackages(root);
+    expect(config.linked ?? []).toEqual([]);
+    expect(config.fixed).toHaveLength(1);
+    expect([...config.fixed[0]].sort()).toEqual(published.map((pkg) => pkg.name).sort());
+    const version = sharedLockstepVersion(published);
+    expect(Bun.semver.order(version, LOCKSTEP_RESET_VERSION)).toBeGreaterThanOrEqual(0);
+    expect(retiredVersionSet(published.map((pkg) => pkg.name)).has(version)).toBe(false);
+    for (const name of Object.keys(RETIRED_PRE_RESET_VERSIONS)) {
+      expect(published.map((pkg) => pkg.name)).toContain(name);
+    }
+  });
+
+  test("skips every version a retired pre-reset release burned", () => {
+    const taken = retiredVersionSet(Object.keys(RETIRED_PRE_RESET_VERSIONS));
+    expect(nextFreeLockstepVersion("1.0.0", taken)).toBe("1.0.0");
+    expect(nextFreeLockstepVersion("1.0.1", taken)).toBe("1.0.2");
+    expect(nextFreeLockstepVersion("1.0.4", taken)).toBe("1.0.5");
+    expect(nextFreeLockstepVersion("1.1.1", taken)).toBe("1.1.2");
+    expect(nextFreeLockstepVersion("1.4.2", taken)).toBe("1.4.3");
+    expect(nextFreeLockstepVersion("2.0.0", taken)).toBe("2.0.0");
+    expect(lockstepCanaryBase("1.0.0", taken)).toBe("1.0.2");
+    // The retired line also burned 3.x and later (sdk/react 3.1.0, config 3.1.1).
+    expect(nextFreeLockstepVersion("3.0.0", taken)).toBe("3.0.0");
+    expect(nextFreeLockstepVersion("3.0.1", taken)).toBe("3.0.2");
+    expect(nextFreeLockstepVersion("3.1.0", taken)).toBe("3.1.2");
+    expect(nextFreeLockstepVersion("4.0.0", taken)).toBe("4.0.4");
+    expect(lockstepCanaryBase("3.0.0", taken)).toBe("3.0.2");
+    expect(() => nextFreeLockstepVersion("1.0.1-canary.1", taken)).toThrow("stable semver");
+    expect(() =>
+      sharedLockstepVersion([
+        { name: "a", version: "1.0.0" },
+        { name: "b", version: "1.0.2" },
+      ]),
+    ).toThrow("one lockstep version");
+  });
+
+  test("rewrites only the release version and its new changelog heading", () => {
+    const manifest = '{\n  "name": "@opengeni/x",\n  "version": "1.0.1",\n  "files": ["dist"]\n}\n';
+    expect(setManifestVersion(manifest, "1.0.1", "1.0.2")).toBe(
+      '{\n  "name": "@opengeni/x",\n  "version": "1.0.2",\n  "files": ["dist"]\n}\n',
+    );
+    expect(() => setManifestVersion(manifest, "1.0.0", "1.0.2")).toThrow();
+    expect(retitleChangelog("# x\n\n## 1.0.1\n\n- a\n\n## 1.0.0\n", "1.0.1", "1.0.2")).toBe(
+      "# x\n\n## 1.0.2\n\n- a\n\n## 1.0.0\n",
+    );
+  });
+
+  test("changeset version plus the guard moves a patch release off a retired version", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lockstep-version-"));
+    try {
+      const names = ["@opengeni/contracts", "@opengeni/jev"];
+      await mkdir(join(dir, ".changeset"));
+      await writeFile(
+        join(dir, "package.json"),
+        JSON.stringify({ name: "fixture", private: true, workspaces: ["packages/*"] }),
+      );
+      for (const name of names) {
+        const directory = join(dir, "packages", name.slice("@opengeni/".length));
+        await mkdir(directory, { recursive: true });
+        await writeFile(
+          join(directory, "package.json"),
+          `${JSON.stringify({ name, version: "1.0.0" }, null, 2)}\n`,
+        );
+      }
+      const browserDirectory = join(dir, "packages", "browserd");
+      await mkdir(browserDirectory, { recursive: true });
+      await writeFile(
+        join(browserDirectory, "package.json"),
+        JSON.stringify({
+          name: "@opengeni/browserd",
+          version: "1.0.0",
+          private: true,
+          dependencies: { "@opengeni/contracts": "workspace:*" },
+        }),
+      );
+      await writeFile(
+        join(dir, ".changeset/config.json"),
+        JSON.stringify({
+          changelog: "@changesets/cli/changelog",
+          commit: false,
+          fixed: [names],
+          access: "public",
+          baseBranch: "main",
+          updateInternalDependencies: "patch",
+          ignore: [],
+        }),
+      );
+      await writeFile(join(dir, ".changeset/fix.md"), '---\n"@opengeni/jev": patch\n---\n\nFix.\n');
+      await writeFile(
+        join(dir, ".changeset/browser.md"),
+        '---\n"@opengeni/browserd": patch\n---\n\nFirst paragraph.\n\nSecond paragraph.\n',
+      );
+      const env = isolatedGitEnvironment({
+        HOME: join(dir, "home"),
+        GIT_AUTHOR_NAME: "Fixture",
+        GIT_AUTHOR_EMAIL: "fixture@example.test",
+        GIT_COMMITTER_NAME: "Fixture",
+        GIT_COMMITTER_EMAIL: "fixture@example.test",
+      });
+      const run = async (command: string[], extraEnv: Record<string, string> = {}) => {
+        const child = Bun.spawn(command, {
+          cwd: dir,
+          env: { ...env, ...extraEnv },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stdout, stderr, status] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        expect({ command, status, stdout, stderr }).toMatchObject({ status: 0 });
+        return stdout;
+      };
+      await run(["git", "init", "-b", "main"]);
+      await run(["git", "add", "-A"]);
+      await run(["git", "commit", "-m", "fixture"]);
+      // Like CI's expected worktree, this fixture has no node_modules. Without
+      // --no-install Bun may resolve a newer formatter outside the locked CLI.
+      await run([
+        "bun",
+        "--no-install",
+        join(root, "node_modules/@changesets/cli/bin.js"),
+        "version",
+      ]);
+      const browserChangelog = await readFile(join(browserDirectory, "CHANGELOG.md"), "utf8");
+      expect(browserChangelog).toContain("Second paragraph.\n\n  - @opengeni/contracts@1.0.1");
+      for (const name of names) {
+        const path = join(dir, "packages", name.slice("@opengeni/".length), "package.json");
+        expect(JSON.parse(await readFile(path, "utf8")).version).toBe("1.0.1");
+      }
+      const guard = join(root, "scripts/release/lockstep-version.ts");
+      const output = await run(["bun", guard], { OPENGENI_RELEASE_SOURCE_ROOT: dir });
+      expect(output).toContain("moved 2 packages to 1.0.2");
+      for (const name of names) {
+        const directory = join(dir, "packages", name.slice("@opengeni/".length));
+        expect(JSON.parse(await readFile(join(directory, "package.json"), "utf8")).version).toBe(
+          "1.0.2",
+        );
+        const changelog = await readFile(join(directory, "CHANGELOG.md"), "utf8");
+        expect(changelog).toContain("## 1.0.2");
+        expect(changelog).not.toContain("## 1.0.1");
+      }
+      await run(["bun", guard, "--check"], { OPENGENI_RELEASE_SOURCE_ROOT: dir });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+});

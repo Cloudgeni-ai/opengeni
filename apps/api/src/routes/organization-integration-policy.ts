@@ -14,11 +14,13 @@ import { nestedPostgresSqlState } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requireSameOriginBrowserMutation } from "./codex";
+import { agentActingAsPerson } from "../http/acting-person";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { managedCookieHuman } from "./supergrok";
+import { parseRequestBody } from "../http/request-body";
 
 /** The database rechecks current organization membership/key authority at commit. */
-async function authorizeAdministration(
+export async function authorizeOrganizationIntegrationAdministration(
   context: Context,
   deps: ApiRouteDeps,
   accountId: string,
@@ -37,7 +39,9 @@ async function authorizeAdministration(
     if (mutation) requireSameOriginBrowserMutation(context, deps);
     return { accountId, subjectId: local.subjectId };
   }
-  const human = await managedCookieHuman(context, deps);
+  const human =
+    agentActingAsPerson(context, accountId, mutation ? "account:admin" : "account:read") ??
+    (await managedCookieHuman(context, deps));
   if (!human || human.subjectId !== access.subjectId) {
     throw new HTTPException(403, { message: "Organization administration required" });
   }
@@ -78,7 +82,7 @@ export function registerOrganizationIntegrationPolicyRoutes(app: Hono, deps: Api
     // The same live administration check as policy reads, including workspace-free service access.
     await policyResponse(() =>
       getOrganizationIntegrationPolicy(deps.db, { accountId }, () =>
-        authorizeAdministration(context, deps, accountId, false),
+        authorizeOrganizationIntegrationAdministration(context, deps, accountId, false),
       ),
     );
     context.header("cache-control", "private, no-store");
@@ -90,7 +94,7 @@ export function registerOrganizationIntegrationPolicyRoutes(app: Hono, deps: Api
     return context.json(
       await policyResponse(() =>
         getOrganizationIntegrationPolicy(deps.db, { accountId }, () =>
-          authorizeAdministration(context, deps, accountId, false),
+          authorizeOrganizationIntegrationAdministration(context, deps, accountId, false),
         ),
       ),
     );
@@ -98,14 +102,15 @@ export function registerOrganizationIntegrationPolicyRoutes(app: Hono, deps: Api
   app.put(path, async (context) => {
     context.header("cache-control", "private, no-store");
     const accountId = organizationId(context);
-    const parsed = UpdateOrganizationIntegrationPolicyRequest.safeParse(
+    const parsed = parseRequestBody(
+      UpdateOrganizationIntegrationPolicyRequest,
       await context.req.json().catch(() => null),
+      { status: 422, message: "Invalid integration policy" },
     );
-    if (!parsed.success) throw new HTTPException(422, { message: "Invalid integration policy" });
     return context.json(
       await policyResponse(() =>
-        updateOrganizationIntegrationPolicy(deps.db, { accountId }, parsed.data, () =>
-          authorizeAdministration(context, deps, accountId, true),
+        updateOrganizationIntegrationPolicy(deps.db, { accountId }, parsed, () =>
+          authorizeOrganizationIntegrationAdministration(context, deps, accountId, true),
         ),
       ),
     );

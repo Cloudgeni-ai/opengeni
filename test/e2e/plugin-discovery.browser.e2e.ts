@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { chromium } from "playwright";
-import { freePort, startProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess } from "@opengeni/testing/process";
 
 test("plugin rows and detail pages preserve keyboard focus, scrolling, and installation states", async () => {
   const port = await freePort();
@@ -97,9 +98,7 @@ test("plugin rows and detail pages preserve keyboard focus, scrolling, and insta
             0,
           );
           expect(
-            await detail
-              .getByText("Only workspace admins can install, update and remove plugins.")
-              .count(),
+            await detail.getByText("Ask a workspace admin to install this plugin.").count(),
           ).toBe(1);
         } else {
           expect(

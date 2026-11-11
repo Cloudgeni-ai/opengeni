@@ -3,11 +3,15 @@
 // menu; the collapse toggle lives at the top of the rail with the wordmark.
 // Collapsed, the avatar and the gear stack.
 import { LockIcon, LogOutIcon, UserIcon } from "lucide-react";
+import { isPasskeyOnlyAccountEmail } from "@opengeni/contracts/passkey-only-account";
 import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
 import { AppearanceSubmenu } from "@/components/appearance-menu";
+import { DesktopAppSubmenu, ExcelAddinMenuItem } from "@/components/desktop-app-menu";
+import { DesktopAccountMenuItems, hasDesktopAccounts } from "@/components/desktop/desktop-rail";
 import { HelpMenu } from "@/components/help-menu";
+import { MyThingsMenuItem } from "@/components/my-things-menu-item";
 import {
   accountMenuAriaLabel,
   OrganizationInvitationsDialog,
@@ -15,10 +19,10 @@ import {
   useOrganizationInvitations,
 } from "@/components/organization-invitations";
 import { AccountTrigger } from "@/components/rail/account-trigger";
-import { useRail } from "@/components/rail/rail-context";
+import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { useNewOrganizationMenuItem } from "@/components/rail/switcher-block";
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
-import { AccountUsageMenuItem } from "@/components/usage/usage-entry";
+import { AccountUsageMenuItem } from "@opengeni/react/app/components/usage/usage-entry";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,13 +30,16 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
-import { hasWorkspacePermission } from "@/lib/permissions";
+} from "@opengeni/react/ui/dropdown-menu";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { userErrorText } from "@opengeni/react/ui/api-error";
+import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { webFeedbackContext } from "@opengeni/react/app/lib/feedback-capture";
 
 const FeedbackDialog = lazy(() =>
-  import("@/components/feedback").then((module) => ({ default: module.FeedbackDialog })),
+  import("@opengeni/react/app/components/feedback").then((module) => ({
+    default: module.FeedbackDialog,
+  })),
 );
 
 const BrowserAccountMenu = lazy(() =>
@@ -47,12 +54,18 @@ export function RailFooter() {
   const context = useAppContext();
   const managed = context.clientConfig.auth.mode === "managedSession";
   const browserAccounts = managed && context.clientConfig.managedAuthSessionSetMode !== "legacy";
+  // An account created with only a passkey has no email address to show.
+  const sessionEmail = context.authSession?.user.email;
+  const passkeyOnly = isPasskeyOnlyAccountEmail(sessionEmail);
+  const shownEmail = passkeyOnly ? undefined : sessionEmail;
   const displayName =
-    context.authSession?.user.name ??
-    context.authSession?.user.email ??
-    context.accessContext.subjectLabel ??
+    context.authSession?.user.name ||
+    shownEmail ||
+    context.accessContext.subjectLabel ||
     context.accessContext.subjectId;
-  const secondary = context.authSession?.user.email ?? context.accessContext.subjectId;
+  const secondary = passkeyOnly
+    ? "Signs in with a passkey"
+    : (shownEmail ?? context.accessContext.subjectId);
   const image = context.authSession?.user.image ?? undefined;
   const canSendFeedback = hasWorkspacePermission(
     context.accessContext,
@@ -86,6 +99,13 @@ export function RailFooter() {
             open={feedbackOpen}
             onOpenChange={setFeedbackOpen}
             onSubmitted={() => toast.success("Thanks for your feedback")}
+            screenshots
+            reportContext={() =>
+              webFeedbackContext({
+                serverVersion: context.clientConfig.serverVersion,
+                deploymentRevision: context.clientConfig.deploymentRevision,
+              })
+            }
           />
         </Suspense>
       ) : null}
@@ -140,16 +160,24 @@ export function RailFooter() {
                   <OrganizationInvitationsMenuItem controller={organizationInvitations} />
                 ) : null}
                 {newOrganization.item}
-                {(managed && organizationInvitations.pendingCount > 0) || newOrganization.item ? (
-                  <DropdownMenuSeparator />
-                ) : null}
+                {managed ? <MyThingsMenuItem workspaceId={rail.workspaceId} /> : null}
+                {managed || newOrganization.item ? <DropdownMenuSeparator /> : null}
                 <AppearanceSubmenu />
                 <HelpMenu
                   documentationUrl={context.clientConfig.documentationUrl}
+                  supportEmail={context.clientConfig.supportEmail}
                   onSendFeedback={onSendFeedback}
                 />
-                <DropdownMenuSeparator />
-                {managed ? (
+                <DesktopAppSubmenu />
+                <ExcelAddinMenuItem />
+                {hasDesktopAccounts() ? (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DesktopAccountMenuItems />
+                  </>
+                ) : null}
+                {hasDesktopAccounts() ? null : <DropdownMenuSeparator />}
+                {hasDesktopAccounts() ? null : managed ? (
                   <DropdownMenuItem
                     variant="destructive"
                     onSelect={() => {

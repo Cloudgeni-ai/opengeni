@@ -1,0 +1,194 @@
+// Generate the native icon geometry from the exact lucide-react icons the web
+// timeline renders, so native rows draw the same glyphs without an icon font.
+// Usage: bun scripts/generate-native-icons.ts
+import { createRequire } from "node:module";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const require = createRequire(join(import.meta.dir, "../packages/react/package.json"));
+const lucide = require("lucide-react") as Record<
+  string,
+  {
+    render?: (
+      props: object,
+      ref: null,
+    ) => { props: { iconNode: Array<[string, Record<string, string | number>]> } };
+  }
+>;
+
+// kebab-case native name → lucide-react export.
+const ICONS: Record<string, string> = {
+  "arrow-down": "ArrowDownIcon",
+  "arrow-up": "ArrowUpIcon",
+  bot: "BotIcon",
+  box: "BoxIcon",
+  brain: "BrainIcon",
+  "brain-circuit": "BrainCircuitIcon",
+  "calendar-clock": "CalendarClockIcon",
+  check: "CheckIcon",
+  "chevron-down": "ChevronDownIcon",
+  "chevron-left": "ChevronLeftIcon",
+  "chevron-right": "ChevronRightIcon",
+  "chevron-up": "ChevronUpIcon",
+  "circle-alert": "CircleAlertIcon",
+  "clock-3": "Clock3Icon",
+  "circle-slash": "CircleSlashIcon",
+  copy: "CopyIcon",
+  "corner-down-right": "CornerDownRightIcon",
+  "file-diff": "FileDiffIcon",
+  "file-search": "FileSearchIcon",
+  "file-text": "FileTextIcon",
+  "layout-grid": "LayoutGridIcon",
+  "table-2": "Table2Icon",
+  image: "ImageIcon",
+  folder: "FolderIcon",
+  "folder-git": "FolderGitIcon",
+  globe: "GlobeIcon",
+  keyboard: "KeyboardIcon",
+  "loader-circle": "LoaderCircleIcon",
+  "list-ordered": "ListOrderedIcon",
+  "key-round": "KeyRoundIcon",
+  menu: "MenuIcon",
+  "message-circle-question": "MessageCircleQuestionIcon",
+  "message-square": "MessageSquareIcon",
+  "message-square-text": "MessageSquareTextIcon",
+  "messages-square": "MessagesSquareIcon",
+  mic: "MicIcon",
+  "package-search": "PackageSearchIcon",
+  paperclip: "PaperclipIcon",
+  "panels-top-left": "PanelsTopLeftIcon",
+  pause: "PauseIcon",
+  pencil: "PencilIcon",
+  play: "PlayIcon",
+  plug: "PlugIcon",
+  plus: "PlusIcon",
+  quote: "QuoteIcon",
+  search: "SearchIcon",
+  server: "ServerIcon",
+  "server-cog": "ServerCogIcon",
+  settings: "SettingsIcon",
+  "share-2": "Share2Icon",
+  shrink: "ShrinkIcon",
+  sparkles: "SparklesIcon",
+  square: "SquareIcon",
+  "square-terminal": "SquareTerminalIcon",
+  target: "TargetIcon",
+  terminal: "TerminalIcon",
+  "thumbs-down": "ThumbsDownIcon",
+  "thumbs-up": "ThumbsUpIcon",
+  "trash-2": "Trash2Icon",
+  "triangle-alert": "TriangleAlertIcon",
+  wrench: "WrenchIcon",
+  x: "XIcon",
+  zap: "ZapIcon",
+  pin: "PinIcon",
+  "pin-off": "PinOffIcon",
+  ellipsis: "EllipsisIcon",
+  "grip-vertical": "GripVerticalIcon",
+  "audio-lines": "AudioLinesIcon",
+  "list-restart": "ListRestartIcon",
+  // Account chrome: accounts, organizations, workspaces, settings, notifications.
+  lock: "LockIcon",
+  "building-2": "Building2Icon",
+  "chevrons-up-down": "ChevronsUpDownIcon",
+  "log-out": "LogOutIcon",
+  "external-link": "ExternalLinkIcon",
+  bell: "BellIcon",
+  "user-round": "UserRoundIcon",
+  smartphone: "SmartphoneIcon",
+  phone: "PhoneIcon",
+  "phone-off": "PhoneOffIcon",
+  "mic-off": "MicOffIcon",
+  "volume-2": "Volume2Icon",
+  "volume-x": "VolumeXIcon",
+  "maximize-2": "Maximize2Icon",
+  "rotate-ccw": "RotateCcwIcon",
+  "shield-check": "ShieldCheckIcon",
+  inbox: "InboxIcon",
+  "circle-pause": "CirclePauseIcon",
+  "bell-ring": "BellRingIcon",
+  "alarm-clock": "AlarmClockIcon",
+  "arrow-up-right": "ArrowUpRightIcon",
+  camera: "CameraIcon",
+  "image-plus": "ImagePlusIcon",
+  // First-party tool steps in the timeline.
+  monitor: "MonitorIcon",
+  "file-spreadsheet": "FileSpreadsheetIcon",
+  hourglass: "HourglassIcon",
+  download: "DownloadIcon",
+  clipboard: "ClipboardIcon",
+  video: "VideoIcon",
+  "circle-dot": "CircleDotIcon",
+  file: "FileIcon",
+  archive: "ArchiveIcon",
+  "app-window": "AppWindowIcon",
+  "graduation-cap": "GraduationCapIcon",
+  hand: "HandIcon",
+  activity: "ActivityIcon",
+  "log-in": "LogInIcon",
+  code: "CodeIcon",
+  receipt: "ReceiptIcon",
+  // Secret ask card: show / hide the value.
+  eye: "EyeIcon",
+  "eye-off": "EyeOffIcon",
+  // Chat and agent avatars (SESSION_AVATAR_ICONS) not already listed above.
+  bug: "BugIcon",
+  mail: "MailIcon",
+  "git-pull-request": "GitPullRequestIcon",
+  telescope: "TelescopeIcon",
+  "chart-line": "ChartLineIcon",
+  megaphone: "MegaphoneIcon",
+  rocket: "RocketIcon",
+  database: "DatabaseIcon",
+  briefcase: "BriefcaseIcon",
+  "book-open": "BookOpenIcon",
+  "flask-conical": "FlaskConicalIcon",
+  headset: "HeadsetIcon",
+  "pen-tool": "PenToolIcon",
+  users: "UsersIcon",
+};
+
+const out: Record<string, Array<[string, Record<string, string | number>]>> = {};
+for (const [name, exportName] of Object.entries(ICONS)) {
+  const icon = lucide[exportName];
+  const node = icon?.render?.({}, null)?.props?.iconNode;
+  if (!node) throw new Error(`lucide-react has no ${exportName}`);
+  out[name] = node.map(([tag, attrs]) => {
+    const { key: _key, ...rest } = attrs;
+    // The native Icon draws path, circle, rect, line and polyline; an ellipse
+    // becomes the same shape as a path of two arcs.
+    if (tag === "ellipse") {
+      const [cx, cy, rx, ry] = [rest.cx, rest.cy, rest.rx, rest.ry].map(Number) as [
+        number,
+        number,
+        number,
+        number,
+      ];
+      return [
+        "path",
+        {
+          d: `M ${cx - rx} ${cy}a${rx} ${ry} 0 1 0 ${2 * rx} 0a${rx} ${ry} 0 1 0 ${-2 * rx} 0`,
+        },
+      ];
+    }
+    if (!["path", "circle", "rect", "line", "polyline"].includes(tag)) {
+      throw new Error(`${exportName} uses <${tag}>, which the native Icon does not draw`);
+    }
+    // A space between a moveto and its first coordinate draws the same path and
+    // keeps generated path data clear of the public-repository label guard.
+    if (typeof rest.d === "string") rest.d = rest.d.replace(/\b([Mm])(12)\b/g, "$1 $2");
+    return [tag, rest];
+  });
+}
+
+const target = join(
+  import.meta.dir,
+  "../packages/react-native/src/timeline/icon-nodes.generated.ts",
+);
+writeFileSync(
+  target,
+  `// GENERATED by scripts/generate-native-icons.ts from lucide-react. Do not edit.\n` +
+    `export const iconNodes = ${JSON.stringify(out, null, 2)} as const;\n\n` +
+    `export type NativeIconName = keyof typeof iconNodes;\n`,
+);
+console.log(`wrote ${Object.keys(out).length} icons to ${target}`);

@@ -1,6 +1,6 @@
 # Agent behavior eval
 
-Runs a fixed set of scenarios against a **real model** through OpenGeni's real
+Runs a fixed set of scenarios against a **real model** through Opengeni's real
 agent-turn path, scores each run, and writes a JSON + Markdown report. It is a
 manual/nightly tool, not a CI gate: it needs Docker and model credentials and
 costs real tokens.
@@ -10,7 +10,7 @@ costs real tokens.
 - Throwaway Postgres + NATS + S3-compatible storage (`startTestServices`, Docker).
 - The real Hono API in-process: sessions are created, messaged, and answered
   (human input, tool approvals) through the public HTTP routes, and the worker's
-  first-party OpenGeni MCP tools call back into it.
+  first-party Opengeni MCP tools call back into it.
 - The real worker activities (`runAgentTurn`, `maybeContinueGoal`, …) with the
   production runtime and the configured model provider. Temporal is replaced by
   `driveSession` (session.ts), which runs the same activity sequence as the
@@ -40,6 +40,9 @@ Credentials: `--env-file <path>` (or `OPENGENI_EVAL_ENV_FILE`), otherwise
 `./.env`, then the main checkout's `.env`. Only `OPENGENI_OPENAI_*` and
 `OPENGENI_AZURE_OPENAI_*` keys are read; values are never logged. Defaults:
 agent `gpt-5.6-luna` (reasoning `medium`), judge `gpt-5.6-sol` (reasoning `low`).
+An env file exporting `F598_AZURE_OPENAI_API_KEY` / `F598_AZURE_OPENAI_BASE_URL`
+(the secrets-overhaul localstack `keys/cloud.env`) maps onto the built-in Azure
+provider; pass the deployment names, for example `--model gpt-6-sol --judge-model gpt-6-sol`.
 
 Behind a TLS-intercepting proxy, run with the proxy variables unset
 (`env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy …`) or make sure

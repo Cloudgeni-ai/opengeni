@@ -9,8 +9,8 @@ import {
   RotateCcwIcon,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { DisabledReason } from "@/components/ui/disabled-reason";
+import { Button } from "@opengeni/react/ui/button";
+import { DisabledReason } from "@opengeni/react/ui/disabled-reason";
 import {
   LineTabs,
   LineTabsContent,
@@ -19,13 +19,18 @@ import {
   LineTabsNav,
   LineTabsTrigger,
   type LineTabsVariant,
-} from "@/components/ui/line-tabs";
-import { ListRow, ListRowSkeleton, RowList, type RowIndicatorKind } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { PageHeader } from "@/components/ui/page-header";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { StatusBadge } from "@/components/ui/status-badge";
+} from "@opengeni/react/ui/line-tabs";
+import {
+  ListRow,
+  ListRowSkeleton,
+  RowList,
+  type RowIndicatorKind,
+} from "@opengeni/react/ui/list-row";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import {
   Toolbar,
   ToolbarFilterChips,
@@ -35,7 +40,7 @@ import {
   ToolbarSummary,
   type ToolbarFilterGroup,
   type ToolbarFilterValue,
-} from "@/components/ui/toolbar";
+} from "@opengeni/react/ui/toolbar";
 
 import {
   connectedCapabilities,

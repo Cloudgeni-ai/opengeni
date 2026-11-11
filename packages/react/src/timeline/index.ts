@@ -17,16 +17,21 @@
 
 // projection
 export {
+  automationRunOutcomesOnly,
   buildTimeline,
   creditExhaustedFromEvents,
+  creditRefusalFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
   mcpToolLeaf,
+  timelineLivePause,
+  timelinePauseSpans,
   toolDisplayName,
   toolMatchesLeaf,
 } from "./projection";
-export type { GroupTimelineOptions } from "./projection";
+export type { GroupTimelineOptions, TimelineLivePause, TimelinePauseSpan } from "./projection";
+export { useTimelinePauses } from "./use-timeline-pauses";
 
 // item types
 export type {
@@ -42,8 +47,10 @@ export type {
   MachineInputBatchItem,
   MachineInputMember,
   MemoryItem,
+  MessageSender,
   KnowledgeItem,
   NoticeItem,
+  SessionUsageLimitStop,
   ReasoningItem,
   SandboxItem,
   StartupPhase,
@@ -53,7 +60,10 @@ export type {
   TimelineItem,
   TimelineAnnotationSourceDescriptor,
   TurnEndItem,
+  TurnStepsItem,
+  TurnStepsState,
   ToolCallItem,
+  ToolOutputPreview,
   UserMessageItem,
   WorkerCompletionItem,
   WorkerItem,
@@ -61,9 +71,20 @@ export type {
 
 // renderer registry
 export { createToolRegistry, rawTypeOf } from "./registry";
+export {
+  createSessionRetainedScreenshotLoader,
+  createWorkspaceRetainedArtifactLoader,
+  createWorkspaceRetainedVideoLoader,
+} from "./retained-loaders";
+export type {
+  RetainedArtifactLoaderClient,
+  RetainedScreenshotLoaderClient,
+  RetainedVideoLoaderClient,
+} from "./retained-loaders";
 export type {
   CreateToolRegistryOptions,
   RetainedArtifactLoader,
+  RetainedArtifactLoadOptions,
   RetainedScreenshotLoader,
   VideoArtifactPlaybackLoader,
   ToolRegistry,
@@ -93,8 +114,17 @@ export {
 export type { ActivityDisclosureProps, DisclosureChip } from "./shared";
 
 // screenshot lightbox
-export { LightboxProvider, useLightbox, useLightboxOptional } from "./screenshot-lightbox";
-export type { LightboxControlLabels } from "./screenshot-lightbox";
+export {
+  LightboxProvider,
+  useLightbox,
+  useLightboxGalleryItem,
+  useLightboxOptional,
+} from "./screenshot-lightbox";
+export type {
+  LightboxControlLabels,
+  LightboxGalleryEntry,
+  LightboxGalleryImage,
+} from "./screenshot-lightbox";
 
 // disclosure defaults (opt-in initial-open seed; for screenshot/test instrumentation)
 export { DisclosureDefaultsProvider, useForcedDefaultOpen } from "./disclosure-context";
@@ -109,6 +139,8 @@ export { SeenActivityIdsProvider, useSeenActivityIds } from "./seen-activity-ids
 // session compute label (host-supplied active machine / cloud sandbox name)
 export { TimelineComputeLabelProvider, useTimelineComputeLabel } from "./compute-label";
 
+// host words for generic tool rows (language, product tool names)
+
 // turn-collapse summary chip
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS, TurnSummary, useTurnSettleOpen } from "./turn-summary";
 export type {
@@ -118,6 +150,7 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
   TurnSummaryProps,
   TurnSummaryStatus,
@@ -144,4 +177,10 @@ export {
 export type { ApplyPatchOperation } from "./parsers";
 
 export { KnowledgeActivityProvider } from "./knowledge-receipt";
+export { PaymentPageActivityProvider, type PaymentPageActivity } from "./payment-page-activity";
+export {
+  LearningRefusalActionsProvider,
+  type LearningRefusalActions,
+} from "./learning-refusal-row";
+export type { LearningRefusalPlace } from "./learning-refusal-copy";
 export type { KnowledgeActivityActions } from "./knowledge-receipt";

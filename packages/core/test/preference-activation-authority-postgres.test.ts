@@ -9,7 +9,7 @@ import {
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { approveSkill, saveSkill } from "../src/domain/skills";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";

@@ -1,5 +1,5 @@
-import { capabilityCuration } from "@/lib/capabilities";
-import type { CapabilityCatalogItem } from "@/types";
+import { capabilityCuration } from "@opengeni/react/app/lib/capabilities";
+import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 
 /**
  * Product presentation order for the connector browser. The server catalog is
@@ -40,6 +40,19 @@ function connectorPresentationBucket(
   if (curation.curated) return 2;
   if (item.logoAssetPath) return 3;
   return opaqueCatalogName(item.name) ? 5 : 4;
+}
+
+/**
+ * Name of the workspace an "Only me" connector was carried from into its
+ * owner's Personal workspace, or null for connectors this workspace has itself.
+ */
+export function personalExtensionOrigin(
+  item: Pick<CapabilityCatalogItem, "metadata">,
+): string | null {
+  const extension = item.metadata.personalExtension;
+  if (!extension || typeof extension !== "object") return null;
+  const name = (extension as { originWorkspaceName?: unknown }).originWorkspaceName;
+  return typeof name === "string" && name.trim() ? name.trim() : null;
 }
 
 /** Raw hostnames, machine ids, and punctuation-led labels belong after names a human can scan. */

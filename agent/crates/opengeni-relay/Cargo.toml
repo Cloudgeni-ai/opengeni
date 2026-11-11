@@ -59,7 +59,12 @@ base64 = { workspace = true }
 
 # CLI / env config.
 clap = { workspace = true }
+uuid = { workspace = true }
+tokio-tungstenite = { workspace = true }
+serde_urlencoded = "0.7"
 
 [dev-dependencies]
+# The agent's relay hub registers browser frame streams through this trait.
+opengeni-agent-platform = { path = "../opengeni-agent-platform" }
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros", "time", "io-util"] }
 tokio-tungstenite = { workspace = true }

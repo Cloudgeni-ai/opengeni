@@ -1031,8 +1031,12 @@ describe("WorkerRow — cancelled status (explicit)", () => {
     const text = r.container.textContent ?? "";
     expect(text.toLowerCase()).toContain("fail");
     expect(text).not.toContain("Worker interrupted");
-    expect(text).toContain("nested_agent_depth_exceeded");
     expect(text).toContain("Nested-agent depth 4 exceeds effective limit 3.");
+    // The failure code is detail behind the row's disclosure.
+    const row = r.container.querySelector<HTMLElement>("[data-og-agent-row] [role=button]");
+    await actRun(() => row?.click());
+    await flush();
+    expect(r.container.textContent).toContain("nested_agent_depth_exceeded");
     await r.unmount();
   });
 });

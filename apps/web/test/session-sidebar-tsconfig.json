@@ -4,6 +4,8 @@
     "../src/vendor/*.d.ts",
     "session-sidebar-*.ts",
     "session-sidebar-*.tsx",
+    "session-schedule-*.ts",
+    "session-schedule-*.tsx",
     "../../../test/e2e/session-sidebar.browser.e2e.ts"
   ]
 }

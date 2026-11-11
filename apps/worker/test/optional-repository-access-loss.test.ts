@@ -17,14 +17,10 @@ import {
   listSessionEvents,
 } from "@opengeni/db";
 import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
-import {
-  acquireSharedTestDatabase,
-  assistantMessage,
-  MemoryEventBus,
-  ScriptedModel,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { assistantMessage, ScriptedModel } from "@opengeni/testing/scripted-model";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createActivityTestHarness } from "../src/activities";
 
 const INSTALLATION_ID = 9_001;
@@ -86,6 +82,7 @@ describe("optional repository access lost after the session started", () => {
       authorityExpiresAt: new Date(checkedAt.getTime() + 600_000),
       authorityNonce: crypto.randomUUID(),
       repositoryIds,
+      eventRouteSecret: null,
     });
     if (!bound) throw new Error("allowlist binding was not recorded");
   }

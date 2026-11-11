@@ -2,25 +2,25 @@
 name: opengeni
 audience: repo-maintainer-agent
 description: >-
-  Use when editing, operating, extending, documenting, or debugging the OpenGeni
+  Use when editing, operating, extending, documenting, or debugging the Opengeni
   source repository or deployment: architecture, sessions/events, worker
   orchestration, sandbox backends, files/storage, tools/MCP, scheduling,
   configuration, and deployment. For a customer product that consumes a
-  standalone OpenGeni deployment through the SDK or React packages, use the
+  standalone Opengeni deployment through the SDK or React packages, use the
   separate opengeni-client skill instead.
 ---
 
-# OpenGeni
+# Opengeni
 
-This skill is for repo-maintainer agents working in, operating, or changing the OpenGeni repository.
+This skill is for repo-maintainer agents working in, operating, or changing the Opengeni repository.
 
 ## Overview
 
-Use this skill as an orientation layer, not as frozen API documentation. OpenGeni evolves through the codebase, so code wins over this skill whenever they differ.
+Use this skill as an orientation layer, not as frozen API documentation. Opengeni evolves through the codebase, so code wins over this skill whenever they differ.
 
-OpenGeni is a workspace-scoped agent control plane. Public clients talk to an API. The API resolves every protected request to an access grant, persists sessions and events, accepts user/control events, exposes replay/SSE streams, handles uploads, and talks to Temporal. A worker runs OpenAI Agents SDK turns inside a configured sandbox backend. Postgres is durable state, NATS is live fanout, object storage holds uploaded file bytes, Temporal coordinates work and schedules, and MCP servers provide pluggable tools.
+Opengeni is a workspace-scoped agent control plane. Public clients talk to an API. The API resolves every protected request to an access grant, persists sessions and events, accepts user/control events, exposes replay/SSE streams, handles uploads, and talks to Temporal. A worker runs OpenAI Agents SDK turns inside a configured sandbox backend. Postgres is durable state, NATS is live fanout, object storage holds uploaded file bytes, Temporal coordinates work and schedules, and MCP servers provide pluggable tools.
 
-Canonical source repo: `https://github.com/Cloudgeni-ai/opengeni`. This skill may be installed outside that repo, which is normal. If the current workspace is not OpenGeni, first determine whether the user wants client integration against a deployed OpenGeni service, source-level changes, deployment help, or conceptual explanation. For source-level exactness, inspect or fetch the repo; for client integration, ask for or infer the deployed API base URL and inspect the running API/client config where possible.
+Canonical source repo: `https://github.com/Cloudgeni-ai/opengeni`. This skill may be installed outside that repo, which is normal. If the current workspace is not Opengeni, first determine whether the user wants client integration against a deployed Opengeni service, source-level changes, deployment help, or conceptual explanation. For source-level exactness, inspect or fetch the repo; for client integration, ask for or infer the deployed API base URL and inspect the running API/client config where possible.
 
 ## Start With Repository Discovery
 
@@ -39,6 +39,10 @@ Then open the smallest source files that answer the question:
 - API routes: `apps/api/src/routes/`, plus `apps/api/src/app.ts` and `apps/api/src/index.ts`.
 - Core domain/access/billing helpers: `packages/core/src/` (`access/`, `domain/`, `billing/`, and `dependencies.ts`). These moved out of `apps/api`; API routes are HTTP adapters over `@opengeni/core`.
 - Public shapes: `packages/contracts/src/index.ts`, especially workspace, access, billing, usage, session, file, document, schedule, and MCP contracts.
+- Organization API-key policy/preset normalization and all/selected shared-workspace scope:
+  `packages/contracts/src/organization-access.ts`, then `packages/core/src/access/`
+  and `apps/api/src/routes/api-keys.ts`. Explicit policies have exact grants;
+  legacy wildcard semantics are separate. See `docs/product-integration.md`.
 - External host identities and credential authority: `packages/core/src/access/`,
   `packages/contracts/src/external-identities.ts`, and `packages/db/src/connection-authority.ts`.
   Verified external owning-user authority is distinct from a managed login cookie.
@@ -54,17 +58,45 @@ Then open the smallest source files that answer the question:
   fabricated sessions. See `docs/remote-mcp-credentials.md` for cutover status.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
-- Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
+- Feature subsystems: `docs/secrets.md` (vaults, `{{secret:…}}` references and delivery), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/design/automations-and-events.md` (event sources and event-triggered scheduled tasks).
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
+- Subscription policy and lifecycle: `packages/subscriptions/` and
+  `packages/db/src/subscription-core/`, with provider bindings registered in
+  `subscription-core-providers.ts`. Session account choice has one transaction
+  in `subscription-core/session-choice.ts`; legacy provider endpoints project
+  their existing receipts, never duplicate its writer. Check the cutover and
+  retirement runbooks before activation; stored legacy rows are not runtime
+  fallbacks. See `docs/subscription-accounts.md`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
-- Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
+- Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. The deadline requests host-owned graceful worker drain so peer turns checkpoint and resume; the standalone host retains a 100-second exit backstop if cleanup cannot quiesce. Embedded hosts supply their termination policy. Cleanup consumes only exact durable terminal process proof, including independent reaper settlement. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
+- Command-output collection follows durable custody independently of model
+  completion. Inspect foreground finalization in
+  `apps/worker/src/activities/agent-turn/quiescence.ts`, background replay/release
+  in `apps/worker/src/activities/sandbox-lease.ts`, and
+  `packages/db/src/session-background-commands.ts` before diagnosing retention.
+- Parallel title cleanup settles completed results and their separate Codex
+  custody before failure recovery; pending/unknown requests remain fenced.
 - Startup telemetry: `apps/worker/src/observability-metrics.ts` separates blocking
   preparation from background MCP work. Phase durations can overlap; use durable
   milestones for elapsed startup latency. Runtime stream initialization is not
   the provider wire-dispatch milestone. See `docs/run-lifecycle.md`.
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
-  retained Modal command observation uses the versioned task-router byte-offset
+  synchronous filesystem completion is owned by `sandbox/synchronous-command.ts`,
+  with pre-Start SDK stream capture in `sandbox/native-synchronous-collection.ts`.
+  Inspect provider-owned trusted pages, routing capture/settlement and
+  `sandbox/turn-tool-cancellation.ts` together; bounded shell presentation is not
+  lossless output, and observation failure is not physical quiescence.
+  OpenSandbox wire validation and invocation-local dispatch proof live in
+  `sandbox/providers/opensandbox-command-stream.ts`; its adapter's exact-ID
+  physical observer does not consume output. Missing first identity after an
+  attempted dispatch remains unknown and joined, never synthetic terminal proof.
+  Daytona's registered exact native binding and framed command collection live
+  in `sandbox/providers/daytona-command-{binding,frames}.ts` and
+  `daytona-framed-command.ts`; inspect routing's awaited output-release cleanup
+  separately from marker/PGID cancellation. Native session deletion is not exit
+  or stream-completion proof.
+  Retained Modal command observation uses the versioned task-router byte-offset
   boundary in `sandbox/providers/modal-command-control.ts`; output and cursor
   capture is atomic in `packages/db/src/retained-provider-commands.ts`. Never
   reinterpret a legacy batch locator or infer exit from missing output.
@@ -78,9 +110,13 @@ Then open the smallest source files that answer the question:
 - Files/object storage: `apps/api/src/routes/files.ts`, `packages/storage/src/index.ts`.
 - Deployment/operator sources: `packages/deployment`, `docs/deployment.md`, `deploy/helm/opengeni`, `deploy/terraform/`, and `deploy/stacks/`.
 - Knowledge, selective source retention, collection/duplicate discovery (`knowledge_prepare_save`), retrieval and learning policy: read `docs/knowledge.md`, then `apps/api/src/routes/knowledge.ts`, `packages/core/src/domain/knowledge*.ts`, and `packages/db/src/knowledge-entries.ts`. Old Memory and reviewed-Knowledge authoring are retired; conversation history and temporary task notes remain separate.
-- GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`. The separately configured OpenGeni Lens GitHub App reuses the same owner-proof primitives through `apps/api/src/routes/pr-review-github.ts`; its shared webhook still enters the generic PR-review automation source.
+  Useful retention is ordinary work under accepted learning settings, including
+  new Slack sessions. The worker renders those modes and the Knowledge destination
+  in governance; source text and feedback cannot widen policy or access. Older
+  Slack sessions can retain their stored explicit-save restriction.
+- GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, allowlist sync with GitHub (webhooks and listings) in `apps/api/src/github-installation-sync.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`.
 - Connected Machine (bring-your-own-compute / the `selfhosted` backend): API routes `apps/api/src/routes/machines.ts` and `apps/api/src/routes/enrollments.ts`; services `apps/api/src/sandbox/machines.ts` and `apps/api/src/sandbox/enrollment.ts`; the machine-primary turn branch in `apps/worker/src/activities/agent-turn/sandbox-establish.ts` and the clone-guard in `packages/runtime/src/index.ts`; the runtime session at `packages/runtime/src/sandbox/selfhosted/`; the on-machine agent + relay in the `agent/` Rust crate; public behavior in `docs/connected-machines.md`; opt-in UI at the `@opengeni/react/machines` subpath.
-- Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.
+- Web usage examples: `apps/web/src/api.ts`, `packages/react/src/app/types.tsx` (the shared session app layer under `packages/react/src/app/`), relevant UI components.
 - TypeScript SDK: `packages/sdk/src/` (typed client, SSE streaming core with reconnect/replay-by-sequence, proxy re-streaming helpers) and `packages/sdk/README.md`.
 - React hooks + styled components: `packages/react/src/` (hooks on the SDK, timeline projection, ChatComposer/MessageTimeline/SessionStatus/FleetTile, CSS-variable design tokens in `packages/react/styles/`) and `packages/react/README.md`; runnable harness under `packages/react/demo/`.
 - Standalone product integration: `docs/product-integration.md` is canonical for
@@ -95,7 +131,7 @@ rg -n "CreateSessionRequest|ClientSessionEvent|sessionWorkflow|runAgentTurn|crea
 
 ## Client Integration
 
-For external clients, SaaS integrations, SDK wrappers, customer-side coding agents, or UIs on top of OpenGeni, prefer the separate `opengeni-client` skill when available. For TypeScript clients, `@opengeni/sdk` (`packages/sdk`) is the first-party client: typed session/event API, the SSE streaming core (reconnect + replay-by-sequence + dedup), and proxy-through-your-own-API re-streaming helpers. When staying inside this source-level skill, read `references/client-integration.md`. Treat OpenGeni as a service boundary: the client discovers or chooses a workspace, creates sessions under `/v1/workspaces/:workspaceId/...`, streams/replays events, sends follow-up/control events, uploads files, selects resources/tools, and displays approvals/status. Do not require the client to know worker, Temporal, NATS, or sandbox internals except as concepts for status and product behavior.
+For external clients, SaaS integrations, SDK wrappers, customer-side coding agents, or UIs on top of Opengeni, prefer the separate `opengeni-client` skill when available. For TypeScript clients, `@opengeni/sdk` (`packages/sdk`) is the first-party client: typed session/event API, the SSE streaming core (reconnect + replay-by-sequence + dedup), and proxy-through-your-own-API re-streaming helpers. When staying inside this source-level skill, read `references/client-integration.md`. Treat Opengeni as a service boundary: the client discovers or chooses a workspace, creates sessions under `/v1/workspaces/:workspaceId/...`, streams/replays events, sends follow-up/control events, uploads files, selects resources/tools, and displays approvals/status. Do not require the client to know worker, Temporal, NATS, or sandbox internals except as concepts for status and product behavior.
 
 For the canonical external-product shape, the product backend holds an
 organization API key and calls `ensureWorkspace` /
@@ -111,7 +147,11 @@ organization-wide Skill registry or Skill inheritance for this boundary. See
 
 Keep these boundaries explicit:
 
-- Workspace scoping is core. Public operational routes use `/v1/workspaces/:workspaceId/...`; scoped Variable Sets are selected through that boundary but may be organization-, workspace-, or organization-user-owned.
+- Workspace scoping is core. Public operational routes use `/v1/workspaces/:workspaceId/...`; vaults are reached through that boundary but may be organization-, workspace-, user- or task-owned.
+- Session authorization classifies model-account writes neutrally inside core,
+  but existing host ports receive the legacy operation name until explicitly
+  opting in after migrating policy keys. Never retry host denials under aliases;
+  inspect `SessionAuthorizationPort` and `docs/embedding.md` before changing it.
 - External product backends use an **organization API key**. Organization key
   administration uses `/v1/organizations/:organizationId/api-keys`; the key is
   server-held and cannot reach Personal workspaces through organization
@@ -120,7 +160,7 @@ Keep these boundaries explicit:
   kind is `"shared"`; Personal workspaces (`"personal"`) are excluded from
   `ensureWorkspace` and must not be selected through a default-workspace
   fallback.
-- Old unscoped operational routes are deleted, not soft-deprecated. Do not add compatibility aliases unless the user explicitly changes that product decision.
+- The old unscoped operational routes were removed before the 2026-11-03 compatibility policy and stay removed; do not reintroduce them. New changes follow Public API compatibility below.
 - Better Auth is only the managed-mode browser human auth resolver. It is not the tenant model and should not appear in core session/file/document/schedule route code.
 - Managed sign-in method changes belong to `apps/api/src/routes/managed-sign-in-methods.ts`
   and its canonical identity/database guards. Discover the current contract in
@@ -130,10 +170,11 @@ Keep these boundaries explicit:
   authentication, and last-usable-method protection across every login route;
   do not expose raw provider mutation routes or use `trustedProviders` to bypass
   email verification. Login methods are distinct from integration permissions.
-- OpenGeni organization API keys are owned by OpenGeni and use the
+- Opengeni organization API keys are owned by Opengeni and use the
   `Authorization` header. The optional deployment shared key uses
   `x-opengeni-access-key`.
 - Billing, Stripe, prepaid credits, entitlements, usage, and limits belong in billing/access modules. Core route/domain code should check local providers/interfaces, not call Stripe directly.
+- Customer OpenAI/Azure model keys use encrypted shared workspace Connections, with model identity bound to the exact connection and version. Discover the contract in `packages/contracts/src/direct-model-provider.ts` and execution loader in `packages/db/src/index.ts`; never fall back to deployment keys. See `docs/model-providers.md`.
 - Product access mode (`local`, `configured`, `managed`) is separate from deployment/infrastructure profile (`azure-managed`, existing services, local Kubernetes, previews, and so on).
 - RLS is defense-in-depth. Do not claim RLS-backed isolation from app-level checks alone; verify policies with a non-owner DB role and current workspace/account settings.
 
@@ -143,7 +184,7 @@ Keep these concepts straight while working:
 
 - **Account**: managed billing/ownership container for members, workspaces, credits, and billing mirrors.
 - **Workspace**: operational data boundary for sessions, events, files, documents, schedules, GitHub installation bindings, usage, and first-party MCP.
-- **GitHub installation binding**: a workspace-local reference to a GitHub App installation plus its repository allowlist. One GitHub installation may be linked to many OpenGeni workspaces; unlinking one workspace must not mutate another workspace or uninstall the App from GitHub. New binding is currently fail-closed: setup callback parameters are spoofable, and user-installation visibility, repository administrator permission, and an installation request do not prove that the current human may install or configure the App for the target account. Existing trusted bindings are rechecked before platform token mint / GitHub-authenticated run startup. Connected Machines are exempt because they use their own git auth.
+- **GitHub installation binding**: a workspace-local reference to a GitHub App installation plus its repository allowlist. One GitHub installation may be linked to many Opengeni workspaces; unlinking one workspace must not mutate another workspace or uninstall the App from GitHub. New binding is currently fail-closed: setup callback parameters are spoofable, and user-installation visibility, repository administrator permission, and an installation request do not prove that the current human may install or configure the App for the target account. Existing trusted bindings are rechecked before platform token mint / GitHub-authenticated run startup. An owner-proved binding's allowlist then follows GitHub's repository selection for the installation (webhooks plus every listing; removals immediate, additions only from GitHub's live list); see `docs/github-app.md`. Connected Machines are exempt because they use their own git auth.
 - **Access grant**: resolved subject plus permissions for one workspace. Route code should depend on grants and permissions, not on the caller's auth mechanism.
 - **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn. Normal idle closes without a grace timer after durable rechecks and transactional parent-result settlement; late input can start another workflow run of the same session. Keep the legacy timer replay patch and unrelated lifecycle waits intact; see `docs/run-lifecycle.md`.
 - **Turn**: one queued/running unit of agent work inside a session, run as one non-retryable Temporal activity (`runAgentTurn`). Follow-ups, goal continuations, and scheduled task firings become turns. Inside a turn the SDK makes as many model/tool calls as the work needs; run length is bounded by symptoms (no-progress, budget), not by counts or clocks. A graceful worker shutdown preempts an in-flight turn (checkpoint, requeue, resume on a healthy worker) instead of failing the session. See `docs/run-lifecycle.md`.
@@ -159,12 +200,12 @@ Keep these concepts straight while working:
 - **Admission block**: a non-transient preclaim persistence rejection parks accepted work without failing or consuming it. Inspect `sessions.admission_block`, the worker classifier and `docs/run-lifecycle.md`; authorized Resume or new Send/Steer explicitly rechecks, never grants missing authority. Operational DB failures retain timed recovery.
 - **Control observation**: unavailable scoped reads are not deletion or idle truth; exact still-owned attempts are not successor admission. Versioned observers wait on signals/bounded control timers, retain outbox obligations, and inspect exact Temporal identity without replacing physical-writer proof. See `docs/run-lifecycle.md` before changing these paths.
 - **Session memory (three stores, three jobs)**: `session_history_items` is exact accepted conversation truth fed to the model (default read path); `agent_run_states` is the serialized RunState blob, used only to resume a turn paused for a human approval; `session_events` is the exact append-only human-audit timeline for accepted payloads and is never fed back to the model. Protocol/size projections are deterministic and must not classify or rewrite content. Sandbox recovery state lives separately in `sandbox_session_envelopes`. See `docs/run-lifecycle.md`.
-- **Variable Set**: named organization-, workspace-, or organization-user-owned collection of authenticated-encrypted secret env vars, attached to a session/scheduled-task and injected into the sandbox at run time. Attachment and runtime use require independent `variable-sets:attach` and `variable-sets:use` authority; exact plaintext access is a separate explicit permissioned operation with metadata-only audit. Never expose values through unrelated list/detail projections. See `docs/variable-sets.md`.
+- **Vault**: organization-, workspace-, user- (Only me) or task-owned collection of items with authenticated-encrypted, versioned fields (or a linked 1Password/host provider vault). Agents use values only through `{{secret:…}}` references resolved at the execution boundary under the acting human's reach and the session's vault policy; nothing is injected into sandbox env. Plaintext reveal is a separate `secrets:read` operation with metadata-only audit. See `docs/secrets.md`.
 - **Event log**: append-only session timeline with per-session sequence numbers. It supports replay, SSE reconnect, UI timeline projection, and auditing.
 - **SSE/NATS split**: Postgres is replay/source of truth. NATS is live fanout. If live events are missed, API should backfill from Postgres by sequence.
 - **Temporal**: orchestration, signals, timers, schedules, and worker dispatch. Token streams/tool output should not be pushed through workflow history unless the code intentionally changes that design.
 - **Worker activity**: side-effect boundary where the OpenAI Agents SDK actually runs. Treat model/tool/sandbox/cloud calls as side-effectful.
-- **Sandbox**: pluggable execution environment behind the OpenAI Agents SDK sandbox interface. OpenGeni should describe the contract and selected backend, not pretend the backend is hard-coded. The shipped `SandboxBackend` enum is broad (currently twelve members), so never claim it is only Docker/Modal/local/none.
+- **Sandbox**: pluggable execution environment behind the OpenAI Agents SDK sandbox interface. Opengeni should describe the contract and selected backend, not pretend the backend is hard-coded. The shipped `SandboxBackend` enum is broad (currently twelve members), so never claim it is only Docker/Modal/local/none.
 - **Connected Machine**: a user's own machine (enrolled through the `agent/` Rust agent) that acts as a first-class *primary* compute target, co-equal with the managed cloud sandbox — a sibling compute target, not a backend overlay bolted onto Modal. Its enum value is `selfhosted`. A machine-targeted turn establishes a `SelfhostedSession` directly and does NOT create, lease, or bill a cloud (Modal) box; the platform mints no GitHub token for it and never clones repos onto it (the machine uses its own git auth and already owns its filesystem). Runs execute at a per-session `workingDir` (default = the agent's launch dir), not a fixed `/workspace`. The whole feature is gated by `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` (default off). See `docs/connected-machines.md` and `references/sandbox-configuration.md`.
 - **Resources**: external context mounted or made available to a run, commonly repositories and uploaded files.
 - **Tools**: currently MCP-first. Tool refs select configured MCP servers. Built-ins are defaults, not limits.
@@ -191,6 +232,13 @@ Do not rely on this skill for exact route lists, env var lists, event types, mod
 
 ## Code Change Workflow
 
+For informational agent input, inspect `packages/db/src/inbox-execution-context.ts`
+and `docs/durable-agent-inputs.md`. Ordinary same-human messages use the receiving
+chat's last started user/API context; selected-account differences alone do not
+split batches. Other humans, restricted sources, schedules and Steer retain
+explicit authority. The context pointer advances on durable first `turn.started`,
+not queue/claim or recovery, and inherited receipts retain their generations.
+
 Before editing, identify which layer owns the behavior:
 
 - Public API or validation: routes, core domain helpers, contracts, tests.
@@ -203,6 +251,71 @@ Before editing, identify which layer owns the behavior:
 - Scheduling: scheduled task contracts/routes/core domain helpers, Temporal schedule mapping, dispatch activity.
 - Event-triggered automation: automation contracts/routes/core adapter registry, FORCE-RLS source/event/run state, bounded Temporal dispatch, and the provider adapter layered above it.
 - UI: `apps/web` API helpers/types/components.
+
+### Model-facing text (prompts and tool descriptions)
+
+Every model request carries the prompt modules in
+`packages/runtime/src/agent-instructions/` and every attached tool's
+description and schema, so each sentence there is paid on every call of every
+session. Embedded product agents pay for it too, and their customers compare
+the cost with leaner platforms. Before you add or change this text:
+
+- Gate it on the fact that makes it relevant: a capability, an attached tool,
+  a sandbox, a feature flag or a session kind. It must disappear when that fact
+  is absent. Never write always-on text about a feature that can be off, and
+  name a tool only where it is attached.
+- Say each rule once, where it belongs: tool mechanics go in that tool's
+  description, and a cross-cutting rule goes in the section that owns it. Do
+  not restate a rule elsewhere for emphasis.
+- Fix a behaviour problem by changing the sentence that causes it before you
+  add a new one, and check whether your change makes existing text redundant.
+  Add an example or an edge case only when it changes behaviour.
+- Keep the cached prefix stable. Per-turn data, times and caller context go in
+  the user message, never in instructions or tool definitions (see
+  `AGENTS.md`).
+- Measure the change. Record the byte or token delta in
+  `agent-instructions/PROMPT_CHANGELOG.md`, keep the prompt budget and parity
+  tests green, and do not raise a budget without a reason stated in the PR.
+- Shortening existing behavioural text needs before/after behaviour evidence,
+  for example from `scripts/agent-behavior-eval`, because most of it guards a
+  known failure. Omitting text for a feature that is switched off does not.
+
+### Public API compatibility
+
+Canonical policy: `docs/design/api-compatibility-policy.md`. Existing customer
+integrations must keep working across every production update. Before changing
+an API route, a `@opengeni/contracts` schema, the SDK, React exports or
+documented behaviour, decide how the change stays compatible:
+
+- The public surface is every SDK-reachable `/v1` route and its request and
+  response shapes (including every route a **published** SDK calls), session
+  event types and payload fields, `@opengeni/sdk`/`@opengeni/react` exports,
+  public ingress routes, and the defaults, error codes and semantics the docs
+  describe. Web-only routes, worker protocols and the database are internal.
+- Never remove, rename, retype or narrow any of it. A major release, changeset
+  or deprecation period does not permit a break; neither does marking an
+  existing public method `@internal` or retiring a feature.
+- Make it additive: a new optional field whose absence keeps the old behaviour
+  and defaults, a new response field, event type, error code or route.
+- For a redesign, add a new API version beside the old one: thin
+  version-specific adapters (routing, validation, response mapping) over
+  shared `packages/core` logic. Mark the old surface `@deprecated` with its
+  replacement; it keeps working.
+- Run `bun run public-api:refresh` for additive changes and
+  `bun run check:public-api` before pushing. A breaking finding means
+  redesign, not allowlisting. Do not add a `breaking-changes.json` entry, a
+  `Compatibility exception:` changeset line or an `--accept-gaps` reason
+  without a recorded security exception or owner approval for that exact
+  change.
+- The checks cannot see behaviour, defaults or payload semantics; state them in
+  the PR template's "External API impact" section and keep them unchanged
+  unless the caller opts in.
+- Do not declare a major release of any package in a changeset. All published
+  packages share one lockstep version, so any major (including
+  `@opengeni/contracts` or `@opengeni/runtime`) ships `@opengeni/sdk` and
+  `@opengeni/react` majors; CI rejects it without a linked exception.
+- After a stable SDK publication, record it with
+  `bun run public-api:published-refresh` so the check covers that version.
 
 For pull-request delivery, preserve immutable candidates across a moving base:
 
@@ -257,7 +370,7 @@ For infrastructure and deployment work, read `references/deployment-infrastructu
 
 Do not claim a deployment is operational from static validation, rendered artifacts, deterministic smoke responses, or a sandbox-disabled profile alone. Real deployment confidence requires the selected profile's live dependencies, model provider, sandbox backend, object storage, auth boundary, and conformance checks to match the behavior being claimed.
 
-For production Kubernetes, use official upstream charts/operators or managed services for platform dependencies. OpenGeni's chart should own OpenGeni workloads and integration resources; built-in Postgres, Temporal, NATS, or MinIO templates are disposable conformance fixtures only and must not be described as the production path.
+For production Kubernetes, use official upstream charts/operators or managed services for platform dependencies. Opengeni's chart should own Opengeni workloads and integration resources; built-in Postgres, Temporal, NATS, or MinIO templates are disposable conformance fixtures only and must not be described as the production path.
 
 ## File Upload And Sandbox Discovery
 
@@ -281,6 +394,22 @@ every sandbox file, live mid-session remount, or an unbounded artifact system.
 
 ## Sandbox Backend Discovery
 
+Tool approval work starts at `docs/tool-approvals.md`. Connector Allow/Ask/Block
+choices have one resolver; legacy flags are recommendations, not extra floors.
+Keep live access checks independent. Durable Codemode review preserves original
+attempt/catalog provenance and adopts exact stored operations into a current
+authorized attempt; waiting releases capacity and uncertain writes never replay.
+Web, React, SDK and Slack consume shared saved review facts with scoped details.
+Check migration compatibility, owned clients and frozen selections together.
+
+Modal command-start transport safety spans the native router and the pinned SDK
+patch, including internal setup, path/filesystem and archive helpers. Only local
+pre-dispatch proof permits finite same-turn recovery; preserve typed causes
+through SDK wrappers and never replay an uncertain Start. See `docs/run-lifecycle.md`.
+Published runtime consumers use unpatched Modal: do not import patch-added error
+exports. Keep native errors runtime-owned and recognize genuine patched SDK
+boundaries by their own non-enumerable Symbol marker, never names or RPC text.
+
 Lease-owned Modal creation is fenced at `modal-create-boundary.ts`, before the
 physical RPC, and attributed through `modal-create-session.ts` before setup.
 Unknown outcomes retain their epoch/checkpoint. Historical positive discovery
@@ -298,11 +427,28 @@ For sandbox pluggability or adding a backend:
 6. Find environment/secret injection and any sandbox lifecycle hook logic.
 7. Check tests for backend expectations.
 
-Describe the backend contract in terms of the OpenAI Agents SDK sandbox client/session capabilities used by OpenGeni. Add a new backend by extending contracts/config, wiring a compatible SDK sandbox client, supporting manifests/resources/resume as needed, and adding tests.
+Describe the backend contract in terms of the OpenAI Agents SDK sandbox client/session capabilities used by Opengeni. Add a new backend by extending contracts/config, wiring a compatible SDK sandbox client, supporting manifests/resources/resume as needed, and adding tests.
 
 For sandbox configuration work, read `references/sandbox-configuration.md`. Use it when configuring any sandbox backend (Docker, Modal, local, none, the cloud backends, or a Connected Machine / `selfhosted`), deciding which environment variables enter the sandbox, debugging resource mounts, explaining sandbox preparation profiles and lifecycle hooks, adding a sandbox backend, or checking what claims are safe for docs/marketing.
 
 ## Tools And MCP Discovery
+
+For known current-human tool calls, inspect `apps/api/src/workspace-tool-target.ts`
+and the targeted contracts in `packages/contracts/src/tool-catalog.ts`. Resolve
+only the selected authorized registry/account route before constructing providers;
+do not add full-workspace discovery as a fallback. Definition pins are full-entry
+preconditions, never authority. Version-2 approvals bind the existing executable
+effect digest and Site tuple, separately from private authority, and retain the
+v1 operation tombstone namespace.
+For raw/local targets lacking adapter private authority, use the runtime's
+existing executable-authority digest and exact selected configuration, never
+the public-catalog fallback; preserve v1/frozen semantics. Targeted requests use one
+live fence (`apps/api/src/workspace-tool-target-fence.ts`): each physical callback
+evaluates caller, Site, selected route (narrow reads) and live action policy once,
+after its last credential step; never share or cache decisions, never lock or
+write the key inside it, and start no further part after its deadline; do not change
+frozen worker/Codemode policy semantics. SDK/Site adoption and explicit legacy mode are documented in
+`packages/sdk/README.md`; local previews retain frozen Codemode authority.
 
 For unified Skills work, start with `docs/design/skills-system.md`. Server-side
 file primitives and packaged guidance live in `packages/runtime/src/skill-files.ts`,
@@ -323,10 +469,28 @@ activation guards belong to the maintenance cutover, not a permanent fallback.
 
 For tools and MCP work, distinguish:
 
+Required first-party MCP setup outages use paced same-turn recovery without a
+retry cutoff; only runtime-verified connect/list transport failures qualify.
+Inspect `provider-recovery-policy.ts`, the DB provider-recovery clock, and
+`docs/run-lifecycle.md` before changing that boundary. External tools, protocol
+rejections, and uncertain tool mutations must not inherit setup-wait policy.
+
 - MCP tool providers selected by session/turn/scheduled-task config.
 - First-party MCP servers exposed by the API.
-- Built-in SDK sandbox capabilities for shell/files, and OpenGeni's separate Skill catalog and reader.
+- Built-in SDK sandbox capabilities for shell/files, and Opengeni's separate Skill catalog and reader.
 - Tools available inside the sandbox image, such as CLIs.
+
+Conversation target context is non-authoritative: inspect
+`packages/db/src/session-target.ts` and `docs/session-monitoring-mcp.md` for
+`session_target_get/set` and exact Send/Steer receipt tracking. Selection must
+never transfer voice, dispatch work, or replace live session authorization.
+
+Configured agents receive capability-gated prompt modules under
+`packages/runtime/src/agent-instructions/`; media guidance belongs to the media
+module, while deferred discovery mechanics remain always on. Inspect the
+runtime's current authorized tool catalog before concluding a tool is absent.
+Integration catalogs and sandbox CLI inventories do not enumerate runtime
+media adapters. Literal-prefix recovery hints never load schemas or grant access.
 
 Managed Codemode clients are release-owned, not image-version-owned. Inspect
 `packages/runtime/src/sandbox/codemode-client.ts` and the runtime/process build
@@ -335,9 +499,30 @@ content-addressed clients during setup; per-exec PATH and
 `OPENGENI_CODEMODE_CLIENT_MODULE` select the release without changing the manifest.
 Do not repair stale clients by weakening catalog integrity or choosing npm latest.
 
-Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point OpenGeni at a different MCP server if current config supports it.
+Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Account-qualified identity projection is shared by worker and current-caller gateways in `packages/core/src/domain/mcp-account-routes.ts`; compare exact catalog identities when debugging Site or OAuth tool availability. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point Opengeni at a different MCP server if current config supports it.
 
 ## Scheduling Discovery
+
+For chat Archive, inspect `archiveHumanSessionWorkstream` and the archive request
+contract. There is one archive: it is for everyone, needs control of the chat,
+stops the chat's work, offers Undo for a few seconds and then moves the chat to
+long-term storage for good (read-only, never restored). See
+`docs/session-storage-lifecycle.md` and `docs/run-lifecycle.md`.
+
+Scheduled bot posting uses ordinary selected capabilities and instructions, not a
+separate schedule-only approval field. Slack installation availability, incoming
+channel routing and workspace automation settings have distinct owners; see
+`docs/slack-bot.md` before changing them. Personal Add and Reconnect preserve
+separate Slack team/user identities.
+
+Workspace default machines apply to fresh sessions and schedules that explicitly
+follow the workspace default. Accepted runs and existing chats retain their
+placement; missing or unavailable selected machines never silently fall back.
+See `docs/connected-machines.md` for resolution and replay boundaries.
+
+The stock Schedules chat shortcut sends the request and time zone. Its setup
+procedure lives in `packages/runtime/src/bundled_schedule_skills/schedules/SKILL.md`,
+selected through the worker's configured bundled-Skill rules.
 
 For queueing or scheduling work:
 
@@ -353,7 +538,7 @@ Prefer precise language: "DB-backed per-session queued turns" is different from 
 
 Use careful wording:
 
-- "OpenGeni is self-hostable" if the repo still includes local/deployable API, worker, DB, NATS, Temporal, and object storage config.
+- "Opengeni is self-hostable" if the repo still includes local/deployable API, worker, DB, NATS, Temporal, and object storage config.
 - "Session-based public API" if routes/contracts still expose sessions/events/turns.
 - "Durable replayable event log" if session events are still stored and replayed by sequence.
 - "Temporal coordinates work" if workflows/activities remain present.
@@ -384,6 +569,8 @@ Update this skill in the same change whenever the repo changes any of these:
 - Product integration boundary: organization API-key administration,
   `ensureWorkspace`, organization-workspace wire kind, Personal-workspace
   exclusion, and external inline Skill ownership.
+- Public API compatibility rules or their checks (keep the summary above in
+  line with `docs/design/api-compatibility-policy.md`).
 - Pluggability model: sandbox backend contract, MCP tool config, model provider config, object storage, GitHub integration.
 - Compute targeting: the Connected Machine (`selfhosted`) primary-compute model, the machines/enrollment routes, per-session `workingDir`, and the `targetSandboxId` create field.
 - Source layout: if important files move or names change.

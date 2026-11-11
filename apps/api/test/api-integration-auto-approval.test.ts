@@ -1,9 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import {
-  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
-  autoApprovalForbidden,
-  type IntegrationDefinition,
-} from "@opengeni/capabilities";
 import type { AccessGrant, InstallApiIntegrationRequest } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import { validatedIntegrationInstallInput } from "../src/routes/api-integrations";
@@ -66,21 +61,32 @@ describe("autoApprovedTools governance", () => {
     ).toThrow(HTTPException);
   });
 
-  test("a curated definition can forbid exempting specific operations", () => {
-    const governed: IntegrationDefinition = {
-      ...GOOGLE_DRIVE_INTEGRATION_DEFINITION,
-      autoApproval: { forbiddenOperationKeys: ["drive.files.update"] },
-    };
-    expect(autoApprovalForbidden(governed, "drive.files.update")).toBe(true);
-    expect(autoApprovalForbidden(governed, "drive.files.delete")).toBe(false);
-    expect(
-      autoApprovalForbidden(
-        { ...governed, autoApproval: { forbiddenOperationKeys: "all" } },
-        "anything",
-      ),
-    ).toBe(true);
-    expect(autoApprovalForbidden(GOOGLE_DRIVE_INTEGRATION_DEFINITION, "drive.files.update")).toBe(
-      false,
+  test("a member installs without choosing auto-approved tools, never with them", () => {
+    const member = {
+      ...grant,
+      permissions: ["connections:read", "connections:write"],
+    } as AccessGrant;
+    for (const autoApprovedTools of [["drive_files_update"], []]) {
+      let status = 0;
+      try {
+        validatedIntegrationInstallInput(
+          member,
+          member.workspaceId,
+          request(autoApprovedTools),
+          resolved("curated"),
+        );
+      } catch (error) {
+        status = (error as { status?: number }).status ?? -1;
+      }
+      expect(status).toBe(403);
+    }
+    const { autoApprovedTools: _omitted, ...withoutChoice } = request([]);
+    const input = validatedIntegrationInstallInput(
+      member,
+      member.workspaceId,
+      withoutChoice as InstallApiIntegrationRequest,
+      resolved("curated"),
     );
+    expect(input.autoApprovedTools).toBeUndefined();
   });
 });

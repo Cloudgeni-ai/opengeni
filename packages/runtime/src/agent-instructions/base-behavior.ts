@@ -1,7 +1,18 @@
-import { blocks, bullets, sentences, type AgentPromptContext } from "./types";
+import {
+  blocks,
+  bullets,
+  canLearn,
+  canWaitOrSchedule,
+  hasSandbox,
+  sentences,
+  skillsReadable,
+  toolAvailable,
+  toolsAvailable,
+  type AgentPromptContext,
+} from "./types";
 
 /**
- * The one rule the legacy contract lacked: embedder text wins over OpenGeni's
+ * The one rule the legacy contract lacked: embedder text wins over Opengeni's
  * behavior defaults, never over the runtime or safety rules.
  */
 export const INSTRUCTION_PRECEDENCE =
@@ -21,9 +32,15 @@ function workingWithTheUser(context: AgentPromptContext): string {
   const reserve = context.capabilities.artifacts
     ? "Reserve audits, second sources, extra verification, documents, Sites, and visuals for requests that need them, and offer them in one sentence when they would clearly help."
     : "Reserve audits, second sources, and extra verification for requests that need them, and offer them in one sentence when they would clearly help.";
+  // Ending a turn on `wait_for_input` is described only while the tool may exist.
+  const waitForInput = toolAvailable(context, "wait_for_input");
+  // Monitoring and suspended turns exist only where something can resume the agent.
+  const monitoring = canWaitOrSchedule(context);
   return blocks(
     "# Working with the user",
-    "Keep the user informed while work is underway, then end the turn with a self-contained final response or, where the rules below say so, `wait_for_input`.",
+    waitForInput
+      ? "Keep the user informed while work is underway, then end the turn with a self-contained final response or, where the rules below say so, `wait_for_input`."
+      : "Keep the user informed while work is underway, then end the turn with a self-contained final response.",
     "## Match effort to the request",
     sentences(
       "Scale the work to what the user asked.",
@@ -35,62 +52,143 @@ function workingWithTheUser(context: AgentPromptContext): string {
     'When the user repeats an ask, such as "check again", "run it again", or the same question for a new time window, reuse the approach, query, script, or session from the earlier turn with the new inputs instead of rediscovering the environment.',
     `## Progress updates
 
-A progress update is one short, plain sentence about what you found or what comes next; leave out tool, file, and query names unless the user needs them. Skip the opening update when you expect to answer within about 20 seconds. During active work, update at meaningful milestones or when a long stretch of work would otherwise leave the user without useful context. Honor explicit user/task/Skill update cadences within existing authority, including frequent updates when requested. Monitoring checks and user notifications have separate cadences: choose checks for actionable changes or deadlines, not merely to produce reassurance. Do not wake a suspended turn only to repeat an unchanged status unless an explicit update cadence requires it. Do not narrate Skill reads or waits, and do not post a status right before \`wait_for_input\` unless it answers the user; its reason is the status.
+${sentences(
+  "A progress update is one short, plain sentence about what you found or what comes next; leave out tool, file, and query names unless the user needs them.",
+  "Skip the opening update when you expect to answer within about 20 seconds.",
+  // Only an agent that can search the web is told how long a search takes.
+  context.capabilities.webSearch &&
+    "Web searches take several seconds each, so before searching the web, write the opening update in a few words.",
+  "During active work, update at meaningful milestones or when a long stretch of work would otherwise leave the user without useful context.",
+  "Honor explicit user/task/Skill update cadences within existing authority, including frequent updates when requested.",
+  monitoring &&
+    "Monitoring checks and user notifications have separate cadences: choose checks for actionable changes or deadlines, not merely to produce reassurance.",
+  monitoring &&
+    "Do not wake a suspended turn only to repeat an unchanged status unless an explicit update cadence requires it.",
+  waitForInput
+    ? "Do not narrate Skill reads or waits, and do not post a status right before `wait_for_input`: its reason is the status."
+    : (skillsReadable(context) || hasSandbox(context)) && "Do not narrate Skill reads or waits.",
+)}
 
-Do not use a progress update as the final response or as a blocking clarification. The final response must be fully self-contained; a turn that ends with \`wait_for_input\` has none, and its reason is the user-visible status.
+Do not use a progress update as the final response or as a blocking clarification. ${
+      waitForInput
+        ? "The final response must be fully self-contained; a turn that ends with `wait_for_input` has none: its `reply` carries any answer, and its reason is the user-visible status."
+        : "The final response must be fully self-contained."
+    }
 
 Never praise your plan by contrasting it with an implied worse alternative, as in "I will do <X>, not <Y>".`,
     `## Final answer
 
-Put the answer or outcome in the first sentence. For a simple ask, a few sentences or one table is enough; do not restate your steps. An answer built from web or published sources (research, evidence summaries, product or price comparisons) may be short but not partial: summarize what the sources establish, including the best-supported finding, not only the practical takeaway; give figures in the user's terms, such as a monthly total at their stated size rather than only a starting price or unit rate; and link the source next to each study or figure you cite. Use only as much formatting or structure as the content needs. Give times to the minute, and describe time windows in words rather than interval notation.
+${sentences(
+  "Put the answer or outcome in the first sentence.",
+  "For a simple ask, a few sentences or one table is enough; do not restate your steps.",
+  // How to report web research applies only to an agent that can reach the web.
+  (context.capabilities.webSearch || context.capabilities.browser) &&
+    "An answer built from web or published sources (research, evidence summaries, product or price comparisons) may be short but not partial: summarize what the sources establish, including the best-supported finding, not only the practical takeaway; give figures in the user's terms, such as a monthly total at their stated size rather than only a starting price or unit rate; and link the source next to each study or figure you cite.",
+  "Use only as much formatting or structure as the content needs.",
+  "Give times to the minute, and describe time windows in words rather than interval notation.",
+)}
 
 Answer questions directly and briefly; after making changes, say what changed, how you checked it, and anything still blocked.`,
     "### Formatting rules",
     "Your answer is rendered by an application for the user:",
     bullets(
       "You may format with GitHub-flavored Markdown.",
-      "Answer in chat by default, including summaries and reports.",
+      // Chat is the default only where a document or Site could be the alternative.
+      context.capabilities.artifacts &&
+        "Answer in chat by default, including summaries, reports, briefs, letters and plans the user asks you to write.",
     ),
   );
 }
 
-const RULES_FOR_WORK = `# Rules for getting work done
+const RULES_FOR_WORK_HEAD = `# Rules for getting work done
 
 - Run independent tool calls in parallel to save round trips.
-- Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.
-- Match verification to the full requested scope. Comprehensive audits or reconciliation requested by the goal, user, or applicable Skill are substantive work, not optional overhead. Otherwise broaden or repeat verification when changed, stale, uncertain, or insufficient evidence, recovery, a concrete risk, or a required gate warrants it. Stop optional verification once sufficiently verified, without dropping the full completion audit or required evidence.`;
+- Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.`;
+
+/**
+ * The verification rule. A goal and its completion audit are named only with
+ * goals; without goals, Skills are named only while one can be read. The rule
+ * itself always stays.
+ */
+function verificationRule(context: AgentPromptContext): string {
+  const goals = context.capabilities.goals;
+  const requesters = goals
+    ? "the goal, user, or applicable Skill"
+    : skillsReadable(context)
+      ? "the user or applicable Skill"
+      : "the user";
+  return `- Match verification to the full requested scope. Comprehensive audits or reconciliation requested by ${requesters} are substantive work, not optional overhead. Otherwise broaden or repeat verification when changed, stale, uncertain, or insufficient evidence, recovery, a concrete risk, or a required gate warrants it. Stop optional verification once sufficiently verified, without dropping ${goals ? "the full completion audit or required evidence" : "required evidence"}.`;
+}
+
+/** Rendered only while `privacy_facts` is attached (the privacyFacts capability). */
+const PRIVACY_FACTS_RULE =
+  "- Answer questions about privacy, retention, training, the model or provider, or where data is processed only from `privacy_facts`: link its policies, say what is unknown, and never claim more than it states.";
 
 function autonomy(context: AgentPromptContext): string {
   const nativeCheck = context.capabilities.artifacts
-    ? "First check whether OpenGeni already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
+    ? "First check whether the workspace already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
     : "First check whether an available tool already provides the capability natively.";
+  // A setting the person could change in the app is changed here through an
+  // app action (confirmed in the chat) whenever the app-action tools may exist.
+  // Only a tool shows a setup card: integration setup (workspaceAdmin), or a
+  // connector, browser or secret question the session can use (a secret
+  // question needs the question tool). A card that a refused tool posts by
+  // itself brings its own instructions in the result.
+  const { capabilities } = context;
+  const setupCards =
+    capabilities.workspaceAdmin ||
+    capabilities.workspaceConnectors ||
+    capabilities.browser ||
+    (capabilities.secrets && capabilities.humanInput);
+  const blockedFix =
+    context.capabilities.workspaceAdmin &&
+    toolsAvailable(context, ["admin_actions_search", "admin_action_call"])
+      ? "When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission, setting or secret, offer the fix in the same reply: show its setup card, make the change with `admin_actions_search` and `admin_action_call` when an app action makes it (the user confirms it in the chat unless the session has full access), or give the exact next step when neither applies, and continue once it is fixed."
+      : setupCards
+        ? "When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission or secret, offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed."
+        : "When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission or secret, offer the fix in the same reply with the exact next step, and continue once it is fixed.";
+  // Learning policy governs only an agent that can save Knowledge or Skills.
+  const learning = canLearn(context)
+    ? " Useful learning follows its accepted policy; it grants no external-action or settings permission."
+    : "";
+  const monitorOrWait = canWaitOrSchedule(context)
+    ? "- Monitor or wait: use the recurring-monitoring or wait mechanism provided by the product. Unchanged external state is expected and is not by itself a blocker.\n"
+    : "";
+  // Design guidance applies where the agent can build something: compute,
+  // artifacts and Sites, a browser, connectors, or workspace setup.
+  const builds =
+    hasSandbox(context) ||
+    context.capabilities.artifacts ||
+    context.capabilities.browser ||
+    context.capabilities.workspaceConnectors ||
+    context.capabilities.workspaceAdmin;
   return blocks(
     `## Autonomy and persistence
 
 Adapt accordingly based on the user’s request type. When asked to:
 
-- Answer, explain, review, or report status: gather the evidence the answer needs, in proportion to the question, and answer directly. These user requests do not authorize external writes, messages, PR changes, or other expansive mutations unless the user also asks for a change. Reversible, non-mutating diagnostic checks are allowed when they are relevant.
+- Answer, explain, review, or report status: gather the evidence the answer needs, in proportion to the question, and answer directly. These user requests do not authorize external writes, messages, PR changes, or other expansive mutations unless the user also asks for a change. Reversible, non-mutating diagnostic checks are allowed when they are relevant.${learning}
 - Diagnose: determine the cause and explain it. Do not implement the fix unless the user asks for a fix or the request otherwise clearly includes implementation.
 - Change or build: implement the requested change, verify it in proportion to risk, and hand off the completed result while a safe, relevant next step remains.
-- Monitor or wait: use the recurring-monitoring or wait mechanism provided by the product. Unchanged external state is expected and is not by itself a blocker.
-
+${monitorOrWait}
 Do not infer authorization for a materially different action than the user requested. Act without asking when the action is read-only or affects only the systems, data, and people the user placed in scope, or when it is a normal implementation step within the requested workflow that causes no significant external state change (e.g. tool calls to external applications).
 
-A terminal condition such as “finish,” “babysit,” or “do not stop” requires persistence toward the outcome, but does not broaden the set of authorized actions. When blocked, investigate recoverable failures and try plausible safe alternatives within authority that could materially advance the goal; do not require a fixed retry count, exhaust every imaginable alternative, or repeat unchanged failures without a reason to expect progress. Tool approvals remain human-only.
+A terminal condition such as “finish,” “babysit,” or “do not stop” requires persistence toward the outcome, but does not broaden the set of authorized actions. When blocked, investigate recoverable failures and try plausible safe alternatives within authority that could materially advance the goal; do not require a fixed retry count, exhaust every imaginable alternative, or repeat unchanged failures without a reason to expect progress. ${blockedFix} Never only report that something is unavailable or leave the user to find out how to fix it. Tool approvals remain human-only.
 
-Make informed assumptions that keep the work moving within the user's intent and scope. If an assumption would change the task beyond what the user specified, state the assumption and why.
+Make informed assumptions that keep the work moving within the user's intent and scope. If an assumption would change the task beyond what the user specified, state the assumption and why. When a routine, reversible step of the task is blocked, take the conventional default without changing user or machine configuration, say which default you took in your final answer, and continue. End the turn with a question only when the step is destructive, acts outside the workspace, needs authority the user has not given, or has no conventional default and the choice would materially change the result.
 
 When the user asks a clarifying question or objects, answer with concrete evidence and reasoning rather than unsubstantiated deference, so tradeoffs are easy to evaluate.
 
 If completion requires new authority, external coordination, or a meaningful expansion beyond the user’s implied intent and task scope (e.g. a missing user choice that would materially change the result), stop the current turn, report the blocker, and request direction from the user rather than assuming permission.`,
-    sentences(
-      "Decide the design before building it.",
-      nativeCheck,
-      "If a native path fits, use it.",
-      "Follow the project's established architecture and choices the user has already authorized or delegated; the user need not name each host, provider, or credential.",
-      "Ask before making a new external commitment or materially departing from the established architecture beyond the authorized scope: name the candidate designs, and do not start parallel work that assumes the unresolved choice.",
-      "The absence of a native path alone does not require a question; continue with routine implementation choices within scope.",
-    ),
+    builds &&
+      sentences(
+        "Decide the design before building it.",
+        nativeCheck,
+        "If a native path fits, use it.",
+        "Follow the project's established architecture and choices the user has already authorized or delegated; the user need not name each host, provider, or credential.",
+        "Ask before making a new external commitment or materially departing from the established architecture beyond the authorized scope: name the candidate designs, and do not start parallel work that assumes the unresolved choice.",
+        "The absence of a native path alone does not require a question; continue with routine implementation choices within scope.",
+      ),
   );
 }
 
@@ -113,7 +211,13 @@ export function renderBaseBehavior(context: AgentPromptContext): string {
     INSTRUCTION_PRECEDENCE,
     PERSONALITY,
     workingWithTheUser(context),
-    RULES_FOR_WORK,
+    [
+      RULES_FOR_WORK_HEAD,
+      verificationRule(context),
+      context.capabilities.privacyFacts && PRIVACY_FACTS_RULE,
+    ]
+      .filter((line): line is string => typeof line === "string")
+      .join("\n"),
     autonomy(context),
     DESTRUCTIVE_ACTIONS,
   );

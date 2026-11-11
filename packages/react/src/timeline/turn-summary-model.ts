@@ -1,0 +1,340 @@
+// Pure turn-summary model shared by the web and native renderers: facet definitions,
+// the summary context, status types and duration formatting. No DOM, no styling.
+import type { ReactNode } from "react";
+import type { ActivityItem, ToolCallItem, TurnOutcome } from "./types";
+import type { OpenGeniText } from "../messages/runtime";
+
+export const BUILT_IN_TURN_SUMMARY_FACET_IDS = [
+  "steps",
+  "files",
+  "commands",
+  "screenshots",
+  "memories",
+  "compacted",
+  "duration",
+] as const;
+
+export type BuiltInTurnSummaryFacetId = (typeof BUILT_IN_TURN_SUMMARY_FACET_IDS)[number];
+
+export type TurnSummaryContext = Readonly<{
+  /** Every normalized activity item folded into this summary. */
+  items: readonly ActivityItem[];
+  /** Tool calls from `items`, retained in timeline order for convenient aggregation. */
+  toolCalls: readonly ToolCallItem[];
+  /** The settled turn verdict, or absent for a neutral/incomplete cluster. */
+  outcome: TurnOutcome | undefined;
+  /** The bounded failure reason rendered by the enclosing summary, when present. */
+  failureText: string | undefined;
+  /** Total turn duration when the enclosing group has both valid timestamps. */
+  durationMs: number | undefined;
+  /** False when any projected activity is still running or streaming. */
+  settled: boolean;
+  /**
+   * Adjacent compaction landmarks next to this fold. Landmark remains the
+   * primary UI; this is a secondary chip signal only.
+   */
+  contextCompactionCount: number;
+  /** Text in the host's language, for facets that show words. */
+  t: OpenGeniText;
+}>;
+
+export type TurnSummaryFacetResult = Readonly<{
+  icon?: ReactNode;
+  content: ReactNode;
+  ariaLabel?: string;
+  title?: string;
+}>;
+
+export type TurnSummaryFacet = Readonly<{
+  /** Stable identity used for removal and deterministic de-duplication. */
+  id: string;
+  /** Return null when this facet has nothing useful to show. */
+  summarize(context: TurnSummaryContext): TurnSummaryFacetResult | null;
+}>;
+
+type ModifyTurnSummaryFacets = Readonly<{
+  /** Appended after the remaining built-ins, in supplied order. */
+  add?: readonly TurnSummaryFacet[];
+  /** Built-ins to omit before custom facets are appended. */
+  remove?: readonly BuiltInTurnSummaryFacetId[];
+  replace?: never;
+}>;
+
+type ReplaceTurnSummaryFacets = Readonly<{
+  /** The complete ordered facet list. Mutually exclusive with add/remove. */
+  replace: readonly TurnSummaryFacet[];
+  add?: never;
+  remove?: never;
+}>;
+
+export type TurnSummaryFacetConfiguration = ModifyTurnSummaryFacets | ReplaceTurnSummaryFacets;
+
+export type TurnSummaryOptions = Readonly<{
+  /**
+   * Readable per-turn presentation. Assistant progress stays fully formatted;
+   * each turn has its own Working / Worked row and rolling latest step.
+   * Ordinary tip-follow and manual scrolling are unchanged.
+   */
+  rolling?: boolean;
+  facets?: TurnSummaryFacetConfiguration;
+  /**
+   * Your own mark (a small animated logo or mascot) at the leading edge of the
+   * live "Working" / "Waiting" / "Paused" row. Called with the row's state
+   * while the turn is live, and no longer once it settles. Draw it about the
+   * row's height (20px); it is decorative, so the row's words still say what
+   * is happening. Default: nothing.
+   */
+  renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
+}>;
+
+/**
+ * The state a live turn row passes to `renderLiveMark`: `working`, `waiting`
+ * (with `waitingOn: "you"` when the wait needs the reader, such as an
+ * approval or a question) or `paused`.
+ */
+export type TurnSummaryLiveMarkState = Readonly<{
+  kind: "working" | "waiting" | "paused";
+  waitingOn?: "you" | undefined;
+}>;
+
+/**
+ * Exchange status shown in place of the plain facet line. `working` and
+ * `waiting` run a live clock from `since`; `worked` shows the settled span;
+ * `paused` shows the work done before the pause, with its clock stopped.
+ */
+export type TurnSummaryStatus = Readonly<{
+  kind: "working" | "waiting" | "worked" | "paused";
+  /** Replaces the default "Working" / "Waiting" wording. */
+  label?: string | undefined;
+  /** Who the wait is on: `you` when it needs the reader. */
+  waitingOn?: "you" | undefined;
+  /** For a `worked` row folding quiet cycles: how many updates it spans. */
+  updates?: number | undefined;
+  /** Live clock start for `working` and `waiting`. */
+  since?: string | undefined;
+  /** Settled span for `worked`; work done before the pause for `paused`. */
+  durationMs?: number | undefined;
+  /** Live step preview under the row while it is collapsed. */
+  preview?: ReactNode;
+  /**
+   * Guidance under the row that stays visible whether the fold is open or
+   * closed, e.g. what a wait needs from the reader.
+   */
+  guidance?: ReactNode;
+}>;
+
+/** The live-mark state of a turn row's status; null once the row settles. */
+export function turnSummaryLiveMarkState(
+  status: Pick<TurnSummaryStatus, "kind" | "waitingOn"> | undefined,
+): TurnSummaryLiveMarkState | null {
+  if (!status || status.kind === "worked") return null;
+  return status.kind === "waiting" && status.waitingOn === "you"
+    ? { kind: "waiting", waitingOn: "you" }
+    : { kind: status.kind };
+}
+
+/** Elapsed wall time with seconds below an hour: "14s", "2m 14s", "1h 05m". */
+/**
+ * The label of a turn row with no status line and no facets. Steps are not
+ * counted, so the row still names what opening it reveals: "Preparation" when
+ * it holds only startup phases (and no unloaded steps), else "Steps".
+ */
+export function turnSummaryFallbackLabel(
+  t: OpenGeniText,
+  items: readonly ActivityItem[],
+  unloadedSteps = false,
+): string {
+  // Progress notes narrate steps; they are not steps themselves.
+  const preparationOnly =
+    !unloadedSteps &&
+    items.some((item) => item.kind === "startup-phase") &&
+    items.every((item) => item.kind === "startup-phase" || item.kind === "agent-message");
+  return preparationOnly ? t("timeline.turnSummary.preparation") : t("timeline.turnSummary.steps");
+}
+
+export function formatElapsed(t: OpenGeniText, durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  if (totalSeconds < 60) {
+    return t("timeline.turnSummaryModel.seconds", { count: totalSeconds });
+  }
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    const seconds = totalSeconds % 60;
+    return seconds
+      ? t("timeline.turnSummaryModel.minutesSeconds", { minutes: totalMinutes, seconds })
+      : t("timeline.turnSummaryModel.minutes", { count: totalMinutes });
+  }
+  return formatHoursOrDays(t, totalMinutes);
+}
+
+/** "1h 05m" below a day, "2d 03h" from a day on, so long waits stay readable. */
+function formatHoursOrDays(t: OpenGeniText, totalMinutes: number): string {
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    return t("timeline.turnSummaryModel.hoursMinutes", {
+      hours: totalHours,
+      minutes: String(totalMinutes % 60).padStart(2, "0"),
+    });
+  }
+  return t("timeline.turnSummaryModel.daysHours", {
+    days: Math.floor(totalHours / 24),
+    hours: String(totalHours % 24).padStart(2, "0"),
+  });
+}
+
+export function createTurnSummaryContext(
+  t: OpenGeniText,
+  items: ActivityItem[],
+  outcome: TurnOutcome | undefined,
+  failureText: string | undefined,
+  durationMs: number | undefined,
+  contextCompactionCount: number,
+): TurnSummaryContext {
+  const itemSnapshot = Object.freeze([...items]);
+  const toolCalls = Object.freeze(
+    itemSnapshot.filter((item): item is ToolCallItem => item.kind === "tool-call"),
+  );
+  const settled = itemSnapshot.every((item) => {
+    if (item.kind === "reasoning" || item.kind === "agent-message") {
+      return !item.streaming;
+    }
+    if (
+      item.kind === "tool-call" ||
+      item.kind === "worker" ||
+      item.kind === "sandbox" ||
+      item.kind === "startup-phase"
+    ) {
+      return item.status !== "running";
+    }
+    return true;
+  });
+  return Object.freeze({
+    t,
+    items: itemSnapshot,
+    toolCalls,
+    outcome,
+    failureText,
+    durationMs,
+    settled,
+    contextCompactionCount: Math.max(0, Math.floor(contextCompactionCount)),
+  });
+}
+
+// Step, file, command and screenshot counts are not shown: conversation-first
+// history does not load a turn's steps until the turn is opened, so a count
+// would cost a read on every open. Their ids remain accepted by `remove`.
+export const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze([
+  {
+    id: "memories",
+    summarize: ({ items, t }) => {
+      let saved = 0;
+      let updated = 0;
+      for (const item of items) {
+        if (item.kind !== "memory") {
+          continue;
+        }
+        if (item.variant === "corrected") {
+          updated += 1;
+        } else {
+          saved += 1;
+        }
+      }
+      const parts: string[] = [];
+      if (saved) {
+        parts.push(t("timeline.turnSummaryModel.memoriesSaved", { count: saved }));
+      }
+      if (updated) {
+        parts.push(t("timeline.turnSummaryModel.memoriesUpdated", { count: updated }));
+      }
+      return parts.length > 0 ? { content: parts.join(" · ") } : null;
+    },
+  },
+  {
+    id: "compacted",
+    summarize: ({ contextCompactionCount, t }) =>
+      contextCompactionCount > 0
+        ? {
+            content: t("timeline.turnSummaryModel.compacts", { count: contextCompactionCount }),
+            ariaLabel: t("timeline.turnSummaryModel.compactions", {
+              count: contextCompactionCount,
+            }),
+          }
+        : null,
+  },
+  {
+    id: "duration",
+    summarize: ({ durationMs, t }) => {
+      const duration = formatDurationFacet(t, durationMs);
+      return duration ? { content: duration } : null;
+    },
+  },
+]);
+
+export function resolveTurnSummaryFacets(
+  configuration: TurnSummaryFacetConfiguration | undefined,
+): readonly TurnSummaryFacet[] {
+  const requested: readonly TurnSummaryFacet[] = configuration?.replace ?? [
+    ...BUILT_IN_TURN_SUMMARY_FACETS.filter(
+      (facet) => !configuration?.remove?.includes(facet.id as BuiltInTurnSummaryFacetId),
+    ),
+    ...(configuration?.add ?? []),
+  ];
+  const seen = new Set<string>();
+  return requested.filter((facet) => {
+    if (!facet.id || seen.has(facet.id)) {
+      return false;
+    }
+    seen.add(facet.id);
+    return true;
+  });
+}
+
+export function formatDurationFacet(
+  t: OpenGeniText,
+  durationMs: number | undefined,
+): string | null {
+  if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 1000) {
+    return null;
+  }
+  const totalSeconds = Math.floor(durationMs / 1000);
+  if (totalSeconds < 60) {
+    return t("timeline.turnSummaryModel.seconds", { count: totalSeconds });
+  }
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return t("timeline.turnSummaryModel.minutes", { count: totalMinutes });
+  }
+  return formatHoursOrDays(t, totalMinutes);
+}
+
+function hasFacetContent(content: ReactNode): boolean {
+  return content !== null && content !== undefined && content !== false && content !== "";
+}
+
+/**
+ * The facets a turn header shows. With a readable status line, duration lives in
+ * the status, and a live or waiting status shows no built-in facets. A failing
+ * custom facet is skipped rather than breaking the header.
+ */
+export function selectTurnSummaryFacets(
+  definitions: readonly TurnSummaryFacet[],
+  context: TurnSummaryContext,
+  statusKind: TurnSummaryStatus["kind"] | undefined,
+): Array<{ facet: TurnSummaryFacet; result: TurnSummaryFacetResult }> {
+  return definitions.flatMap((facet) => {
+    if (
+      statusKind &&
+      (facet.id === "duration" ||
+        (statusKind !== "worked" &&
+          BUILT_IN_TURN_SUMMARY_FACET_IDS.includes(facet.id as BuiltInTurnSummaryFacetId)))
+    ) {
+      return [];
+    }
+    try {
+      const result = facet.summarize(context);
+      return result && hasFacetContent(result.content) ? [{ facet, result }] : [];
+    } catch {
+      return [];
+    }
+  });
+}

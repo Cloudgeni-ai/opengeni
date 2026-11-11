@@ -11,6 +11,13 @@ export type EditableArtifactResource = Readonly<{
   stateHash: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Who can open it: everyone in the workspace, or only its owner ("Only
+   * me"). Absent on older servers, which share every artifact.
+   */
+  visibility?: "private" | "workspace";
+  /** The signed-in viewer owns it, so they can share or limit it. */
+  ownedByViewer?: boolean;
 }>;
 
 export type EditableArtifactListResource = Readonly<{
@@ -24,6 +31,8 @@ export type CreateEditableArtifactResourceRequest = Readonly<{
   replicaId: string;
   modality: EditableArtifactModality;
   title: string;
+  /** Who can open it. Without one, it is shared with the workspace. */
+  visibility?: "private" | "workspace";
 }>;
 
 export type ImportEditableArtifactResourceRequest = Readonly<{
@@ -32,6 +41,12 @@ export type ImportEditableArtifactResourceRequest = Readonly<{
   modality: EditableArtifactModality;
   title: string;
   sourceFileId: string;
+  /** Who can open it. Without one, it follows the file: an Only me file stays Only me. */
+  visibility?: "private" | "workspace";
+}>;
+
+export type UpdateEditableArtifactVisibilityRequest = Readonly<{
+  visibility: "private" | "workspace";
 }>;
 
 export type ReadEditableArtifactResourceOptions = OpenGeniRequestOptions &

@@ -15,7 +15,7 @@ import {
   SandboxResumeIdentityMismatchError,
   SandboxProviderContinuityUnavailableError,
 } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ModalCreateIntent } from "../src/sandbox/providers/modal-create-boundary";
 
 const hydrateCalls: Uint8Array[] = [];
@@ -427,7 +427,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     },
   );
 
-  test("resume-only materializes the stable OpenGeni identity for a legacy SDK deserializer", async () => {
+  test("resume-only materializes the stable Opengeni identity for a legacy SDK deserializer", async () => {
     let deserialized: Record<string, unknown> | null = null;
     const established = await establishRuntimeSandboxSessionFromEnvelope(
       testSettings({ sandboxBackend: "none" }),

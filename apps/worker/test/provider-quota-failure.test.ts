@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { CODEX_TRANSPORT_ERROR_HEADER } from "@opengeni/codex";
-import { buildOpenAIClientFromSettings, CompactionProviderResponseError } from "@opengeni/runtime";
-import { testSettings } from "@opengeni/testing";
+import {
+  AnthropicRequestError,
+  buildOpenAIClientFromSettings,
+  CompactionProviderResponseError,
+} from "@opengeni/runtime";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   agentRunFailurePayload,
   compactionFailureReasonFromError,
@@ -9,6 +13,7 @@ import {
   providerRecoveryResult,
   shouldRecoverCompactionProviderFailure,
 } from "../src/activities/agent-turn";
+import { compactionTrimFallbackReason } from "../src/activities/agent-turn/compaction-trim-fallback";
 
 // Realistic provider refusals, replayed over real HTTP through the same OpenAI
 // SDK client the worker builds for the built-in provider (SDK retries enabled).
@@ -327,6 +332,40 @@ describe("provider quota exhaustion fails the turn promptly", () => {
     });
   });
 
+  test("a Claude subscription rate limit during compaction recovers instead of failing as quota", () => {
+    // A transient subscription 429 can carry a long retry hint and limit
+    // wording. The ordinary turn path rotates accounts or waits for capacity;
+    // the checkpoint request must take that same path.
+    const claude429 = (subscription: boolean) =>
+      new AnthropicRequestError(
+        "Claude request failed with HTTP 429",
+        429,
+        "anthropic_http_error",
+        { type: "rate_limit_error", message: "This request would exceed your rate limit." },
+        new Headers({ "retry-after": "3600" }),
+        { subscription },
+      );
+    const subscriptionFailure = new CompactionProviderResponseError(
+      { httpStatus: 429 },
+      claude429(true),
+    );
+    expect(shouldRecoverCompactionProviderFailure(subscriptionFailure)).toBe(true);
+    expect(compactionFailureTurnEventPayload(subscriptionFailure)).not.toHaveProperty("quotaScope");
+    expect(agentRunFailurePayload(claude429(true))).not.toMatchObject({
+      code: "provider_quota_exhausted",
+    });
+
+    // The same refusal on a Claude API key keeps the API-key quota rule.
+    const apiKeyFailure = new CompactionProviderResponseError(
+      { httpStatus: 429 },
+      claude429(false),
+    );
+    expect(shouldRecoverCompactionProviderFailure(apiKeyFailure)).toBe(false);
+    expect(compactionFailureTurnEventPayload(apiKeyFailure)).toMatchObject({
+      quotaScope: "quota",
+    });
+  });
+
   test("an exhausted quota during compaction is terminal with plain copy", async () => {
     const { error } = await providerFailure(OPENROUTER_FREE_PER_DAY);
     const compactError = new CompactionProviderResponseError(
@@ -334,6 +373,8 @@ describe("provider quota exhaustion fails the turn promptly", () => {
       error,
     );
     expect(shouldRecoverCompactionProviderFailure(compactError)).toBe(false);
+    // Trimming history cannot help: the next ordinary request is refused too.
+    expect(compactionTrimFallbackReason(compactError)).toBeNull();
     expect(compactionFailureReasonFromError(compactError)).toBe(
       "compaction summarization failed: This model's daily limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets. Active history was preserved.",
     );
@@ -355,8 +396,8 @@ describe("provider quota exhaustion fails the turn promptly", () => {
     expect(agentRunFailurePayload(new Error("ENOSPC: Disk quota exceeded"))).toEqual({
       error: "ENOSPC: Disk quota exceeded",
     });
-    expect(agentRunFailurePayload(new Error("insufficient OpenGeni credits"))).toEqual({
-      error: "insufficient OpenGeni credits",
+    expect(agentRunFailurePayload(new Error("insufficient workspace credits"))).toEqual({
+      error: "insufficient workspace credits",
     });
   });
 });

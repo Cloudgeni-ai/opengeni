@@ -177,10 +177,6 @@ export function pickProgress(state: PickState): PickProgress {
   };
 }
 
-export function usePickProgress(): PickProgress {
-  return pickProgress(usePickState());
-}
-
 function describeAlternative(key: SectionKey, id: ForkAlternativeId): string {
   const name = alternativeMeta(key, id)?.name;
   return name ? `${alternativeLetter(id)} - ${name}` : alternativeLetter(id);
@@ -189,7 +185,7 @@ function describeAlternative(key: SectionKey, id: ForkAlternativeId): string {
 /** Readable text of every pick and note, for pasting back into a conversation. */
 export function formatPicksForExport(state: PickState): string {
   const progress = pickProgress(state);
-  const lines = [`OpenGeni UI kit - my picks (${progress.picked} of ${progress.total} picked)`];
+  const lines = [`Opengeni UI kit - my picks (${progress.picked} of ${progress.total} picked)`];
   const unpicked: string[] = [];
 
   for (const group of visibleGroups()) {

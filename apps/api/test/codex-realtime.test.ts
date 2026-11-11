@@ -9,9 +9,11 @@ import {
   CodexRealtimeBrokerError,
   OPENGENI_REALTIME_BASE_INSTRUCTIONS,
   brokerSessionCodexRealtime,
+  codexRealtimeFailureLogAttributes,
   openGeniRealtimeInstructions,
   type CodexRealtimeBrokerDependencies,
 } from "../src/codex-realtime";
+import { createObservability } from "@opengeni/observability";
 
 const request = {
   sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
@@ -61,6 +63,131 @@ function dependencies(
 }
 
 describe("session Codex realtime broker", () => {
+  test("a failed history read waits for outstanding configuration before releasing its caller", async () => {
+    let finishConfig!: () => void;
+    let complete = false;
+    const pending = brokerSessionCodexRealtime(
+      dependencies({
+        loadInitialItems: async () => {
+          throw Error("history failed");
+        },
+        loadProviderConfig: async () => {
+          await new Promise<void>((resolve) => {
+            finishConfig = resolve;
+          });
+          return { model: "live", architecture: "voice", version: "v3" };
+        },
+        createCall: async () => {
+          throw Error("must not create a call");
+        },
+      }),
+      { sessionId: "session-one", request },
+    ).catch((error) => {
+      complete = true;
+      return error;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(complete).toBe(false);
+    finishConfig();
+    expect((await pending).message).toBe("history failed");
+  });
+
+  test("setup timing logs retain only known phase names and finite durations", () => {
+    const logs: string[] = [];
+    const original = console.log;
+    console.log = (line: string) => {
+      logs.push(line);
+    };
+    try {
+      const observer = createObservability(
+        {
+          observabilityStructuredLogs: true,
+          serviceName: "opengeni",
+          environment: "test",
+        } as never,
+        { component: "api" },
+      );
+      observer.info("Realtime setup phase completed", {
+        realtimeSetupPhase: "config",
+        durationMs: 123,
+      });
+      observer.info("Realtime setup phase completed", {
+        realtimeSetupPhase: "untrusted-value",
+        durationMs: 1,
+      });
+    } finally {
+      console.log = original;
+    }
+    expect(JSON.parse(logs[0]!).realtimeSetupPhase).toBe("config");
+    expect(JSON.parse(logs[0]!).durationMs).toBe(123);
+    expect(JSON.parse(logs[1]!)).not.toHaveProperty("realtimeSetupPhase");
+  });
+
+  test("resolves token and configuration while history is loading, then sends unchanged history", async () => {
+    let finishHistory!: (items: []) => void;
+    const order: string[] = [];
+    const history = new Promise<[]>((resolve) => {
+      finishHistory = resolve;
+    });
+    const providerConfig = { model: "live", architecture: "voice", version: "v3" } as const;
+    const call = brokerSessionCodexRealtime(
+      dependencies({
+        loadInitialItems: () => {
+          order.push("history");
+          return history;
+        },
+        tokenResolver: () => ({
+          getToken: async () => {
+            order.push("token");
+            return tokenSnapshot();
+          },
+          refresh: async () => tokenSnapshot(),
+        }),
+        loadProviderConfig: async () => {
+          order.push("config");
+          finishHistory([]);
+          return providerConfig;
+        },
+        createCall: async (_auth, input, options) => {
+          order.push("call");
+          expect(input.initialItems).toEqual([]);
+          expect(options.providerConfig).toEqual(providerConfig);
+          return response;
+        },
+      }),
+      { sessionId: "session-one", request },
+    );
+    await call;
+    expect(order).toEqual(["history", "token", "config", "call"]);
+  });
+
+  test("a config 401 refreshes exactly once before creating any call", async () => {
+    let configs = 0;
+    let refreshes = 0;
+    let calls = 0;
+    await brokerSessionCodexRealtime(
+      dependencies({
+        tokenResolver: () => ({
+          getToken: async () => tokenSnapshot(),
+          refresh: async () => {
+            refreshes++;
+            return tokenSnapshot();
+          },
+        }),
+        loadProviderConfig: async () => {
+          if (++configs === 1) throw new CodexRealtimeError("authentication", "rejected", 401);
+          return { model: "live", architecture: "voice", version: "v3" };
+        },
+        createCall: async () => {
+          calls++;
+          return response;
+        },
+      }),
+      { sessionId: "session-one", request },
+    );
+    expect({ configs, refreshes, calls }).toEqual({ configs: 2, refreshes: 1, calls: 1 });
+  });
+
   test("binds the session pin and account to a V3 call without returning either identity", async () => {
     let selected: string | null = null;
     let capturedAuth: CodexAuthHeaders | null = null;
@@ -89,7 +216,7 @@ describe("session Codex realtime broker", () => {
     expect(capturedAuth?.accessToken).toBe(BEARER_DEFAULT);
     expect(capturedAuth?.chatgptAccountId).toBe("account-bound");
     expect(capturedAuth?.isFedramp).toBe(true);
-    expect(capturedAuth?.clientVersion).toBe("0.159.2");
+    expect(capturedAuth?.clientVersion).toBe("0.167.1");
     expect(capturedInput).toEqual({
       ...request,
       sessionId: "session-one",
@@ -119,6 +246,35 @@ describe("session Codex realtime broker", () => {
       { sessionId: "session-one", request },
     );
     expect(selected).toBe("credential-active");
+  });
+
+  test("calls on a connected plan with voice when the session's plan has none", async () => {
+    const selectedFor = async (connected: string[], voiceless: string[]) => {
+      let selected: string | null = null;
+      await brokerSessionCodexRealtime(
+        dependencies({
+          loadSelection: async () => ({
+            pinnedCredentialId: null,
+            activeCredentialId: "credential-free",
+            connectedCredentialIds: new Set(connected),
+            voicelessCredentialIds: new Set(voiceless),
+            voiceCredentialIds: connected.filter((id) => !voiceless.includes(id)),
+          }),
+          tokenResolver: (credentialId) => {
+            selected = credentialId;
+            return dependencies().tokenResolver(credentialId);
+          },
+        }),
+        { sessionId: "session-one", request },
+      );
+      return selected;
+    };
+    expect(await selectedFor(["credential-free", "credential-pro"], ["credential-free"])).toBe(
+      "credential-pro",
+    );
+    // Without another subscription, the provider decides.
+    expect(await selectedFor(["credential-free"], ["credential-free"])).toBe("credential-free");
+    expect(await selectedFor(["credential-free", "credential-pro"], [])).toBe("credential-free");
   });
 
   test("adds server-projected history and reuses the exact snapshot on an auth retry", async () => {
@@ -204,7 +360,35 @@ describe("session Codex realtime broker", () => {
     expect(captured?.instructions).toContain(
       "An answered or skipped response came through the structured session UI and is already routed",
     );
-    expect(captured?.instructions).not.toContain("OpenGeni");
+    expect(captured?.instructions).toContain(
+      "Send the user's request in their own words and in the language they spoke",
+    );
+    expect(captured?.instructions).toContain(
+      "Do not add tools, commands, methods, steps, scope, examples, output formats, or assumptions the user did not state",
+    );
+    expect(captured?.instructions).toContain(
+      "When the user corrects, criticizes, or redirects work, relay what they said as they said it",
+    );
+    expect(captured?.instructions).toContain(
+      "or when the answer is already in the session context or this conversation",
+    );
+    expect(captured?.instructions).toContain(
+      'Never answer it with a promise such as "I\'ll do that" or "I\'ll stop that" without passing it on.',
+    );
+    expect(captured?.instructions).toContain(
+      "Never state a result, status, change, name, number, time, or identifier the backend has not reported.",
+    );
+    // While a delegation runs the voice model has no answer: it must not fill
+    // the wait with facts of its own or treat working notes as findings.
+    expect(captured?.instructions).toContain(
+      "is the backend's working notes while it runs: plans, guesses, and partial observations, not conclusions.",
+    );
+    expect(captured?.instructions).toContain(
+      "While a delegation is running you do not know its answer, even if you think you can guess it. Never answer a delegated question yourself from general knowledge, the session history, or progress notes",
+    );
+    expect(captured?.instructions).not.toContain("complete standalone task");
+    expect(captured?.instructions).not.toContain("make a reasonable assumption");
+    expect(captured?.instructions).not.toContain("Opengeni");
     expect(captured?.instructions).not.toContain("client delegation");
     expect(captured?.instructions).not.toContain("Steer with");
   });
@@ -342,5 +526,89 @@ describe("session Codex realtime broker", () => {
       { sessionId: "session-one", request, signal: abort.signal },
     );
     expect(signal).toBe(abort.signal);
+  });
+});
+
+describe("refused realtime negotiation log line", () => {
+  test("carries the provider reason under reviewed fields and keeps the client message safe", async () => {
+    const pending = brokerSessionCodexRealtime(
+      dependencies({
+        createCall: async () => {
+          throw new CodexRealtimeError(
+            "incompatible",
+            "Codex subscription realtime is unavailable",
+            404,
+            {
+              stage: "call",
+              providerErrorCode: "Not Found",
+              configSource: "fallback",
+              advertisedVersion: "v4",
+              providerModel: "gpt-live-1-codex",
+              providerArchitecture: "avas",
+            },
+          );
+        },
+      }),
+      { sessionId: "session-one", request },
+    );
+    const error = await pending.catch((caught: unknown) => caught as CodexRealtimeBrokerError);
+    expect(error).toBeInstanceOf(CodexRealtimeBrokerError);
+    expect(error.message).toBe("Connected Codex subscription is not compatible with realtime V3");
+
+    const lines: string[] = [];
+    const original = console.warn;
+    console.warn = (line: string) => lines.push(line);
+    try {
+      createObservability(
+        {
+          observabilityStructuredLogs: true,
+          serviceName: "opengeni",
+          environment: "test",
+        } as never,
+        { component: "api" },
+      ).warn("Realtime WebRTC negotiation rejected", codexRealtimeFailureLogAttributes(error));
+    } finally {
+      console.warn = original;
+    }
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      message: "Realtime WebRTC negotiation rejected",
+      reason: "incompatible",
+      providerStatus: 404,
+      realtimeFailureMessage: "Codex subscription realtime is unavailable",
+      realtimeStage: "call",
+      providerErrorCode: "Not Found",
+      realtimeConfigSource: "fallback",
+      realtimeAdvertisedVersion: "v4",
+      realtimeProviderModel: "gpt-live-1-codex",
+      realtimeProviderArchitecture: "avas",
+    });
+  });
+
+  test("drops values outside the reviewed grammars", () => {
+    const lines: string[] = [];
+    const original = console.warn;
+    console.warn = (line: string) => lines.push(line);
+    try {
+      createObservability(
+        {
+          observabilityStructuredLogs: true,
+          serviceName: "opengeni",
+          environment: "test",
+        } as never,
+        { component: "api" },
+      ).warn("Realtime WebRTC negotiation rejected", {
+        realtimeStage: "elsewhere",
+        realtimeFailureMessage: 'Bearer "secret" for person@example.com',
+        providerErrorCode: "person@example.com",
+        realtimeProviderModel: "model with spaces",
+      });
+    } finally {
+      console.warn = original;
+    }
+    const line = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(line).not.toHaveProperty("realtimeStage");
+    expect(line).not.toHaveProperty("realtimeFailureMessage");
+    expect(line).not.toHaveProperty("providerErrorCode");
+    expect(line).not.toHaveProperty("realtimeProviderModel");
   });
 });

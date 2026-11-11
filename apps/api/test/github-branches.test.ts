@@ -14,11 +14,8 @@ import {
   ensureManagedAccessForUser,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { createApp } from "../src/app";
 
@@ -100,6 +97,7 @@ async function bindRepository(
     authorityExpiresAt: new Date(now.getTime() + 5 * 60_000),
     authorityNonce: `github-branches-${crypto.randomUUID()}`,
     repositoryIds: input.repositoryIds,
+    eventRouteSecret: null,
   });
   expect(bound).not.toBeNull();
 }

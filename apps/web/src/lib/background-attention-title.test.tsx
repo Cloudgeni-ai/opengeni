@@ -7,7 +7,7 @@ import {
   useBackgroundAttentionTitle,
   withAttentionPrefix,
   withoutAttentionPrefix,
-} from "./background-attention-title";
+} from "@opengeni/react/app/lib/background-attention-title";
 
 registerDom();
 

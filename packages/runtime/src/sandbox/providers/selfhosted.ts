@@ -32,7 +32,7 @@ import type { ProviderRegistration } from "./types";
  * route; an unconfigured deployment falls back to a placeholder host (the URL shape
  * is still well-formed; the relay is simply unreachable until configured).
  */
-function resolveRelayConfig(settings: Settings): SelfhostedRelayConfig {
+export function resolveRelayConfig(settings: Settings): SelfhostedRelayConfig {
   const raw = settings.selfhostedRelayUrl?.trim();
   if (!raw) {
     return { host: "relay.opengeni.local", port: 443, tls: true, path: "/stream" };
@@ -66,6 +66,8 @@ export const selfhostedProvider: ProviderRegistration = {
   instanceIdFields: ["agentId"],
   workspaceCapturePolicy: () => null,
   descriptor: CAPABILITY_DESCRIPTORS.selfhosted,
+  // Same session as compute: no agent stdin, whatever the person's terminal has.
+  sessionSupportsPty: false,
   /**
    * No per-box credentials: the machine is reached over the agent's own
    * enrollment. The enrollment-signing + relay-token secrets are deployment-level

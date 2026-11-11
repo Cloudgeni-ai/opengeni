@@ -3,7 +3,7 @@
 These files are third-party vendor marks, committed so a default deployment can
 show connector logos without fetching from third-party logo hosts at deploy
 time. They are **not** covered by this repository's licence and are not
-OpenGeni's to relicense. Each mark remains the property of its owner and is
+Opengeni's to relicense. Each mark remains the property of its owner and is
 reproduced here solely to identify that owner's product in the connector
 catalog, which is nominative use.
 
@@ -14,18 +14,24 @@ catalog, which is nominative use.
   source URL at vendoring time, the SHA-256 digest, content type, byte size, and
   fetch timestamp. It is the authority; a file with no entry is an orphan and
   the vendoring script deletes it.
-- One asset file per curated connector that publishes a reusable mark.
+- One asset file per curated or identity connector (see `identities` in
+  `data/catalog/curated.json`) that publishes a reusable mark.
 
 ## Rules
 
 - Do not add, edit, or delete files here by hand. Run
   `bun run catalog:vendor-logos`, which refetches from the current snapshot plus
   the curated overlay, validates, and rewrites both the assets and the manifest.
-- Only curated rows are vendored. The uncurated long tail keeps a monogram
-  unless a deployment opts into logo fetching.
-- A curated `logoSourceUrl: null` in `data/catalog/curated.json` suppresses the
-  logo entirely. Use it when a provider publishes no reusable mark, as with
-  Gmail and Mobbin today. That decision belongs in the overlay, never here.
+- Only curated and identity rows are vendored. The rest of the long tail keeps a
+  monogram unless a deployment opts into logo fetching.
+- A generated letter placeholder (an SVG of shapes and at most three text
+  characters, which integrations.sh serves for domains it has no mark for) is
+  never vendored or imported; the product's own monogram is used instead.
+- A curated `logoSourceUrl: null` in `data/catalog/curated.json` keeps the
+  catalog from vendoring or fetching a logo for that row. Use it when no
+  reusable mark can be fetched, or when the product UI ships the mark itself,
+  as it does for Gmail, Google Drive and Google Calendar today. That decision
+  belongs in the overlay, never here.
 - The importer refuses an asset whose bytes no longer match its manifest digest,
   whose row moved to a different logo source, whose content type the
   catalog-asset route cannot serve, or, for SVG, that carries active content.

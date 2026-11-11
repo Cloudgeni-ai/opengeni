@@ -11,7 +11,7 @@ function Conversation({ id }: { id: string }) {
   return (
     <SessionConversation
       sessionId={id}
-      composerProps={{ placeholder: "Send a message through OpenGeni…" }}
+      composerProps={{ placeholder: "Send a message through Opengeni…" }}
     />
   );
 }
@@ -26,11 +26,6 @@ function App() {
     try {
       const result = await site.client.createSession(site.workspaceId, {
         startMode: "realtime",
-        resources: [],
-        skills: [],
-        tools: [],
-        metadata: {},
-        visibility: "workspace",
         idempotencyKey: crypto.randomUUID(),
       });
       setId(result.id);

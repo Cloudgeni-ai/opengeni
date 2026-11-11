@@ -9,40 +9,56 @@ const workspaceRouteContracts = {
   workspaceIndexRoute: { kind: "redirect" },
   workspaceAgentRoute: { kind: "redirect" },
   workspaceRetiredPriorityRoute: { kind: "redirect" },
-  workspaceRetiredAgentsRoute: { kind: "redirect" },
   workspaceSessionsRoute: {
     kind: "self-managed",
-    source: "routes/sessions-index.tsx",
+    source: "../../../packages/react/src/app/routes/sessions-index.tsx",
   },
-  workspaceSessionRoute: { kind: "self-managed", source: "routes/session.tsx" },
-  workspaceVariableSetsRoute: {
-    kind: "page",
-    source: "routes/variable-sets.tsx",
+  workspaceSessionRoute: {
+    kind: "self-managed",
+    source: "../../../packages/react/src/app/routes/session.tsx",
   },
-  // The list and each set's page only match the URL; the parent's single
-  // VariableSetsRoute component renders both inside one ContentPage.
-  workspaceVariableSetsIndexRoute: {
-    kind: "page",
-    source: "routes/variable-sets.tsx",
-  },
-  workspaceVariableSetDetailRoute: {
-    kind: "page",
-    source: "routes/variable-sets.tsx",
-  },
-  workspaceEnvironmentsRoute: { kind: "redirect" },
+  workspacePlaygroundRoute: { kind: "self-managed", source: "routes/playground.tsx" },
+  // Secrets: the list, each vault and each item only match the URL; the
+  // parent's single Secrets component renders them inside one ContentPage.
+  workspaceSecretsRoute: { kind: "page", source: "routes/secrets.tsx" },
+  workspaceSecretsIndexRoute: { kind: "page", source: "routes/secrets.tsx" },
+  workspaceSecretsVaultRoute: { kind: "page", source: "routes/secrets.tsx" },
+  workspaceSecretsItemRoute: { kind: "page", source: "routes/secrets.tsx" },
   workspaceRigsRoute: { kind: "page", source: "routes/rigs.tsx" },
   workspaceRigDetailRoute: { kind: "page", source: "routes/rig-detail.tsx" },
   workspaceMachinesRoute: { kind: "page", source: "routes/machines.tsx" },
+  workspaceComputerUseRoute: { kind: "page", source: "routes/computer-use.tsx" },
+  workspaceReadOnlyChatsRoute: { kind: "page", source: "routes/read-only-chats.tsx" },
+  workspaceLegacyReadOnlyChatsRoute: { kind: "redirect" },
+  workspaceInboxRoute: { kind: "page", source: "routes/inbox.tsx" },
   workspaceInsightsRoute: { kind: "page", source: "routes/insights.tsx" },
   workspaceCapabilitiesRoute: {
     kind: "self-managed",
     source: "routes/capabilities.tsx",
   },
   workspaceLegacyCapabilitiesRoute: { kind: "redirect" },
-  workspaceSchedulesRoute: { kind: "page", source: "routes/schedules.tsx" },
-  workspaceScheduleNewRoute: { kind: "page", source: "routes/schedules.tsx" },
-  workspaceScheduleDetailRoute: { kind: "page", source: "routes/schedules.tsx" },
-  workspaceScheduleEditRoute: { kind: "page", source: "routes/schedules.tsx" },
+  workspaceAutomationsRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceAutomationNewRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceAutomationDetailRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceAutomationEditRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceAutomationTemplatesRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceAgentsRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentNewRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentDetailRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentEditRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentIntroRoute: { kind: "page", source: "routes/agents.tsx" },
+  // Bot templates became agents.
+  workspaceBotTemplatesRoute: { kind: "redirect" },
+  workspaceEventSourcesRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceEventSourceNewRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceEventSourceDetailRoute: { kind: "page", source: "routes/automations.tsx" },
+  // The old Schedules URLs redirect to Automations.
+  workspaceLegacySchedulesRoute: { kind: "redirect" },
+  workspaceLegacyScheduleNewRoute: { kind: "redirect" },
+  workspaceLegacyScheduleDetailRoute: { kind: "redirect" },
+  workspaceLegacyScheduleEditRoute: { kind: "redirect" },
+  workspaceMeetingsRoute: { kind: "page", source: "routes/meetings.tsx" },
+  workspaceMeetingDetailRoute: { kind: "page", source: "routes/meetings.tsx" },
   workspaceDocumentsRoute: { kind: "redirect" },
   workspaceMemoryRoute: { kind: "redirect" },
   workspaceStateRoute: {
@@ -50,12 +66,23 @@ const workspaceRouteContracts = {
     source: "routes/workspace-state.tsx",
     scrollSource: "components/knowledge/knowledge-page.tsx",
   },
-  workspaceArtifactsRoute: { kind: "page", source: "routes/artifacts.tsx" },
+  workspaceArtifactsRoute: {
+    kind: "page",
+    source: "../../../packages/react/src/app/routes/artifacts.tsx",
+  },
   workspaceArtifactDetailRoute: {
     kind: "page",
-    source: "routes/artifacts.tsx",
+    source: "../../../packages/react/src/app/routes/artifacts.tsx",
   },
-  workspaceRetainedArtifactRoute: { kind: "page", source: "routes/retained-artifact.tsx" },
+  workspaceRetainedArtifactRoute: {
+    kind: "page",
+    source: "../../../packages/react/src/app/routes/retained-artifact.tsx",
+  },
+  // The Site fills the canvas beside its conversations column; each pane scrolls itself.
+  workspaceSiteViewRoute: {
+    kind: "self-managed",
+    source: "../../../packages/react/src/app/routes/site-view.tsx",
+  },
   workspaceEditableArtifactRoute: {
     kind: "self-managed",
     source: "routes/editable-artifact.tsx",
@@ -149,7 +176,7 @@ describe("workspace route scroll ownership", () => {
     const legacyWrapper =
       'className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8"';
     for (const path of [
-      "routes/schedules.tsx",
+      "routes/automations.tsx",
       "routes/rigs.tsx",
       "routes/rig-detail.tsx",
       "routes/machines.tsx",

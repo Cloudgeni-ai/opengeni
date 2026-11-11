@@ -2,18 +2,28 @@ import {
   ClaudeUsageWindowId,
   type ClaudeSubscriptionUsage,
   type ClaudeUsageWindow,
+  type ClaudeUsageRequestStatus,
 } from "@opengeni/contracts";
 
 export type ClaudeUsageObservation = {
   windows: ClaudeUsageWindow[];
   observedAt: string;
   source: "response_headers" | "provider";
+  requestStatus?: ClaudeUsageRequestStatus | null;
+  requestRestrictions?: ClaudeUsageRequestStatus[];
+  /**
+   * Windows the usage endpoint answered with an explicit `null`: the plan has
+   * no such limit now (a verified Ultra plan reports `five_hour: null`). An
+   * omitted key is not evidence of anything and is never listed here.
+   */
+  noLimitWindows?: ClaudeUsageWindow["id"][];
 };
 const prefixes: Record<string, string[]> = {
   five_hour: ["5h"],
   seven_day: ["7d"],
   seven_day_opus: ["7d-opus"],
   seven_day_sonnet: ["7d-sonnet"],
+  seven_day_fable: ["7d-fable"],
   seven_day_overage_included: ["7d_oi", "7d-overage-included"],
   overage: ["overage"],
 };
@@ -31,9 +41,50 @@ function status(value: unknown): ClaudeUsageWindow["status"] {
   return value === "allowed" || value === "allowed_warning" || value === "rejected" ? value : null;
 }
 
+function latestReset(left: string | null, right: string | null, observedAt: string): string {
+  return new Date(
+    Math.max(
+      left ? Date.parse(left) : Date.parse(observedAt) + 60_000,
+      right ? Date.parse(right) : Date.parse(observedAt) + 60_000,
+    ),
+  ).toISOString();
+}
+
+function evidenceKey(item: ClaudeUsageRequestStatus): string {
+  // A legacy Sonnet claim does not prove an account-wide restriction cleared.
+  return JSON.stringify([
+    item.upstreamModelId,
+    item.upstreamModelId ? null : item.representativeClaim,
+    item.source === "provider",
+  ]);
+}
+
+function tiedRequest(
+  left: ClaudeUsageRequestStatus,
+  right: ClaudeUsageRequestStatus,
+): ClaudeUsageRequestStatus {
+  const denied = left.status === "rejected" ? left : right.status === "rejected" ? right : null;
+  return {
+    ...(denied ?? left),
+    resetsAt: denied
+      ? latestReset(
+          left.status === "rejected" ? left.resetsAt : denied.resetsAt,
+          right.status === "rejected" ? right.resetsAt : denied.resetsAt,
+          left.observedAt,
+        )
+      : null,
+    representativeClaim:
+      left.representativeClaim === right.representativeClaim ? left.representativeClaim : null,
+    status: denied ? "rejected" : null,
+    overageStatus: null,
+    overageResetsAt: null,
+  };
+}
+
 export function parseClaudeUsageHeaders(
   headers: Headers,
   now = new Date(),
+  upstreamModelId?: string,
 ): ClaudeUsageObservation | null {
   const observedAt = now.toISOString();
   const claim = ClaudeUsageWindowId.safeParse(
@@ -41,6 +92,8 @@ export function parseClaudeUsageHeaders(
   );
   const claimedStatus = status(headers.get("anthropic-ratelimit-unified-status"));
   const claimedReset = epoch(headers.get("anthropic-ratelimit-unified-reset"));
+  const overageStatus = status(headers.get("anthropic-ratelimit-unified-overage-status"));
+  const overageResetsAt = epoch(headers.get("anthropic-ratelimit-unified-overage-reset"));
   const windows = ClaudeUsageWindowId.options.flatMap((id) => {
     const header = (suffix: string) =>
       prefixes[id]!.map((prefix) =>
@@ -53,7 +106,57 @@ export function parseClaudeUsageHeaders(
     if (usedPercent === null && resetsAt === null && windowStatus === null) return [];
     return [{ id, usedPercent, resetsAt, status: windowStatus, observedAt }];
   });
-  return windows.length ? { windows, observedAt, source: "response_headers" } : null;
+  return windows.length || claimedStatus || overageStatus
+    ? {
+        windows,
+        observedAt,
+        source: "response_headers",
+        requestStatus: {
+          status: claimedStatus,
+          resetsAt: claimedReset,
+          representativeClaim: claim.success ? claim.data : null,
+          overageStatus,
+          overageResetsAt,
+          upstreamModelId: upstreamModelId ?? null,
+          observedAt,
+        },
+      }
+    : null;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/**
+ * The weekly Fable limit from the endpoint's scoped `limits` list, when the
+ * body has no top-level `seven_day_fable`. Built on the publicly reported
+ * shape (`{ kind: "weekly_scoped", scope: { model: { id, display_name } },
+ * percent | utilization, resets_at }`, percentages 0-100) without a captured
+ * body, so any other shape is ignored and never breaks the reading.
+ */
+function scopedFableWindow(value: Record<string, unknown>): Record<string, unknown> | null {
+  try {
+    const limits = value.limits;
+    if (!Array.isArray(limits)) return null;
+    for (const entry of limits) {
+      const limit = record(entry);
+      if (!limit || limit.kind !== "weekly_scoped") continue;
+      const model = record(record(limit.scope)?.model);
+      const name = typeof model?.display_name === "string" ? model.display_name : "";
+      const id = typeof model?.id === "string" ? model.id : "";
+      if (name.trim().toLowerCase() !== "fable" && !id.startsWith("claude-fable")) continue;
+      return {
+        utilization: limit.utilization ?? limit.percent ?? null,
+        resets_at: limit.resets_at ?? null,
+      };
+    }
+  } catch {
+    // An unexpected shape is not a reading.
+  }
+  return null;
 }
 
 export function parseClaudeUsageResponse(
@@ -62,8 +165,10 @@ export function parseClaudeUsageResponse(
 ): ClaudeUsageObservation | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const observedAt = now.toISOString();
+  const body = value as Record<string, unknown>;
   const windows = ClaudeUsageWindowId.options.flatMap((id) => {
-    const window = (value as Record<string, unknown>)[id];
+    const window =
+      id === "seven_day_fable" && body[id] === undefined ? scopedFableWindow(body) : body[id];
     if (!window || typeof window !== "object" || Array.isArray(window)) return [];
     const fields = window as Record<string, unknown>;
     const usedPercent = percent(fields.utilization, 1);
@@ -72,7 +177,17 @@ export function parseClaudeUsageResponse(
     if (usedPercent === null && resetsAt === null) return [];
     return [{ id, usedPercent, resetsAt, status: null, observedAt }];
   });
-  return windows.length ? { windows, observedAt, source: "provider" } : null;
+  const noLimitWindows = ClaudeUsageWindowId.options.filter(
+    (id) => Object.hasOwn(value, id) && (value as Record<string, unknown>)[id] === null,
+  );
+  return windows.length
+    ? {
+        windows,
+        observedAt,
+        source: "provider",
+        ...(noLimitWindows.length ? { noLimitWindows } : {}),
+      }
+    : null;
 }
 
 export function emptyClaudeUsage(credentialVersion: number | null): ClaudeSubscriptionUsage {
@@ -93,16 +208,175 @@ export function mergeClaudeUsage(
   observation: ClaudeUsageObservation,
 ): ClaudeSubscriptionUsage {
   const windows = new Map(current.windows.map((window) => [window.id, window]));
-  for (const window of observation.windows) {
+  for (const incomingWindow of observation.windows) {
+    const window = { ...incomingWindow, source: incomingWindow.source ?? observation.source };
     const previous = windows.get(window.id);
-    if (!previous || previous.observedAt <= window.observedAt) windows.set(window.id, window);
+    if (!previous || previous.observedAt < window.observedAt) windows.set(window.id, window);
+    else if (
+      previous.observedAt === window.observedAt &&
+      JSON.stringify(previous) !== JSON.stringify(window)
+    ) {
+      const rejected = previous.status === "rejected" || window.status === "rejected";
+      const full = (previous.usedPercent ?? 0) >= 100 || (window.usedPercent ?? 0) >= 100;
+      windows.set(window.id, {
+        ...previous,
+        usedPercent:
+          previous.usedPercent === null
+            ? window.usedPercent
+            : window.usedPercent === null
+              ? previous.usedPercent
+              : Math.max(previous.usedPercent, window.usedPercent),
+        status: rejected ? "rejected" : previous.status === window.status ? previous.status : null,
+        resetsAt:
+          rejected || full
+            ? latestReset(previous.resetsAt, window.resetsAt, window.observedAt)
+            : previous.resetsAt === window.resetsAt
+              ? previous.resetsAt
+              : null,
+        source:
+          previous.source === "response_headers" || window.source === "response_headers"
+            ? "response_headers"
+            : "provider",
+      });
+    }
   }
-  const newest = !current.observedAt || current.observedAt <= observation.observedAt;
+  const incoming = observation.requestStatus;
+  const restrictions = new Map(
+    (current.requestRestrictions ?? []).map((item) => [evidenceKey(item), item]),
+  );
+  // Legacy snapshots also contribute their denial; a different model's success
+  // must not erase a restriction with an unknown representative claim.
+  for (const item of [
+    current.requestStatus?.status ? current.requestStatus : null,
+    ...(observation.requestRestrictions ?? []),
+    incoming?.status ? incoming : null,
+  ]) {
+    if (!item) continue;
+    const key = evidenceKey(item);
+    const previous = restrictions.get(key);
+    const sanitized = {
+      ...item,
+      overageStatus: null,
+      overageResetsAt: null,
+    };
+    if (!previous || item.observedAt > previous.observedAt) restrictions.set(key, sanitized);
+    else if (
+      item.observedAt === previous.observedAt &&
+      JSON.stringify(previous) !== JSON.stringify(sanitized)
+    )
+      restrictions.set(key, tiedRequest(previous, sanitized));
+  }
+  // Direct refreshes can precede late turn finalizers. Retain each direct
+  // window's watermark even when no model restriction is present yet.
+  const directWindows = [
+    ...current.windows.filter(
+      (window) =>
+        window.source === "provider" ||
+        (!window.source &&
+          current.source === "provider" &&
+          current.observedAt === window.observedAt),
+    ),
+    ...observation.windows.filter((window) => (window.source ?? observation.source) === "provider"),
+  ];
+  for (const window of directWindows) {
+    if (window.usedPercent === null || window.usedPercent >= 100) continue;
+    const proof: ClaudeUsageRequestStatus = {
+      status: null,
+      resetsAt: null,
+      representativeClaim: window.id,
+      upstreamModelId: null,
+      overageStatus: null,
+      overageResetsAt: null,
+      observedAt: window.observedAt,
+      source: "provider",
+    };
+    const key = evidenceKey(proof);
+    if (!restrictions.has(key) || restrictions.get(key)!.observedAt < proof.observedAt)
+      restrictions.set(key, proof);
+  }
+  for (const [key, item] of restrictions) {
+    if (item.status !== "rejected") continue;
+    const proof = [...restrictions.values()].find(
+      (candidate) =>
+        candidate.source === "provider" &&
+        candidate.representativeClaim === item.representativeClaim &&
+        candidate.observedAt > item.observedAt &&
+        candidate.representativeClaim !== "overage" &&
+        candidate.representativeClaim !== "seven_day_overage_included",
+    );
+    if (proof)
+      restrictions.set(key, {
+        ...item,
+        status: null,
+        resetsAt: null,
+        observedAt: proof.observedAt,
+      });
+  }
+  // Bound persisted state without dropping denials: overflow collapses to a
+  // conservative account-wide restriction until the latest known reset.
+  let requestRestrictions = [...restrictions.values()];
+  const evidenceTime = requestRestrictions.reduce(
+    (value, item) => (item.observedAt > value ? item.observedAt : value),
+    observation.observedAt,
+  );
+  const liveDenials = requestRestrictions.filter(
+    (item) =>
+      item.status === "rejected" &&
+      (item.resetsAt ? Date.parse(item.resetsAt) : Date.parse(item.observedAt) + 60_000) >
+        Date.parse(evidenceTime),
+  );
+  if (requestRestrictions.length > 64 && liveDenials.length === 0) {
+    requestRestrictions = requestRestrictions
+      .sort((left, right) => right.observedAt.localeCompare(left.observedAt))
+      .slice(0, 64);
+  } else if (requestRestrictions.length > 64) {
+    const observedAt = evidenceTime;
+    const resetsAt = new Date(
+      Math.max(
+        ...liveDenials.map((item) =>
+          item.resetsAt ? Date.parse(item.resetsAt) : Date.parse(item.observedAt) + 60_000,
+        ),
+        Date.parse(observedAt) + 60_000,
+      ),
+    ).toISOString();
+    requestRestrictions = [
+      {
+        status: "rejected",
+        resetsAt,
+        representativeClaim: null,
+        overageStatus: null,
+        overageResetsAt: null,
+        upstreamModelId: null,
+        observedAt,
+      },
+    ];
+  }
+  const newest = !current.observedAt || current.observedAt < observation.observedAt;
+  const tied = current.observedAt === observation.observedAt;
+  let requestStatus = current.requestStatus ?? null;
+  if (newest) requestStatus = incoming ?? null;
+  else if (tied && JSON.stringify(requestStatus) !== JSON.stringify(incoming ?? null)) {
+    // Millisecond timestamps do not order concurrent responses. Never restore
+    // paid authority or erase a denial on an ambiguous tie.
+    requestStatus =
+      incoming && requestStatus && evidenceKey(incoming) === evidenceKey(requestStatus)
+        ? tiedRequest(requestStatus, incoming)
+        : null;
+  }
   return {
     ...current,
+    requestRestrictions,
+    requestStatus,
     windows: ClaudeUsageWindowId.options.flatMap((id) =>
       windows.has(id) ? [windows.get(id)!] : [],
     ),
-    ...(newest ? { observedAt: observation.observedAt, source: observation.source } : {}),
+    ...(newest
+      ? {
+          observedAt: observation.observedAt,
+          source: observation.source,
+          // A newer direct or partial observation cannot retain an older paid
+          // fallback authorization. Window readings remain independently merged.
+        }
+      : {}),
   };
 }

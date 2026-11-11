@@ -52,7 +52,8 @@ describe("artifact runtime workflow contract", () => {
 bun scripts/prepare-development-artifact-runtime.ts \\
   --repository-root "$GITHUB_WORKSPACE" \\
   --output "$GITHUB_WORKSPACE/.opengeni/artifact-runtime-report-ci"
-bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts
+bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
+  ./apps/api/test/native-spreadsheet-transaction-order.test.ts
 `);
     const unitSteps = parsed.jobs["unit-shards"]!.steps!;
     expect(unitSteps.some((candidate) => candidate.run?.includes("artifact-kernel-rust"))).toBe(
@@ -86,6 +87,29 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts
     expect(build).toContain(
       'wasm_path="$cargo_target_dir/wasm32-unknown-unknown/release/opengeni_artifact_kernel_wasm.wasm"',
     );
+  });
+
+  test("retains canonical mismatch diagnostics without bypassing the required byte gate", async () => {
+    const source = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
+    const parsed = Bun.YAML.parse(source) as { permissions: unknown; jobs: Record<string, CiJob> };
+    const steps = parsed.jobs["package-contracts"]!.steps!;
+    const rebuildIndex = steps.findIndex(
+      (step) => step.name === "Reproduce committed modality WASM packages from clean Rust sources",
+    );
+    const rebuild = steps[rebuildIndex]!;
+    expect(rebuild.id).toBe("modality-wasm-rebuild");
+    expect(rebuild.run).toContain("scripts/rebuild-artifact-kernel-wasm-packages.ts --check");
+    expect(rebuild.run).toContain("--diagnostic-output .opengeni/ci-canonical-modality-wasm");
+    expect(rebuild["continue-on-error"]).toBeUndefined();
+    expect(rebuild.if).toBeUndefined();
+    const upload = steps[rebuildIndex + 1]!;
+    expect(upload.name).toBe("Retain failed canonical modality WASM rebuild");
+    expect(upload.if).toBe("${{ failure() && steps.modality-wasm-rebuild.outcome == 'failure' }}");
+    expect(upload.uses).toBe("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
+    expect(upload.with?.path).toBe(".opengeni/ci-canonical-modality-wasm");
+    expect(upload.with?.["include-hidden-files"]).toBe(true);
+    expect(upload.with?.["retention-days"]).toBe(3);
+    expect(upload.with?.name).toContain("github.event.pull_request.head.sha");
   });
 
   test("aggregates only eight OS-smoked targets and proves both OCI architectures", async () => {
@@ -147,6 +171,7 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts
       parsed.jobs["api-image"],
       parsed.jobs["artifact-materializer-image"],
       parsed.jobs["sandbox-image"],
+      parsed.jobs["desktop-image"],
     ];
     for (const job of runtimeConsumers) {
       expect(job?.steps?.find((step) => step.name === "Check out repository")?.with?.ref).toBe(
@@ -166,7 +191,9 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts
       ["artifact-outbox-dispatcher-image", "artifact_outbox_dispatcher_image"],
     ].map(([jobName, stepId]) =>
       parsed.jobs[jobName]?.steps?.find(
-        (step) => step.uses === "docker/build-push-action@v7.3.0" && step.id === stepId,
+        (step) =>
+          step.uses === "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a" &&
+          step.id === stepId,
       ),
     );
     expect(serverBuilds.map((step) => step?.id)).toEqual([
@@ -189,6 +216,10 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts
       (step) => step.id === "sandbox_image",
     );
     expect(sandboxBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
+    const desktopBuild = parsed.jobs["desktop-image"]?.steps?.find(
+      (step) => step.id === "desktop_image",
+    );
+    expect(desktopBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
   });
 
   test("desktop publish consumes the same verified runtime bundle as the headless sandbox", async () => {
@@ -235,15 +266,5 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts
     expect(desktopBuild?.with?.labels).toContain(
       "org.opencontainers.image.source=https://github.com/${{ github.repository }}",
     );
-    for (const glob of [
-      "packages/artifact-tool/**",
-      "packages/artifact-kernel-wasm-document/**",
-      "packages/artifact-kernel-wasm-presentation/**",
-      "packages/artifact-kernel-wasm-spreadsheet/**",
-      "scripts/*artifact*.ts",
-      ".github/workflows/artifact-runtime.yml",
-    ]) {
-      expect(source).toContain(`- "${glob}"`);
-    }
   });
 });

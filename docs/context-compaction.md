@@ -1,21 +1,72 @@
 # Conversation context compaction
 
-OpenGeni freezes a per-session compaction mode at create time
+Opengeni freezes a per-session compaction mode at create time
 (`sessions.codex_compaction_mode`):
 
 | Mode | When | Mechanism |
 | --- | --- | --- |
-| `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
-| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference. Retained cleartext keeps recent user/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
+| `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` (API only); `remote_v2` sessions after their first non-Codex turn | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
+| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference. Retained cleartext keeps recent user/system/developer messages **including images** within the same 20k budget as portable compaction. The Agents SDK rejects a bare trigger item, so Opengeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. While the session stays on Codex models it stays `remote_v2`; see "Switching a remote_v2 session to another model" below. |
 
-There is no off switch, compatibility ladder, ordinary-turn history trim, or
-deterministic non-model fallback. A `remote_v2` session never silently falls
-back to portable on remote failure (avoids mixed history shapes). Its single
+There is no off switch, compatibility ladder or ordinary-turn history trim.
+The one deterministic non-model fallback is the portable trimmed checkpoint
+described under "When the summary fails" below. A `remote_v2` session never
+silently falls back to portable on remote failure (avoids mixed history
+shapes). Its single
 overflow retry is described below. Azure / OpenAI platform remote compact APIs
 are out of scope.
 
 Workspace setting `codexCompactionDefault` only affects **new** Codex sessions;
-later setting changes never move an already-frozen session.
+later setting changes never move an already-frozen session. It has no UI: any
+session may switch models, so there is no portability choice to make up front.
+A workspace that set `"portable"` earlier keeps it until the API sets
+`"remote_v2"` again.
+
+### Switching a remote_v2 session to another model
+
+Admission accepts any model on any session. When a turn on a non-Codex model
+claims a `remote_v2` session, the worker
+(`convertSessionToPortableCompactionForModelSwitch`) switches it to `portable`
+at once if no Codex checkpoint is active; otherwise it requests a forced
+compaction and runs that turn as portable. That write is fenced to the exact
+claiming turn attempt. The pre-turn compaction sees the
+opaque checkpoint in active history and rebuilds from the stored transcript
+instead (`readActiveSessionHistory(..., { rows: "stored_transcript" })`): every
+row since the latest context clear, including rows a compaction superseded,
+minus the rows any compaction inserted (identified by the
+`session.context.compacted` receipt's checkpoint position, its
+`replacementFromPosition`, and their shared insert transaction). A clear
+marker that a compaction retained is one of those inserted rows, never a new
+clear. Both bounds are resolved once per read, so the row filter compares
+constants. Compaction
+never deletes rows, so only Codex's opaque checkpoint and encrypted reasoning
+are unreadable; the portable path drops those as usual.
+
+That stored transcript spans every Codex checkpoint since the last clear, so it
+can be far larger than any model's window, the new one included (the
+recovery-view read above bounds it). The new model therefore summarizes it in
+bounded requests, oldest first (`summarizeTranscriptInBoundedRequests`): each
+request reads the summary so far and then the largest next chunk, cut between
+whole assistant/tool batches, that fits the same checkpoint input budget as any
+portable checkpoint on that model (its declared window minus the summary
+output, its prepared tools and instructions) and, on Claude, the exact
+request-byte limit. The last summary covers the whole transcript, just as
+repeated ordinary checkpoints build on each other. The provider's token count
+is authoritative over the local estimate: when it rejects a request as too
+long, the budget becomes half of that request's estimate and the chunk is
+refitted, and later chunks keep the smaller budget. A single batch that cannot
+fit (after shortening its tool output, where the portable preparation can)
+fails the rebuild without being sent. The receipt counts the requests in
+`compactionInputProviderCalls`. These requests read no warm cache: the
+transcript differs from what Codex was sent. The replacement is
+installed with `implementation: "portable_model_switch"` (the timeline says
+"Earlier messages summarized for the new model") and switches
+`codex_compaction_mode` to `portable` in the same transaction, so a failed
+rebuild is requested again by the next non-Codex turn. A session never returns
+to `remote_v2`. A rebuild that installs nothing fails the turn
+(`EmptyCompactionSummaryError`, stage `portable_model_switch`) instead of
+running the new model on Codex's checkpoint, and every non-Codex turn omits
+`{ type: "compaction" }` items from its model input as a backstop.
 
 The portable path follows Codex CLI 0.146.0 local compaction (upstream tag
 `rust-v0.146.0`, commit `be449751a978f02e5bbba886999662956c7f38f5`) and is used
@@ -25,7 +76,7 @@ The implementation lives in:
 
 - `packages/runtime/src/context-compaction.ts`: thresholds, portable rebuild,
   remote v2 retain/rebuild helpers, and the typed compaction signal.
-- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Responses pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Remote v2 preserves all prepared model settings; portable Responses preserves the prepared tools and instructions while applying its summary-specific output limit and provider safety settings.
+- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Responses and Claude pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Remote v2 preserves all prepared model settings; portable Responses preserves the prepared tools and instructions while applying its summary-specific output limit and provider safety settings; Claude preserves every cache-relevant field (see below).
 - `apps/worker/src/activities/run-input.ts`: operator compaction loads canonical history through ordinary input preparation without a synthetic message or required update batch.
 - `packages/runtime/src/index.ts`: portable summarizer + `requestRemoteCompactionV2`.
 - `apps/worker/src/activities/context-compaction.ts`: mode branch, summarizer
@@ -44,10 +95,52 @@ Each resolved model can declare three distinct values:
 | effective input window | provider-safe input ceiling |
 | automatic compaction limit | proactive checkpoint trigger |
 
-If a model has no explicit automatic limit, OpenGeni uses
+If a model has no explicit automatic limit, Opengeni uses
 `floor(rawWindow * contextCompactionThresholdRatio)`. The ratio defaults to
 0.9 and is clamped to 0.3–0.9. An explicit limit is capped at 90% of the raw
 window, matching Codex core.
+
+### Organization and workspace preferences
+
+Organization owners and admins set limits once for every workspace under
+**Organization settings → Models → Defaults for every workspace → Context &
+compaction**. An empty field there follows the model's default. Each workspace
+follows the organization's limit for a model until its own admins set one under
+**Organization settings → Models → your workspace → Context & compaction**
+(including your Personal workspace). On a workspace's page an empty field shows
+what it follows (the organization's limit, labeled with the organization's name,
+or the model's default) as its placeholder; a number is the workspace's own limit
+(`300k` and `300,000` both work), with what it replaces and a way back to it
+under it. The Models row says "Model defaults", the organization's limits, or how
+many models have a custom limit. A saved limit above the model's current maximum
+says which value is used. Only the respective administrators can save; readers can
+inspect. Setting a limit does not change any session's model or reasoning effort.
+
+Preferences apply when a subsequent turn attempt prepares its model, including
+existing sessions. An in-flight model call is unchanged. They never change the
+session's frozen portable/remote-v2 mode. The worker resolves the preference once
+for all model-facing paths in that attempt, including same-turn continuation.
+Provider usage anchors are still cleared after a checkpoint; a lowered threshold
+does not restore stale usage or cause an immediate compaction loop.
+
+The setting is `modelCompactionThresholds`, keyed by the exact product model ID
+(so API and subscription routes can differ). PATCH `/v1/workspaces/:workspaceId/settings`
+merges a workspace's model keys atomically, and PATCH
+`/v1/organizations/:organizationId/model-defaults` merges the organization's.
+The workspace's value wins, then the organization's, then the model default. Omission preserves a model; `null` removes only its
+override. Writes require whole numbers of at least 16,000 tokens. The effective
+value is bounded by both 90% of the raw window and the provider-safe input window.
+If a model's limits change, the saved preference remains visible but is clamped
+at execution. Malformed read values are ignored per model, not by resetting the
+whole workspace settings bag. The model catalog exposes `compactionPolicy` with
+default/override/organization/effective/minimum/maximum tokens, separately from immutable model
+execution metadata.
+
+Haiku 5.5 defaults to 95,000 tokens and Opus 5.5 (native Claude and Opper) to
+300,000, unless overridden (for example, to 250,000). These are proactive thresholds, not
+hard spending caps: checks run between steps and include provider-accounted
+context, so newly appended content or a large response may cross a price boundary.
+The independent request-byte guard described below always remains active.
 
 The Codex subscription catalog verified with Codex CLI 0.146.0 on 2026-07-29
 has the following limits, and billed GPT-5.6 Sol/Terra/Luna pin the same
@@ -60,7 +153,7 @@ triple instead of the 1.05M deployment fallback:
 | automatic compaction limit (90%) | 244,800 |
 
 Automatic compaction is provider-accounted. Before a provider response exists,
-no local whole-request estimate may force compaction: OpenGeni sends the request,
+no local whole-request estimate may force compaction: Opengeni sends the request,
 then either records the provider's usage or handles the provider's typed context
 overflow through the same compaction recovery. After a response, the per-call
 guard anchors to that exact response's provider-reported **total** tokens and
@@ -97,10 +190,108 @@ conservative bounded fallback. Inline image bytes or data-URL base64 therefore
 do not grow the text estimate linearly. A data URL inside ordinary textual
 content is still text and receives ordinary text accounting.
 
+## Stored size and image-count triggers
+
+Tokens are not the only thing that grows. Inline screenshots cost a few hundred
+to a few thousand provider tokens each but 100–200 KB of stored JSON, so a long
+browser- or computer-use session can fill the worker's active-history
+materialization guard (15 MiB UTF-8 JSON, 8,192 rows, 131,072 JSON nodes or
+65,536 object properties) after about a hundred images, while still far below
+its token threshold. Two more signals therefore enter the same proactive
+checkpoint path as the token threshold, checked before every model request:
+
+| signal | compacts at | measured |
+| --- | --- | --- |
+| stored active history | 60% of any guard limit (for example 9 MiB) | by PostgreSQL in the read that prepared the turn, plus each row the turn appends, measured in the same insert statement |
+| images in one request | 60% of the route's per-request image limit | by counting image parts in the prepared request |
+
+Per-request image limits: Azure OpenAI Responses 50, Anthropic Messages 100
+for 200k-token-window models and 600 otherwise, OpenAI Responses 1,500. Chat
+Completions routes have no knowable limit and get no image trigger. 60%
+leaves room for the checkpoint request itself and for several more large tool
+results produced before the next request boundary.
+
+These triggers change only *when* a checkpoint happens; the checkpoint is the
+ordinary one (`trigger: "proactive"`). No item is rewritten between ordinary
+requests.
+
+A history that is already over the guard (for example written before these
+triggers existed) is not decoded in full. Turn preparation and compaction read
+a bounded recovery view instead, built in PostgreSQL to fit 60% of every limit:
+base64 data-URL payloads in the oldest items are replaced first (tool results
+before messages, oldest first) with a fixed, content-free note, or with the
+standard omission card for computer screenshots; only if that is not enough
+are the oldest rows left out, starting the view at a message. Raw base64 that
+is not a data URL (encrypted reasoning, signatures) is never touched. Such a
+view is used only to checkpoint, never for ordinary inference, and the
+`session.context.compacted` event records `compactionInputInlinePayloadRowsElided`
+and `compactionInputHistoryRowsOmitted`. Only when even the newest item alone
+cannot fit does a turn fail with `active_history_too_large`; clearing the
+context (`/clear` or `clearSessionContext`) deactivates rows without reading
+them and lets the session continue.
+
+## Claude request bytes and image-heavy recovery
+
+Request bytes are independent of model context tokens. Claude's Messages API
+accepts a 32 MB body; Opengeni checks the **final UTF-8 JSON**, after subscription
+identity additions, against a conservative 24,000,000-byte transport budget.
+This is not a local token estimate or an automatic-compaction preference.
+Each inline raster is independently bounded to 2,000 pixels per side and
+512 KiB of base64. Compression and, when necessary, further resizing depend
+only on that image, never the number of later images. Originals stay retained;
+coordinate-mapping notes describe the request-local rendition. A per-image
+limit alone cannot bound an accumulating conversation.
+
+On models with prefix-bound thinking, every request that asks for thinking opts
+into the documented `thinking-binding-controls-2026-08-01` beta with
+`prefix_mismatch_behavior: "drop_block"`. A request without thinking is moved
+into it only while its input carries a checkpoint summary or a resized image,
+and never when it forces a tool, which Claude refuses together with thinking. The prefix can change
+between ordinary turns too: the system prompt follows live workspace state,
+such as the repository Skills index after a branch checkout, and a strict
+request would then be rejected on every retry. The provider, not the client,
+may omit only reasoning invalidated by the changed prefix; an unchanged prefix
+drops nothing. Signed blocks remain verbatim in durable history and in
+requests. The setting is the same on every request, so it never changes the
+cached prefix inside a conversation.
+Responses expose only counts of dropped blocks by closed reason, not signatures
+or prompt data. This reset can lose old reasoning and cost new reasoning tokens;
+it is not a claim that a client-generated checkpoint preserves prefix binding.
+See Anthropic's [preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
+
+Both the preflight refusal and a real HTTP 413 before a response stream use the
+same worker-owned recovery. The worker checkpoints the largest complete earlier
+prefix that fits both the summary's token budget and at most half the rejected
+body's bytes (also capped at 24 MB). Fitting uses the same serializer and image
+projection as dispatch, without making inference calls. The complete remaining
+suffix stays verbatim, including unread images and paired tool calls/results;
+cuts never separate signed reasoning from its assistant/tool batch. The durable
+replacement appends that suffix after the checkpoint. Historical tool actions
+are not executed again, and neither a queue entry nor a new turn is created.
+
+The exact turn-attempt fence claims one size-recovery allowance in logical-turn
+metadata before requesting the summary. It survives worker restart, attempt
+replacement, and successful checkpointing. A second size refusal is terminal,
+not another automatic summary or replay. An irreducible prefix, empty/failed
+summary, non-shrinking replacement, cancellation, or stale attempt cannot replace
+active history. Explicit subsequent input or compaction can create a new attempt
+at the task; no automatic retry promises that irreducibly large new input fits.
+Portable Claude compaction also uses exact-byte prefix fitting when its normal
+checkpoint would otherwise be too large. Other provider protocols are unchanged.
+
+Diagnostics retain only total UTF-8 bytes, image count/base64 bytes, system/tool
+schema bytes, the budget, and an available provider request ID; they do not retain
+prompt/image contents or depend on full request capture. A stream error after HTTP
+200 and an unrelated file-upload 413 do not enter this pre-dispatch recovery.
+
+See `packages/runtime/src/anthropic-request-size.ts`,
+`packages/runtime/src/anthropic-compaction.ts`, and Anthropic's
+[request-size limits](https://platform.claude.com/docs/en/api/errors#request-size-limits).
+
 ## Model-facing tool output
 
 Every resolved model carries a textual tool-output policy. The Codex catalog's
-10,000-token policy is the default; OpenGeni applies Codex's exact 1.2x JSON
+10,000-token policy is the default; Opengeni applies Codex's exact 1.2x JSON
 serialization allowance, UTF-8-safe head/tail truncation, and explicit
 `…N tokens truncated…` marker. Structured textual parts share one sequential
 budget while images, files, and encrypted content remain structured.
@@ -135,25 +326,152 @@ The compaction model receives:
 3. for Responses providers, the exact prepared system instructions and
    model-visible tool schemas from the ordinary agent request; portable
    compaction sets `tool_choice:none` and cannot execute returned tool calls.
+   Claude caches `tools` → `system` → `messages`, and its thinking mode,
+   `output_config.effort` and `tool_choice` are part of the cache key, so a
+   Claude checkpoint keeps the prepared tools, instructions, thinking, effort
+   and tool choice unchanged, changes only `max_tokens`, and appends a
+   text-only instruction after the checkpoint prompt in the same user turn.
+   Its history is the exact input of the ordinary request that the prepared
+   compaction boundary withheld (see "Prompt-cache stability" below), so the
+   checkpoint extends the previous ordinary request byte for byte and reads
+   its warm cache. Only when that request is unavailable does it project
+   durable history again, which is an expected miss.
+   If the model still calls a tool, one retry sets `tool_choice:none` (tools
+   and instructions stay cached); a reply with a tool call never becomes the
+   checkpoint.
    Chat providers still use a tool-less transcript request and composed
    instructions because their protocol differs;
 4. no provider-side context-management policy.
 
 Portable checkpoint output is capped at 20,000 tokens or one quarter of the
 model's configured context window, whichever is smaller. The input fitting
-budget reserves that same amount, and the retained real-user-message budget
+budget reserves that same amount, and the retained user/system-message budget
 has the same cap. A Chat completion whose finish reason is
 not `stop` cannot replace active history, even if it contains partial text.
 Provider-specific output ceilings are not in the model catalog; a provider
 that rejects this cap fails compaction with the existing active history intact.
 
-Explicit compaction is a new accepted logical turn and therefore composes the
+Both rebuilds (portable and remote v2) keep the answer of a retained request.
+
+- **Pairing.** Each history row carries the turn that wrote it. A retained
+  person message is followed by a text-only copy of the last assistant reply of
+  that same turn. The copy keeps the reply's start and end, at most 512 tokens,
+  and is charged to the same retained budget, so the retained window overshoots
+  that budget by at most one bounded reply.
+- **What is never paired.**
+  - The turn running the compaction, whose request may still be open.
+  - A reply from a different turn.
+  - A message whose turn is unknown: rows an earlier compaction rewrote before
+    turn ids were kept, and deferred rows.
+- **Duplicates.** A turn's reply follows only its last retained request.
+- **Repeated compactions.** Retained messages keep their original turn id in
+  `session_history_items.turn_id`. A reply copy is stored with a null turn id
+  and records its turn in `opengeni_retained_reply_turn` on the item, which is
+  stripped at the model wire. A later compaction pairs them again from these,
+  while turn-keyed readers such as a message fork's reply boundary see only the
+  original reply row. The summary row keeps the compacting turn, and deferred
+  rows stay unattributed.
+
+Explicit compaction is a new accepted logical turn and therefore records the
 same deterministic workspace instruction-policy and preference-descriptor
-governance as an ordinary agent turn. Its service initiator may inherit the
+governance as an ordinary agent turn (as a history item, see below). Its
+service initiator may inherit the
 causal human's immutable preference authority from the latest started turn;
 pure service compaction has no personal preference authority. The exact
 snapshot is attempt-fenced, recovery reuses it, and Documents/RAG evidence are
 never promoted into governance.
+
+## Prompt-cache stability
+
+Providers cache a request by its exact byte prefix: tools, then system, then
+history. Each request may only append to what the previous request sent;
+changing any earlier byte makes everything after it a cache write. With
+prefix-bound thinking and `drop_block`, Claude also drops every signed
+thinking block after the first changed byte, which shrinks the prompt and
+loses that reasoning.
+
+**The checkpoint request.** The ordinary request is assembled by the full
+request projection: durable items, lazy tool-search results, tool-family
+disclosure messages, image rendering, provider-artifact projection. When
+compaction becomes due at a model boundary, the prepared-compaction boundary
+stops that request before inference and keeps its exact input. Claude portable
+compaction and Codex remote v2 send that input (plus the checkpoint prompt or
+`compaction_trigger`), so they extend what the provider already cached.
+Re-projecting durable items instead used to drop request-local items such as
+tool disclosures, so the checkpoint diverged at the first one; in production
+most Claude checkpoint calls after an earlier compaction wrote most of their
+history again, and lost the signed thinking after that point.
+
+The withheld input is consumed once. It stands in for durable history only if
+it covers every durable tool result and user message the checkpoint marks as
+summarized; otherwise (for example input that arrived after the request was
+prepared) the worker projects durable history as before. Size recovery after a
+413 and histories that exceed the summary budget also cut a fitting prefix
+from durable history. Both fallbacks are deliberate cache misses. Portable
+compaction on Responses providers (including portable-locked Codex sessions)
+still omits opaque encrypted reasoning and compaction blobs so any provider
+can summarize the history, so it never reads the warm cache.
+
+**What stays out of the system prompt.** Text that can change between turns
+of one session must not be in the system prompt, because changing it rewrites
+the start of every later request:
+
+- Workspace governance (instruction policies, learning settings, organization
+  profile) differs by who starts a turn and changes when an administrator edits
+  a policy. It is a durable developer history item, written before the turn
+  that first sees a new value, exactly like the Skill catalog. Recovery
+  attempts of the same logical turn reuse its frozen snapshot. A change
+  appends a new item that replaces the old one; withdrawn governance appends an
+  explicit "no workspace governance" item. Compaction re-adds only the latest
+  governance item after the Skill catalog.
+- An agent's Instructions are the exception that is allowed in the system
+  prompt, because every chat of one agent shares them: chats bound to an agent
+  revision (`sessions.agent_prompt_revision`) carry that revision as their own
+  layer, at the end of the cached stable prefix. An edit made during a chat
+  does not rewrite it. It arrives as a developer history item
+  (`<opengeni_agent_instructions>`) before the turn that first sees it, frozen
+  for that turn's attempts like governance. Compaction drops these items and
+  folds the newest revision they showed into `sessions.agent_prompt_revision`
+  in the same transaction as the replacement, so the next turn's system prompt
+  carries it. Only developer items count, and the fold only moves the
+  revision forward to a revision of the chat's own agent. A turn that
+  continues after compaction keeps its system prompt (its attempts all use the
+  revision its first attempt recorded), so the newest item is re-added after
+  the governance item for the rest of it. That item repeats the whole folded
+  text (up to 20,000 characters) on every request until the next compaction or
+  turn; this is accepted because it stays in the cached prefix of the
+  continuing turn. See `docs/run-lifecycle.md`, "Agent instructions".
+- Files attached to one turn are described in that turn's own input, never in
+  the system prompt.
+- Per-request billing metadata in the first system block does not affect the
+  cache.
+
+Codex prompt-cache affinity is keyed by the session's scope subject, not by
+the human who started the turn, so turns started by different people in one
+session share one cache.
+
+Known remaining system-prompt changes are deliberate and rare: a machine swap
+or SDK filesystem manifest change (`workspace_root_changed_this_turn`) changes
+the system prompt or tools, and the next request is a full write.
+
+**Diagnostics.** The worker fingerprints every provider request after dispatch
+(tools, system without billing metadata, and chained history digests at item
+counts 1, 2, 4, … and the full count). `model_call_facts.prompt_cache_diagnostics`
+stores that fingerprint, Claude's dropped signed-thinking counts by reason,
+and, when a call reads much less cache than the previous call of the same model
+in the session, a warm-miss class: `context_replaced`, `tools_changed`,
+`system_changed`, `history_rewritten` (with the first diverging checkpoint),
+`thinking_dropped`, `account_changed`, `idle_gap` or `unexplained`. The worker
+also exports `opengeni_model_prompt_cache_warm_misses_total{class}`,
+`opengeni_model_prompt_cache_missed_tokens_total` and
+`opengeni_model_thinking_blocks_dropped_total{reason}`. `context_replaced`,
+`idle_gap` and `account_changed` are expected; a steady rate of any other class
+points to a prompt-cache bug.
+
+`packages/runtime/test/prompt-cache-prefix-stability.test.ts` asserts the
+byte-prefix contract across consecutive requests: new turn, steer and
+recovery, a checkpoint after a tool disclosure, a lazy tool load, a resized
+image, a goal or governance update, and a file attachment.
 
 Responses providers use the Agents SDK's structured Responses conversion, so
 tool calls/results remain real protocol items on the wire. Chat providers use a
@@ -168,17 +486,28 @@ Historical `tool_search` calls and outputs are not rerun, compared with the
 current catalog, or reclassified. There is no switch-time rewrite and no second
 durable history form.
 
-Before the provider call, OpenGeni estimates the history and checkpoint prompt. It
+Claude's Messages adapter preserves these system-role inputs request-locally.
+Portable replacement removes assistant replies, which can leave
+`user → system → user` (including the user-role checkpoint summary). The
+mid-conversation system beta rejects that order. The adapter coalesces user
+inputs within each assistant-delimited phase and places that phase's system
+blocks after them, before the next assistant or at the end. Exact block text,
+system authority, user ordering, system ordering, tool correlation and signed
+assistant content survive; no system moves across an assistant, and canonical
+history is never rewritten. Already-compacted sessions use this projection on
+their next ordinary turn without clearing context or rerunning completed tools.
+
+Before the provider call, Opengeni estimates the history and checkpoint prompt. It
 replaces aggregate oversized tool results oldest-first only in the temporary
 copy, preserving recent detail. If that remains too large, it removes whole
 oldest user-delimited work units and re-sanitizes the suffix so no tool result,
 call, or reasoning fragment is orphaned. The temporary history copy is kept
 beneath the effective input ceiling and raw window minus requested summary.
-For a prepared Responses call, OpenGeni reserves the estimated instruction and
+For a prepared Responses call, Opengeni reserves the estimated instruction and
 tool-schema tokens before fitting history. If the provider still reports context
 overflow, it refits history to 40% of the remaining target and sends one final
 request. The provider may still count differently; on another overflow, active
-history stays intact. If only the checkpoint instruction fits, OpenGeni stops
+history stays intact. If only the checkpoint instruction fits, Opengeni stops
 without asking the model to summarize unseen history. It never issues one
 failing call per history item.
 
@@ -200,15 +529,15 @@ terminal SSE `response.failed` and `response.error` events that arrive on HTTP
 type/code/message/parameter and response identity; arbitrary nested diagnostics
 are omitted and truncation is explicit. They are never misclassified as an
 empty summary. A genuinely successful but empty response is a distinct typed
-compaction failure with bounded, content-free response diagnostics. OpenGeni
+compaction failure with bounded, content-free response diagnostics. Opengeni
 never installs a manufactured placeholder as conversation truth.
 
 ## Durable replacement
 
 The replacement history is:
 
-1. the newest real user messages that fit one cumulative budget of at most
-   20,000 tokens (one quarter of the context window on smaller models),
+1. the newest user messages and system-role conversation inputs that fit one
+   cumulative budget of at most 20,000 tokens (one quarter of the context window on smaller models),
    in chronological order;
 2. one user-role summary item prefixed with Codex's `summary_prefix.md` text and
    marked `opengeni_context_summary: true`.
@@ -218,8 +547,22 @@ in retained messages. Retention budgets charge projected image tokens as well
 as text; a message whose non-text content cannot fit is omitted as a whole.
 Existing text truncation preserves the retained image parts. Uploaded images
 are reconstructed before summarization just as for ordinary inference; only
-the compacted archive-reference catalog remains receipt-only. Durable machine inputs participate in the
-history being summarized like every other canonical model item. Assistant
+the compacted archive-reference catalog remains receipt-only. Durable machine
+inputs participate in the
+history being summarized like every other canonical model item. Their recent
+system-role batches share the cleartext retention budget (user/system for
+portable, user/system/developer for remote v2). This preserves frozen goal
+snapshots, timestamps, update identities and direction chronologically, without
+promoting them to user intent, rebuilding mutable goals or replaying updates.
+Both modes use one 20,000-token budget (smaller on small models). Remote v2
+previously kept up to 64,000 tokens, following the Codex CLI, whose retained
+messages are short typed requests. In agent-driven sessions that window filled
+with platform updates the checkpoint already summarizes, leaving about 80,000
+tokens after each compaction instead of about 20,000.
+Turn-scoped operational notices are retained verbatim only for the turn running
+the compaction, or when one is the newest input; older notices are left to the
+checkpoint, because each applies only to its own turn.
+Existing budget-driven omission and text truncation still apply. Assistant
 messages, reasoning, tool calls, and tool results leave the active model
 history but remain in inactive audit rows.
 
@@ -249,6 +592,12 @@ rewrite of the chat transcript. The React timeline projects a first-class
 | `session.context.compacted` | `compacted` with optional `~before → ~after estimated history tokens` |
 | `session.context.compaction.skipped` | `skipped` with a short reason |
 
+A `skipped` landmark with `reason="interrupted"` means the attempt itself was
+cancelled while the checkpoint request was in flight (typically a worker
+draining during a deploy). It renders as "Compaction interrupted" with retry
+copy rather than as a failure; the recovered attempt compacts again if the
+history still needs it.
+
 Start and finish for the same turn settle in place (one landmark). The landmark
 is a turn boundary, so mid-turn auto-compact stays visible between collapsed
 pre/post activity instead of vanishing inside a chevron. Copy always reminds
@@ -256,6 +605,16 @@ that chat history above is unchanged. Provider `implementation` stays in the
 event payload for debug, not as hero UI text.
 
 ## Observability
+
+The turn worker logs expected proactive/operator requests at info level as
+`context compaction requested`, with the signal source and measured threshold.
+Only actual context-window or request-size rejection logs
+`context compaction recovery attempted` as a warning, with a distinct error code.
+These logs retain content-free token, history-footprint, and request-byte counts.
+Checkpoint failures use the existing protected failure diagnostic recorder and
+distinguish provider-request failure from an empty summary; they never log the
+provider's raw message or conversation. This classification does not change
+when compaction runs or what it sends to the model.
 
 The turn worker records `opengeni_context_compaction_starts_total{trigger}`
 immediately after the attempt-fenced `session.context.compaction.started`
@@ -278,7 +637,8 @@ token guess. No tenant or attempt identity becomes a Prometheus label.
 ## Turn behavior
 
 Before a fresh user or goal inference, the worker checks the durable token
-signal and any manual compaction request. During an inference, the per-model-call
+signal and any pending compaction request (manual `/compact`, or the idle
+request described under "Idle checkpoint after a turn at the threshold"). During an inference, the per-model-call
 filter raises `CompactionNeededError` when the threshold is reached. A provider
 context-window rejection enters the same path.
 
@@ -286,7 +646,7 @@ The successful summarizer response reports usage through the same durable,
 idempotency-keyed `agent.model.usage` and billing-ledger path as an ordinary
 model call, owned by the current execution attempt. Codex subscription
 allowance headers use the same per-account request context and remain separate
-from OpenGeni token billing.
+from Opengeni token billing.
 
 Both paths compact inside the same activity, turn, attempt, and sandbox.
 Compaction never creates a prompt-queue row, a recovery message, a new logical
@@ -298,12 +658,80 @@ terminal `session.context.compacted` or `session.context.compaction.skipped`
 landmark is durable, the ordinary turn settles `superseded` before another
 model request and the Steer runs next. Pause and Cancel are not deferred.
 
-If summarization produces an authoritative terminal failure, the turn ends
-with an honest `context_compaction_failed` result. OpenGeni does not continue
-with silently trimmed input and does not install a mechanical fallback summary.
-Retryable provider failures instead recover the same accepted turn through the
+### When the summary fails
+
+A portable checkpoint asks the chat's own model for its summary. For an
+OpenAI-compatible endpoint (a workspace or organization custom provider), a
+summary request rejected with HTTP 400 or 422 is sent once more without its
+output cap (`max_tokens`, or `max_output_tokens` on the Responses API), since
+such endpoints often reject a cap above their own model's limit. A summary
+produced by that retry is then held to the cap it would have had, cut from the
+middle with the usual truncation marker, so it fits exactly as a capped summary
+would. Other providers are not retried this way. Only the provider call itself
+is retried or classified as a provider failure: an error from recording the
+summary's usage (a lost credential lease, a database error) propagates
+unchanged to its own recovery.
+
+If the summary still fails in a way that repeating the same request cannot
+fix, the portable path installs a trimmed checkpoint instead of failing the
+turn. That covers a definitive rejection (HTTP 400, 413 or 422), a failed or
+incomplete response whose code is not a temporary condition, an empty or
+unusable summary (including one cut off at the output limit), and no history
+fitting the summary request. A summary that was produced is never thrown away
+for a trim. The trimmed checkpoint is rebuilt exactly like
+a summarized one (platform context, the newest requests with shortened copies
+of their replies, attachment catalog), but a fixed model-visible note
+(`TRIMMED_CONTEXT_NOTICE` in `packages/runtime/src/context-compaction.ts`)
+takes the summary's place. The note carries forward the newest earlier
+checkpoint's summary (bounded), the tools the current turn has called so far,
+and the current turn's latest assistant text (bounded). It is marked like a
+summary, so a later compaction reads it as one. No other model is called, so
+no history leaves the chat's provider, and the workspace's data-residency,
+training and billing choices hold unchanged. `session.context.compacted` then
+carries `implementation: "deterministic_trim"` and
+`fallback: { reason, providerRejection?, providerMessage? }`, where `reason` is
+`provider_rejected`, `provider_failed` or `summary_unusable`; the timeline
+shows "Older messages trimmed" with the provider's reason behind Details. The
+worker logs one content-free warning (identifiers and classifications only).
+
+The fallback never applies when trimming would lose history for nothing or
+when retrying may succeed: a retryable provider or capacity failure (the
+same-turn recovery below owns it), an exhausted quota or an authentication,
+permission or missing-model refusal (the next ordinary request would be
+refused too), any other HTTP status, a transport failure with no response, a
+failed response with a temporary code (server error, rate limit, overload,
+timeout), the attempt's own cancellation, a `remote_v2` checkpoint, or the
+one-time rebuild when a Codex chat switches to another model (trimming would
+move the chat off Codex for good, so that rebuild keeps failing until a
+summary succeeds). When the trimmed checkpoint would not help (it exceeds the
+model's budget, is unchanged or is not smaller), history stays as it was and
+the turn fails with the summary's own error, as below. A summary that is too
+long to install settles `skipped(reason="replacement_exceeds_model_budget")` as
+before.
+
+The provider's own error message, bounded to 500 characters on one line, is
+kept apart from the content-free diagnostics. Only the provider's error body
+is read (`error.message`, or a bare string `error`); SDK, transport and
+runtime error text never stands in for it, and it is not an enumerable error
+property, so error serializers do not carry it. It is recorded only in the
+structured `providerMessage` field of the session's own events (the trimmed
+checkpoint's `fallback`, the `summarization_failed` skip landmark, and the
+`turn.failed` payload), which the conversation's readers can already see. It
+is never put in the free-text `turn.failed` `error`, which workspace activity
+also copies for event triggers and automations. Worker logs, metrics and
+telemetry never carry it.
+
+If summarization produces an authoritative terminal failure that the trimmed
+checkpoint cannot replace, the turn ends with an honest
+`context_compaction_failed` result. Retryable provider failures instead recover the same accepted turn through the
 ordinary provider/capacity path; they do not create another goal continuation,
 and an explicit `/compact` request remains pending for that same-turn retry.
+The attempt's own cancellation (worker shutdown or another activity
+cancellation) is neither: it records
+`session.context.compaction.skipped(reason="interrupted")` when the attempt can
+still write, keeps any `/compact` request pending, and propagates the
+cancellation to the ordinary same-turn recovery path (see
+[`run-lifecycle.md`](run-lifecycle.md)).
 When a terminal failure belongs to an explicit `/compact`, one attempt-fenced
 database settlement records
 `session.context.compaction.skipped(reason="summarization_failed")`, clears that
@@ -318,23 +746,53 @@ unchanged history. A later human/API prompt, Steer, explicitly requested
 Compact, or genuinely new machine input can create newer truth and make one new
 attempt. The active history stays unchanged throughout.
 
+A standalone compaction execution (the idle checkpoint below, or an explicit
+`/compact` on an idle session) is maintenance, so any terminal failure that
+reaches the generic turn-failure settlement, for example while preparing its
+tools, settles the same way: `turn.failed` with `context_compaction_failed`,
+the session idle rather than failed, and a still-pending request consumed with
+`session.context.compaction.skipped(reason="summarization_failed")` so the
+execution is not claimed again. Every recovery path runs first. A failed read of
+the pending flag goes to post-claim database recovery instead of settling idle
+with the request still pending. The failure's classification (code, error
+class and HTTP status, never the message) goes to worker telemetry; the
+recorded reason stays short and, for an error that is not a provider, quota
+or summary failure, says the checkpoint could not run and names its class. The timeline names an automatic compaction's failure
+(labelled Auto) with "Chat history is unchanged." and keeps "Request it again
+to retry." for a requested `/compact` or an overflow.
+
 Codex-subscription responses are streaming on the wire even for this
 non-streaming summarizer. Terminal `response.failed`, `response.error`, `error`,
 and `response.incomplete` events are converted to ordinary non-2xx provider
 errors before the SDK sees them; a stream with no terminal event is a protocol
 error. None of these shapes may collapse to `{}` or be mislabeled as a
 semantically empty assistant response. Persisted diagnostics contain only
-bounded status/code/request identifiers, never the provider message or model
-input.
+bounded status/code/request identifiers, never model input; the provider's
+bounded message is recorded only on the session's own events, as described
+under "When the summary fails".
 
 When the latest finished inference has `code="context_compaction_failed"`, an
-active goal remains active and ordinary pending system/child/schedule updates
-remain durable, but neither may start another inference against the unchanged
-history. A queued human/API prompt or Agent Steer instruction remains runnable
-and receives the pending updates at its normal boundary. Explicit `/compact`
-also remains runnable; it does not consume those updates, but a successful
-checkpoint supplies newer finished-turn truth so the existing pending batch can
-run next. This gate neither creates queue work nor consumes a goal
+active goal remains active and the machine inputs that were already pending at
+that failure remain durable, but neither may start another inference against
+the unchanged history. The hold is bounded by the exact `turn.failed` event
+sequence (`compactionFailureHoldSequenceTx` in
+`packages/db/src/compaction-failure-hold.ts`): an input whose own
+`system.update.pending` event is newer than that sequence is genuinely new
+truth. Under the ordinary wake-class rules it makes one new attempt, and the
+held backlog rides along in canonical order (a batch that cannot coalesce
+claims first and the newer input follows). A queued human/API prompt or Agent
+Steer instruction, of any age, remains runnable and receives the pending
+updates at its normal boundary. Explicit `/compact` also remains runnable; it
+does not consume those updates, but a successful checkpoint supplies newer
+finished-turn truth so the existing pending batch can run next. Every reader
+of runnable work applies the same hold: work peek, claim, pre-claim failure,
+goal materialization, final idle settlement, the workflow-wake delivery ACK and
+the child-result wake repair. Held-only input therefore neither keeps a wake
+revision open (the dispatcher would otherwise re-signal a closed workflow
+forever) nor wakes a session, while a sender's new message after the failure
+always wakes it. A further compaction failure starts a new hold at its own
+sequence, so every retry needs another external input and there is no
+self-sustaining loop. This gate neither creates queue work nor consumes a goal
 continuation counter.
 
 Manual `/compact` sets one durable idempotent request. During active inference,
@@ -350,6 +808,36 @@ inference. A Steer accepted while that standalone maintenance attempt is live
 does not interrupt it; maintenance records its terminal compaction result and
 completes normally, then the already-admitted Steer is the next runnable work.
 
+That maintenance execution continues the latest started turn, so its claim
+resolves that turn's connection account intent again, like an internal update
+continuing the turn (see `docs/remote-mcp-credentials.md`). The compaction
+request therefore carries the person's current account-routed connector tools
+and delegation-based personal tools (personal GitHub, personal connectors),
+normally the same ones as the turn before it, and keeps that turn's cached
+prompt prefix. After a scheduled run, the run's intent is resolved against all
+of the session's connectors rather than the run's own connector subset, so the
+tool list can differ there; it is still the same person's accounts, checked
+live. A picked account that can no longer be used leaves its connector out and
+is recorded in `connectionAccountGaps`. An intent naming someone other than that
+turn's person, or, in a private chat, someone other than its owner, resolves
+shared accounts only. A compaction turn cannot carry an external link's
+permission ceiling or a credential restriction (such as developer setup)
+forward, so after a turn with either it gets no connection accounts and stores
+no intent. Work that later continues the compaction turn, such as a goal
+continuation or a second compaction, then resolves nothing from it. Otherwise
+the compaction turn stores the same intent, and that work resolves it again like
+any continuation. Unlike an internal update, accounts never fail the claim. The
+external-link check, the resolver and the turn's acceptance (its
+authority-capture and binding-fence triggers) each run in a savepoint. If any of
+them fails, or the resolver offers an account that person may not lend, the
+claim records `connectionAccountsUnresolved` (reason, error class and SQLSTATE,
+never the message) in the turn's internal
+metadata, the worker logs it as a warning, and the compaction runs with only the
+session's shared tools. A stored intent the current schema no longer reads is
+recorded the same way, lends nothing and is not stored on the compaction turn.
+A session with no started turn, or a turn accepted before account intent
+existed, compacts without connection accounts.
+
 The exact attempt that successfully installs the replacement clears the request
 in the same transaction. If there is no active history, the generated
 checkpoint is not strictly smaller, or it exactly repeats the latest durable
@@ -359,6 +847,64 @@ one transaction without changing history. A failed, paused, recovered, or
 superseded attempt cannot lose the request or publish a current compaction
 result; only an authoritatively recorded terminal summarization failure consumes
 the request as described above.
+
+### Idle checkpoint after a turn at the threshold
+
+A person's own turn (`source="user"`, subject initiator) in a root session can
+end with its provider-reported `last_input_tokens` already at or above the
+automatic compaction limit. Left alone, that checkpoint would run in front of
+the person's next message, often days later with a cold provider prompt cache (a
+`remote_v2` checkpoint of about 240,000 tokens measured 145 s on staging, and
+the median remote checkpoint took 171 s). Instead, right after the turn's
+completion settlement commits, the worker calls
+`requestIdleSessionCompactionIfDue`. Under the session row lock it rechecks that
+the session is idle with no active turn, is a root session, has no pending
+request, has no active goal, has no held or timed-out `wait_for_input`, has no
+undelivered future-dated workflow wake, and holds a provider-reported count at
+or above the resolved limit. It then sets the same durable request as
+`/compact` and enqueues the same workflow wake. The workflow's next work peek
+claims the ordinary standalone maintenance execution described above while the
+prompt cache is still warm. It is never prompt-queue work. The request is best
+effort: a failed write is logged and the next turn's ordinary pre-inference
+check compacts instead.
+
+While that checkpoint runs (minutes for a large `remote_v2` history) the session
+counts as running, exactly as during a manual `/compact`:
+
+- a new Send queues behind it, a Steer waits for it, and Pause and Cancel fence
+  it immediately;
+- deleting the session returns 409 until it finishes;
+- a whole-session fork and an Only-me visibility transition wait for
+  quiescence;
+- a scheduled task with `overlapPolicy: "skip"` that continues this chat skips
+  an occurrence that fires during the checkpoint.
+
+When the subscription pool has no capacity for the checkpoint, the maintenance
+execution is cancelled without holding a capacity waiter (as for `/compact`).
+A `proactive` request is then dropped in the same attempt-fenced settlement and
+recorded as `session.context.compaction.skipped(reason="capacity_unavailable")`,
+so it cannot keep winning later claims ahead of pending machine input with
+nothing to wake it when capacity returns; the person's next turn compacts at its
+ordinary threshold check. An operator request is preserved, as before.
+
+API turns are excluded, so an embedding host running one-shot API sessions does
+not pay a checkpoint per session. Child, scheduled, goal-continuation and other
+service work is excluded too, because nobody may come back to those sessions and
+a checkpoint costs a full provider call; they compact at their next model
+boundary if they continue. Goal and `wait_for_input` sessions are left to their
+own next turn, so the request never pulls their future-dated wake forward. Set
+`OPENGENI_IDLE_CONTEXT_COMPACTION_ENABLED=false` (default `true`) to turn the
+idle request off for a deployment.
+
+`sessions.compact_request_trigger` (migration 1102) labels the pending request:
+`operator` for `/compact`, `proactive` for the idle request. An operator request
+always relabels a pending request as `operator`; an idle request never relabels
+a pending one. A request written by an older binary, or created by a model
+switch away from Codex remote compaction, has no label and reads as `operator`.
+The label feeds the `session.context.compaction.requested`, `started` and
+metric `trigger`, so the timeline shows an automatic idle checkpoint as Auto
+rather than Manual, and it decides the capacity-deferral drop above. Every
+transaction that clears the request clears the label.
 
 ### Portable Responses identity regression
 
@@ -427,7 +973,7 @@ summary setting, alongside its exact instructions and tool schemas. Omitting the
 reasoning configuration can change provider-side instructions before the long
 history is summarized. Durable turn-scoped operational notices remain at their
 original positions in the compaction input. The resulting summarized history is
-still a deliberate new prefix.
+still a deliberate new prefix, and keeps only the current turn's notices.
 
 ### Reasoning effort updates (opt-in)
 

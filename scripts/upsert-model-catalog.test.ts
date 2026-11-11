@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -102,6 +102,48 @@ describe("model catalog operator CLI", () => {
     ).toThrow(
       "database model catalog provider unbound-provider has no matching host-authorized api-key transport",
     );
+  });
+
+  test("refuses a residency claim that differs from the host transport", () => {
+    const euDataZone = {
+      geography: "eu",
+      deploymentType: "azure_data_zone",
+      regions: ["swedencentral"],
+      evidence: {
+        source: "operator_declaration",
+        reference: "Azure deployment gpt-eu, sku DataZoneStandard",
+        verifiedAt: "2026-10-26",
+      },
+    };
+    const provider = {
+      id: "azure-eu",
+      api: "responses",
+      wireProfile: "azure-openai",
+      baseUrl: "https://res.openai.azure.com/openai/v1",
+      models: [{ id: "azure-eu/gpt-eu", upstreamModelId: "gpt-eu" }],
+    };
+    const env = operatorTestEnv({
+      OPENGENI_OPENAI_API_KEY: "openai-test-key",
+      OPENGENI_MODEL_CATALOG_SOURCE: "code",
+      OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+        { ...provider, apiKey: "key", residency: euDataZone },
+      ]),
+    });
+    const document = (residency?: unknown) => ({
+      schemaVersion: 1,
+      defaultModel: "azure-eu/gpt-eu",
+      builtInModels: ["gpt-5.6-luna"],
+      registryProviders: [{ ...provider, ...(residency ? { residency } : {}) }],
+      gatewayModels: [],
+      openrouterModels: [],
+      modelNotes: {},
+    });
+    expect(() => preflightModelCatalogDocument(document(), env)).toThrow(
+      /residency claim differs from its host-authorized transport/u,
+    );
+    expect(preflightModelCatalogDocument(document(euDataZone), env)).toMatchObject({
+      defaultModel: "azure-eu/gpt-eu",
+    });
   });
 
   test("upserts only the deployment catalog in a configured dedicated schema", async () => {

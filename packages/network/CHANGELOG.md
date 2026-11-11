@@ -1,5 +1,154 @@
 # @opengeni/network
 
+## 6.14.0
+
+## 6.13.0
+
+## 6.12.0
+
+### Minor Changes
+
+- 913e2b4: Allow deployment operators to permit exact private-network integration hosts, optionally restricted by port, without enabling private destinations globally. Apply the allowlist at DNS-pinned connection time across MCP and OAuth traffic.
+
+## 6.11.0
+
+## 6.10.0
+
+### Patch Changes
+
+- b5201d5: Dependency security updates: sharp 0.35.5 (bundled libvips fixes), Electron 44.10.1, @azure/msal-node 7.1.2, undici 6.29.1, @grpc/grpc-js 1.14.7, and patched transitive versions of dompurify, ip-address, js-yaml, proxy-addr, fast-uri, seroval, follow-redirects and body-parser. This clears the critical and most high advisories reported by `bun audit` for server and desktop code.
+
+## 6.9.0
+
+## 6.8.0
+
+## 6.7.0
+
+## 6.6.0
+
+## 6.5.1
+
+## 6.4.0
+
+## 6.3.1
+
+## 6.2.1
+
+## 6.1.1
+
+## 6.0.2
+
+## 5.5.1
+
+## 5.4.2
+
+### Patch Changes
+
+- a57cfa8: Support keyless built-in Azure OpenAI authentication with workload or managed
+  identity and automatically refreshed Cognitive Services tokens. Preserve built-in
+  model and reasoning settings, and enable reasoning effort for organization Azure
+  OpenAI models using either API keys or Microsoft Entra ID.
+
+## 5.3.1
+
+### Minor Changes
+
+- 4c6bf32: An organization's Azure OpenAI connection can now sign in with Microsoft Entra ID instead of an API key, so Azure resources that turn key authentication off can run agent turns. Admins choose the sign-in method when connecting: an API key (unchanged), the organization's own Entra app registration with a client secret, or, when the operator sets `OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED=true` and configures the standard `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_FEDERATED_TOKEN_FILE` or `AZURE_CLIENT_SECRET` variables, the deployment's own workload identity. Tokens for the `https://cognitiveservices.azure.com/.default` scope are cached per credential and renewed before they expire. The upsert request accepts `authentication` in place of `apiKey`, connection responses report `authMethod`, and the client config reports `azureOpenAIDeploymentIdentity`. `@opengeni/network/azure-entra` exports the shared token source.
+
+## 5.2.1
+
+## 5.1.2
+
+## 5.0.2
+
+## 4.8.0
+
+## 4.7.2
+
+## 4.7.1
+
+## 4.7.0
+
+## 4.6.1
+
+## 4.5.0
+
+## 4.4.1
+
+## 4.3.1
+
+### Patch Changes
+
+- d1de8b4: Honor explicit provider-dispatch catalog preparation even when all MCP servers
+  are already connected. Keep eager schemas available before the first request,
+  and join the same catalog completion fence before tool execution and cleanup.
+  Use the shared transport's dispatch notification after admission and transport
+  setup on both native subscription and generic model routes.
+  Compile a tool's input and output validators together on its first call, before
+  authorization or execution, instead of compiling every unused tool at startup.
+  Malformed schemas now fail that tool's call rather than catalog preparation.
+
+## 4.2.0
+
+## 4.1.3
+
+## 4.1.1
+
+## 4.0.4
+
+### Patch Changes
+
+- 35dcfa0: Use Azure's API-key header for configured API-key credentials on HTTP and Responses WebSocket connections, while preserving Entra bearer authentication and explicit header overrides. Treat a redirected WebSocket upgrade as a refusal and use the existing turn-scoped HTTP fallback without following credential-bearing redirects.
+- b1b51e2: Report HTTP response-reader cancellation separately from transport failure. A consumer that stops reading after a successful model terminal event no longer produces a false transport-failure metric.
+- 1d24639: Reserve persistent Responses sockets for explicitly scoped conversation requests so title side requests cannot displace a warmed main connection or continuation chain. Add immutable request-receipt snapshots of local dispatch/socket timing and allowlisted response-scoped server timing, without changing model request content, prewarming, retries, or custody.
+- a34aebb: Responses WebSocket requests continue the previous response on the same connection: when a request extends the last completed response exactly, it sends `previous_response_id` and only the new input items, and falls back to the full request otherwise or when the provider no longer holds that response. The transport now serves the OpenAI API (`/v1/responses`) and Azure OpenAI's v1 API (`/openai/v1/responses`) as well as the Codex subscription, with one connection per conversation (`OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED`, default on). Other OpenAI-compatible hosts stay on HTTP. Each request's transport label and the model-request phase metrics say whether the input was full or incremental.
+
+  Share lifecycle and failure policy in the network package. Use the JavaScript WebSocket implementation to release sent buffers, retain only continuation fingerprints, coalesce concurrent handshakes, and retire idle connections when credentials change. The existing durable model-step retry budget owns dropped responses; its final retry uses HTTP, with no additional retry budget or timer-based cooldown. HTTP remains selected through turn recovery and subsequent successful steps, but a new turn tries the socket again. Definitive continuation refusal settles and re-admits request custody before a full-input resend. Transport diagnostics distinguish first-request cache behavior and final-prefix startup overlap; no speculative model prewarm is sent.
+
+## 3.4.0
+
+## 3.3.0
+
+## 3.2.2
+
+## 3.1.2
+
+## 3.0.0
+
+## 2.0.1
+
+## 2.0.0
+
+## 1.4.4
+
+## 1.4.3
+
+## 1.4.2
+
+## 1.4.1
+
+## 1.4.0
+
+## 1.3.0
+
+## 1.2.0
+
+## 1.1.0
+
+## 1.0.2
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 0.3.2
+
+### Patch Changes
+
+- 3cc26b5: Identify the default pinned HTTP client with a User-Agent, preserve caller overrides, and show retryable MCP sign-in discovery failures in connection setup.
+
 ## 0.3.1
 
 ### Patch Changes

@@ -17,8 +17,10 @@ import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sd
 import * as z from "zod/v4";
 
 import type { ApiRouteDeps } from "@opengeni/core";
+import { postgresEditableArtifactAudiences } from "../editable-artifact-audience";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { EditableArtifactQueryRequestSchema } from "./editable-artifact-query-schema";
+import { isRecord } from "@opengeni/contracts/values";
 
 const ArtifactId = z
   .string()
@@ -32,7 +34,7 @@ const ArtifactCommand = z
   .object({ kind: z.string().min(1).max(128) })
   .passthrough()
   .describe(
-    "One canonical modality command. Use the exact OpenGeni document, spreadsheet, or presentation skill command contract; never send local-file facade calls here.",
+    "One canonical modality command. Use the exact documents, spreadsheets, or presentations Skill command contract; never send local-file facade calls here.",
   );
 
 const ArtifactMetadata = z
@@ -93,6 +95,12 @@ export function registerEditableArtifactAgentTools(
   input: RegisterEditableArtifactToolsInput,
 ): void {
   const application = () => requireApplication(input.deps);
+  // A new artifact follows its chat: made in an Only me chat, or from an Only
+  // me file, it is Only me. The tool surface itself does not change.
+  const resolveAudience = () =>
+    postgresEditableArtifactAudiences(input.deps).resolveNew(input.grant, {
+      sourceSessionId: input.sessionId,
+    });
   const context = (toolName: string, extra: ToolExtra) =>
     artifactAttemptContext(input.grant, input.sessionId, toolName, extra);
   const execute = async <T>(
@@ -143,6 +151,7 @@ export function registerEditableArtifactAgentTools(
             idempotencyKey: editableArtifactClientTransactionId(invocation.operationKey),
             modality,
             title,
+            resolveAudience: resolveAudience(),
             signal: extra.signal,
           }),
       );
@@ -173,6 +182,7 @@ export function registerEditableArtifactAgentTools(
             fileId,
             modality,
             title,
+            resolveAudience: resolveAudience(),
             signal: extra.signal,
           }),
       );
@@ -287,6 +297,7 @@ export function registerEditableArtifactAgentTools(
     },
     async ({ artifactId, format, options }, extra) => {
       const invocation = context("editable_artifact_export", extra);
+      // HTTP refuses the matching materialization for the same agent.
       return await execute(
         async () =>
           await application().startExport({
@@ -424,10 +435,6 @@ function jsonValue(value: unknown): unknown {
     return output;
   }
   throw new Error("Artifact result contains unsupported data");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function readOnlyAnnotations(title: string) {

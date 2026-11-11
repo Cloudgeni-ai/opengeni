@@ -1,12 +1,19 @@
 import type { OpenGeniClient, OpenGeniLinkTarget } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { type OpenGeniText } from "../messages/runtime";
+import { ArtifactLinkScopeContext, type ArtifactLinkScope } from "./artifact-link-scope";
 
 export type { OpenGeniLinkTarget };
 
 /**
- * How the host opens one OpenGeni object an agent linked in chat Markdown.
+ * How the host opens one Opengeni object an agent linked in chat Markdown.
  *
  * - `{ href }` renders a real link (new tab) — use it for a host page URL.
+ * - `{ href, open }` renders a real link to an in-app page: a plain click runs
+ *   `open` (client-side navigation in the same view), while modified clicks
+ *   (⌘/Ctrl, Shift, middle button) keep the browser's own handling of `href`,
+ *   such as a new tab, or the external browser in a desktop shell.
  * - `{ open }` renders a button that runs the action (download, open a panel,
  *   client-side navigation) with loading and retry states.
  * - `null` / `undefined` means "not handled here": the next resolver is asked,
@@ -14,7 +21,7 @@ export type { OpenGeniLinkTarget };
  *   never as a navigation that would 404 inside the host.
  */
 export type OpenGeniLinkResolution =
-  | { href: string; open?: undefined }
+  | { href: string; open?: (() => void) | undefined }
   | { open: () => void | Promise<void>; href?: undefined };
 
 export type OpenGeniLinkResolver = (
@@ -22,6 +29,50 @@ export type OpenGeniLinkResolver = (
 ) => OpenGeniLinkResolution | null | undefined;
 
 const OpenGeniLinkContext = createContext<OpenGeniLinkResolver | null>(null);
+
+/**
+ * One ordinary link in an agent's Markdown that the host may draw itself:
+ * its own scheme (`myapp:order/42`), an in-app path, or a web URL.
+ */
+export type OpenGeniHostLink = {
+  /** The destination exactly as the agent wrote it. It is not sanitized: check it before use. */
+  href: string;
+  /** The rendered link text. */
+  children: ReactNode;
+  /**
+   * The link is the only content of its paragraph or list item, so the host
+   * can draw it as a block (a card or preview) instead of inline text.
+   */
+  standalone: boolean;
+};
+
+/**
+ * Draw a host-owned link in agent Markdown. Return `undefined` to keep the
+ * default rendering (web links open in a new tab; other schemes are shown as
+ * unavailable). Opengeni object links (`artifact:`, `sandbox:`, `session:`) never reach
+ * it; use {@link OpenGeniLinkResolver} for those.
+ */
+export type OpenGeniLinkRenderer = (link: OpenGeniHostLink) => ReactNode | undefined;
+
+const OpenGeniLinkRendererContext = createContext<OpenGeniLinkRenderer | null>(null);
+
+/** First renderer that draws a link wins. */
+export function chainLinkRenderers(
+  ...renderers: ReadonlyArray<OpenGeniLinkRenderer | null | undefined>
+): OpenGeniLinkRenderer | null {
+  const active = renderers.filter((renderer): renderer is OpenGeniLinkRenderer =>
+    Boolean(renderer),
+  );
+  if (active.length === 0) return null;
+  if (active.length === 1) return active[0]!;
+  return (link) => {
+    for (const renderer of active) {
+      const rendered = renderer(link);
+      if (rendered !== undefined) return rendered;
+    }
+    return undefined;
+  };
+}
 
 /** First resolver that handles a target wins. */
 export function chainLinkResolvers(
@@ -42,20 +93,64 @@ export function chainLinkResolvers(
 }
 
 /**
- * Resolve OpenGeni object links (`artifact:`, `sandbox:`, editable artifacts,
+ * Resolve Opengeni object links (`artifact:`, `sandbox:`, editable artifacts,
  * Sites) for every {@link Markdown} body below. An inner provider is asked
  * before an outer one, so a host can override a single kind and keep defaults.
+ * `renderLink` draws the host's own links (its scheme, in-app paths, web
+ * URLs) in the same bodies, inner provider first.
  */
 export function OpenGeniLinkProvider({
   resolveLink,
+  renderLink,
+  artifactScope,
   children,
 }: {
-  resolveLink: OpenGeniLinkResolver | null | undefined;
+  resolveLink?: OpenGeniLinkResolver | null | undefined;
+  renderLink?: OpenGeniLinkRenderer | null | undefined;
+  /** Exact artifact metadata reads in the current workspace, before host resolution. */
+  artifactScope?: ArtifactLinkScope | undefined;
   children: ReactNode;
 }) {
   const parent = useContext(OpenGeniLinkContext);
+  const parentRenderer = useContext(OpenGeniLinkRendererContext);
+  const parentArtifactScope = useContext(ArtifactLinkScopeContext);
+  const artifactClient = artifactScope?.client;
+  const artifactWorkspaceId = artifactScope?.workspaceId;
+  const artifactSessionId = artifactScope?.sessionId;
+  const artifactOverride = artifactScope?.override;
+  const effectiveArtifactScope = useMemo(
+    () =>
+      artifactClient && artifactWorkspaceId
+        ? {
+            client: artifactClient,
+            workspaceId: artifactWorkspaceId,
+            sessionId: artifactSessionId,
+            override: chainLinkResolvers(artifactOverride, parent),
+          }
+        : parentArtifactScope,
+    [
+      artifactClient,
+      artifactWorkspaceId,
+      artifactSessionId,
+      artifactOverride,
+      parent,
+      parentArtifactScope,
+    ],
+  );
   const value = useMemo(() => chainLinkResolvers(resolveLink, parent), [resolveLink, parent]);
-  return <OpenGeniLinkContext.Provider value={value}>{children}</OpenGeniLinkContext.Provider>;
+  const renderer = useMemo(
+    () => chainLinkRenderers(renderLink, parentRenderer),
+    [renderLink, parentRenderer],
+  );
+  return (
+    <ArtifactLinkScopeContext.Provider value={effectiveArtifactScope}>
+      <OpenGeniLinkContext.Provider value={value}>
+        <OpenGeniLinkRendererContext.Provider value={renderer}>
+          {children}
+        </OpenGeniLinkRendererContext.Provider>
+      </OpenGeniLinkContext.Provider>
+    </ArtifactLinkScopeContext.Provider>
+  );
 }
 
 /** The effective resolver from the nearest {@link OpenGeniLinkProvider}. */
@@ -63,10 +158,17 @@ export function useOpenGeniLinkResolver(): OpenGeniLinkResolver | null {
   return useContext(OpenGeniLinkContext);
 }
 
+/** The effective host link renderer from the nearest {@link OpenGeniLinkProvider}. */
+export function useOpenGeniLinkRenderer(): OpenGeniLinkRenderer | null {
+  return useContext(OpenGeniLinkRendererContext);
+}
+
 // Every sandbox read the proxy forwards is bounded by the API's own maximum.
 const SANDBOX_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024;
 
-type SessionLinkClient = Partial<Pick<OpenGeniClient, "createFileDownloadUrl" | "fsRead">>;
+type SessionLinkClient = Partial<
+  Pick<ChatClient<OpenGeniClient>, "createFileDownloadUrl" | "fsRead">
+>;
 
 function saveBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
@@ -80,7 +182,7 @@ function saveBlob(blob: Blob, filename: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
-function openUrl(url: string): void {
+function openUrl(t: OpenGeniText, url: string): void {
   // A signed download URL is attachment-disposition; an anchor click keeps the
   // page and survives popup blockers after the awaited URL request.
   const link = document.createElement("a");
@@ -100,22 +202,25 @@ function base64Bytes(content: string): Uint8Array<ArrayBuffer> {
 }
 
 /**
- * Default resolver for a session conversation that talks to OpenGeni through
+ * Default resolver for a session conversation that talks to Opengeni through
  * the normal SDK client (for example behind `createSessionProxyHandler`):
  *
  * - `artifact:<file>` downloads the retained file through a short-lived URL.
- * - `sandbox:<path>` downloads when enabled by the host proxy capability.
+ * - `sandbox:<path>` downloads unless the client config reports `sandboxFiles: false`.
  *
  * Editable artifacts and Sites have no default: they need a host surface
  * (see `@opengeni/react/artifacts/*` and `@opengeni/react/sites`), so they stay
  * unavailable until the host resolves them.
  */
-export function sessionLinkResolver(input: {
-  client: SessionLinkClient;
-  workspaceId: string;
-  sessionId: string;
-  sandboxFiles?: boolean;
-}): OpenGeniLinkResolver {
+export function sessionLinkResolver(
+  t: OpenGeniText,
+  input: {
+    client: SessionLinkClient;
+    workspaceId: string;
+    sessionId: string;
+    sandboxFiles?: boolean;
+  },
+): OpenGeniLinkResolver {
   const { client, workspaceId, sessionId } = input;
   return (target) => {
     if (target.kind === "file") {
@@ -126,7 +231,7 @@ export function sessionLinkResolver(input: {
           const { url } = await client.createFileDownloadUrl!(workspaceId, target.fileId, {
             sessionId,
           });
-          openUrl(url);
+          openUrl(t, url);
         },
       };
     }
@@ -140,7 +245,7 @@ export function sessionLinkResolver(input: {
             encoding: "base64",
             maxBytes: SANDBOX_DOWNLOAD_MAX_BYTES,
           });
-          if (file.truncated) throw new Error("File is too large to download here.");
+          if (file.truncated) throw new Error(t("openGeniLinks.fileIsTooLargeTo"));
           const name = file.path.split(/[\\/]/u).at(-1) || "download";
           const bytes =
             file.encoding === "base64"
@@ -173,7 +278,7 @@ export function viewerLinkResolver(input: {
 }): OpenGeniLinkResolver {
   return (target) => {
     if (target.kind !== "editable-artifact" && target.kind !== "site") return null;
-    if (target.workspaceId !== input.workspaceId) return null;
+    if (target.workspaceId !== null && target.workspaceId !== input.workspaceId) return null;
     return { open: () => input.open({ kind: target.kind, artifactId: target.artifactId }) };
   };
 }

@@ -11,6 +11,7 @@ import {
   type EditableArtifactId,
   type EditableArtifactModality,
   type EditableArtifactOriginalImport,
+  type EditableArtifactAudience,
   type EditableArtifactScope,
   type ImportEditableArtifactRequest,
 } from "../domain/editable-artifacts/types";
@@ -56,6 +57,8 @@ export type CreateEditableArtifactApplicationInput = Readonly<{
   idempotencyKey: EditableArtifactClientTransactionId;
   modality: EditableArtifactModality;
   title: string;
+  /** Who can open it; absent means the whole workspace with no owner. */
+  audience?: EditableArtifactAudience;
   signal?: AbortSignal;
 }>;
 
@@ -67,6 +70,8 @@ export type ImportEditableArtifactApplicationInput = Readonly<{
   title: string;
   originalImport: EditableArtifactOriginalImport;
   snapshot: ImportEditableArtifactRequest["snapshot"];
+  /** Who can open it; absent means the whole workspace with no owner. */
+  audience?: EditableArtifactAudience;
   signal?: AbortSignal;
 }>;
 
@@ -75,6 +80,12 @@ export type ReadEditableArtifactApplicationInput = Readonly<{
   actor: EditableArtifactActor;
   artifactId: EditableArtifactId;
 }>;
+
+export type ReadEditableArtifactsApplicationInput = Omit<
+  ReadEditableArtifactApplicationInput,
+  "artifactId"
+> &
+  Readonly<{ artifactIds: readonly EditableArtifactId[] }>;
 
 export type MintEditableArtifactApplicationTicketInput = ReadEditableArtifactApplicationInput &
   Readonly<{
@@ -94,6 +105,10 @@ export interface EditableArtifactApplicationPort {
   createArtifact(input: CreateEditableArtifactApplicationInput): Promise<EditableArtifact>;
   importArtifact(input: ImportEditableArtifactApplicationInput): Promise<EditableArtifact>;
   readArtifact(input: ReadEditableArtifactApplicationInput): Promise<EditableArtifact>;
+  /** Optional bounded read optimization. Results correspond to input order. */
+  readArtifacts?(
+    input: ReadEditableArtifactsApplicationInput,
+  ): Promise<readonly PromiseSettledResult<EditableArtifact>[]>;
   mintLiveTicket(
     input: MintEditableArtifactApplicationTicketInput,
   ): Promise<EditableArtifactLiveTicket>;
@@ -119,6 +134,7 @@ export class EditableArtifactApplication implements EditableArtifactApplicationP
         idempotencyKey: editableArtifactClientTransactionId(input.idempotencyKey),
         modality: input.modality,
         title: input.title,
+        ...(input.audience ? { audience: input.audience } : {}),
       },
       ...(input.signal ? { signal: input.signal } : {}),
     });
@@ -137,6 +153,7 @@ export class EditableArtifactApplication implements EditableArtifactApplicationP
         title: input.title,
         originalImport: input.originalImport,
         snapshot: input.snapshot,
+        ...(input.audience ? { audience: input.audience } : {}),
       },
       ...(input.signal ? { signal: input.signal } : {}),
     });
@@ -150,6 +167,18 @@ export class EditableArtifactApplication implements EditableArtifactApplicationP
     return await this.dependencies.domain.getArtifact({
       scope,
       artifactId,
+      actor: Object.freeze({ ...input.actor }) as EditableArtifactActor,
+    });
+  }
+
+  async readArtifacts(
+    input: ReadEditableArtifactsApplicationInput,
+  ): Promise<readonly PromiseSettledResult<EditableArtifact>[]> {
+    const scope = editableArtifactScope(input.scope);
+    validateEditableArtifactActor(input.actor);
+    return this.dependencies.domain.getArtifacts({
+      scope,
+      artifactIds: input.artifactIds.map(editableArtifactId),
       actor: Object.freeze({ ...input.actor }) as EditableArtifactActor,
     });
   }

@@ -12,7 +12,7 @@ its list fields so old revisions, hashes, snapshots, and integrations remain
 readable without mutation. Current product surfaces and new writes use only
 `identity` and `mission`. Nonempty list fields on an already-active historical
 revision remain prompt-composed as explicitly labeled compatibility context
-until an organization owner replaces that profile; this prevents silent context
+until an organization owner or admin replaces that profile; this prevents silent context
 loss while the organization moves those facts into Documents.
 
 Canonical implementation:
@@ -47,34 +47,42 @@ workspace admin, session creation, provenance, documents, collections, memory,
 and preference records never widen organization authority.
 
 Reads require `workspace:read` in a workspace belonging to the account. Human
-administration requires a direct authenticated human session with the exact
-account's `account:admin` (granted to organization owners); `workspace:admin`,
-organization admins and members, services, agent attempt grants, and API-key
-identity cannot activate or roll back through the admin route. That admission
-contract is unchanged by the agent path below; widening it to organization
-admins, or narrowing it to the canonical managed-cookie session only, is a
-deliberate product decision rather than a side effect of agent administration.
+administration requires a direct authenticated human session that administers
+the organization: either the exact account's `account:admin` (granted to
+organization owners), or an active `owner` or `admin` organization role proven
+by the canonical Better Auth cookie session (or a signed delegated human proof
+for the same organization that itself carries `account:admin`). Admin rights in
+one organization never apply to another. `workspace:admin`, organization
+members, services, agent attempt grants, and API-key identity cannot activate
+or roll back through the admin route.
 
 An exact live agent attempt may administer the profile only through the
 separate `company_profile_propose` path. Proposal admission resolves the
 logical turn's initiating human and requires that human's current active
-organization membership to be the `owner` role, i.e. exactly the authority the
-manual `account:admin` route requires; an organization admin who cannot use the
-manual editor cannot activate through an agent either. A separate
-organization-scoped policy, editable only by an active organization owner,
-controls the result:
+organization membership to be the `owner` or `admin` role, i.e. exactly the
+people who can use the manual editor (migration 1096). A separate
+organization-scoped policy, editable only by an active organization owner or
+admin, controls the result:
 
 - `off` rejects the operation before a proposal revision is created;
-- `suggest` (shown as **Require approval**, and the default for existing and new organizations) creates an
+- `suggest` (shown as **Review first**, and the default for existing and new organizations) creates an
   inactive immutable proposal and requires the bound
   `company_profile_confirm` human-confirmation path;
 - `automatic` creates the same immutable proposal and immediately activates it
   through the existing company-profile compare-and-swap lifecycle, without a
   second human prompt.
 
+In the web app an owner or admin changes this policy on Settings > Agent
+learning, as an owner/admin-only **Organization identity** row beside the workspace modes and in
+the same Off / Review first / Automatic words. Organization settings >
+Organization identity shows the current mode as one row that links there. The
+stored values and the `PATCH /company-profile/agent-policy` contract are
+unchanged.
+
 The policy mode and version are frozen on the proposal receipt. Changing the
 policy afterward does not reinterpret an existing proposal, and every mode
-still requires an exact live turn initiated by the active organization owner.
+still requires an exact live turn initiated by an active organization owner or
+admin.
 Under `suggest`, confirmation requires the canonical question returned by the
 proposal to have been answered `activate` by that same human, then revalidates
 the current attempt, organization membership, immutable proposal
@@ -265,7 +273,7 @@ receipts and public `AUTHORITY_WRITE_FAILED` translation.
 
 The first-party `company_profile_propose` and `company_profile_confirm` tools
 (`apps/api/src/mcp/company-profile-agent-admin.ts`) are the agent-facing path the
-Organization settings → Organization identity "Create with OpenGeni" prompt directs a session to. They register
+Organization settings → Organization identity "Create with Opengeni" prompt directs a session to. They register
 only for exact worker-signed agent attempts with `workspace:read` plus
 `sessions:control`. Proposal input contains only identity and mission; the
 canonical compatibility lists are written empty before the exact profile is

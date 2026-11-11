@@ -28,7 +28,7 @@ use crate::enrollment::InstallIdentity;
 use crate::DEFAULT_API_URL;
 
 /// Public fallback used only before the machine has any enrolled deployment.
-const DEFAULT_BASE_URL: &str = "https://get.opengeni.ai";
+const DEFAULT_BASE_URL: &str = DEFAULT_API_URL;
 // Linux current_exe follows the running inode. After replacement it can return
 // a deleted path; retain the install identity for retries and successor exec.
 static INSTALLED_EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
@@ -37,10 +37,23 @@ static INSTALLED_EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new()
 pub fn installed_executable() -> Result<&'static Path, String> {
     INSTALLED_EXECUTABLE
         .get_or_init(|| {
-            std::env::current_exe().map_err(|_| "installed_binary_unavailable".to_string())
+            let path =
+                std::env::current_exe().map_err(|_| "installed_binary_unavailable".to_string())?;
+            // _NSGetExecutablePath can return the launch symlink on macOS.
+            // Resolve it BEFORE selecting an artifact or replacing anything;
+            // otherwise a bundle alias becomes a standalone executable.
+            #[cfg(target_os = "macos")]
+            let path = resolve_macos_install_path(&path)
+                .map_err(|_| "installed_binary_unavailable".to_string())?;
+            Ok(path)
         })
         .as_deref()
         .map_err(Clone::clone)
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn resolve_macos_install_path(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize()
 }
 
 fn apply_verified_update(
@@ -49,14 +62,18 @@ fn apply_verified_update(
 ) -> UpdateResult<PathBuf> {
     // Unix permits replacing the running file using the captured pathname.
     // Windows still needs self-replace's running-image lock handling.
+    // On every platform the candidate passes its startup check, staged beside
+    // the install, before it replaces it, and again once installed: a binary
+    // this machine cannot start (a missing DLL on Windows) is never swapped in.
+    let preflight = |staged: &Path| verify_installed_binary(staged, &pending.version);
     #[cfg(unix)]
     {
-        pending.apply_running_at(install_path)
+        pending.apply_running_at(install_path, preflight)
     }
     #[cfg(not(unix))]
     {
         let _ = install_path;
-        pending.apply_running()
+        pending.apply_running(preflight)
     }
 }
 
@@ -179,10 +196,8 @@ fn persist_completed_update_receipt_at(
 /// Returns a human-facing error string on any fetch/verify/apply failure.
 pub fn run(args: &UpdateArgs) -> Result<(), String> {
     let install_path = installed_executable()?;
-    let legacy_api_url =
-        std::env::var("OPENGENI_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
-    let connections = config::load_connections(&legacy_api_url)
-        .map_err(|e| format!("could not load connections: {e}"))?;
+    let connections =
+        config::load_connections().map_err(|e| format!("could not load connections: {e}"))?;
 
     // The binary is process-global, so update policy is process-global too. Never
     // silently let whichever connection sorts first choose the channel for every
@@ -191,7 +206,7 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
     let channel = resolve_channel(args.channel.as_deref(), &connections)?;
     // Staged rollout cohorting must be stable for the physical install, not tied
     // to an arbitrary workspace agent id. Every enrollment already shares this
-    // durable keypair, including across independent OpenGeni deployments.
+    // durable keypair, including across independent Opengeni deployments.
     let install_identity = InstallIdentity::load_or_generate(
         &config::config_dir().map_err(|e| format!("could not resolve config dir: {e}"))?,
     )
@@ -270,7 +285,7 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
             .apply_app_bundle(install_path, |_| Ok(()))
             .map_err(|error| format!("signed application update failed: {error}"))?;
         println!(
-            "complete signed application updated to v{}; restart the agent to activate it",
+            "complete signed application updated to v{}; restart Opengeni Runner to activate it",
             pending.version
         );
         return Ok(());
@@ -286,7 +301,7 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
     })?;
     info!(version = %pending.version, "update applied and startup preflight passed; prior binary removed");
     println!(
-        "update applied and verified (v{}). Restart the agent to activate it.",
+        "update applied and verified (v{}). Restart Opengeni Runner to activate it.",
         pending.version
     );
     Ok(())
@@ -302,6 +317,34 @@ pub struct ManagedUpdateResult {
     pub expected_sha256: String,
 }
 
+/// The update check for one control-plane request. This path exists only after
+/// an authorized human/control-plane request. Manual opt-in may cross a staged
+/// rollout boundary and may re-pin the same version after a failed/rolled-back
+/// attempt; signature, digest, target, monotonic-version, atomic-apply,
+/// health-gate, and rollback checks remain.
+fn managed_update_config(
+    base_url: &str,
+    channel: &str,
+    agent_id: String,
+    target_version: &str,
+    install_path: &Path,
+) -> UpdateConfig {
+    let mut config = UpdateConfig::new(
+        base_url.trim_end_matches('/'),
+        channel,
+        agent_id,
+        env!("CARGO_PKG_VERSION"),
+    );
+    select_install_target(&mut config, install_path);
+    config.allow_staged_rollout_opt_in = true;
+    config.allow_same_version = true;
+    // The request names its exact release. The channel pointer can still name
+    // the previous release while the control plane rolls out, so read that
+    // release's own signed manifest.
+    config.pinned_version = Some(target_version.to_string());
+    config
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ManagedUpdatePhase {
     Downloading,
@@ -309,17 +352,28 @@ pub enum ManagedUpdatePhase {
     Applying,
 }
 
-/// Applies one exact signed release from one deployment origin. This is the same
-/// updater as the local CLI, narrowed by the control-plane request: the signed
-/// manifest must offer exactly `target_version`, then artifact minisign+sha256,
-/// atomic swap, startup health-gate, and rollback all run unchanged.
-pub fn apply_managed(
+/// One exact signed release, downloaded and verified but not yet installed.
+/// Preparing touches nothing on the machine, so it runs while the agent keeps
+/// accepting work; only [`apply_prepared`] needs the host quiet.
+#[derive(Debug)]
+pub struct PreparedManagedUpdate {
+    operation_id: String,
+    install_path: &'static Path,
+    expected_sha256: String,
+    pending: opengeni_agent_update::PendingUpdate,
+}
+
+/// Fetches one exact signed release from one deployment origin and verifies it.
+/// This is the same updater as the local CLI, narrowed by the control-plane
+/// request: the signed manifest must offer exactly `target_version`, and the
+/// artifact must pass minisign + sha256 before it is returned.
+pub fn prepare_managed(
     operation_id: &str,
     base_url: &str,
     channel: &str,
     target_version: &str,
     mut progress: impl FnMut(ManagedUpdatePhase),
-) -> Result<ManagedUpdateResult, String> {
+) -> Result<PreparedManagedUpdate, String> {
     let install_path = installed_executable()?;
     if uuid::Uuid::parse_str(operation_id).is_err() {
         return Err("invalid_update_operation".to_string());
@@ -333,23 +387,24 @@ pub fn apply_managed(
     )
     .map_err(|_| "install_identity_unavailable".to_string())?;
     let source = HttpSource::new().map_err(|_| "update_transport_unavailable".to_string())?;
-    let mut config = UpdateConfig::new(
-        base_url.trim_end_matches('/'),
+    let config = managed_update_config(
+        base_url,
         channel,
         install_identity.public_key_base64(),
-        env!("CARGO_PKG_VERSION"),
+        target_version,
+        install_path,
     );
-    select_install_target(&mut config, install_path);
-    // This path exists only after an authorized human/control-plane request.
-    // Manual opt-in may cross a staged rollout boundary and may re-pin the same
-    // version after a failed/rolled-back attempt; signature, digest, target,
-    // monotonic-version, atomic-apply, health-gate, and rollback checks remain.
-    config.allow_staged_rollout_opt_in = true;
-    config.allow_same_version = true;
     let plan = match check_update_manifest(&source, &config) {
         Ok(ManifestCheckOutcome::Available(plan)) => plan,
         Ok(ManifestCheckOutcome::UpToDate(_)) => return Err("target_not_offered".to_string()),
-        Err(_) => return Err("manifest_verification_failed".to_string()),
+        Err(error) => {
+            return Err(managed_fetch_failure(
+                operation_id,
+                target_version,
+                "manifest",
+                &error,
+            ));
+        }
     };
     if plan.version != target_version {
         return Err("target_manifest_mismatch".to_string());
@@ -358,8 +413,29 @@ pub fn apply_managed(
     progress(ManagedUpdatePhase::Downloading);
     let pending = plan
         .download(&source)
-        .map_err(|_| "artifact_verification_failed".to_string())?;
+        .map_err(|error| managed_fetch_failure(operation_id, target_version, "artifact", &error))?;
     progress(ManagedUpdatePhase::Verifying);
+    Ok(PreparedManagedUpdate {
+        operation_id: operation_id.to_string(),
+        install_path,
+        expected_sha256,
+        pending,
+    })
+}
+
+/// Installs a prepared release: atomic swap, startup health gate, durable
+/// receipt and rollback, unchanged from the local CLI.
+pub fn apply_prepared(
+    prepared: PreparedManagedUpdate,
+    mut progress: impl FnMut(ManagedUpdatePhase),
+) -> Result<ManagedUpdateResult, String> {
+    let PreparedManagedUpdate {
+        operation_id,
+        install_path,
+        expected_sha256,
+        pending,
+    } = prepared;
+    let operation_id = operation_id.as_str();
     progress(ManagedUpdatePhase::Applying);
     #[cfg(target_os = "macos")]
     if opengeni_agent_update::app_bundle_root(install_path).is_some() {
@@ -408,12 +484,38 @@ pub fn apply_managed(
     Ok(ManagedUpdateResult { expected_sha256 })
 }
 
-/// Executes the newly-swapped binary through the smallest stable startup surface.
-/// If the loader, executable bit, CLI wiring, or embedded version is wrong, the
-/// updater rolls back atomically before reporting success.
+fn managed_fetch_failure(
+    operation_id: &str,
+    target_version: &str,
+    stage: &str,
+    error: &UpdateError,
+) -> String {
+    let (suffix, failure_kind) = match error {
+        UpdateError::Download { .. } if error.is_download_timeout() => {
+            ("download_timeout", "timeout")
+        }
+        UpdateError::Download { .. } => ("download_failed", "transport"),
+        UpdateError::Signature(_) => ("verification_failed", "signature"),
+        UpdateError::Checksum { .. } => ("verification_failed", "checksum"),
+        _ => ("verification_failed", "manifest_or_target"),
+    };
+    let error_code = format!("{stage}_{suffix}");
+    // Progress error_code is an open string on the existing wire contract. Keep
+    // verification codes stable, and never log release URLs that may be signed.
+    warn!(operation_id, target_version, stage, %error_code, failure_kind,
+        "managed update fetch or verification failed; installed agent unchanged");
+    error_code
+}
+
+/// Executes the binary at `install_path` through the smallest stable startup
+/// surface: the candidate staged beside the install before it replaces it,
+/// then the newly-swapped binary. If the loader, executable bit, CLI
+/// wiring, or embedded version is wrong, the updater leaves or rolls back the
+/// install before reporting success.
 fn verify_installed_binary(install_path: &std::path::Path, version: &str) -> UpdateResult<()> {
     let output = std::process::Command::new(install_path)
         .arg("--version")
+        .stdin(opengeni_agent_platform::discarded_stdio())
         .output()
         .map_err(|source| UpdateError::Io {
             path: install_path.display().to_string(),
@@ -440,14 +542,6 @@ fn resolve_update_bases(explicit: Option<&str>, connections: &[StoredConnection]
     }
     let bases: BTreeSet<_> = connections
         .iter()
-        // A pre-multi-connection credentials file did not persist its control-
-        // plane origin. `load_connections` keeps the caller/default URL only as
-        // a visibly unverified hint so the runtime transport remains usable.
-        // Never turn that hint into update authority: on a private deployment it
-        // is commonly the public default and would query the wrong server. The
-        // public signed channel remains the safe fallback until one explicit
-        // reconnect confirms the deployment origin.
-        .filter(|connection| !connection.legacy_origin)
         .map(|connection| connection.api_url.trim_end_matches('/').to_string())
         .collect();
     if bases.is_empty() {
@@ -483,6 +577,111 @@ mod tests {
     use super::*;
     use crate::config::StoredCredentials;
 
+    #[test]
+    fn managed_fetch_failures_distinguish_transport_timeout_and_verification() {
+        for stage in ["manifest", "artifact"] {
+            for (error, suffix) in [
+                (
+                    UpdateError::Download {
+                        url: "https://example.test/artifact?token=not-for-logs".to_string(),
+                        source: Box::new(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+                    },
+                    "download_timeout",
+                ),
+                (
+                    UpdateError::Download {
+                        url: "https://example.test/artifact".to_string(),
+                        source: Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+                    },
+                    "download_failed",
+                ),
+                (
+                    UpdateError::Signature("bad signature".to_string()),
+                    "verification_failed",
+                ),
+                (
+                    UpdateError::Checksum {
+                        expected: "a".to_string(),
+                        actual: "b".to_string(),
+                    },
+                    "verification_failed",
+                ),
+            ] {
+                assert_eq!(
+                    managed_fetch_failure("operation", "1.0.0", stage, &error),
+                    format!("{stage}_{suffix}")
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn macos_install_alias_resolves_before_artifact_selection_and_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir
+            .path()
+            .join("OpenGeni Agent.app/Contents/MacOS/opengeni-agent");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(&executable, "sealed original").unwrap();
+        let alias = dir.path().join("agent");
+        symlink(&executable, &alias).unwrap();
+        let resolved = resolve_macos_install_path(&alias).unwrap();
+        assert_eq!(resolved, executable.canonicalize().unwrap());
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        #[cfg(target_os = "macos")]
+        {
+            let mut config = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.0");
+            select_install_target(&mut config, &resolved);
+            assert_eq!(config.target, opengeni_agent_update::APP_BUNDLE_TARGET);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn running_through_an_app_symlink_captures_the_bundle_executable() {
+        const PROBE: &str = "OPENGENI_TEST_APP_ALIAS";
+        if let Some(expected) = std::env::var_os(PROBE) {
+            let installed = installed_executable().unwrap();
+            assert_eq!(installed, Path::new(&expected));
+            let mut config = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.0");
+            select_install_target(&mut config, installed);
+            assert_eq!(config.target, opengeni_agent_update::APP_BUNDLE_TARGET);
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir
+            .path()
+            .join("OpenGeni Agent.app/Contents/MacOS/opengeni-agent");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let alias = dir.path().join("agent");
+        std::os::unix::fs::symlink(&executable, &alias).unwrap();
+        let output = std::process::Command::new(&alias)
+            .args([
+                "--exact",
+                "update::tests::running_through_an_app_symlink_captures_the_bundle_executable",
+                "--nocapture",
+            ])
+            .env(PROBE, executable.canonicalize().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(std::fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn app_and_standalone_installations_select_distinct_signed_artifacts() {
@@ -495,6 +694,21 @@ mod tests {
         let mut standalone = UpdateConfig::new("https://example.com", "stable", "agent", "0.1.28");
         select_install_target(&mut standalone, Path::new("/usr/local/bin/opengeni-agent"));
         assert_eq!(standalone.target, "universal-apple-darwin");
+    }
+
+    #[test]
+    fn a_managed_update_reads_the_requested_release_manifest() {
+        let config = managed_update_config(
+            "https://example.com/",
+            "stable",
+            "agent".to_string(),
+            "0.1.110",
+            Path::new("/usr/local/bin/opengeni-agent"),
+        );
+        assert_eq!(config.pinned_version.as_deref(), Some("0.1.110"));
+        assert_eq!(config.base_url, "https://example.com");
+        assert!(config.allow_staged_rollout_opt_in);
+        assert!(config.allow_same_version);
     }
 
     fn connection(channel: &str) -> StoredConnection {
@@ -533,20 +747,24 @@ mod tests {
             let captured = installed_executable().unwrap();
             assert_eq!(captured, installed);
             let bytes = std::fs::read(captured).unwrap();
-            opengeni_agent_update::replace_running_exe_at(captured, &bytes).unwrap();
+            opengeni_agent_update::replace_running_exe_at(captured, &bytes, |_| Ok(())).unwrap();
             assert_ne!(std::env::current_exe().unwrap(), captured);
             opengeni_agent_update::rollback(captured).unwrap();
             // Rollback restores a copied binary; our running inode remains deleted.
             assert_ne!(std::env::current_exe().unwrap(), captured);
             // Retry must continue using the same canonical install identity.
             assert_eq!(installed_executable().unwrap(), installed);
-            opengeni_agent_update::replace_running_exe_at(installed_executable().unwrap(), &bytes)
-                .unwrap();
+            opengeni_agent_update::replace_running_exe_at(
+                installed_executable().unwrap(),
+                &bytes,
+                |_| Ok(()),
+            )
+            .unwrap();
             opengeni_agent_update::finalize_update(captured, Ok(())).unwrap();
             assert_ne!(std::env::current_exe().unwrap(), captured);
             assert_eq!(installed_executable().unwrap(), installed);
             std::fs::write(&marker, b"ready").unwrap();
-            crate::restart_after_verified_update().expect("successor exec");
+            crate::restart_after_verified_update(&None).expect("successor exec");
             panic!("successful Unix exec never returns");
         }
         let directory = tempfile::tempdir().unwrap();
@@ -568,6 +786,99 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(directory.path().join("ready-for-successor").exists());
+    }
+
+    /// The guest init signals the agent's process to reconnect whenever its
+    /// host loses the link, and may do so while a verified successor image is
+    /// still starting, before it handles the signal: the successor reconnects
+    /// at once then, rather than ending, with every command it carries. Nor
+    /// do the threads it starts, or the commands they run, keep the signal
+    /// blocked as it was across the exec: a program the user runs that waits
+    /// for it receives it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reconnect_signal_during_the_exec_reconnects_the_successor() {
+        use nix::sys::signal::{kill, Signal};
+        const CHILD_DIR: &str = "OPENGENI_TEST_RECONNECT_SUCCESSOR_DIR";
+        /// Whether a process that ran `cat /proc/self/status`, in `status`,
+        /// had `SIGUSR1` blocked.
+        fn blocks_usr1(status: &[u8]) -> bool {
+            let status = String::from_utf8_lossy(status);
+            let mask = status
+                .lines()
+                .find_map(|line| line.strip_prefix("SigBlk:"))
+                .expect("a signal mask");
+            let mask = u64::from_str_radix(mask.trim(), 16).unwrap();
+            mask & (1 << (Signal::SIGUSR1 as u64 - 1)) != 0
+        }
+        if let Some(directory) = std::env::var_os(CHILD_DIR) {
+            let directory = PathBuf::from(directory);
+            let execed = directory.join("execed");
+            if !execed.exists() {
+                std::fs::write(&execed, b"").unwrap();
+                crate::exec_successor_holding_reconnect(&None).expect("successor exec");
+                panic!("successful Unix exec never returns");
+            }
+            // The successor, as its `main` starts, and not yet handling it.
+            crate::reconnect_signal::catch_until_handled().unwrap();
+            kill(nix::unistd::Pid::this(), Signal::SIGUSR1).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let worker = tokio::spawn(async {
+                    tokio::process::Command::new("cat")
+                        .arg("/proc/self/status")
+                        .output()
+                        .await
+                        .unwrap()
+                });
+                let blocking = tokio::task::spawn_blocking(|| {
+                    std::process::Command::new("cat")
+                        .arg("/proc/self/status")
+                        .output()
+                        .unwrap()
+                });
+                assert!(
+                    !blocks_usr1(&worker.await.unwrap().stdout),
+                    "a worker's command"
+                );
+                assert!(
+                    !blocks_usr1(&blocking.await.unwrap().stdout),
+                    "a blocking thread's command"
+                );
+                let reconnect = crate::supervisor::ReconnectSignal::default();
+                let mut requests = reconnect.subscribe();
+                crate::spawn_reconnect_handler(reconnect);
+                tokio::time::timeout(std::time::Duration::from_secs(5), requests.changed())
+                    .await
+                    .expect("the signal sent during the exec reconnects")
+                    .unwrap();
+            });
+            std::fs::write(directory.join("reconnected"), b"").unwrap();
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "update::tests::a_reconnect_signal_during_the_exec_reconnects_the_successor",
+                "--nocapture",
+            ])
+            .env(CHILD_DIR, directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{:?}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(directory.path().join("reconnected").exists());
     }
 
     #[test]
@@ -646,22 +957,6 @@ mod tests {
         assert_eq!(
             resolve_update_bases(None, &[]),
             vec![DEFAULT_BASE_URL.to_string()]
-        );
-    }
-
-    #[test]
-    fn unverified_legacy_origin_is_never_an_update_source() {
-        let mut legacy = connection("stable");
-        legacy.api_url = "https://possibly-wrong.example".to_string();
-        legacy.legacy_origin = true;
-
-        assert_eq!(
-            resolve_update_bases(None, &[legacy.clone()]),
-            vec![DEFAULT_BASE_URL.to_string()]
-        );
-        assert_eq!(
-            resolve_update_bases(Some("https://operator.example/"), &[legacy]),
-            vec!["https://operator.example".to_string()]
         );
     }
 }

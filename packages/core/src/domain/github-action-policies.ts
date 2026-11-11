@@ -150,7 +150,7 @@ export function githubAppActionPolicyActor(input: {
 }): GitHubActionPolicyActorBinding {
   return {
     actor: { kind: "workspace_app", installationId: input.installationId },
-    label: input.accountLogin ? `OpenGeni bot on ${input.accountLogin}` : "OpenGeni bot",
+    label: input.accountLogin ? `Opengeni bot on ${input.accountLogin}` : "Opengeni bot",
     connectionId: `github-app:${input.installationId}`,
     serverId: GITHUB_REST_MCP_APP_SERVER_ID,
   };

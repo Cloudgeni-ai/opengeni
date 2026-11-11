@@ -1,0 +1,931 @@
+/**
+ * Plain helpers for meeting UIs (web, phone, embedders): words for a recording's state, clock
+ * times, speaker names and colors, and the transcript grouped into turns.
+ * No React here, so each rule is tested on its own.
+ */
+import {
+  recordingMicrophoneIsOwner,
+  recordingSpeakerDefault,
+  type Recording,
+  type RecordingSpeaker,
+  type RecordingTrack,
+  type RecordingTranscriptSegment,
+  type RecordingTranscriptionModel,
+  type RecordingTranscriptVersion,
+} from "@opengeni/contracts";
+import type { RecorderSnapshot, RecordingUploadStatus } from "@opengeni/sdk/recordings";
+import { createOpenGeniText, type OpenGeniText } from "./messages/runtime";
+
+const defaultText = createOpenGeniText();
+
+/** "4:07", "1:02:09". Never negative; rounds down to the second. */
+export function formatClock(milliseconds: number): string {
+  const total = Math.max(0, Math.floor(milliseconds / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  const ss = String(seconds).padStart(2, "0");
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${ss}` : `${minutes}:${ss}`;
+}
+
+/** "45 sec", "12 min", "1 h 5 min": a recording's length in a list, in `msg`'s language. */
+export function formatDuration(milliseconds: number, msg: OpenGeniText = defaultText): string {
+  const seconds = Math.round(Math.max(0, milliseconds) / 1000);
+  if (seconds < 60) return msg("meetings.recordings.durationSeconds", { seconds });
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return msg("meetings.recordings.durationMinutes", { minutes });
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0
+    ? msg("meetings.recordings.durationHours", { hours })
+    : msg("meetings.recordings.durationHoursMinutes", { hours, minutes: rest });
+}
+
+export type MeetingPhase =
+  | { kind: "uploading" }
+  | { kind: "transcribing"; version: RecordingTranscriptVersion | null }
+  | { kind: "ready"; version: RecordingTranscriptVersion }
+  | { kind: "failed"; version: RecordingTranscriptVersion | null }
+  | { kind: "no_transcript" };
+
+/**
+ * Where a recording is in its life, from the reader's side. A recording still
+ * capturing is "uploading" (kept for compatibility; it reads "In progress"):
+ * it is still being recorded, or its last audio is still on its way from the
+ * device that recorded it. That device knows which, so it asks
+ * {@link meetingHereStatus}. A failed re-run leaves an older complete version
+ * current, so the transcript stays readable.
+ */
+export function meetingPhase(recording: Recording): MeetingPhase {
+  if (recording.state === "capturing") return { kind: "uploading" };
+  const version = recording.transcript;
+  if (version?.state === "complete") return { kind: "ready", version };
+  if (version?.state === "queued" || version?.state === "processing") {
+    return { kind: "transcribing", version };
+  }
+  if (version?.state === "failed" || recording.state === "failed") {
+    return { kind: "failed", version: version ?? null };
+  }
+  if (recording.state === "processing") return { kind: "transcribing", version: null };
+  return { kind: "no_transcript" };
+}
+
+/**
+ * What this device's recorder knows about one meeting that the server can't
+ * yet: it is recording (or paused) here, or it was stopped here and its last
+ * few seconds of audio are on their way, which a person reads as Transcribing.
+ * The audio uploads while it records, so nothing is left to "upload" after
+ * Stop unless the connection is down or the server refused it. Null when this
+ * device isn't recording that meeting, or when capture failed before Stop
+ * finished it; the server's {@link meetingPhase} says the rest.
+ *
+ * A meeting recorded here earlier (before a reload, a restart, or a move to
+ * another page) is finished in the background from the audio kept here: it is
+ * `uploading` until the server has it all, then `transcribing`, and
+ * `upload_failed` when the server refused it, keeping the audio here for a retry.
+ */
+export type MeetingHereStatus =
+  | "recording"
+  | "paused"
+  | "uploading"
+  | "transcribing"
+  | "waiting_for_connection"
+  | "upload_failed";
+
+export function meetingHereStatus(
+  recorder:
+    | (Pick<RecorderSnapshot, "state" | "recordingId" | "upload"> & {
+        uploads?: Readonly<Record<string, RecordingUploadStatus>> | undefined;
+      })
+    | null,
+  recordingId: string,
+  online = true,
+): MeetingHereStatus | null {
+  if (!recorder) return null;
+  if (recorder.recordingId !== recordingId) {
+    const upload = recorder.uploads?.[recordingId];
+    if (!upload || upload.discarded) return null;
+    if (upload.failed) return "upload_failed";
+    if (upload.finalized) return "transcribing";
+    if (!online || upload.retryingAfterError) return "waiting_for_connection";
+    return "uploading";
+  }
+  if (recorder.state === "recording") return "recording";
+  if (recorder.state === "paused") return "paused";
+  if (recorder.state === "idle" || recorder.state === "starting") return null;
+  const upload = recorder.upload;
+  if (upload?.discarded) return null;
+  if (upload?.failed) return "upload_failed";
+  // Capture failed mid-recording: nothing finishes it until this browser
+  // recovers it, so it isn't transcribing yet.
+  if (recorder.state === "failed" && !upload?.finalized) return null;
+  if (!upload?.finalized && (!online || upload?.retryingAfterError)) {
+    return "waiting_for_connection";
+  }
+  return "transcribing";
+}
+
+/** The upload failure this device's recorder holds for a meeting, current or earlier. */
+export function meetingUploadFailure(
+  recorder:
+    | (Pick<RecorderSnapshot, "recordingId" | "upload"> & {
+        uploads?: Readonly<Record<string, RecordingUploadStatus>> | undefined;
+      })
+    | null,
+  recordingId: string,
+): { code: string; message: string } | null {
+  if (!recorder) return null;
+  const upload =
+    recorder.recordingId === recordingId ? recorder.upload : recorder.uploads?.[recordingId];
+  return upload?.failed ?? null;
+}
+
+/** Audio up to this long is usually transcribed in a minute or two. */
+const SHORT_AUDIO_MILLISECONDS = 5 * 60_000;
+
+/**
+ * What to say while a meeting is transcribed: a short one is done in a minute
+ * or two; a long one takes a while (its words may be timed on our side), so
+ * the line says how much audio it is and that the reader needn't wait.
+ */
+export function transcribingText(
+  durationMilliseconds: number,
+  msg: OpenGeniText = defaultText,
+): string {
+  if (durationMilliseconds <= SHORT_AUDIO_MILLISECONDS) {
+    return msg("meetings.detailPage.transcribingThisUsuallyTakesA");
+  }
+  return msg("meetings.detailPage.transcribingLongAudio", {
+    duration: formatDuration(durationMilliseconds, msg),
+  });
+}
+
+/** Refusals that credits, or a model that doesn't use them, fix. */
+export function transcriptNeedsCredits(code: string | null | undefined): boolean {
+  return (
+    code === "insufficient_credits" ||
+    code === "allowance_exhausted" ||
+    code === "monthly_model_cost_limit"
+  );
+}
+
+/** Failures of the provider itself: any other provider may work. */
+const PROVIDER_FAILURES = new Set([
+  "missing_provider_key",
+  "provider_unauthorized",
+  "provider_quota_exceeded",
+  "policy_blocked",
+  "subscription_api_unavailable",
+]);
+/** Failures of the model: another model, even the same provider's, may work. */
+const MODEL_FAILURES = new Set([
+  "provider_too_large",
+  "provider_not_supported",
+  "model_unavailable",
+]);
+
+/**
+ * The model to transcribe a failed meeting with instead, as its one direct
+ * fix: usable here, not the one that failed (nor its provider, when the
+ * provider was the problem), and for a credit refusal one that uses no
+ * credits. A subscription comes first, then a model the deployment covers,
+ * then the workspace's own key. Null when no other model would help.
+ */
+export function transcriptFixModel(
+  code: string | null | undefined,
+  failed: { providerId: string; model: string } | null,
+  models: readonly RecordingTranscriptionModel[],
+): RecordingTranscriptionModel | null {
+  const credits = transcriptNeedsCredits(code);
+  if (!code || (!credits && !PROVIDER_FAILURES.has(code) && !MODEL_FAILURES.has(code))) {
+    return null;
+  }
+  const charged = (entry: RecordingTranscriptionModel) =>
+    entry.chargedInCredits ?? (entry.funding === "deployment" && entry.usdPerHour !== null);
+  const rank = (entry: RecordingTranscriptionModel) =>
+    entry.funding === "workspace_subscription"
+      ? 0
+      : charged(entry)
+        ? 3
+        : entry.usdPerHour === null
+          ? 1
+          : 2;
+  const candidates = models.filter((entry) => {
+    if (!entry.available || !entry.capabilities.batch) return false;
+    if (code === "subscription_api_unavailable" && entry.funding === "workspace_subscription")
+      return false;
+    if (failed && entry.providerId === failed.providerId) {
+      if (!MODEL_FAILURES.has(code) || entry.model === failed.model) return false;
+    }
+    // The server says which models are charged in credits.
+    return !credits || !charged(entry);
+  });
+  return [...candidates].sort((a, b) => rank(a) - rank(b))[0] ?? null;
+}
+
+/** The one-word state a list row shows, or null when there is nothing to say. */
+export function meetingStatusLabel(
+  phase: MeetingPhase,
+  msg: OpenGeniText = defaultText,
+): { label: string; tone: "progress" | "danger" | "neutral" } | null {
+  switch (phase.kind) {
+    case "uploading":
+      return { label: msg("meetings.recordings.inProgress"), tone: "progress" };
+    case "transcribing":
+      return { label: msg("meetings.recordings.transcribing"), tone: "progress" };
+    case "failed":
+      return { label: msg("meetings.recordings.transcriptFailed"), tone: "danger" };
+    case "no_transcript":
+      return { label: msg("meetings.recordings.noTranscript"), tone: "neutral" };
+    case "ready":
+      return null;
+  }
+}
+
+/**
+ * Plain words for a transcription error code, with what to do about it. The
+ * codes are the worker's: its own (`missing_provider_key`, `invalid_audio`,
+ * ...) and the provider's, prefixed `provider_`. `model` names the model the
+ * version ran and its provider, when the caller knows them, so a missing key
+ * says which provider isn't connected rather than that none is. Its funding
+ * says who can connect it (the deployment's own key is its operator's), and
+ * `pinned` that the deployment offers no other model to try instead.
+ */
+export function transcriptErrorText(
+  code: string | null,
+  msg: OpenGeniText = defaultText,
+  model?: {
+    modelName: string;
+    providerName: string;
+    funding?: string | undefined;
+    pinned?: boolean | undefined;
+  } | null,
+): string {
+  switch (code) {
+    case "subscription_plan_required":
+      return msg("lib.format.subscriptionUpgradeRequiredHeadline");
+    case "subscription_api_unavailable":
+      return msg("meetings.recordings.errorSubscriptionApiUnavailable");
+    case "missing_provider_key": {
+      if (!model) return msg("meetings.recordings.errorMissingProviderKey");
+      const names = { modelName: model.modelName, providerName: model.providerName };
+      if (model.funding === "deployment") {
+        return model.pinned
+          ? msg("meetings.recordings.errorMissingProviderKeyForDeploymentPinned", names)
+          : msg("meetings.recordings.errorMissingProviderKeyForDeployment", names);
+      }
+      return model.pinned
+        ? msg("meetings.recordings.errorMissingProviderKeyForPinned", names)
+        : msg("meetings.recordings.errorMissingProviderKeyFor", names);
+    }
+    case "provider_unauthorized":
+      return msg("meetings.recordings.errorProviderUnauthorized");
+    case "provider_quota_exceeded":
+      return msg("meetings.recordings.errorProviderQuotaExceeded");
+    case "provider_too_large":
+      return msg("meetings.recordings.errorProviderTooLarge");
+    case "provider_not_supported":
+    case "model_unavailable":
+      return msg("meetings.recordings.errorModelUnavailable");
+    case "invalid_audio":
+    case "provider_invalid_audio":
+    case "ffmpeg_failed":
+      return msg("meetings.recordings.errorInvalidAudio");
+    case "storage_unavailable":
+      return msg("meetings.recordings.errorStorageUnavailable");
+    case "region_restricted":
+      return msg("inferenceRegion.notSupportedInEu");
+    case "insufficient_credits":
+      return model
+        ? msg("meetings.recordings.errorInsufficientCreditsFor", { modelName: model.modelName })
+        : msg("meetings.recordings.errorInsufficientCredits");
+    case "allowance_exhausted":
+      return msg("meetings.recordings.errorAllowanceExhausted");
+    case "monthly_model_cost_limit":
+      return msg("meetings.recordings.errorMonthlyCostLimit");
+    case "policy_blocked":
+      return msg("meetings.recordings.errorPolicyBlocked");
+    case "timed_out":
+      return msg("meetings.recordings.errorTimedOut");
+    case "worker_stopped":
+      return msg("meetings.recordings.errorWorkerStopped");
+    default:
+      return msg("meetings.recordings.errorUnknown");
+  }
+}
+
+/**
+ * The name to show for a speaker: the person or plain name someone gave it,
+ * else "Speaker 2" for a model's label, or the track's role for a track label.
+ */
+export function speakerDisplayName(
+  label: string | null,
+  speakers: readonly RecordingSpeaker[],
+  tracks: readonly RecordingTrack[],
+  msg: OpenGeniText = defaultText,
+): string {
+  if (!label) return msg("meetings.recordings.unknownSpeaker");
+  const speaker = speakers.find((candidate) => candidate.label === label);
+  if (speaker && speakerIsNamed(label, speakers) && speaker.name.trim()) return speaker.name;
+  return defaultSpeakerName(label, tracks, msg);
+}
+
+/** "Speaker 2", "Microphone" or "Shared audio" for an unnamed label, in `msg`'s language. */
+export function defaultSpeakerName(
+  label: string,
+  tracks: readonly RecordingTrack[],
+  msg: OpenGeniText = defaultText,
+): string {
+  const named = recordingSpeakerDefault(label, tracks);
+  switch (named.kind) {
+    case "speaker":
+      return msg("meetings.recordings.speakerNumber", { number: named.number });
+    case "microphone":
+      return msg("meetings.recordings.microphone");
+    case "system":
+      return msg("meetings.recordings.sharedAudio");
+    case "track":
+      return msg("meetings.recordings.trackNumber", { number: named.number });
+    case "label":
+      return named.label;
+  }
+}
+
+/**
+ * A live preview lane's name when the microphone is the person recording
+ * (computer or tab audio beside it): `ownerName` for the microphone and
+ * "Others" for the computer or tab audio. Null otherwise, when lanes are
+ * named by their source.
+ */
+export function ownerLiveLaneName(
+  tracks: readonly { trackNumber: number; source: RecordingTrack["source"] }[],
+  trackNumber: number,
+  ownerName: string,
+  msg: OpenGeniText = defaultText,
+): string | null {
+  if (!recordingMicrophoneIsOwner(tracks)) return null;
+  const source = tracks.find((track) => track.trackNumber === trackNumber)?.source;
+  if (source === "microphone") return ownerName;
+  if (source === "system") return msg("meetings.liveTranscript.others");
+  return null;
+}
+
+/** True when the label has a name of its own: a person, a plain name, or a suggestion. */
+export function speakerIsNamed(label: string, speakers: readonly RecordingSpeaker[]): boolean {
+  const speaker = speakers.find((candidate) => candidate.label === label);
+  return Boolean(speaker && (speaker.personId || speaker.source));
+}
+
+/**
+ * A stable color slot (1-6, the chart palette) per speaker label, in order of
+ * first appearance so the first voice is always the same hue.
+ */
+export function speakerColorSlots(
+  segments: readonly RecordingTranscriptSegment[],
+): Map<string, number> {
+  const slots = new Map<string, number>();
+  for (const segment of segments) {
+    const label = segment.speakerLabel;
+    if (label && !slots.has(label)) slots.set(label, (slots.size % 6) + 1);
+  }
+  return slots;
+}
+
+export type TranscriptTurn = {
+  /** First segment index; stable across edits that keep the order. */
+  key: number;
+  speakerLabel: string | null;
+  startMilliseconds: number;
+  endMilliseconds: number;
+  segments: RecordingTranscriptSegment[];
+};
+
+/**
+ * Consecutive segments of one speaker read as one turn, the way a person reads
+ * a transcript. A long pause starts a new turn even for the same voice, so a
+ * timestamp is never far from the words it marks.
+ */
+export function groupTranscriptTurns(
+  segments: readonly RecordingTranscriptSegment[],
+  maxGapMilliseconds = 30_000,
+  /** Times no turn runs across, such as where audio went missing. */
+  breaks: readonly number[] = [],
+): TranscriptTurn[] {
+  const turns: TranscriptTurn[] = [];
+  for (const segment of segments) {
+    const last = turns.at(-1);
+    if (
+      last &&
+      last.speakerLabel === segment.speakerLabel &&
+      segment.startMilliseconds - last.endMilliseconds <= maxGapMilliseconds &&
+      !breaks.some((at) => at > last.startMilliseconds && at <= segment.startMilliseconds)
+    ) {
+      last.segments.push(segment);
+      last.endMilliseconds = Math.max(last.endMilliseconds, segment.endMilliseconds);
+      continue;
+    }
+    turns.push({
+      key: segment.index,
+      speakerLabel: segment.speakerLabel,
+      startMilliseconds: segment.startMilliseconds,
+      endMilliseconds: segment.endMilliseconds,
+      segments: [segment],
+    });
+  }
+  return turns;
+}
+
+/** The shortest stretch without audio the transcript marks, as the server keeps them. */
+const UNRECORDED_MIN_MILLISECONDS = 2_000;
+
+/**
+ * Where a meeting has no audio, as the transcript marks it: one track
+ * (`trackNumber`), or every track at once (`trackNumber` null), which is all
+ * of a single-track meeting's stretches.
+ */
+export type TranscriptUnrecordedMark = {
+  key: string;
+  trackNumber: number | null;
+  source: RecordingTrack["source"] | null;
+  startMilliseconds: number;
+  endMilliseconds: number;
+  /** Every other audio track recorded for all of this one track's stretch. */
+  othersRecorded: boolean;
+};
+
+type Stretch = { start: number; end: number };
+
+/** `from` without any part of `cut`, keeping only pieces long enough to mark. */
+function withoutStretches(from: readonly Stretch[], cut: readonly Stretch[]): Stretch[] {
+  let pieces = [...from];
+  for (const part of cut) {
+    pieces = pieces.flatMap((piece) =>
+      part.end <= piece.start || part.start >= piece.end
+        ? [piece]
+        : [
+            { start: piece.start, end: part.start },
+            { start: part.end, end: piece.end },
+          ],
+    );
+  }
+  return pieces.filter((piece) => piece.end - piece.start >= UNRECORDED_MIN_MILLISECONDS);
+}
+
+/** Where every list has a stretch at once. */
+function overlapOfAll(lists: readonly Stretch[][]): Stretch[] {
+  let shared = lists[0] ?? [];
+  for (const list of lists.slice(1)) {
+    shared = shared.flatMap((left) =>
+      list.flatMap((right) => {
+        const start = Math.max(left.start, right.start);
+        const end = Math.min(left.end, right.end);
+        return end - start >= UNRECORDED_MIN_MILLISECONDS ? [{ start, end }] : [];
+      }),
+    );
+  }
+  return shared;
+}
+
+/**
+ * The stretches of a meeting with no audio, in order on its timeline: where
+ * every track was silent at once (all of a single-track meeting's), then
+ * what each track missed on its own. A stretch running to the end ends at
+ * `durationMilliseconds`, the meeting's length.
+ */
+export function transcriptUnrecordedMarks(
+  tracks: readonly RecordingTrack[],
+  durationMilliseconds: number,
+): TranscriptUnrecordedMark[] {
+  const audio = tracks
+    .filter((track) => track.kind === "audio")
+    .map((track) => ({
+      track,
+      // A server from before tracks said where they have no audio sends none.
+      stretches: (track.unrecorded ?? [])
+        .map((stretch) => ({
+          start: stretch.startMilliseconds,
+          end: Math.max(stretch.startMilliseconds, stretch.endMilliseconds ?? durationMilliseconds),
+        }))
+        .filter((stretch) => stretch.end - stretch.start >= UNRECORDED_MIN_MILLISECONDS),
+    }));
+  const silent = overlapOfAll(audio.map((entry) => entry.stretches));
+  const marks: TranscriptUnrecordedMark[] = silent.map((stretch) => ({
+    key: `all:${stretch.start}`,
+    trackNumber: null,
+    source: null,
+    startMilliseconds: stretch.start,
+    endMilliseconds: stretch.end,
+    othersRecorded: false,
+  }));
+  if (audio.length > 1) {
+    for (const { track, stretches } of audio) {
+      const others = audio
+        .filter((entry) => entry.track !== track)
+        .flatMap((entry) => entry.stretches);
+      for (const stretch of withoutStretches(stretches, silent)) {
+        marks.push({
+          key: `${track.trackNumber}:${stretch.start}`,
+          trackNumber: track.trackNumber,
+          source: track.source,
+          startMilliseconds: stretch.start,
+          endMilliseconds: stretch.end,
+          othersRecorded: others.every(
+            (other) => other.end <= stretch.start || other.start >= stretch.end,
+          ),
+        });
+      }
+    }
+  }
+  return marks.sort(
+    (left, right) =>
+      left.startMilliseconds - right.startMilliseconds ||
+      (left.trackNumber ?? -1) - (right.trackNumber ?? -1),
+  );
+}
+
+export type TranscriptItem =
+  | { kind: "turn"; turn: TranscriptTurn }
+  | { kind: "unrecorded"; mark: TranscriptUnrecordedMark };
+
+/**
+ * The transcript in reading order: each mark goes before the first turn that
+ * starts where its stretch does or later, and after the last turn when none
+ * does. Group the turns with the marks' starts as breaks, so no turn runs
+ * across one.
+ */
+export function interleaveUnrecordedMarks(
+  turns: readonly TranscriptTurn[],
+  marks: readonly TranscriptUnrecordedMark[],
+): TranscriptItem[] {
+  const items: TranscriptItem[] = [];
+  let next = 0;
+  for (const turn of turns) {
+    while (next < marks.length && marks[next]!.startMilliseconds <= turn.startMilliseconds) {
+      items.push({ kind: "unrecorded", mark: marks[next]! });
+      next += 1;
+    }
+    items.push({ kind: "turn", turn });
+  }
+  for (; next < marks.length; next += 1) items.push({ kind: "unrecorded", mark: marks[next]! });
+  return items;
+}
+
+/**
+ * The person a track's audio is, when the transcript hears exactly one
+ * voice on it and someone named it ("Ingrid Solberg"); otherwise null. A
+ * name only suggested from the voice doesn't count until someone confirms it.
+ */
+export function trackSpeakerName(
+  trackNumber: number,
+  segments: readonly RecordingTranscriptSegment[],
+  speakers: readonly RecordingSpeaker[],
+): string | null {
+  const labels = new Set<string>();
+  for (const segment of segments) {
+    if (segment.trackNumber === trackNumber && segment.speakerLabel) {
+      labels.add(segment.speakerLabel);
+    }
+  }
+  const [label, ...others] = [...labels];
+  if (!label || others.length > 0 || !speakerIsNamed(label, speakers)) return null;
+  const speaker = speakers.find((candidate) => candidate.label === label);
+  if (!speaker || speaker.source === "suggested") return null;
+  return speaker.name.trim() || null;
+}
+
+/**
+ * "Ingrid Solberg's microphone wasn't recording from 17:39 to 45:35", in
+ * `msg`'s language. `speakerName` names the microphone's one voice
+ * (`trackSpeakerName`); computer or tab audio is the other people.
+ */
+export function unrecordedMarkText(
+  mark: TranscriptUnrecordedMark,
+  msg: OpenGeniText = defaultText,
+  speakerName: string | null = null,
+): string {
+  const from = formatClock(mark.startMilliseconds);
+  const to = formatClock(mark.endMilliseconds);
+  if (mark.source === "microphone") {
+    if (speakerName) {
+      const values = { name: speakerName, from, to };
+      return mark.othersRecorded
+        ? msg("meetings.transcript.nameSMicrophoneWasnTRecordingFromToEveryoneElse", values)
+        : msg("meetings.transcript.nameSMicrophoneWasnTRecordingFromTo", values);
+    }
+    return mark.othersRecorded
+      ? msg("meetings.transcript.theMicrophoneWasnTRecordingFromToOtherPeople", { from, to })
+      : msg("meetings.transcript.theMicrophoneWasnTRecordingFromTo", { from, to });
+  }
+  if (mark.source === "system" || mark.source === "browser_tab") {
+    return msg("meetings.transcript.otherPeopleWerenTRecordedFromTo", { from, to });
+  }
+  return msg("meetings.transcript.nothingWasRecordedFromTo", { from, to });
+}
+
+/** The segment playing at `milliseconds`, or the last one that started before it. */
+export function activeSegmentIndex(
+  segments: readonly RecordingTranscriptSegment[],
+  milliseconds: number,
+): number | null {
+  let low = 0;
+  let high = segments.length - 1;
+  let found: number | null = null;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const segment = segments[middle]!;
+    if (segment.startMilliseconds <= milliseconds) {
+      found = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return found === null ? null : segments[found]!.index;
+}
+
+/** "ElevenLabs Scribe v2 · English · 3 speakers" style facts for a version. */
+export function versionSummary(
+  version: RecordingTranscriptVersion,
+  modelName: string | null,
+  locale?: string,
+): string[] {
+  const parts = [modelName ?? version.model];
+  const languages = version.languages.map((code) => languageName(code, locale)).filter(Boolean);
+  if (languages.length > 0) parts.push(languages.join(", "));
+  return parts;
+}
+
+/** English names for common languages, for runtimes without Intl.DisplayNames (Hermes). */
+const LANGUAGE_NAMES: Record<string, string> = {
+  ar: "Arabic",
+  cs: "Czech",
+  da: "Danish",
+  de: "German",
+  el: "Greek",
+  en: "English",
+  es: "Spanish",
+  fi: "Finnish",
+  fr: "French",
+  he: "Hebrew",
+  hi: "Hindi",
+  hu: "Hungarian",
+  id: "Indonesian",
+  is: "Icelandic",
+  it: "Italian",
+  ja: "Japanese",
+  ko: "Korean",
+  nb: "Norwegian Bokmål",
+  nl: "Dutch",
+  nn: "Norwegian Nynorsk",
+  no: "Norwegian",
+  pl: "Polish",
+  pt: "Portuguese",
+  ro: "Romanian",
+  ru: "Russian",
+  sv: "Swedish",
+  th: "Thai",
+  tr: "Turkish",
+  uk: "Ukrainian",
+  vi: "Vietnamese",
+  zh: "Chinese",
+};
+
+// Providers may report ISO 639-2 codes ("eng"). Hermes, the phone's
+// JavaScript engine, does not canonicalize them to "en", so map them here.
+const THREE_LETTER_LANGUAGES: Record<string, string> = {
+  ara: "ar",
+  ces: "cs",
+  cze: "cs",
+  dan: "da",
+  deu: "de",
+  ger: "de",
+  ell: "el",
+  gre: "el",
+  eng: "en",
+  spa: "es",
+  fin: "fi",
+  fra: "fr",
+  fre: "fr",
+  heb: "he",
+  hin: "hi",
+  hun: "hu",
+  ind: "id",
+  isl: "is",
+  ice: "is",
+  ita: "it",
+  jpn: "ja",
+  kor: "ko",
+  nob: "nb",
+  nld: "nl",
+  dut: "nl",
+  nno: "nn",
+  nor: "no",
+  pol: "pl",
+  por: "pt",
+  ron: "ro",
+  rum: "ro",
+  rus: "ru",
+  swe: "sv",
+  tha: "th",
+  tur: "tr",
+  ukr: "uk",
+  vie: "vi",
+  zho: "zh",
+  chi: "zh",
+};
+
+/**
+ * "English" for "en" or a provider's "eng", named in `locale` ("engelsk" in Norwegian);
+ * the code itself when no name is known.
+ */
+export function languageName(code: string, locale?: string): string {
+  let tag = code;
+  try {
+    tag = Intl.getCanonicalLocales(code)[0] ?? code;
+  } catch {
+    // Not a well-formed tag: show it as given.
+  }
+  const [primary, ...rest] = tag.split("-");
+  const twoLetter = THREE_LETTER_LANGUAGES[primary!.toLowerCase()];
+  if (twoLetter) tag = [twoLetter, ...rest].join("-");
+  try {
+    const name = new Intl.DisplayNames(locale ? [locale, "en"] : ["en"], { type: "language" }).of(
+      tag,
+    );
+    // Some languages write language names in lower case ("norsk"); a label starts upper case.
+    if (name && name !== tag) return name.charAt(0).toLocaleUpperCase(locale) + name.slice(1);
+  } catch {
+    // No Intl.DisplayNames here.
+  }
+  return LANGUAGE_NAMES[tag] ?? LANGUAGE_NAMES[tag.split("-")[0]!] ?? tag;
+}
+
+const MONTH_KEYS = [
+  "time.month.jan",
+  "time.month.feb",
+  "time.month.mar",
+  "time.month.apr",
+  "time.month.may",
+  "time.month.jun",
+  "time.month.jul",
+  "time.month.aug",
+  "time.month.sep",
+  "time.month.oct",
+  "time.month.nov",
+  "time.month.dec",
+] as const;
+
+/**
+ * A short, readable default title for a new recording, in local time and the
+ * app's own date words and 24-hour clock: "Meeting, 23 Oct, 14:05".
+ */
+export function defaultMeetingTitle(now: Date, msg: OpenGeniText = defaultText): string {
+  const month = msg(MONTH_KEYS[now.getMonth()] ?? "time.month.jan");
+  const date = msg("time.date", { day: now.getDate(), month });
+  const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  return msg("meetings.recordings.defaultTitle", { date, time });
+}
+
+/**
+ * The title to show for a meeting. One started without a title carries the
+ * server's stand-in, "Recording 2026-10-26 11:15 UTC"; it shows as a
+ * recorder would have named it, in the viewer's language and time.
+ */
+export function meetingTitle(
+  recording: Pick<Recording, "title" | "startedAt">,
+  msg: OpenGeniText = defaultText,
+): string {
+  const title = recording.title.trim();
+  const startedAt = new Date(recording.startedAt);
+  if (Number.isNaN(startedAt.getTime())) return title;
+  if (title && title !== serverDefaultTitle(startedAt)) return title;
+  return defaultMeetingTitle(startedAt, msg);
+}
+
+/** The title the server gives a recording started without one. */
+function serverDefaultTitle(startedAt: Date): string {
+  return `Recording ${startedAt.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
+/** A finished stretch of live text on one track, as the live preview shows it. */
+export type LiveTranscriptLine = {
+  trackNumber: number;
+  startMilliseconds: number;
+  /** When it ended; without it the line is taken as a moment at its start. */
+  endMilliseconds?: number;
+  text: string;
+};
+
+/** Consecutive live lines from one track, read as one turn. */
+export type LiveTranscriptTurn = {
+  key: string;
+  trackNumber: number;
+  startMilliseconds: number;
+  texts: string[];
+};
+
+/** Consecutive lines from one track read as one turn. */
+export function groupLiveTurns(lines: readonly LiveTranscriptLine[]): LiveTranscriptTurn[] {
+  const sorted = [...lines].sort(
+    (a, b) => a.startMilliseconds - b.startMilliseconds || a.trackNumber - b.trackNumber,
+  );
+  const turns: LiveTranscriptTurn[] = [];
+  for (const line of sorted) {
+    const text = line.text.trim();
+    if (!text) continue;
+    const last = turns.at(-1);
+    if (last && last.trackNumber === line.trackNumber) {
+      last.texts.push(text);
+      continue;
+    }
+    turns.push({
+      key: `${line.trackNumber}:${line.startMilliseconds}`,
+      trackNumber: line.trackNumber,
+      startMilliseconds: line.startMilliseconds,
+      texts: [text],
+    });
+  }
+  return turns;
+}
+
+/** How far apart a microphone line and computer audio may be and still be one sound. */
+const LIVE_ECHO_SLACK_MILLISECONDS = 2_000;
+/** Matching words an echoed line needs, so one shared "ja" or "okay" stays. */
+const LIVE_ECHO_MIN_MATCHED_WORDS = 2;
+/** The share of a microphone line's words heard in computer audio for it to be an echo. */
+const LIVE_ECHO_MIN_SHARE = 0.7;
+
+/** A line's words as compared across tracks: letters and digits only, any case. */
+function liveWordKeys(text: string): string[] {
+  return text
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .split(/\s+/u)
+    .map((word) => word.replace(/[^\p{L}\p{N}]+/gu, ""))
+    .filter(Boolean);
+}
+
+/**
+ * Without headphones the microphone also hears the others in a call from the
+ * speakers, so the live preview would show their words twice: from computer
+ * audio, and again as if the person recording said them. Leave out a
+ * microphone line when most of its words (at least two, and 70%) were heard
+ * in computer audio at the same moment. The preview's text comes a sentence
+ * at a time, so a line that also holds the person's own words stays whole.
+ * The transcript does the same word by word once the recording is done.
+ */
+export function withoutLiveMicrophoneEchoes<Line extends LiveTranscriptLine>(
+  lines: readonly Line[],
+  tracks: readonly { trackNumber: number; source: RecordingTrack["source"] }[],
+): Line[] {
+  if (!recordingMicrophoneIsOwner(tracks)) return [...lines];
+  const sourceOf = (trackNumber: number) =>
+    tracks.find((track) => track.trackNumber === trackNumber)?.source;
+  const computer = lines
+    .filter((line) => sourceOf(line.trackNumber) === "system")
+    .map((line) => ({
+      start: line.startMilliseconds,
+      end: Math.max(line.startMilliseconds, line.endMilliseconds ?? line.startMilliseconds),
+      keys: new Set(liveWordKeys(line.text)),
+    }));
+  if (computer.length === 0) return [...lines];
+  return lines.filter((line) => {
+    if (sourceOf(line.trackNumber) !== "microphone") return true;
+    const keys = liveWordKeys(line.text);
+    if (keys.length < LIVE_ECHO_MIN_MATCHED_WORDS) return true;
+    const start = line.startMilliseconds;
+    const end = Math.max(start, line.endMilliseconds ?? start);
+    const heard = computer.filter(
+      (other) =>
+        other.start <= end + LIVE_ECHO_SLACK_MILLISECONDS &&
+        other.end >= start - LIVE_ECHO_SLACK_MILLISECONDS,
+    );
+    if (heard.length === 0) return true;
+    const matched = keys.filter((key) => heard.some((other) => other.keys.has(key))).length;
+    return !(
+      matched >= LIVE_ECHO_MIN_MATCHED_WORDS && matched / keys.length >= LIVE_ECHO_MIN_SHARE
+    );
+  });
+}
+
+/**
+ * Joins a turn's pieces into readable text. Streaming providers send pieces
+ * that end in a trailing ellipsis while they wait, or a space before a full
+ * stop; joined naively those read as "between you…." or "dog .".
+ */
+export function tidyLiveText(pieces: readonly string[]): string {
+  return pieces
+    .map((piece) => piece.trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+([.,!?;:])/g, "$1")
+    .replace(/(?:…|\.{3})(?=[.,!?;:…])/g, "")
+    .replace(/([,!?;:])\1+/g, "$1")
+    .replace(/(?<!\.)\.\.(?!\.)/g, ".")
+    .replace(/\s{2,}/g, " ");
+}
+
+/** Words still being heard, without the provider's "still listening" ellipsis. */
+export function tidyPartialText(text: string): string {
+  return tidyLiveText([text]).replace(/\s*(?:…|\.{3})$/, "");
+}

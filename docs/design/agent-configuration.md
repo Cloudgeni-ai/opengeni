@@ -50,14 +50,14 @@ is not falsely added to `unavailable`.
 
 ## Why
 
-An embedder today configures an OpenGeni agent through about fifteen independent
+An embedder today configures an Opengeni agent through about fifteen independent
 knobs spread over the session request, workspace settings, and deployment env:
 `tools`, `excludedMcpServerIds`, `mcpServers`, `firstPartyMcpTools`,
 `firstPartyMcpPermissions`, `bundledSkillIds`, `skills`, `sandboxBackend`,
 `instructions`, workspace `agentInstructions`, `visibility`, `agentAccess`,
 `memoryScope`, `agentLearning`, `sessionToolDefaults`, `agentHumanInputEnabled`,
 `codeSearchEnabled`, plus eight `OPENGENI_*` tool flags. Coding-agent integration
-evals (Sonnet in Umami, the Vercel chatbot, and linkding; Luna in OpenGeni staging)
+evals (Sonnet in Umami, the Vercel chatbot, and linkding; Luna in Opengeni staging)
 showed the consequences:
 
 - No request field yields an exact tool set. Skill writers (`skill_save`,
@@ -89,7 +89,7 @@ An agent is one object; everything else is derived.
 ```ts
 type AgentConfigRequest = {
   capabilities?: "all" | "none" | ({ from: "all" | "none" } & Partial<Toggles>);
-  identity?: string | null; // who the agent is; null = workspace default, then OpenGeni's
+  identity?: string | null; // who the agent is; null = workspace default, then Opengeni's
   instructions?: string;    // alias of the session `instructions` field
   renderer?: "opengeni" | "markdown";
 };
@@ -177,28 +177,38 @@ Rules:
 
 1. **Derived tools follow automatically and cannot be toggled.**
    Sandbox attached ⇒ `exec_command`, `write_stdin`, `apply_patch`, `view_image`,
-   and `code_search` when the deployment and workspace offer it. Anything
-   deferred ⇒ the search router. A product MCP server attached ⇒ selected
-   (upfront by default). Runtime mechanics (`wait_for_input`, `command_read`,
-   `command_wait`, titling) are always present.
+   and `code_search` when the deployment and workspace offer it. Sandbox or
+   Connected Machine attached to the turn ⇒ `command_read` and `command_wait`
+   (owner `sandbox`; withheld for every session when no compute is attached).
+   Anything deferred ⇒ the search router and its guidance; nothing deferred ⇒
+   neither, and no `set_session_title` (Opengeni titles the session itself).
+   A product MCP server attached ⇒ selected (upfront by default).
+   `wait_for_input` and the waiting guidance need something that can resume
+   the agent: compute, `subagents`, `goals`, `schedules`, `browser`, `media`
+   or `workspaceAdmin` (a `run_on` command finishes later). A person needs no
+   wait: an answer to `request_human_input` resumes the paused turn and a new
+   message starts one. Legacy sessions keep both unconditionally. The Codemode
+   directive needs compute or `run_on` as well.
 2. **Selectable capabilities** (each owns its tools and, where it has one, its
    prompt module). The single source of truth is the registry in
    `packages/contracts/src/agent-config.ts`; a test maps every first-party tool.
 
 | Capability | Tools | In `"none"` |
 | --- | --- | --- |
-| `humanInput` | `request_human_input` | on |
+| `humanInput` | `request_human_input` (secret kind with `secrets`, Skill reviews with `skills: "manage"`; never in a session that started unattended) | on |
+| `notifications` | `notify_user`, `notification_withdraw`, `inbox_tidy`, `call_user` (also need `humanInput`) | off |
+| `privacyFacts` | `privacy_facts` and its prompt rule | off |
 | `webSearch` | hosted `web_search` (+ `x_search` on SuperGrok) | off |
 | `skills` | `"read"`: `skill_read` (with a nonempty catalog); `"manage"`: all seven Skill tools | `"read"` |
-| `goals` | `goal_*` | off |
+| `goals` | `goal_*` (`goal_resume` once the session has a goal) | off |
 | `subagents` | `session_*`, `sessions_list`, `set_other_session_title`, `list_models` | off |
 | `knowledge` | `knowledge_*`, `memory_*`, `task_note_*`, instruction-policy, preference and company-profile tools, docs server | off |
 | `schedules` | `scheduled_tasks_*`, `scheduled_task_runs_list` | off |
 | `artifacts` | `artifacts_*`, `editable_artifact_*`, `sandbox_file_publish`; Sites and visuals guidance | off |
 | `browser` | `interaction_*`, `browser_*`, `computer_*` | off |
-| `media` | `generate_image`, `generate_video`, hosted `image_generation` | off |
+| `media` | `generate_image`, `generate_video`, hosted `image_generation`; their guidance only when one is attached | off |
 | `workspaceFiles` | files server | off |
-| `workspaceConnectors` | workspace default connectors, API Integrations, Drive publishing, GitHub/Slack/social/X/Reddit/Fiken/Atlassian families | off |
+| `workspaceConnectors` | workspace default connectors, API Integrations, Drive publishing, GitHub/Slack/social/X/Reddit/Fiken families; hosted Atlassian MCP | off |
 | `workspaceAdmin` | variable sets and environments, capability and connector setup, machines, sandboxes, rigs, projects | off |
 
 3. **Omitted ⇒ the workspace default, else `"all"`.** Explicit ⇒ starting point
@@ -210,8 +220,14 @@ Rules:
    bounds what first-party tools may do; approvals still gate individual calls.
 6. **Legacy fields keep working.** `firstPartyMcpTools`, `tools`,
    `excludedMcpServerIds` and `bundledSkillIds` refine inside the resolved
-   capabilities; naming a tool of a capability that is off is a 422
-   `agent_config_conflict`. Without `agent`, resolution reproduces the creator's
+   capabilities. A first-party tool of a capability that is off is left out of
+   an API or SDK client's `firstPartyMcpTools`, because the tool-to-capability
+   map grows and a client built against an older one cannot know a tool moved;
+   an agent's own list, read from the live catalog, is still a 422
+   `agent_config_conflict`, as is a `tools` entry naming the `files` or `docs`
+   server of a capability that is off. Under `"none"`, an omitted `bundledSkillIds`
+   freezes as `[]` at create (no bundled Opengeni guides); an explicit list
+   opts in exactly. Without `agent`, resolution reproduces the creator's
    legacy values exactly.
 
 ## Identity and instructions
@@ -224,7 +240,7 @@ Read in full, it falls into four buckets:
 
 | Bucket | Today's text | End state |
 | --- | --- | --- |
-| **Identity** | opening line ("You are an agent for the current workspace…"), `# Personality`, the template's first sentence ("You are an OpenGeni workspace agent…"); ~0.6k | Replaceable. The only part an embedder rewrites: name, product, domain, voice. |
+| **Identity** | opening line ("You are an agent for the current workspace…"), `# Personality`, the template's first sentence ("You are an Opengeni workspace agent…"); ~0.6k | Replaceable. The only part an embedder rewrites: name, product, domain, voice. |
 | **Base behavior** | writing style (outcome first, minimal formatting, CommonMark); match effort; progress updates (short commentary, skipped under ~20 s; the runtime already separates commentary from the final answer); final-answer rules; autonomy by request type (answer, diagnose, change, monitor), no inferred authorization, stated assumptions, stop for new authority; no unsolicited disclaimers; verification matched to scope | Always on, no knobs. Tuned through instructions, which take explicit precedence (below). |
 | **Runtime mechanics** | `wait_for_input` semantics, new messages arriving mid-turn (steer/queue), continuing after compaction, command yields | Always on: every agent on the durable runtime needs them. Moved out of "working with the user" into their own section. |
 | **Capability modules** | everything below | Included only when the capability or resource is present. |
@@ -242,9 +258,9 @@ Capability modules (current size in characters):
 - **attachments** (files attached): `.opengeni/files/<file-id>/` mounts and
   read-only copies.
 - **machines** (Connected Machine target): host-native paths and link examples.
-- **artifacts** (artifacts capability and an OpenGeni renderer): document artifact
-  delivery via `opengeni-documents`, `artifact:` links and previews, publication,
-  Sites and inline visuals (`opengeni-visualize`, `opengeni-sites`), goal
+- **artifacts** (artifacts capability and an Opengeni renderer): document artifact
+  delivery via `documents`, `artifact:` links and previews, publication,
+  Sites and inline visuals (`visualize`, `sites`), goal
   deliverable evidence (~3.5k).
 - **goals**: goal loop from CORE (~0.5k) plus goal-deliverable rules.
 - **subagents**: child creation, `session_wait`, `session_events`, supervision and
@@ -253,6 +269,10 @@ Capability modules (current size in characters):
   doctrine (~5.4k of CORE).
 - **skills** (~1k), **admin** or integration setup (~1k), plus the already
   conditional variable-set, rig, codemode, and code-search directives.
+- **media**: runtime/provider image and video discovery, separate from integration
+  setup. Capability enablement permits discovery; it does not assert attachment.
+  Always-on runtime mechanics explains progressive schemas, focused searches,
+  exhaustive listing, and literal-prefix recovery without widening authority.
 
 Two additions the legacy text lacked, both shipped in the modular composer
 (`packages/runtime/src/agent-instructions/`):
@@ -260,7 +280,7 @@ Two additions the legacy text lacked, both shipped in the modular composer
 1. **Precedence.** One explicit rule: product, workspace, and session
    instructions override base-behavior defaults (for example "answer in one
    sentence"), never runtime mechanics or safety.
-2. **Renderer.** `sandbox:` and `artifact:` links only render in OpenGeni's React
+2. **Renderer.** `sandbox:` and `artifact:` links only render in Opengeni's React
    timeline. The session declares its client renderer (`opengeni` or `markdown`);
    with `markdown`, link-syntax rules and inline visuals are omitted and the agent
    uses ordinary Markdown links. This is the only behavior option. The chat
@@ -270,8 +290,8 @@ Resulting tiers:
 
 | Tier | Controlled by |
 | --- | --- |
-| Identity | OpenGeni default, then deployment, workspace, session (each replaces) |
-| Base behavior and runtime mechanics | OpenGeni, always on |
+| Identity | Opengeni default, then deployment, workspace, session (each replaces) |
+| Base behavior and runtime mechanics | Opengeni, always on |
 | Capability modules | derived from resolved capabilities and attached resources |
 | Instructions and context | session `instructions` (append, with precedence over base behavior), `modelContext`, goal snapshot, date |
 
@@ -333,6 +353,12 @@ privacy semantics are unchanged.
   execution digest and access-drift report), composer drafts
   (`new_session_drafts`), site-auth maintenance sessions, and browser sessions.
   Their stored legacy fields keep working.
+- **Scheduled recovery validates the accepted configuration.** Generated
+  sessions must match the complete frozen agent configuration, its instruction
+  alias, and its creation identity. The database binding fence and worker recovery
+  use the same proof; a legacy NULL snapshot still requires a legacy session.
+  Migration `0561_scheduled_session_agent_identity.sql` updates the binding fence
+  without changing existing grants or its schema-scoped security boundary.
 - **Goals imply the goals capability.** Setting a goal enables `goals`, and a
   request that disables `goals` while setting a goal is a 422.
 - **No separate preview API.** Every session reports `agent` and
@@ -364,14 +390,13 @@ privacy semantics are unchanged.
 
 ## Rollout
 
-Readers shipped before writers. `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED`
-(default off) admits `agent` on every surface, the workspace default and the
-update route; while it is off they return 422 `agent_config_not_enabled` and the
-client config reports `agentConfig.enabled: false`, which also hides the web UI.
-`OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` makes omitted `agent` resolve to
-`{ from: "all" }` with the modular prompt (the web app's switch). Workers honor a
-stored configuration regardless of either switch, and an old worker ignoring an
-`"all"` configuration still produces the legacy tool set.
+Readers shipped before writers, behind two temporary deployment switches. Once
+every worker understood migration 0559 the switches were removed: agent
+configuration is always on, `agent` is admitted on every surface, the workspace
+default and the update route, and an omitted `agent` resolves to
+`{ from: "all" }` with the modular prompt. The client config still reports
+`agentConfig.enabled` and `defaultForNewSessions`, always `true`, for
+compatibility.
 
 ## Dropped from the proposal
 

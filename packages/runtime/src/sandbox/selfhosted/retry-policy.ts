@@ -13,7 +13,7 @@
 // clock, no transport, and no session. The sleep + jitter side effects live behind
 // the injected `SelfhostedRetryClock` so tests are deterministic.
 
-import type { SelfhostedControlError } from "./control-rpc";
+import { RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY, type SelfhostedControlError } from "./control-rpc";
 
 /**
  * The read-only, idempotent-safe control ops that MAY be retried after a TIMEOUT
@@ -54,9 +54,21 @@ export const SELFHOSTED_IDEMPOTENT_READONLY_OPS: ReadonlySet<string> = new Set([
  */
 export const SELFHOSTED_DRAINING_MAX_RETRIES = 3;
 export const SELFHOSTED_EXEC_DRAINING_MAX_RETRIES = 10;
+/** The agent marks the refusals it sends while a verified self-update drains with
+ *  this `detail.reason`. The refused op never started, and the successor process
+ *  accepts it seconds later, so every op kind gets the patient exec budget and
+ *  rides across the update instead of failing the caller's tool call. */
+export const SELFHOSTED_AGENT_UPDATE_DRAIN_REASON = "agent_update";
+export const SELFHOSTED_UPDATE_DRAINING_MAX_RETRIES = SELFHOSTED_EXEC_DRAINING_MAX_RETRIES;
 /** A read-only op that timed out is retried at most once (see the at-least-once
  *  note above — even a read gets a single re-issue, not an unbounded loop). */
 export const SELFHOSTED_TIMEOUT_MAX_RETRIES = 1;
+/** The agent's `failure_code` when it refuses a call's delivery token as expired
+ *  or unknown. Its usual cause is an agent process that started after Opengeni
+ *  fetched the token, so it never issued it; the transport has then already
+ *  dropped its other prefetched tokens. Whether an earlier delivery ran is
+ *  unknown, so only a read-only op is re-issued, once, with a fresh token. */
+export const SELFHOSTED_DELIVERY_EXPIRED_FAILURE_CODE = "control_delivery_expired";
 /** A fault the transport synthesized PRE-SEND (no connection / no responder) — the
  *  op provably never reached the machine, so it is safe to re-issue for ANY op kind.
  *  Short bounded budget (≈3.5s summed): enough to ride out a NATS reconnect blip
@@ -103,6 +115,8 @@ export function selfhostedRetryBackoffMs(attempt: number, jitter: number): numbe
  *    → retry at most `SELFHOSTED_TIMEOUT_MAX_RETRIES`, and ONLY for a read-only
  *    idempotent-safe op (`SELFHOSTED_IDEMPOTENT_READONLY_OPS`). A timed-out
  *    MUTATION is never retried here — it may already have run (at-least-once).
+ *  - a refused delivery token (`SELFHOSTED_DELIVERY_EXPIRED_FAILURE_CODE`, an
+ *    unknown outcome) → the same single re-issue, ONLY for a read-only op.
  *  - Everything else → no retry at this layer:
  *      · FENCED is retried by the routing proxy against a RE-RESOLVED backend
  *        (retrying here under the same stale epoch would just re-fence);
@@ -125,11 +139,28 @@ export function decideSelfhostedRetry(input: {
 }): SelfhostedRetryDecision {
   const { opKind, error, drainingRetries, timeoutRetries, neverSentRetries = 0, jitter } = input;
 
+  if (
+    error.connectionReplaced &&
+    !error.neverSent &&
+    SELFHOSTED_IDEMPOTENT_READONLY_OPS.has(opKind)
+  ) {
+    // The agent restarted with a read in flight: read again from the new one.
+    if (timeoutRetries >= SELFHOSTED_TIMEOUT_MAX_RETRIES) {
+      return { action: "fail" };
+    }
+    return { action: "retry", delayMs: selfhostedRetryBackoffMs(timeoutRetries, jitter) };
+  }
+
   if (error.neverSent) {
     // Provably not executed (the request never reached the machine) → safe to
     // re-issue for ANY op kind. Bounded so a genuinely-offline machine surfaces
     // honestly rather than hanging the turn.
     if (neverSentRetries >= SELFHOSTED_NEVER_SENT_MAX_RETRIES) {
+      return { action: "fail" };
+    }
+    // The transport already waited out its reconnect window for this exact
+    // process; another attempt would only wait that window again.
+    if (error.detail[RESPONDER_WAIT_EXHAUSTED_DETAIL_KEY] === "1") {
       return { action: "fail" };
     }
     return { action: "retry", delayMs: selfhostedRetryBackoffMs(neverSentRetries, jitter) };
@@ -138,18 +169,27 @@ export function decideSelfhostedRetry(input: {
   if (error.draining) {
     // exec is patient (the flat 8-permit pool needs longer than 5s to free a slot);
     // every other op keeps the short budget so fs/git latency stays snappy.
+    // A self-update drain ends with the successor accepting the same op, so
+    // it waits as patiently as exec whatever the op kind.
     const maxDrainingRetries =
-      opKind === "exec" ? SELFHOSTED_EXEC_DRAINING_MAX_RETRIES : SELFHOSTED_DRAINING_MAX_RETRIES;
+      error.detail.reason === SELFHOSTED_AGENT_UPDATE_DRAIN_REASON
+        ? SELFHOSTED_UPDATE_DRAINING_MAX_RETRIES
+        : opKind === "exec"
+          ? SELFHOSTED_EXEC_DRAINING_MAX_RETRIES
+          : SELFHOSTED_DRAINING_MAX_RETRIES;
     if (drainingRetries >= maxDrainingRetries) {
       return { action: "fail" };
     }
     return { action: "retry", delayMs: selfhostedRetryBackoffMs(drainingRetries, jitter) };
   }
 
-  if (error.reason === "agent_reconnecting") {
+  if (
+    error.reason === "agent_reconnecting" ||
+    error.detail.failure_code === SELFHOSTED_DELIVERY_EXPIRED_FAILURE_CODE
+  ) {
     if (!SELFHOSTED_IDEMPOTENT_READONLY_OPS.has(opKind)) {
-      // A timed-out mutation may already have executed on the machine — never
-      // re-issue it (at-least-once). Surface the reconnecting error instead.
+      // A timed-out or refused mutation may already have executed on the
+      // machine — never re-issue it (at-least-once). Surface the error instead.
       return { action: "fail" };
     }
     if (timeoutRetries >= SELFHOSTED_TIMEOUT_MAX_RETRIES) {

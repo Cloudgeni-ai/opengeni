@@ -2,10 +2,12 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ConnectController, type ConnectAttempt, type ConnectTransport } from "@opengeni/connect";
 import { ConnectSetup } from "../src/connect";
+import { curatedAutoAdvance } from "../src/connect-setup";
 
 async function render(
   nextAction: ConnectAttempt["nextAction"],
   state: ConnectAttempt["state"] = "requires_user_action",
+  overrides: Partial<ConnectAttempt> = {},
 ) {
   const attempt: ConnectAttempt = {
     id: "attempt",
@@ -19,6 +21,7 @@ async function render(
     integrationInstalled: false,
     completionRequirement: "connection",
     expiresAt: "2030-01-01T00:00:00Z",
+    ...overrides,
   };
   const transport: ConnectTransport = {
     catalog: async () => [],
@@ -139,4 +142,287 @@ test("OAuth presents one primary action without an empty credential form heading
   expect(html).toContain('class="og-connect-setup-secondary"');
   expect(html).toContain("Check status");
   expect(html).toContain("Cancel setup");
+});
+
+test("a GitHub owner-approval request reads as a calm waiting state, not an error", async () => {
+  const html = await render({ type: "none" }, "connected_but_incomplete", {
+    providerId: "github-app",
+    ownership: "workspace",
+    error: {
+      code: "owner_approval_pending",
+      message: "Request sent.",
+      retryable: true,
+    },
+  });
+  expect(html).toContain("Waiting for an organization owner");
+  expect(html).toContain("GitHub asked the owners of your organization to approve");
+  expect(html).toContain("invite them to this workspace first");
+  expect(html).not.toContain('role="alert"');
+  expect(html).not.toContain("Choose tools");
+  expect(html).not.toContain("Choose which tools to add");
+});
+
+test("a Microsoft organization that needs admin approval gets a link for its administrator", async () => {
+  const link =
+    "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=client-1&scope=https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite&state=microsoft_admin_consent";
+  const required = await render({ type: "none" }, "failed", {
+    providerId: "microsoft-outlook-mail",
+    error: {
+      code: "admin_consent_required",
+      message: `Your organization requires a Microsoft 365 administrator to approve this app first. Send your administrator this approval link: ${link} After they approve, connect again.`,
+      retryable: true,
+    },
+  });
+  expect(required).toContain("Your IT needs to approve Opengeni first");
+  expect(required).toContain("Copy message for IT");
+  expect(required).toContain("Copy approval link");
+  expect(required).toContain("Open approval link");
+  // The ready-made message carries the exact approval link.
+  expect(required).toContain(`could you approve it with this link?`.replace("could", "Could"));
+  expect(required).toContain(link.replaceAll("&", "&amp;"));
+  expect(required).not.toContain("Connection setup could not continue");
+  expect(required).not.toContain("Personal connection");
+  expect(required).not.toContain("<ol>");
+  expect(required).not.toContain("Check status");
+  const declined = await render({ type: "none" }, "cancelled", {
+    providerId: "microsoft-outlook-mail",
+    error: {
+      code: "provider_denied",
+      message: `Microsoft did not grant access. If Microsoft said your organization needs an administrator to approve this app, send your administrator this approval link: ${link} After they approve, connect again.`,
+      retryable: true,
+    },
+  });
+  expect(declined).toContain("Microsoft didn&#x27;t give access");
+  expect(declined).toContain("If Microsoft said an admin has to approve Opengeni");
+  expect(declined).toContain("Copy message for IT");
+  const other = await render({ type: "none" }, "cancelled", {
+    error: {
+      code: "provider_denied",
+      message: "Authorization was not completed. Start a new connection attempt.",
+      retryable: false,
+    },
+  });
+  expect(other).not.toContain("Open approval link");
+  expect(other).not.toContain("Copy message for IT");
+});
+
+test("GitHub account selection explains how a non-owner requests an organization install", async () => {
+  const accounts = [
+    {
+      id: "42",
+      providerId: "github-app",
+      label: "me",
+      ownership: "workspace" as const,
+      status: "connected" as const,
+    },
+    {
+      id: "new",
+      providerId: "github-app",
+      label: "Install on another GitHub account",
+      ownership: "workspace" as const,
+      status: "connected" as const,
+    },
+  ];
+  const github = await render({ type: "select_account", accounts }, "account_selection", {
+    providerId: "github-app",
+  });
+  expect(github).toContain("Only its owners can connect it");
+  expect(github).toContain("send its owners");
+  const other = await render({ type: "select_account", accounts }, "account_selection");
+  expect(other).not.toContain("Only its owners can connect it");
+});
+
+const curatedPreview: ConnectAttempt["nextAction"] = {
+  type: "preview",
+  previewId: "preview",
+  contentHash: "hash",
+  operations: [
+    { id: "read", label: "Read mail", kind: "read" },
+    { id: "send", label: "Send mail", kind: "mutation" },
+  ],
+};
+
+test("a built-in integration finishes by itself after sign-in instead of asking to choose tools", async () => {
+  const connected = await render({ type: "none" }, "connected_but_incomplete", {
+    completionRequirement: "integration",
+  });
+  expect(connected).toContain("Finishing setup");
+  expect(connected).not.toContain("Choose tools");
+  const preview = await render(curatedPreview, "preview", {
+    completionRequirement: "integration",
+    source: { kind: "definition", definitionId: "microsoft-outlook-mail" },
+  });
+  expect(preview).toContain("Finishing setup");
+  expect(preview).not.toContain("Add selected tools");
+});
+
+test("built-in integrations advance to the preview and install every reviewed tool", () => {
+  const base = {
+    id: "attempt",
+    workspaceId: "workspace",
+    providerId: "microsoft-outlook-mail",
+    ownership: "personal" as const,
+    revision: 2,
+    credentialsCommitted: true,
+    integrationInstalled: false,
+    completionRequirement: "integration" as const,
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  expect(
+    curatedAutoAdvance({
+      ...base,
+      state: "connected_but_incomplete",
+      nextAction: { type: "none" },
+    }),
+  ).toEqual({ type: "retry" });
+  expect(curatedAutoAdvance({ ...base, state: "preview", nextAction: curatedPreview })).toEqual({
+    type: "install",
+    previewId: "preview",
+    contentHash: "hash",
+    operationIds: ["read", "send"],
+  });
+  // Errors, custom sources and connection-only providers stay with the person.
+  expect(
+    curatedAutoAdvance({
+      ...base,
+      state: "preview",
+      nextAction: curatedPreview,
+      error: { code: "source_changed", message: "changed", retryable: true },
+    }),
+  ).toBeNull();
+  expect(
+    curatedAutoAdvance({
+      ...base,
+      state: "preview",
+      nextAction: curatedPreview,
+      source: { kind: "openapi", url: "https://api.example.com/openapi.json" },
+    }),
+  ).toBeNull();
+  expect(
+    curatedAutoAdvance({
+      ...base,
+      completionRequirement: "connection",
+      state: "connected_but_incomplete",
+      nextAction: { type: "none" },
+    }),
+  ).toBeNull();
+});
+
+test("a custom OpenAPI source keeps the explicit tool review", async () => {
+  const html = await render(curatedPreview, "preview", {
+    completionRequirement: "integration",
+    source: { kind: "openapi", url: "https://api.example.com/openapi.json" },
+  });
+  expect(html).toContain("Add selected tools");
+  expect(html).not.toContain("Finishing setup");
+});
+
+test("setup the person authorized carries on without its dialog", async () => {
+  const { connectSetupContinuesWithoutDialog, continueConnectSetup } =
+    await import("../src/connect-setup-model");
+  const signingIn: ConnectAttempt = {
+    id: "attempt",
+    workspaceId: "workspace",
+    providerId: "microsoft-sharepoint",
+    ownership: "personal",
+    revision: 1,
+    state: "requires_user_action",
+    nextAction: { type: "authorize", url: "https://login.microsoftonline.com/authorize" },
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "integration",
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  // Closing before signing in leaves nothing running; after, it carries on.
+  expect(connectSetupContinuesWithoutDialog(signingIn, false)).toBe(false);
+  expect(connectSetupContinuesWithoutDialog(signingIn, true)).toBe(true);
+  expect(
+    connectSetupContinuesWithoutDialog(
+      { ...signingIn, state: "connected_but_incomplete", nextAction: { type: "none" } },
+      false,
+    ),
+  ).toBe(true);
+  expect(
+    connectSetupContinuesWithoutDialog(
+      {
+        ...signingIn,
+        state: "connected_but_incomplete",
+        nextAction: { type: "none" },
+        error: { code: "failed", message: "failed", retryable: true },
+      },
+      true,
+    ),
+  ).toBe(false);
+  // The provider callback finished setup: nothing is left to do but read it.
+  const complete: ConnectAttempt = {
+    ...signingIn,
+    revision: 2,
+    state: "complete",
+    nextAction: { type: "none" },
+    credentialsCommitted: true,
+    integrationInstalled: true,
+  };
+  let reads = 0;
+  const advances: unknown[] = [];
+  const transport = {
+    get: async () => (++reads < 2 ? signingIn : complete),
+    advance: async (...args: unknown[]) => {
+      advances.push(args);
+      return complete;
+    },
+  };
+  expect(await continueConnectSetup(transport, signingIn)).toEqual(complete);
+  expect(advances).toEqual([]);
+  // A setup that needs the person again stays resumable instead.
+  expect(
+    await continueConnectSetup(transport, {
+      ...signingIn,
+      state: "account_selection",
+      nextAction: { type: "select_account", accounts: [] },
+    }),
+  ).toBeNull();
+});
+
+test("background setup stops at a refusal and when it is aborted", async () => {
+  const { continueConnectSetup } = await import("../src/connect-setup-model");
+  const connected: ConnectAttempt = {
+    id: "attempt",
+    workspaceId: "workspace",
+    providerId: "microsoft-sharepoint",
+    ownership: "workspace",
+    revision: 2,
+    state: "connected_but_incomplete",
+    nextAction: { type: "none" },
+    credentialsCommitted: true,
+    integrationInstalled: false,
+    completionRequirement: "integration",
+    expiresAt: "2030-01-01T00:00:00Z",
+  };
+  let reads = 0;
+  const refused = Object.assign(new Error("Forbidden"), { status: 403 });
+  const transport = {
+    get: async () => {
+      reads += 1;
+      return connected;
+    },
+    advance: async () => {
+      throw refused;
+    },
+  };
+  // A permission or policy refusal needs the person: no waiting for a move.
+  const started = Date.now();
+  expect(await continueConnectSetup(transport, connected, { settleMs: 5_000 })).toBeNull();
+  expect(Date.now() - started).toBeLessThan(1_000);
+  expect(reads).toBe(0);
+  // A conflict waits for the attempt to move, until it is aborted.
+  const conflict = { ...transport, advance: async () => Promise.reject({ status: 409 }) };
+  const abort = new AbortController();
+  const continuing = continueConnectSetup(conflict, connected, {
+    signal: abort.signal,
+    settleMs: 60_000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  abort.abort();
+  expect(await continuing).toBeNull();
+  expect(reads).toBeGreaterThan(0);
 });

@@ -5,13 +5,17 @@ import {
 } from "@opengeni/contracts";
 import {
   getWorkspaceInteractionRevisionState,
-  listSessionEvents,
+  listSessionEventPage,
   listWorkspaceControlEvents,
+  getWorkspaceControlEvent,
+  readSessionEventStorageGapEnd,
   type Database,
+  type SessionListChangeSource,
 } from "@opengeni/db";
 import {
   coalesceSessionEventDeltasWithCoverage,
   formatSessionEventSse,
+  formatWorkspaceControlCursorSse,
   formatWorkspaceControlEventSse,
   requireSessionEventDurableFanoutCapability,
   SESSION_EVENT_SSE_FRAME_MAX_BYTES,
@@ -19,8 +23,10 @@ import {
 } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import { MANAGED_AUTH_ACTOR_EPOCH_HEADER } from "@opengeni/core/managed-auth-session-sets";
+import { subscribeSessionListHints, type SessionListHintIds } from "./session-list-hints";
 
 const SESSION_REPLAY_PAGE_SIZE = 100;
+const SESSION_REPLAY_PAGE_MAX_BYTES = 8 * 1024 * 1024;
 const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
 export const SSE_QUEUED_FRAME_MAX_COUNT = 1;
 export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
@@ -149,12 +155,12 @@ export function createByteBoundedSseStream(
   return {
     stream,
     write: async (frame) => {
-      const chunk = encoder.encode(frame);
       for (;;) {
         if (stopped) return false;
         const desired = controller.desiredSize;
         if (desired === null) return false;
         if (desired >= 1 && queuedFrames === 0) {
+          const chunk = encoder.encode(frame);
           controller.enqueue(chunk);
           queuedFrames = 1;
           queuedBytes = chunk.byteLength;
@@ -267,6 +273,32 @@ export function createLatestWinsDelivery<T extends { sequence: number }>(
   };
 }
 
+/**
+ * Durable coverage for each projected frame. Storage may omit sequences on
+ * purpose (an archived session keeps only its readable timeline), and clients
+ * treat an uncovered jump as a gap to backfill. Within a page the next stored
+ * row bounds the gap; after the last row, `gapEnd` (when given) reads the
+ * race-free bound from storage.
+ */
+export async function coverStorageGaps(
+  projection: { events: SessionEvent[]; coveredThroughBySequence: ReadonlyMap<number, number> },
+  gapEnd: ((through: number) => Promise<number>) | null,
+): Promise<Map<number, number>> {
+  const coverage = new Map<number, number>();
+  const events = projection.events;
+  for (const [index, event] of events.entries()) {
+    const own = projection.coveredThroughBySequence.get(event.sequence) ?? event.sequence;
+    const next = events[index + 1];
+    coverage.set(event.sequence, next ? Math.max(own, next.sequence - 1) : own);
+  }
+  const last = events.at(-1);
+  if (last && gapEnd) {
+    const own = coverage.get(last.sequence)!;
+    coverage.set(last.sequence, Math.max(own, await gapEnd(own)));
+  }
+  return coverage;
+}
+
 export async function sseSessionStream(
   db: Database,
   bus: EventBus,
@@ -277,18 +309,19 @@ export async function sseSessionStream(
   options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
   if (isHttp1BrowserBatch(options)) {
-    const events = await listSessionEvents(db, workspaceId, sessionId, {
+    const { events } = await listSessionEventPage(db, workspaceId, sessionId, {
       after,
       limit: SESSION_REPLAY_PAGE_SIZE,
+      maxBytes: options.finiteResponseMaxBytes ?? HTTP1_BROWSER_SSE_BATCH_MAX_BYTES,
     });
     await options.reauthorize?.();
     const compactProjection = coalesceSessionEventDeltasWithCoverage(events);
+    const coverage = await coverStorageGaps(compactProjection, async (through) =>
+      readSessionEventStorageGapEnd(db, workspaceId, sessionId, through),
+    );
     return finiteSseBatchResponse(
       compactProjection.events.map((event) =>
-        formatSessionEventSse(
-          event,
-          compactProjection.coveredThroughBySequence.get(event.sequence) ?? event.sequence,
-        ),
+        formatSessionEventSse(event, coverage.get(event.sequence) ?? event.sequence),
       ),
       options,
     );
@@ -353,10 +386,12 @@ export async function sseSessionStream(
         targetSequence === undefined
           ? SESSION_REPLAY_PAGE_SIZE
           : Math.min(SESSION_REPLAY_PAGE_SIZE, targetSequence - lastSent);
-      const page = await listSessionEvents(db, workspaceId, sessionId, {
+      const replayPage = await listSessionEventPage(db, workspaceId, sessionId, {
         after: lastSent,
         limit,
+        maxBytes: SESSION_REPLAY_PAGE_MAX_BYTES,
       });
+      const page = replayPage.events;
       const eligible =
         targetSequence === undefined
           ? page
@@ -372,9 +407,16 @@ export async function sseSessionStream(
       // a long answer cannot create thousands of React renders and starve
       // command acknowledgements behind its own token stream.
       const compactProjection = coalesceSessionEventDeltasWithCoverage(eligible);
+      // Live delivery stops exactly at a published sequence; replay pages also
+      // cover what storage intentionally omits after their last event.
+      const coverage = await coverStorageGaps(
+        compactProjection,
+        targetSequence === undefined
+          ? async (through) => readSessionEventStorageGapEnd(db, workspaceId, sessionId, through)
+          : null,
+      );
       for (const projected of compactProjection.events) {
-        const coveredThrough =
-          compactProjection.coveredThroughBySequence.get(projected.sequence) ?? projected.sequence;
+        const coveredThrough = coverage.get(projected.sequence) ?? projected.sequence;
         await writeFrame(formatSessionEventSse(projected, coveredThrough));
         lastSent = coveredThrough;
       }
@@ -382,8 +424,10 @@ export async function sseSessionStream(
         throw new Error(`Session event replay made no progress after sequence ${lastSent}`);
       }
       if (targetSequence !== undefined && lastSent >= targetSequence) return;
+      if (targetSequence === undefined && !replayPage.hasMore) return;
       // A byte-selected page may contain fewer rows than requested, especially
-      // when one large message travels alone. Only an empty read proves EOF.
+      // when one large message travels alone. Use explicit continuation rather
+      // than page length; live publication covers appends after the snapshot.
     }
   };
   let durableDeliveryTail = Promise.resolve();
@@ -529,28 +573,53 @@ export async function replaySessionEvents(
   }
 }
 
+/**
+ * Session-scope control events belong to one chat. A reader only receives
+ * those for chats it can read; workspace-scope events go to every reader.
+ */
+export type WorkspaceControlEventVisibility = (
+  events: readonly WorkspaceControlEvent[],
+) => Promise<WorkspaceControlEvent[]>;
+
+export type WorkspaceControlSseOptions = SseDeliveryOptions & {
+  visibleControlEvents: WorkspaceControlEventVisibility;
+};
+
+/**
+ * One finite page of control frames for a reader. When the page ends in
+ * events the reader cannot see, a cursor-only frame moves its cursor past them.
+ */
+async function workspaceControlBatchFrames(
+  db: Database,
+  workspaceId: string,
+  after: number,
+  visibleControlEvents: WorkspaceControlEventVisibility,
+): Promise<string[]> {
+  const events = (
+    await listWorkspaceControlEvents(db, workspaceId, after, WORKSPACE_CONTROL_REPLAY_PAGE_SIZE)
+  ).sort((left, right) => left.sequence - right.sequence);
+  const visible = await visibleControlEvents(events);
+  const frames = visible.map(formatWorkspaceControlEventSse);
+  const scannedThrough = events.at(-1)?.sequence;
+  if (scannedThrough !== undefined && scannedThrough > (visible.at(-1)?.sequence ?? after)) {
+    frames.push(formatWorkspaceControlCursorSse(workspaceId, scannedThrough));
+  }
+  return frames;
+}
+
 export async function sseWorkspaceControlStream(
   db: Database,
   bus: EventBus,
   workspaceId: string,
   after: number,
   signal: AbortSignal,
-  options: SseDeliveryOptions = {},
+  options: WorkspaceControlSseOptions,
 ): Promise<Response> {
+  const { visibleControlEvents } = options;
   if (isHttp1BrowserBatch(options)) {
-    const events = await listWorkspaceControlEvents(
-      db,
-      workspaceId,
-      after,
-      WORKSPACE_CONTROL_REPLAY_PAGE_SIZE,
-    );
+    const frames = await workspaceControlBatchFrames(db, workspaceId, after, visibleControlEvents);
     await options.reauthorize?.();
-    return finiteSseBatchResponse(
-      events
-        .sort((left, right) => left.sequence - right.sequence)
-        .map(formatWorkspaceControlEventSse),
-      options,
-    );
+    return finiteSseBatchResponse(frames, options);
   }
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   let lastSent = after;
@@ -617,17 +686,17 @@ export async function sseWorkspaceControlStream(
           WORKSPACE_CONTROL_REPLAY_PAGE_SIZE,
           Math.max(1, event.sequence - lastSent),
         );
-        const missing = await listWorkspaceControlEvents(db, workspaceId, lastSent, limit);
-        let reachedIncoming = false;
-        for (const missed of missing.sort((a, b) => a.sequence - b.sequence)) {
-          if (missed.sequence >= event.sequence) {
-            reachedIncoming = true;
-            break;
-          }
-          if (missed.sequence > lastSent) {
-            await writeFrame(formatWorkspaceControlEventSse(missed));
-            lastSent = missed.sequence;
-          }
+        const missing = (await listWorkspaceControlEvents(db, workspaceId, lastSent, limit)).sort(
+          (a, b) => a.sequence - b.sequence,
+        );
+        const reachedIncoming = missing.some((missed) => missed.sequence >= event.sequence);
+        const gap = missing.filter(
+          (missed) => missed.sequence > lastSent && missed.sequence < event.sequence,
+        );
+        const visibleIds = new Set((await visibleControlEvents(gap)).map((missed) => missed.id));
+        for (const missed of gap) {
+          if (visibleIds.has(missed.id)) await writeFrame(formatWorkspaceControlEventSse(missed));
+          lastSent = missed.sequence;
         }
         if (reachedIncoming || missing.length < limit) break;
         if (lastSent === previousLastSent) {
@@ -637,7 +706,11 @@ export async function sseWorkspaceControlStream(
         }
       }
     }
-    await writeFrame(formatWorkspaceControlEventSse(event));
+    // The bus is workspace-wide, not an authorization projection. Re-read the
+    // exact durable row under this stream's actor before delivering live data.
+    const durable = await getWorkspaceControlEvent(db, workspaceId, event.id);
+    const [visible] = durable ? await visibleControlEvents([durable]) : [];
+    if (visible) await writeFrame(formatWorkspaceControlEventSse(visible));
     lastSent = event.sequence;
   };
   delivery = createLatestWinsDelivery(send, fail);
@@ -694,11 +767,18 @@ export async function sseWorkspaceControlStream(
 
 export type WorkspaceInteractionSseOptions = SseDeliveryOptions & {
   pollIntervalMs?: number | undefined;
+  sessionLists?:
+    | {
+        source: SessionListChangeSource;
+        subjectId: string;
+        authorizeIds: (ids: string[]) => Promise<SessionListHintIds>;
+      }
+    | undefined;
 };
 
 /**
  * One HTTP connection for the two workspace-wide invalidation domains used by
- * every visible OpenGeni surface. Keeping these as separate HTTP/1 streams
+ * every visible Opengeni surface. Keeping these as separate HTTP/1 streams
  * consumes all six per-origin browser connections with only two windows and
  * starves ordinary mutations/terminal grants. The durable cursors remain
  * independent; this function only multiplexes their already-bounded SSE frames.
@@ -711,11 +791,11 @@ export async function sseWorkspaceLiveStream(
   controlAfter: number,
   interactionAfter: number,
   signal: AbortSignal,
-  options: WorkspaceInteractionSseOptions = {},
+  options: WorkspaceInteractionSseOptions & WorkspaceControlSseOptions,
 ): Promise<Response> {
   if (isHttp1BrowserBatch(options)) {
-    const [controlEvents, interactionState] = await Promise.all([
-      listWorkspaceControlEvents(db, workspaceId, controlAfter, WORKSPACE_CONTROL_REPLAY_PAGE_SIZE),
+    const [controlFrames, interactionState] = await Promise.all([
+      workspaceControlBatchFrames(db, workspaceId, controlAfter, options.visibleControlEvents),
       getWorkspaceInteractionRevisionState(db, { accountId, workspaceId }),
     ]);
     await options.reauthorize?.();
@@ -733,15 +813,12 @@ export async function sseWorkspaceLiveStream(
         ),
       );
     }
-    frames.push(
-      ...controlEvents
-        .sort((left, right) => left.sequence - right.sequence)
-        .map(formatWorkspaceControlEventSse),
-    );
+    frames.push(...controlFrames);
     return finiteSseBatchResponse(frames, options);
   }
   const upstream = new AbortController();
   let stopReauthorization = () => {};
+  let stopSessionListHints = () => {};
   const channel = createByteBoundedSseStream({
     connectionLifetimeMs: options.connectionLifetimeMs,
     maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
@@ -749,6 +826,7 @@ export async function sseWorkspaceLiveStream(
     onObservation: sseObservationReporter("workspace_interaction", options),
     onStop: () => {
       stopReauthorization();
+      stopSessionListHints();
       signal.removeEventListener("abort", abort);
       upstream.abort();
     },
@@ -761,7 +839,7 @@ export async function sseWorkspaceLiveStream(
   else signal.addEventListener("abort", abort, { once: true });
   stopReauthorization = startSseReauthorization(options, channel.stopped, channel.close);
 
-  const upstreamOptions: WorkspaceInteractionSseOptions = {
+  const upstreamOptions: WorkspaceInteractionSseOptions & WorkspaceControlSseOptions = {
     ...options,
     connectionLifetimeMs: undefined,
     finiteResponseMaxBytes: undefined,
@@ -779,6 +857,15 @@ export async function sseWorkspaceLiveStream(
     writeTail = pending.catch(() => false);
     return pending;
   };
+  if (options.sessionLists && !channel.stopped()) {
+    stopSessionListHints = subscribeSessionListHints({
+      ...options.sessionLists,
+      workspaceId,
+      intervalMs: options.pollIntervalMs ?? SSE_HEARTBEAT_INTERVAL_MS,
+      write: (hint) => write(`event: ${hint.type}\ndata: ${JSON.stringify(hint)}\n\n`),
+      fail: channel.fail,
+    });
+  }
   const pump = async (response: Response): Promise<void> => {
     if (!response.body) throw new TypeError("workspace live upstream omitted its body");
     const reader = response.body.getReader();

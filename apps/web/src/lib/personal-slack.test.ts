@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { ConnectAttempt } from "@opengeni/connect";
 import { OPENGENI_PERSONAL_SLACK_MCP_URL } from "@opengeni/contracts";
 
-import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
+import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/react/app/types";
 import {
   enableNewSlackAccountTools,
   personalSlackAccountState,

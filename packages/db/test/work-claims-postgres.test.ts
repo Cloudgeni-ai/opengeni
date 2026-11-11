@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   createDb,
@@ -232,7 +232,7 @@ function claimInput(
     subjectNamespace: "github",
     subjectType: "pull_request" as const,
     canonicalKey: input.canonicalKey ?? "Cloudgeni-ai/opengeni#384",
-    displayLabel: input.displayLabel ?? "OpenGeni discovery coordination",
+    displayLabel: input.displayLabel ?? "Opengeni discovery coordination",
     role: "working" as const,
     version: input.versionValue
       ? ({ kind: "pull_request_head" as const, value: input.versionValue } as const)
@@ -242,9 +242,10 @@ function claimInput(
 
 async function activityRevision(workspaceId: string): Promise<bigint> {
   const [row] = await shared!.admin<Array<{ revision: string }>>`
-    select revision::text as revision
-    from workspace_session_activity_revisions
-    where workspace_id = ${workspaceId}`;
+    select activity_xid::text as revision
+    from sessions
+    where workspace_id = ${workspaceId}
+    order by activity_xid desc limit 1`;
   if (!row) throw new Error(`missing activity revision for ${workspaceId}`);
   return BigInt(row.revision);
 }
@@ -354,7 +355,7 @@ describe("durable advisory work claims", () => {
       claimInput(attempt, {
         operationId: crypto.randomUUID(),
         expectedRevision: 1,
-        displayLabel: "OpenGeni overlap discovery",
+        displayLabel: "Opengeni overlap discovery",
         versionValue: "head-2",
       }),
     );
@@ -423,7 +424,8 @@ describe("durable advisory work claims", () => {
       { claimId: created.claim.id, mutationKind: "released", resultingRevision: 3 },
       { claimId: recreated.claim.id, mutationKind: "created", resultingRevision: 1 },
     ]);
-    expect(await activityRevision(f.grant.workspaceId)).toBe(before + 4n);
+    // The database-global xid clock is not a consecutive per-workspace counter.
+    expect(await activityRevision(f.grant.workspaceId)).toBeGreaterThan(before);
   });
 
   test("replacement attempts replay the same logical-turn receipt while stale attempts fail closed", async () => {
@@ -988,5 +990,50 @@ describe("durable advisory work claims", () => {
       expect(routine.securityDefiner).toBe(true);
       expect(routine.settings).toContain("search_path=public, pg_catalog");
     }
+  });
+});
+
+describe("session discovery creator and visibility filters", () => {
+  test("mineOnly and visibility narrow discovery; rows say visibility and archive state", async () => {
+    if (!shared || !client) return;
+    const f = await fixture({ privateSession: true });
+    const otherSubjectId = `user:discovery-other-${crypto.randomUUID()}`;
+    await grantWorkspaceAccess(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      subjectId: otherSubjectId,
+      permissions: ["sessions:read", "sessions:create", "sessions:control"],
+    });
+    const mineShared = await createOwnedSession(f, "Shared chat I started");
+    const othersShared = await createOwnedSession(
+      { grant: f.grant, ownerSubjectId: otherSubjectId },
+      "Shared chat someone else started",
+    );
+    const list = async (options: { mineOnly?: boolean; visibility?: "private" | "workspace" }) =>
+      await listSessionDiscoverySummaries(client!.db, f.grant.workspaceId, {
+        limit: 20,
+        subjectId: f.ownerSubjectId,
+        ...options,
+      });
+    const ids = (page: Awaited<ReturnType<typeof list>>) =>
+      new Set(page.sessions.map((session) => session.id));
+
+    expect(ids(await list({}))).toEqual(new Set([f.session.id, mineShared.id, othersShared.id]));
+    expect(ids(await list({ mineOnly: true }))).toEqual(new Set([f.session.id, mineShared.id]));
+    expect(ids(await list({ visibility: "private" }))).toEqual(new Set([f.session.id]));
+    const mineAndShared = await list({ mineOnly: true, visibility: "workspace" });
+    expect(ids(mineAndShared)).toEqual(new Set([mineShared.id]));
+    expect(mineAndShared.total).toBe(1);
+
+    const all = await list({});
+    const byId = new Map(all.sessions.map((session) => [session.id, session]));
+    expect(byId.get(f.session.id)).toMatchObject({ visibility: "private", archived: false });
+    expect(byId.get(othersShared.id)).toMatchObject({ visibility: "workspace", archived: false });
+
+    await shared.admin`
+      update sessions set archived_at = now()
+      where workspace_id = ${f.grant.workspaceId} and id = ${mineShared.id}`;
+    const archived = (await list({ mineOnly: true, visibility: "workspace" })).sessions[0]!;
+    expect(archived).toMatchObject({ id: mineShared.id, archived: true });
   });
 });

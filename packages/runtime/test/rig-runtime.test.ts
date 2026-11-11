@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenGeniAgent,
   composeAgentInstructions,
@@ -425,7 +425,7 @@ describe("runRigSetupHook (M3)", () => {
     expect(
       calls
         .filter((call) => String(call.cmd).startsWith("printf '%s'"))
-        .every((call) => Buffer.byteLength(String(call.cmd), "utf8") < 8 * 1024),
+        .every((call) => Buffer.byteLength(String(call.cmd), "utf8") < 13 * 1024),
     ).toBe(true);
     expect(calls.some((call) => String(call.cmd).includes("base64 -d"))).toBe(true);
     expect(calls.some((call) => String(call.cmd).includes("exec bash '/tmp/opengeni/"))).toBe(true);

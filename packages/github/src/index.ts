@@ -322,36 +322,6 @@ export function githubAppMissingSettings(settings: Settings): string[] {
   return Object.entries(required).flatMap(([name, value]) => (value && value.trim() ? [] : [name]));
 }
 
-export function prReviewGitHubAppMissingSettings(settings: Settings): string[] {
-  const required: Record<string, string | undefined> = {
-    OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: settings.githubAppManifestStateSecret,
-    OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: settings.environmentsEncryptionKey,
-    OPENGENI_PR_REVIEW_GITHUB_APP_ID: settings.prReviewGithubAppId,
-    OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID: settings.prReviewGithubClientId,
-    OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET: settings.prReviewGithubClientSecret,
-    OPENGENI_PR_REVIEW_GITHUB_APP_SLUG: settings.prReviewGithubAppSlug,
-    OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET: settings.prReviewGithubWebhookSecret,
-    OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY: settings.prReviewGithubAppPrivateKey,
-  };
-  return Object.entries(required).flatMap(([name, value]) => (value && value.trim() ? [] : [name]));
-}
-
-/** Project the separately configured review App onto the ordinary GitHub App
- * authority client. This keeps its OAuth, signing, webhook, and installation
- * identity disjoint from the platform GitHub App while reusing the same
- * personal-owner / organization-owner proof implementation. */
-export function settingsForPrReviewGitHubApp(settings: Settings): Settings {
-  return {
-    ...settings,
-    githubAppId: settings.prReviewGithubAppId,
-    githubClientId: settings.prReviewGithubClientId,
-    githubClientSecret: settings.prReviewGithubClientSecret,
-    githubAppSlug: settings.prReviewGithubAppSlug,
-    githubWebhookSecret: settings.prReviewGithubWebhookSecret,
-    githubAppPrivateKey: settings.prReviewGithubAppPrivateKey,
-  };
-}
-
 export type GitHubAppSigningSettings = Pick<Settings, "githubAppId" | "githubAppPrivateKey">;
 
 function githubAppTokenMissingSettings(settings: GitHubAppSigningSettings): string[] {
@@ -368,21 +338,39 @@ export function buildGitHubAppManifest(input: {
   public: boolean;
   includeCiPermissions: boolean;
   setupUrl?: string;
+  /** Public address GitHub sends webhooks to when it differs from baseUrl
+   * (OPENGENI_WEBHOOK_BASE_URL, for a console that isn't public). */
+  webhookBaseUrl?: string | undefined;
 }): Record<string, unknown> {
   const base = input.baseUrl.replace(/\/+$/, "");
+  const webhookBase = (input.webhookBaseUrl?.trim() || base).replace(/\/+$/, "");
   const permissions: Record<string, string> = {
     metadata: "read",
     contents: "write",
+    issues: "write",
     pull_requests: "write",
     // Required for the authenticated-user membership endpoint that proves an
     // active organization owner. Existing installations must approve this
     // permission before organization-owner self-service can succeed.
     members: "read",
   };
+  const events = [
+    "issues",
+    "issue_comment",
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "push",
+    "release",
+    // New repositories of an "All repositories" installation, which no
+    // installation event reports: workspace allowlists follow them.
+    "repository",
+  ];
   if (input.includeCiPermissions) {
     permissions.actions = "read";
     permissions.checks = "read";
     permissions.statuses = "write";
+    events.push("check_run", "check_suite", "workflow_run");
   }
   const manifest: Record<string, unknown> = {
     name: input.appName,
@@ -391,16 +379,35 @@ export function buildGitHubAppManifest(input: {
     callback_urls: [`${base}/v1/github/oauth/callback`],
     public: input.public,
     // A setup URL and OAuth-on-install are mutually exclusive in GitHub's App
-    // contract. OpenGeni needs the setup callback to receive the installation
+    // contract. Opengeni needs the setup callback to receive the installation
     // id, then starts its own exact user-authorization flow.
     request_oauth_on_install: !input.setupUrl,
     default_permissions: permissions,
   };
+  // GitHub must be able to reach the receiver, so only a public https
+  // deployment gets a webhook; others can add one later in the App settings.
+  if (githubCanDeliverTo(webhookBase)) {
+    manifest.hook_attributes = { url: `${webhookBase}/v1/webhooks/github`, active: true };
+    manifest.default_events = events;
+  }
   if (input.setupUrl) {
     manifest.setup_url = input.setupUrl;
     manifest.setup_on_update = true;
   }
   return manifest;
+}
+
+function githubCanDeliverTo(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    return (
+      url.protocol === "https:" &&
+      !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) &&
+      !url.hostname.endsWith(".localhost")
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function personalAppManifestUrl(state: string): string {
@@ -536,10 +543,13 @@ export async function getGitHubAppInstallationSummary(
   settings: Settings,
   installationId: number,
 ): Promise<GitHubAppInstallationSummary | null> {
-  const installations = await listGitHubAppInstallationSummaries(settings);
-  return (
-    installations.find((installation) => installation.installationId === installationId) ?? null
-  );
+  const missing = githubAppMissingSettings(settings);
+  if (missing.length > 0) {
+    throw new GitHubAppConfigurationError(missing);
+  }
+  const jwt = await createGitHubAppJwt(settings);
+  const installation = await getInstallation(jwt, installationId);
+  return installation ? installationSummaryFromPayload(installation) : null;
 }
 
 export async function verifyGitHubInstallationAccessForUser(
@@ -790,7 +800,19 @@ export async function listGitHubAppRepositoriesWithSigningSettings(
     return [];
   }
   const jwt = await createGitHubAppJwt(settings);
-  const installations = await listInstallations(jwt);
+  // Named installations are read one by one rather than paging through every
+  // installation of the App.
+  const installations = allowedInstallations
+    ? (
+        await Promise.all(
+          [...allowedInstallations].map(async (installationId) =>
+            Number.isSafeInteger(installationId) && installationId > 0
+              ? await getInstallation(jwt, installationId)
+              : null,
+          ),
+        )
+      ).filter((installation): installation is Record<string, unknown> => installation !== null)
+    : await listInstallations(jwt);
   const repositories: GitHubRepository[] = [];
   for (const installation of installations) {
     if (installation.suspended_at) {
@@ -919,8 +941,9 @@ export function createGitHubAppInstallationRepositoryLookup(
  */
 export async function findInaccessibleGitHubAppInstallationRepositories(
   settings: Settings,
-  input: { installationId: number; repositoryIds: number[] },
+  input: { installationId: number; repositoryIds: number[]; signal?: AbortSignal },
 ): Promise<number[]> {
+  input.signal?.throwIfAborted();
   const missing = githubAppMissingSettings(settings);
   if (missing.length > 0) {
     throw new GitHubAppConfigurationError(missing);
@@ -936,15 +959,18 @@ export async function findInaccessibleGitHubAppInstallationRepositories(
   if (repositoryIds.length === 0) return [];
   const jwt = await createGitHubAppJwt(settings);
   const probe = async (ids: number[]): Promise<"accessible" | "inaccessible" | "gone"> => {
+    input.signal?.throwIfAborted();
     try {
       await createInstallationToken(jwt, {
         installationId: input.installationId,
         repositoryIds: ids,
         permissions: { metadata: "read" },
         timeoutMs: githubRepositoryLookupTimeoutMs,
+        ...(input.signal ? { signal: input.signal } : {}),
       });
       return "accessible";
     } catch (error) {
+      input.signal?.throwIfAborted();
       if (error instanceof GitHubAppApiError) {
         // 422: at least one repository does not exist or is not accessible to
         // the installation. 404: the installation itself no longer exists.
@@ -957,9 +983,31 @@ export async function findInaccessibleGitHubAppInstallationRepositories(
   const all = await probe(repositoryIds);
   if (all === "accessible") return [];
   if (all === "gone" || repositoryIds.length === 1) return repositoryIds;
-  const outcomes = await Promise.all(
-    repositoryIds.map(async (id) => ({ id, outcome: await probe([id]) })),
+  // Healthy installations still take exactly one batch probe. A 422 is the
+  // expensive exceptional path: admit individual probes lazily, stop admitting
+  // after cancellation/outage, and join every request already sent.
+  const outcomes: Array<{ id: number; outcome: "accessible" | "inaccessible" | "gone" }> = [];
+  let next = 0;
+  let failed = false;
+  const settled = await Promise.allSettled(
+    Array.from({ length: Math.min(8, repositoryIds.length) }, async () => {
+      while (!failed && next < repositoryIds.length) {
+        const index = next++;
+        const id = repositoryIds[index]!;
+        try {
+          outcomes[index] = { id, outcome: await probe([id]) };
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
+      }
+    }),
   );
+  const failure = settled.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) throw failure.reason;
+  input.signal?.throwIfAborted();
   if (outcomes.some(({ outcome }) => outcome === "gone")) return repositoryIds;
   return outcomes.flatMap(({ id, outcome }) => (outcome === "accessible" ? [] : [id]));
 }
@@ -1238,6 +1286,67 @@ export function githubAppBotIdentity(settings: Settings): { name: string; email:
 export const GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING =
   "github_app_bot_identity_unavailable" as const;
 
+type GitHubAppFetch = (url: string, init: RequestInit) => Promise<Response>;
+
+async function githubAppRequest(
+  settings: GitHubAppSigningSettings,
+  path: string,
+  init: { method?: "GET" | "PATCH"; body?: unknown },
+  fetchImpl: GitHubAppFetch,
+): Promise<Response> {
+  const jwt = await createGitHubAppJwt(settings);
+  return await fetchImpl(`${githubApiBase}${path}`, {
+    method: init.method ?? "GET",
+    headers: {
+      ...(githubHeaders(jwt) as Record<string, string>),
+      ...(init.body !== undefined ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+    signal: AbortSignal.timeout(10_000),
+  });
+}
+
+/** Where the App sends its webhooks and which events it is subscribed to. */
+export type GitHubAppWebhookSetup = {
+  /** The webhook URL; null when the App has none. */
+  webhookUrl: string | null;
+  events: string[];
+};
+
+export async function getGitHubAppWebhookSetup(
+  settings: GitHubAppSigningSettings,
+  fetchImpl: GitHubAppFetch = fetch,
+): Promise<GitHubAppWebhookSetup> {
+  const app = await githubAppRequest(settings, "/app", {}, fetchImpl);
+  if (!app.ok) throw new GitHubAppApiError(await githubErrorMessage(app), app.status);
+  const appPayload = (await app.json()) as { events?: unknown };
+  const events = Array.isArray(appPayload.events)
+    ? appPayload.events.filter((event): event is string => typeof event === "string")
+    : [];
+  const config = await githubAppRequest(settings, "/app/hook/config", {}, fetchImpl);
+  if (config.status === 404) return { webhookUrl: null, events };
+  if (!config.ok) throw new GitHubAppApiError(await githubErrorMessage(config), config.status);
+  const url = ((await config.json()) as { url?: unknown }).url;
+  return { webhookUrl: typeof url === "string" && url.trim() ? url.trim() : null, events };
+}
+
+/** Point the App's webhook at `url`, signed with `secret`. */
+export async function setGitHubAppWebhookUrl(
+  settings: GitHubAppSigningSettings,
+  input: { url: string; secret: string },
+  fetchImpl: GitHubAppFetch = fetch,
+): Promise<void> {
+  const response = await githubAppRequest(
+    settings,
+    "/app/hook/config",
+    { method: "PATCH", body: { url: input.url, content_type: "json", secret: input.secret } },
+    fetchImpl,
+  );
+  if (!response.ok) {
+    throw new GitHubAppApiError(await githubErrorMessage(response), response.status);
+  }
+}
+
 /**
  * Non-secret health posture for the stable sandbox Git identity. API-direct
  * attach and worker-turn startup must add the same identity keys. A complete
@@ -1306,6 +1415,24 @@ async function listInstallations(token: string): Promise<Array<Record<string, un
       return out;
     }
   }
+}
+
+/** One installation of the App, or null when GitHub does not know it. */
+async function getInstallation(
+  jwt: string,
+  installationId: number,
+): Promise<Record<string, unknown> | null> {
+  let payload: unknown;
+  try {
+    payload = await githubGet(`/app/installations/${installationId}`, jwt);
+  } catch (error) {
+    if (error instanceof GitHubAppApiError && error.status === 404) return null;
+    throw error;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new GitHubAppApiError("GitHub returned an invalid installation payload");
+  }
+  return payload as Record<string, unknown>;
 }
 
 async function exchangeGitHubOAuthCodeForUserToken(
@@ -1483,6 +1610,7 @@ async function createInstallationToken(
     /** Narrow the token below the installation's granted permissions. */
     permissions?: Record<string, "read" | "write">;
     timeoutMs?: number;
+    signal?: AbortSignal;
   },
 ): Promise<GitHubAppInstallationToken> {
   const body: Record<string, unknown> = {};
@@ -1502,7 +1630,12 @@ async function createInstallationToken(
         ...(scoped ? { "Content-Type": "application/json" } : {}),
       },
       redirect: "manual",
-      signal: AbortSignal.timeout(input.timeoutMs ?? githubTokenMintTimeoutMs),
+      signal: input.signal
+        ? AbortSignal.any([
+            input.signal,
+            AbortSignal.timeout(input.timeoutMs ?? githubTokenMintTimeoutMs),
+          ])
+        : AbortSignal.timeout(input.timeoutMs ?? githubTokenMintTimeoutMs),
       ...(scoped ? { body: JSON.stringify(body) } : {}),
     },
   );

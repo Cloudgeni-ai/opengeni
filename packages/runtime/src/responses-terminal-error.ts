@@ -26,6 +26,7 @@ const SAFETY_CODES = new Set([
   "safety_violation",
   "bio_policy",
   "cyber_policy",
+  "misalignment_policy_violation",
 ]);
 const REQUEST_CODES = new Set([
   "invalid_request",
@@ -36,6 +37,7 @@ const REQUEST_CODES = new Set([
   "invalid_argument",
 ]);
 const RATE_CODES = new Set([
+  "slow_down",
   "rate_limit_exceeded",
   "rate_limit_error",
   "rate_limited",
@@ -44,6 +46,7 @@ const RATE_CODES = new Set([
   "429",
 ]);
 const UNAVAILABLE_CODES = new Set([
+  "server_is_overloaded",
   "server_error",
   "internal_server_error",
   "service_unavailable",
@@ -84,6 +87,9 @@ export class ResponsesStreamingTerminalError extends Error {
     this.headers = new Headers();
     const retryAfter = boundedField(headers?.get("retry-after"), FIELD_MAX_BYTES);
     if (retryAfter !== undefined) this.headers.set("retry-after", retryAfter);
+    const retryAfterMs = boundedField(headers?.get("retry-after-ms"), FIELD_MAX_BYTES);
+    if (retryAfterMs !== undefined) this.headers.set("retry-after-ms", retryAfterMs);
+    const milliseconds = Number(retryAfterMs);
     const directSeconds = Number(error?.retry_after_seconds ?? error?.retryAfterSeconds);
     const header = this.headers.get("retry-after");
     const headerSeconds = header ? Number(header) : Number.NaN;
@@ -95,7 +101,12 @@ export class ResponsesStreamingTerminalError extends Error {
         : Number.isFinite(headerDate)
           ? Math.max(0, (headerDate - Date.now()) / 1_000)
           : Number.NaN;
-    this.retryAfterSeconds = Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
+    this.retryAfterSeconds =
+      Number.isFinite(milliseconds) && milliseconds > 0
+        ? milliseconds / 1_000
+        : Number.isFinite(seconds) && seconds > 0
+          ? seconds
+          : undefined;
     const codes = [this.code, this.type].map((value) => value?.toLowerCase());
     const matches = (allowed: Set<string>) =>
       codes.some((value) => value !== undefined && allowed.has(value));

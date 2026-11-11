@@ -101,7 +101,7 @@ function mainPage(crossOrigin: string): string {
     <html lang="en">
       <head>
         <meta charset="utf-8">
-        <title>OpenGeni browser conformance</title>
+        <title>Opengeni browser conformance</title>
         <style>
           body { font-family: sans-serif; }
           #covered-wrap { position: relative; width: 180px; height: 40px; }
@@ -148,7 +148,7 @@ function mainPage(crossOrigin: string): string {
           <label>Clipboard source <input id="clipboardSource" value="fixture clipboard value"></label>
           <button id="selectClipboard" onclick="clipboardSource.focus(); clipboardSource.select()">Select clipboard source</button>
           <label>Clipboard target <input id="clipboardTarget" oninput="clipboardOutput.textContent='Clipboard ' + this.value"></label>
-          <label>Protected clipboard <input id="clipboardPassword" type="password" value="must-not-copy"></label>
+          <label>Protected clipboard <input id="clipboardPassword" type="password" value="password-field-value"></label>
           <p id="clipboardOutput"></p>
 
           <button onclick="console.error('Conformance console error')">Log conformance error</button>

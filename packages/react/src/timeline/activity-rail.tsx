@@ -1,13 +1,24 @@
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
+import { workerRowTitleParts } from "./platform-activity-presentation";
+import { AgentRow, AgentRowSection } from "./agent-row";
+import { useAgentIdentity } from "./agent-identity";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { GenieLoading } from "./genie-loading";
+import { StartupDispatchDetails } from "./startup-dispatch-details";
 import { useStartupDetails } from "./startup-preference";
-import { ArrowRightIcon, BotIcon, BrainCircuitIcon, MessageSquareTextIcon } from "lucide-react";
 import {
+  ArrowRightIcon,
+  BotIcon,
+  BrainCircuitIcon,
+  MessageSquareTextIcon,
+  SendIcon,
+} from "lucide-react";
+import {
+  Component,
   createContext,
   lazy,
-  Suspense,
   useContext,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -17,7 +28,7 @@ import { jsx as rowJsx, jsxs as rowJsxs } from "react/jsx-runtime";
 import { Markdown } from "../components/markdown";
 import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
-import { defaultToolRegistry } from "./tool-renderers";
+import { defaultToolRegistry, rendersToolOutputPreview } from "./tool-renderers";
 import { useEntranceAnimation, useEntranceAnimationLive } from "./entrance";
 import type { RetainedArtifactLoader, RetainedScreenshotLoader, ToolRegistry } from "./registry";
 import { useSeenActivityIds } from "./seen-activity-ids";
@@ -25,11 +36,19 @@ import {
   BodyNote,
   PayloadBlock,
   ActivityDisclosure,
-  CompactActivityContext,
   ToolCallTruncationProvider,
+  ToolOutputPreviewProvider,
 } from "./shared";
+import { invokedToolCall } from "./invoked-tool";
+import { redactToolCall } from "./credential-redaction";
 import { toolDisplayName } from "./tool-display-name";
-import type { ActivityItem, AgentMessageItem, MemoryItem, WorkerItem } from "./types";
+import { ToolKindIcon } from "./tool-icon";
+import { genericToolIconKind } from "./tool-presentation";
+import type { ActivityItem, AgentMessageItem, MemoryItem, ToolCallItem, WorkerItem } from "./types";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { isChunkLoadError } from "../lib/chunk-load-error";
+import { LoadFailureNotice } from "../components/load-failure-notice";
+import { LazyPart } from "../components/lazy-part";
 
 const LazyFleetDecisionRow = lazy(() => import("./fleet-decision-row"));
 const LazyPlatformActivityRow = lazy(() => import("./platform-activity-row"));
@@ -90,10 +109,12 @@ export function ActivityRail({
   bare,
   className,
 }: ActivityRailProps) {
+  const msg = useOpenGeniText();
   const debug = useStartupDetails();
   const reducedMotion = useReducedMotion();
   const [detailsOpen, setDetailsOpen] = useState(false);
   const phases = items.filter((item) => item.kind === "startup-phase");
+  const dispatch = phases.find((item) => item.dispatchWait !== undefined);
   // Empty reasoning envelopes can arrive before any visible model output.
   const hasWork = items.some(
     (item) =>
@@ -105,7 +126,8 @@ export function ActivityRail({
   const providerResponded = phases.some(
     (item) => item.phase === "provider_first_byte" && item.status === "complete",
   );
-  const preparing =
+  const responsePending = phases.some((item) => item.phase === "provider_first_byte");
+  const loading =
     !hasWork &&
     !interrupted &&
     (startupActive ?? (!providerResponded && phases.some((item) => item.status === "running")));
@@ -117,10 +139,10 @@ export function ActivityRail({
             ? item.status === "failed" || item.status === "cancelled"
             : item.kind !== "reasoning" || item.text.trim().length > 0,
         );
-  const startedAt = phases.reduce(
-    (first, item) => (item.startedAt < first ? item.startedAt : first),
-    phases[0]?.startedAt ?? "",
-  );
+  const startedAt = phases.reduce((first, item) => {
+    const start = item.loadingStartedAt ?? item.startedAt;
+    return start < first ? start : first;
+  }, phases[0]?.startedAt ?? "");
   const enterMounted = useEntranceAnimation();
   // Live gate: rails born during bulk capture enter=false forever; with a
   // seen-id map we still want later live appends to fade (ids gate remounts).
@@ -164,7 +186,7 @@ export function ActivityRail({
       )}
     >
       <AnimatePresence initial={false}>
-        {preparing && !debug ? (
+        {loading && !debug ? (
           <motion.div
             key="startup"
             initial={{ opacity: 0 }}
@@ -182,24 +204,34 @@ export function ActivityRail({
           >
             <GenieLoading
               startedAt={startedAt}
+              notice={
+                dispatch?.dispatchWait?.lastError
+                  ? msg("timeline.activityRail.unableToStartYetYour")
+                  : undefined
+              }
+              phase={responsePending ? "waiting" : "preparing"}
               detailsOpen={detailsOpen}
               onShowDetails={() => setDetailsOpen((open) => !open)}
             />
           </motion.div>
         ) : null}
       </AnimatePresence>
-      {detailsOpen && !debug && !preparing ? (
+      {detailsOpen && !debug && !loading ? (
         <button
           type="button"
           className="og-genie-details self-start"
           onClick={() => setDetailsOpen(false)}
         >
-          Hide startup details
+          {msg("timeline.activityRail.hideStartupDetails")}
         </button>
+      ) : null}
+      {dispatch && (detailsOpen || debug) ? (
+        <StartupDispatchDetails wait={dispatch.dispatchWait ?? null} />
       ) : null}
       {visibleItems.map((item, index) => {
         const newFamily = index > 0 && familyOf(item) !== familyOf(visibleItems[index - 1]!);
         const row = renderActivity(
+          msg,
           item,
           toolRegistry,
           onOpenSession,
@@ -252,7 +284,9 @@ function ActivityNoteRow({ item }: { item: AgentMessageItem }) {
         {renderText ? (
           renderText(item.text, item)
         ) : (
-          <Markdown streaming={item.streaming}>{item.text}</Markdown>
+          <Markdown softLineBreaks streaming={item.streaming}>
+            {item.text}
+          </Markdown>
         )}
       </div>
     </div>
@@ -265,6 +299,7 @@ function assertNever(item: never): never {
 }
 
 export function renderActivity(
+  msg: OpenGeniText,
   item: ActivityItem,
   toolRegistry: ToolRegistry,
   onOpenSession: ((sessionId: string) => void) | undefined,
@@ -277,29 +312,49 @@ export function renderActivity(
     case "sandbox":
     case "startup-phase":
       return (
-        <Suspense fallback={null}>
+        <LazyPart fallback={null}>
           <LazyPlatformActivityRow
             item={item}
             d={ActivityDisclosure}
             p={PayloadBlock}
-            t={toolDisplayName}
+            t={(name: string) => toolDisplayName(msg, name)}
             b={BotIcon}
             m={Markdown}
             j={rowJsx}
             s={rowJsxs}
           />
-        </Suspense>
+        </LazyPart>
       );
     case "tool-call": {
-      const Renderer = toolRegistry.resolve(item);
+      // A deferred tool run through tool_invoke reads as the tool it ran.
+      // Renderers only ever see the call with its credentials hidden.
+      const shown = invokedToolCall(redactToolCall(item));
+      const Renderer = toolRegistry.resolve(shown);
+      const outputPreview = item.outputPreview ?? null;
+      // A row that cannot read its preview waits for its exact output; one
+      // whose read failed, or that has no reader, falls back to the generic
+      // row, which says it shows a preview.
+      const exactFirst = outputPreview !== null && !rendersToolOutputPreview(Renderer, shown);
+      const Shown =
+        exactFirst && (outputPreview.state === "error" || !outputPreview.load)
+          ? toolRegistry.fallback
+          : Renderer;
       return (
-        <ToolCallTruncationProvider value={item.truncation ?? null}>
-          <Renderer
-            item={item}
-            loadRetainedScreenshot={loadRetainedScreenshot}
-            loadRetainedArtifact={loadRetainedArtifact}
-          />
-        </ToolCallTruncationProvider>
+        <ToolRowBoundary name={toolDisplayName(msg, shown.name)} resetKeys={[item.status, Shown]}>
+          <ToolCallTruncationProvider value={item.truncation ?? null}>
+            <ToolOutputPreviewProvider value={outputPreview}>
+              {exactFirst && outputPreview.load && outputPreview.state !== "error" ? (
+                <ToolOutputExactRow item={shown} preview={outputPreview} />
+              ) : (
+                <Shown
+                  item={shown}
+                  loadRetainedScreenshot={loadRetainedScreenshot}
+                  loadRetainedArtifact={loadRetainedArtifact}
+                />
+              )}
+            </ToolOutputPreviewProvider>
+          </ToolCallTruncationProvider>
+        </ToolRowBoundary>
       );
     }
     case "worker":
@@ -320,7 +375,7 @@ export function renderActivity(
       return <ActivityNoteRow item={item} />;
     case "fleet-decision":
       return (
-        <Suspense fallback={null}>
+        <LazyPart fallback={null}>
           <LazyFleetDecisionRow
             item={item}
             d={ActivityDisclosure}
@@ -328,7 +383,7 @@ export function renderActivity(
             j={rowJsx}
             s={rowJsxs}
           />
-        </Suspense>
+        </LazyPart>
       );
     default:
       return assertNever(item);
@@ -336,17 +391,46 @@ export function renderActivity(
 }
 
 /**
+ * A tool row whose renderer needs its exact output: it reads it on mount and
+ * stands in as a quiet loading row until the output lands.
+ */
+function ToolOutputExactRow({
+  item,
+  preview,
+}: {
+  item: ToolCallItem;
+  preview: NonNullable<ToolCallItem["outputPreview"]>;
+}) {
+  const msg = useOpenGeniText();
+  const pending = preview.state === "preview";
+  const load = preview.load;
+  useEffect(() => {
+    if (pending) load?.();
+  }, [pending, load]);
+  return (
+    <div data-og-tool-output-loading="" aria-busy="true">
+      <ActivityDisclosure
+        icon={<ToolKindIcon kind={genericToolIconKind(item.name)} className="size-3.5" />}
+        title={toolDisplayName(msg, item.name, item.display)}
+        preview={msg("timeline.toolRenderers.loadingOutput")}
+        expandable={false}
+      />
+    </div>
+  );
+}
+
+/**
  * Human labels for the memory kinds, translated at the SDK boundary so a raw
  * enum slug never renders as UI. Kept local to the library (the app has its own
  * `KIND_LABEL`); an unknown kind simply omits the chip rather than showing a slug.
  */
-const MEMORY_KIND_LABEL: Record<string, string> = {
-  preference: "Preference",
-  semantic: "Fact",
-  procedural: "Procedure",
-  decision: "Decision",
-  episodic: "History",
-};
+const MEMORY_KIND_LABEL = (msg: OpenGeniText): Record<string, string> => ({
+  preference: msg("timeline.activityRail.preference"),
+  semantic: msg("timeline.activityRail.fact"),
+  procedural: msg("timeline.activityRail.procedure"),
+  decision: msg("timeline.activityRail.decision"),
+  episodic: msg("timeline.activityRail.history"),
+});
 
 /**
  * A memory write the agent made mid-turn. A calm, NEUTRAL step (a successful save
@@ -363,8 +447,9 @@ function MemoryRow({
   item: MemoryItem;
   onMemoryClick?: ((memoryId: string) => void) | undefined;
 }) {
+  const msg = useOpenGeniText();
   const corrected = item.variant === "corrected";
-  const kindLabel = MEMORY_KIND_LABEL[item.memoryKind];
+  const kindLabel = MEMORY_KIND_LABEL(msg)[item.memoryKind];
   // A supersede carries both the old text (`preview`) and the new (`replacementPreview`);
   // an in-place update / archive carries only `preview`.
   const superseded = corrected && Boolean(item.replacementPreview);
@@ -377,7 +462,11 @@ function MemoryRow({
       iconTone="muted"
       title={
         <span className="inline-flex min-w-0 items-center gap-2">
-          <span className="shrink-0">{corrected ? "Updated memory" : "Saved to memory"}</span>
+          <span className="shrink-0">
+            {corrected
+              ? msg("timeline.activityRail.updatedMemory")
+              : msg("timeline.activityRail.savedToMemory")}
+          </span>
           {kindLabel ? (
             <span className="shrink-0 rounded-og-xs bg-og-surface-2 px-1.5 py-px text-og-xs font-normal leading-tight text-og-fg-subtle">
               {kindLabel}
@@ -405,17 +494,19 @@ function MemoryRow({
           <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">
             {item.preview}
           </p>
-          <BodyNote tone="muted">Updated in place.</BodyNote>
+          <BodyNote tone="muted">{msg("timeline.activityRail.updatedInPlace")}</BodyNote>
         </>
       ) : corrected ? (
         // A correction with no replacement (and not an in-place update) archived the record.
-        <BodyNote tone="muted">Archived.</BodyNote>
+        <BodyNote tone="muted">{msg("timeline.activityRail.archived")}</BodyNote>
       ) : (
         <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">
           {item.preview}
         </p>
       )}
-      {item.deduped ? <BodyNote tone="muted">Merged into an existing memory.</BodyNote> : null}
+      {item.deduped ? (
+        <BodyNote tone="muted">{msg("timeline.activityRail.mergedIntoAnExistingMemory")}</BodyNote>
+      ) : null}
       {deepLink ? (
         <button
           type="button"
@@ -425,7 +516,7 @@ function MemoryRow({
             "outline-hidden transition-colors duration-150 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent",
           )}
         >
-          View in memory
+          {msg("timeline.activityRail.viewInMemory")}
           <ArrowRightIcon className="size-3.5 transition-transform duration-150 group-hover/memlink:translate-x-0.5" />
         </button>
       ) : null}
@@ -433,7 +524,13 @@ function MemoryRow({
   );
 }
 
-/** Spawned/messaged worker sessions get a first-class card, not a tool row. */
+/**
+ * Spawning or messaging another agent: a named rail step. The title names the
+ * agent, one line previews the brief or message, expanding shows it in full,
+ * and the trailing arrow opens the agent's session once its id is known. A
+ * failed or interrupted call keeps its quiet chip; an interrupted one, or a
+ * spawn that never produced a session, offers no link.
+ */
 function WorkerRow({
   item,
   onOpenSession,
@@ -441,110 +538,98 @@ function WorkerRow({
   item: WorkerItem;
   onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
-  const compact = useContext(CompactActivityContext);
+  const msg = useOpenGeniText();
+  const identity = useAgentIdentity();
   const running = item.status === "running";
   const failed = item.status === "failed";
   const cancelled = item.status === "cancelled";
-  const title =
-    item.action === "spawn"
-      ? running
-        ? "Spawning worker"
-        : failed
-          ? "Worker spawn failed"
-          : cancelled
-            ? "Worker interrupted"
-            : "Worker spawned"
-      : running
-        ? "Messaging worker"
-        : failed
-          ? "Worker message failed"
-          : cancelled
-            ? "Worker interrupted"
-            : "Worker messaged";
-  if (compact) {
-    return (
-      <ActivityDisclosure
-        icon={<BotIcon className="size-3.5" />}
-        title={title}
-        preview={item.prompt}
-        running={running}
-      />
-    );
-  }
-  // A worker is a first-class actor but still a STEP on the rail — a borderless
-  // row (no card), aligned to its sibling tool rows: the chevron column is an
-  // empty spacer (a worker doesn't expand), then the bot glyph, then the title
-  // with a quiet prompt beneath, and one right-gutter affordance.
-  //
-  // Once the worker's session id is known, the WHOLE row is a clean, clickable
-  // deep-link into that child session (a trailing arrow brightens on hover) —
-  // the spawn moment itself is the affordance, not a small side button. A
-  // still-in-flight spawn (no id yet) or a failed/cancelled worker is inert, so
-  // there is never a dead click target. The gutter mirrors the worker-completion
-  // card's calm language: red chip on failure, "interrupted" on cancel.
   const sessionId = item.workerSessionId;
-  const deepLink = Boolean(sessionId) && Boolean(onOpenSession) && !failed && !cancelled;
-  const inner = (
-    <>
-      <span className="size-3.5 shrink-0" aria-hidden />
-      <span className={cn("mt-px shrink-0", failed ? "text-og-status-failed" : "text-og-accent")}>
-        <BotIcon className="size-3.5" />
-      </span>
-      <div className="min-w-0 flex-1">
-        {/* In-flight state is carried ONLY by the shimmering title (no detached
-            pulse badge), matching every other running row in the rail. */}
-        <span
-          className={cn(
-            "text-og-base font-medium",
-            running ? "og-shimmer-text" : failed ? "text-og-status-failed" : "text-og-fg",
-          )}
-        >
-          {title}
-        </span>
-        {item.prompt ? (
-          <p className="mt-0.5 truncate text-og-sm text-og-fg-muted">
-            {truncate(item.prompt, 140)}
-          </p>
-        ) : null}
-        {failed && item.failure ? (
-          <div className="mt-1 min-w-0 text-og-sm text-og-status-failed">
-            <p className="font-og-mono text-og-xs">{item.failure.code}</p>
-            <p className="mt-0.5 break-words">{item.failure.message}</p>
-          </div>
-        ) : null}
-      </div>
-      {failed ? (
-        <span className="inline-flex shrink-0 self-center items-center gap-1.5 font-og-mono text-og-xs leading-none text-og-status-failed">
-          <span className="size-1.5 rounded-full bg-og-status-failed" />
-          failed
-        </span>
-      ) : cancelled ? (
-        <span className="og-cancelled-chip shrink-0 self-center font-og-mono text-og-xs leading-none text-og-fg-subtle">
-          interrupted
-        </span>
-      ) : deepLink ? (
-        <ArrowRightIcon
-          aria-hidden
-          className="mt-0.5 size-3.5 shrink-0 text-og-fg-subtle transition-[transform,color] duration-150 group-hover/worker:translate-x-0.5 group-hover/worker:text-og-fg"
-        />
-      ) : null}
-    </>
+  const name = identity.titleFor(sessionId) ?? (item.action === "spawn" ? item.title : null);
+  const title = workerRowTitleParts(msg, item, name);
+  const prompt = item.prompt?.trim() ? item.prompt.trim() : null;
+  const failure = failed ? item.failure : null;
+  const hasBody = Boolean(prompt) || Boolean(failure);
+  return (
+    <AgentRow
+      icon={item.action === "spawn" ? <BotIcon /> : <SendIcon />}
+      title={title}
+      preview={
+        failure ? failure.message : prompt ? truncate(prompt.replace(/\s+/g, " "), 240) : null
+      }
+      sessionId={cancelled ? null : sessionId}
+      onOpenSession={onOpenSession ?? identity.onOpenSession}
+      running={running}
+      failed={failed}
+      cancelled={cancelled}
+    >
+      {hasBody ? (
+        <>
+          {prompt ? (
+            <AgentRowSection
+              label={
+                item.action === "spawn"
+                  ? msg("timeline.activityRail.brief")
+                  : msg("timeline.activityRail.message")
+              }
+            >
+              {prompt}
+            </AgentRowSection>
+          ) : null}
+          {failure ? (
+            <AgentRowSection label={failure.code} muted>
+              {failure.message}
+            </AgentRowSection>
+          ) : null}
+        </>
+      ) : undefined}
+    </AgentRow>
   );
+}
 
-  if (deepLink && sessionId && onOpenSession) {
-    return (
-      <button
-        type="button"
-        onClick={() => onOpenSession(sessionId)}
-        className={cn(
-          "group/worker -mx-1.5 flex w-full items-start gap-2 rounded-og-sm px-1.5 py-1.5 text-left",
-          "outline-hidden transition-colors duration-150 hover:bg-og-surface-1 focus-visible:ring-2 focus-visible:ring-og-accent",
-          "pointer-coarse:min-h-11 pointer-coarse:py-2.5",
-        )}
-      >
-        {inner}
-      </button>
+/**
+ * One tool row that fails to render shows a one-line note in its place, so the
+ * rest of the work group (and the live preview) keeps reading normally.
+ */
+function ToolRowRenderError({ name }: { name: string }) {
+  const t = useOpenGeniText();
+  return (
+    <div
+      data-testid="tool-row-render-error"
+      role="status"
+      className="px-1.5 py-1.5 text-og-menu text-og-fg-subtle"
+    >
+      {t("timeline.activityRail.nameCouldNotBeDisplayed", { name })}
+    </div>
+  );
+}
+
+class ToolRowBoundary extends Component<
+  { name: string; resetKeys: readonly unknown[]; children: ReactNode },
+  { failed: boolean; notLoaded: boolean; resetKeys: readonly unknown[] }
+> {
+  state = { failed: false, notLoaded: false, resetKeys: this.props.resetKeys };
+
+  static getDerivedStateFromError(error: unknown): { failed: boolean; notLoaded: boolean } {
+    return { failed: true, notLoaded: isChunkLoadError(error) };
+  }
+
+  /** A new status or renderer for the row gets a fresh attempt. */
+  static getDerivedStateFromProps(
+    props: { resetKeys: readonly unknown[] },
+    state: { failed: boolean; notLoaded: boolean; resetKeys: readonly unknown[] },
+  ): { failed: boolean; notLoaded: boolean; resetKeys: readonly unknown[] } | null {
+    const same =
+      props.resetKeys.length === state.resetKeys.length &&
+      props.resetKeys.every((key, index) => Object.is(key, state.resetKeys[index]));
+    return same ? null : { failed: false, notLoaded: false, resetKeys: props.resetKeys };
+  }
+
+  render(): ReactNode {
+    if (!this.state.failed) return this.props.children;
+    return this.state.notLoaded ? (
+      <LoadFailureNotice />
+    ) : (
+      <ToolRowRenderError name={this.props.name} />
     );
   }
-  return <div className="flex items-start gap-2 px-1.5 py-1.5">{inner}</div>;
 }

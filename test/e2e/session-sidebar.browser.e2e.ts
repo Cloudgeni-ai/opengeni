@@ -1,8 +1,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { startProcess, type StartedProcess } from "@opengeni/testing/process";
 import type { SessionSidebarEvidence } from "../../apps/web/test/session-sidebar-context";
+import { expectWindowTop, WINDOW_BAR_HEIGHT } from "./desktop-window-bar";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const redesignId = "00000000-0000-4000-8000-000000000001";
@@ -125,7 +127,54 @@ async function listCalls(): Promise<SessionSidebarEvidence["listCalls"]> {
   return page.evaluate(() => window.sessionSidebarQa.listCalls);
 }
 
-test("projects start at four roots; disclosure is independent and keeps fifty-row cache pages", async () => {
+test("session titles fade before icons without ellipsis across themes and widths", async () => {
+  for (const theme of ["dark", "light"]) {
+    for (const width of [1160, 390]) {
+      await page.setViewportSize({ width, height: 850 });
+      await page.goto(`${url}?scenario=hover&theme=${theme}`);
+      const link = page
+        .locator("a[data-session-row]")
+        .filter({ hasText: "Astra strategy takeover" })
+        .first();
+      await link.waitFor();
+      const title = link.locator("[data-session-row-title]");
+      const metadata = link.locator("[data-session-row-metadata]");
+      const computed = await title.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          mask: style.maskImage,
+          overflow: style.textOverflow,
+          clipped: element.scrollWidth > element.clientWidth,
+        };
+      });
+      expect(computed.mask).toContain("linear-gradient");
+      expect(computed.overflow).toBe("clip");
+      expect(computed.clipped).toBe(true);
+      const titleBox = (await title.boundingBox())!;
+      const metadataBox = (await metadata.boundingBox())!;
+      expect(titleBox.x + titleBox.width).toBeCloseTo(metadataBox.x - 4, 0);
+      const sidebar = page.getByRole("complementary", { name: "Workspace sidebar" });
+      expect(await sidebar.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+        true,
+      );
+      await capture(`title-fade-${theme}-${width}`);
+      if (screenshots) {
+        await sidebar.screenshot({
+          path: `${screenshots}/title-fade-${theme}-${width}-sidebar.png`,
+          animations: "disabled",
+        });
+      }
+      await link.hover();
+      expect(await title.boundingBox()).toEqual(titleBox);
+      expect(await metadata.boundingBox()).toEqual(metadataBox);
+      await link.focus();
+      expect(await title.boundingBox()).toEqual(titleBox);
+      expect(await metadata.boundingBox()).toEqual(metadataBox);
+    }
+  }
+}, 30_000);
+
+test("projects start at four roots and fetch the next displayed step independently", async () => {
   await openActive();
   expect(await group("Archived").count()).toBe(0);
   expect(await page.getByText(/^Archived /).count()).toBe(0);
@@ -133,12 +182,12 @@ test("projects start at four roots; disclosure is independent and keeps fifty-ro
   expect(initial).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
-        options: expect.objectContaining({ channelId: redesignId, limit: 50 }),
+        options: expect.objectContaining({ channelId: redesignId, limit: 4 }),
       }),
       expect.objectContaining({
-        options: expect.objectContaining({ channelId: bugfixesId, limit: 50 }),
+        options: expect.objectContaining({ channelId: bugfixesId, limit: 4 }),
       }),
-      expect.objectContaining({ options: expect.objectContaining({ channelId: null, limit: 50 }) }),
+      expect.objectContaining({ options: expect.objectContaining({ channelId: null, limit: 4 }) }),
     ]),
   );
   await capture("active-projects");
@@ -148,9 +197,9 @@ test("projects start at four roots; disclosure is independent and keeps fifty-ro
   expect(await showMore("Website redesign").count()).toBe(0);
   expect(await rows(group("Bugfixes")).count()).toBe(4);
   expect(await rows(group("Default")).count()).toBe(4);
-  // All eight were cached by the first fifty-row page; disclosure performs no read.
+  // Only the newly disclosed step is fetched for this project.
   expect((await listCalls()).filter((call) => call.options.channelId === redesignId).length).toBe(
-    initial.filter((call) => call.options.channelId === redesignId).length,
+    initial.filter((call) => call.options.channelId === redesignId).length + 1,
   );
 
   await showMore("Bugfixes").click();
@@ -160,7 +209,7 @@ test("projects start at four roots; disclosure is independent and keeps fifty-ro
   await capture("expanded");
 }, 30_000);
 
-test("disclosure fills across a fifty-row server cursor in one bounded step", async () => {
+test("disclosure follows four-row cursors through the final partial step", async () => {
   await openActive();
   for (let count = 8; count <= 48; count += 4) {
     await showMore("Default").click();
@@ -169,7 +218,7 @@ test("disclosure fills across a fifty-row server cursor in one bounded step", as
   expect(
     (await listCalls()).filter((call) => call.options.channelId === null && call.options.cursor)
       .length,
-  ).toBe(0);
+  ).toBe(11);
   await showMore("Default").click();
   await waitForRows("Default", 51);
   expect(await showMore("Default").count()).toBe(0);
@@ -178,8 +227,12 @@ test("disclosure fills across a fifty-row server cursor in one bounded step", as
   expect(await listCalls()).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
-        options: expect.objectContaining({ channelId: null, cursor: "50", limit: 50 }),
-        returnedIds: ["00000000-0000-4000-9000-000000000350"],
+        options: expect.objectContaining({ channelId: null, cursor: "48", limit: 4 }),
+        returnedIds: [
+          "00000000-0000-4000-9000-000000000348",
+          "00000000-0000-4000-9000-000000000349",
+          "00000000-0000-4000-9000-000000000350",
+        ],
         nextCursor: null,
       }),
     ]),
@@ -279,7 +332,7 @@ test("All isolates archives in the last collapsed folder and uses archive filing
   expect(archiveCall?.options.sortBy).toBeUndefined();
 }, 30_000);
 
-test("Archived filter opens only the archive folder; restore retains the original project", async () => {
+test("Archived filter opens only the archive folder; an archived chat's menu offers no Restore (that is in the chat)", async () => {
   await openActive();
   await selectView("Status", "Archived");
   await waitForRows("Archived", 4);
@@ -293,24 +346,17 @@ test("Archived filter opens only the archive folder; restore retains the origina
   expect(await group("Website redesign").count()).toBe(0);
   expect(await group("Bugfixes").count()).toBe(0);
   await rows(archived).first().click({ button: "right" });
-  await page.getByRole("menuitem", { name: "Restore", exact: true }).click();
-  await page.waitForFunction(() => window.sessionSidebarQa.archiveCalls.length === 1);
-  expect(await page.evaluate(() => window.sessionSidebarQa.archiveCalls)).toEqual([
-    {
-      workspaceId,
-      sessionId: "00000000-0000-4000-9000-000000000401",
-      archived: false,
-      expectedVersion: 1,
-      previousChannelId: redesignId,
-      returnedChannelId: redesignId,
-    },
-  ]);
+  await page.getByRole("menuitem", { name: "Delete chat", exact: true }).waitFor();
+  expect(await page.getByRole("menuitem", { name: "Restore", exact: true }).count()).toBe(0);
+  expect(await page.getByRole("menuitem", { name: /^Archive/ }).count()).toBe(0);
+  await page.keyboard.press("Escape");
+  expect(await page.evaluate(() => window.sessionSidebarQa.archiveCalls)).toEqual([]);
   await selectView("Status", "Active");
-  await group("Website redesign").getByText("Archived design kickoff", { exact: true }).waitFor();
+  await group("Website redesign").waitFor();
   expect(await group("Archived").count()).toBe(0);
-  expect(await group("Default").getByText("Archived design kickoff", { exact: true }).count()).toBe(
-    0,
-  );
+  expect(
+    await group("Website redesign").getByText("Archived design kickoff", { exact: true }).count(),
+  ).toBe(0);
 }, 30_000);
 
 test("a discovered creator auto-hydrates to four before disclosure and expands independently to eight", async () => {
@@ -322,6 +368,7 @@ test("a discovered creator auto-hydrates to four before disclosure and expands i
   const discovery = calls.find(
     (call) =>
       !call.options.pinsOnly &&
+      call.options.limit === 50 &&
       call.options.channelId === undefined &&
       !call.options.createdBy &&
       call.options.archiveStatus === "active",
@@ -361,8 +408,131 @@ test("an off-page project's first-read error exposes retry and recovers only fou
   await showMore("Bugfixes").click();
   await waitForRows("Bugfixes", 8);
   const calls = (await listCalls()).filter((call) => call.options.channelId === bugfixesId);
-  expect(calls.map((call) => call.outcome)).toEqual(["error", "success"]);
-  expect(calls.every((call) => call.options.limit === 50 && !call.options.cursor)).toBe(true);
+  expect(calls.map((call) => call.outcome)).toEqual(["error", "success", "success"]);
+  expect(calls.every((call) => call.options.limit === 4)).toBe(true);
+  expect(calls.map((call) => call.options.cursor)).toEqual([undefined, undefined, "4"]);
+}, 30_000);
+
+test("a commit hint while Retry is shown rereads the loaded window once Retry succeeds", async () => {
+  await openActive("?hints=1");
+  const bugfixes = group("Bugfixes");
+  await showMore("Bugfixes").click();
+  await waitForRows("Bugfixes", 8);
+  // Bugfix conversation 6 arrived with the second page.
+  const archivedId = "00000000-0000-4000-9000-000000000206";
+  const archived = bugfixes.locator(`a[data-session-row="${archivedId}"]`);
+  await archived.waitFor();
+  await page.evaluate((channelId) => {
+    window.sessionSidebarQa.failChannelId = channelId;
+    window.sessionSidebarQa.failCursor = "8";
+  }, bugfixesId);
+  await showMore("Bugfixes").click();
+  const retry = bugfixes.getByRole("button", { name: "Retry sessions in Bugfixes", exact: true });
+  await retry.waitFor();
+
+  // Another device archives an already loaded row. Its commit hint reaches
+  // the sidebar while the explicit page failure owns this group.
+  const beforeHint = (await listCalls()).length;
+  await page.evaluate((id) => window.sessionSidebarQa.archiveRemotely(id), archivedId);
+  await page.waitForFunction((count) => {
+    const reads = window.sessionSidebarQa.listCalls.slice(count);
+    return (
+      reads.some((call) => call.options.pinsOnly) &&
+      reads.some((call) => !call.options.pinsOnly && call.options.channelId === undefined)
+    );
+  }, beforeHint);
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
+  const bugfixReads = async () =>
+    (await listCalls()).slice(beforeHint).filter((call) => call.options.channelId === bugfixesId);
+  // The quiet reconciliation does not consume the explicit retry: the cached
+  // rows and the Retry control stay, and nothing rereads the group yet.
+  expect(await retry.count()).toBe(1);
+  expect(await archived.count()).toBe(1);
+  expect(await bugfixReads()).toEqual([]);
+
+  await retry.click();
+  await showMore("Bugfixes").waitFor();
+  // The hint stayed dirty, so the settled retry rereads the loaded window once.
+  await archived.waitFor({ state: "detached" });
+  const reads = await bugfixReads();
+  expect(reads.map((call) => [call.options.cursor ?? null, call.outcome])).toEqual([
+    ["8", "success"],
+    [null, "success"],
+  ]);
+  expect(reads[1]!.options.limit).toBe(12);
+  expect(reads[1]!.returnedIds).not.toContain(archivedId);
+  // The retry keeps its visible window: the next loaded row fills the gap.
+  await waitForRows("Bugfixes", 8);
+  expect(
+    await rows(bugfixes).evaluateAll((links) =>
+      links.map((link) => link.getAttribute("data-session-row")!.slice(-3)),
+    ),
+  ).toEqual(["201", "202", "203", "204", "205", "207", "208", "209"]);
+  expect(await retry.count()).toBe(0);
+}, 30_000);
+
+test("a failed quiet refresh retried during an explicit read rereads the window once that read settles", async () => {
+  // Only the quiet-refresh retry cadence is advanced; every other timer runs normally.
+  await page.clock.install();
+  await openActive("?hints=1");
+  const bugfixes = group("Bugfixes");
+  await showMore("Bugfixes").click();
+  await waitForRows("Bugfixes", 8);
+  const archivedId = "00000000-0000-4000-9000-000000000206";
+  const archived = bugfixes.locator(`a[data-session-row="${archivedId}"]`);
+  await archived.waitFor();
+
+  // Another device archives a loaded row; the quiet window refresh for its hint fails.
+  const beforeHint = (await listCalls()).length;
+  const bugfixReads = async () =>
+    (await listCalls()).slice(beforeHint).filter((call) => call.options.channelId === bugfixesId);
+  await page.evaluate((channelId) => {
+    window.sessionSidebarQa.failChannelId = channelId;
+    window.sessionSidebarQa.failCursor = null;
+  }, bugfixesId);
+  await page.evaluate((id) => window.sessionSidebarQa.archiveRemotely(id), archivedId);
+  await page.waitForFunction(
+    ({ count, channelId }) =>
+      window.sessionSidebarQa.listCalls
+        .slice(count)
+        .some((call) => call.options.channelId === channelId && call.outcome === "error"),
+    { count: beforeHint, channelId: bugfixesId },
+  );
+  // A failed background refresh keeps the rows and the ordinary disclosure.
+  await showMore("Bugfixes").waitFor();
+  expect(await archived.count()).toBe(1);
+
+  // Its retry falls due while an explicit read owns the group.
+  await page.evaluate((channelId) => {
+    window.sessionSidebarQa.holdChannelId = channelId;
+    window.sessionSidebarQa.holdChannelCursor = "8";
+    window.sessionSidebarQa.heldPageStarted = false;
+  }, bugfixesId);
+  await showMore("Bugfixes").click();
+  await page.waitForFunction(() => window.sessionSidebarQa.heldPageStarted);
+  await page.clock.fastForward(15_000);
+  expect((await bugfixReads()).map((call) => call.options.cursor ?? null)).toEqual([null, "8"]);
+  await page.evaluate(() => window.sessionSidebarQa.releaseHeldPage());
+
+  // The skipped retry left the window dirty: it is reread once the explicit read settles.
+  await archived.waitFor({ state: "detached" });
+  const reads = await bugfixReads();
+  expect(reads.map((call) => [call.options.cursor ?? null, call.outcome])).toEqual([
+    [null, "error"],
+    ["8", "success"],
+    [null, "success"],
+  ]);
+  expect(reads[2]!.options.limit).toBe(12);
+  expect(reads[2]!.returnedIds).not.toContain(archivedId);
+  // The settled disclosure keeps its four new rows; the next row fills the gap.
+  await waitForRows("Bugfixes", 12);
+  expect(
+    await rows(bugfixes).evaluateAll((links) =>
+      links.map((link) => link.getAttribute("data-session-row")!.slice(-3)),
+    ),
+  ).toEqual(["201", "202", "203", "204", "205", "207", "208", "209", "210", "211", "212", "213"]);
 }, 30_000);
 
 test("mobile width preserves four-row disclosure and the actual view menu without overflow", async () => {
@@ -483,7 +653,16 @@ test("one Active disclosure traverses overlapping and sparse fifty-row pages to 
 }, 30_000);
 
 async function openKeyboardFocus(visibleCount: number) {
-  await page.goto(`${url}?scenario=keyboard-focus`);
+  // Keep all 106 recent fixtures in Today, including when CI runs at midnight.
+  // Fix only the wall clock; loading and keyboard timers still run normally.
+  const noon = await page.evaluate(() => {
+    const date = new Date();
+    date.setHours(12, 0, 0, 0);
+    return date.getTime();
+  });
+  await page.clock.setFixedTime(noon);
+  // Control hints isolate keyboard disclosure from the unrelated 15-second fallback poll.
+  await page.goto(`${url}?scenario=keyboard-focus&hints=1`);
   await waitForRows("Today", 4);
   for (let count = 8; count <= visibleCount; count += 4) {
     await showMore("Today").click();
@@ -641,4 +820,756 @@ test("stale pagination completion does not restore focus or grow a new browse ge
   );
   expect(await rows(group("Today")).count()).toBe(4);
   expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+}, 30_000);
+
+test("a chat's unread reply shows over its working sub-sessions, which still say so", async () => {
+  const row = (number: number) =>
+    page.locator(
+      `a[data-session-row="00000000-0000-4000-9000-${String(number).padStart(12, "0")}"]`,
+    );
+  const marker = (number: number) => row(number).locator("[data-session-row-metadata] [title]");
+  for (const desktop of ["browser", "macos"]) {
+    for (const theme of ["light", "dark"]) {
+      await page.goto(`${url}?scenario=unread-reply&theme=${theme}&desktop=${desktop}`);
+      await row(4001).waitFor();
+      // The disclosure is remembered across the reloads below.
+      const more = page.getByRole("button", { name: /^Show 3 more sessions/ });
+      if (await more.count()) await more.click();
+      await row(4009).waitFor();
+
+      // The manager answered while two workers run and it waits on them.
+      expect(await marker(4001).getAttribute("title")).toBe("1 unread · 2 working");
+      expect(await marker(4001).locator(".bg-session-update").count()).toBe(1);
+      expect(await marker(4001).locator(".animate-spin, .lucide-hourglass").count()).toBe(0);
+      expect(await row(4001).getAttribute("aria-label")).toContain("1 unread · 2 working");
+      // The same with a worker running.
+      expect(await marker(4004).getAttribute("title")).toBe("1 unread · 1 working");
+      // Its own turn keeps the spinner: progress posted mid-turn is not the answer.
+      expect(await marker(4005).getAttribute("title")).toBe("1 working");
+      expect(await marker(4005).locator(".animate-spin").count()).toBe(1);
+      // Without an unread reply the row still shows the work.
+      expect(await marker(4006).getAttribute("title")).toBe("1 working");
+      expect(await marker(4006).locator(".animate-spin").count()).toBe(1);
+      expect(await marker(4008).locator(".lucide-hourglass").count()).toBe(1);
+      // Something that needs you still comes first.
+      expect(await marker(4007).getAttribute("title")).toBe("1 needs you");
+      expect(await marker(4009).getAttribute("title")).toBe("1 unread");
+      await capture(`unread-reply-${desktop}-${theme}`);
+
+      // Expanded, each worker keeps its own spinner.
+      await row(4001)
+        .locator("xpath=..")
+        .getByRole("button", { name: "Expand spawned sessions" })
+        .click();
+      await row(4002).waitFor();
+      // Focus on the toggle swaps the row's metadata for its quick actions.
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      for (const worker of [4002, 4003])
+        expect(await marker(worker).locator(".animate-spin").count()).toBe(1);
+      await capture(`unread-reply-${desktop}-${theme}-expanded`);
+      await row(4001)
+        .locator("xpath=..")
+        .getByRole("button", { name: "Collapse spawned sessions" })
+        .click();
+      await row(4002).waitFor({ state: "detached" });
+    }
+  }
+}, 60_000);
+
+test("an idle parent of paused workers is not shown paused; its workers are", async () => {
+  const row = (number: number) =>
+    page.locator(
+      `a[data-session-row="00000000-0000-4000-9000-${String(number).padStart(12, "0")}"]`,
+    );
+  const paused = (number: number) => row(number).locator("[data-og-rail-paused]");
+  await page.goto(`${url}?scenario=paused&theme=light`);
+  await row(5007).waitFor();
+  await page.mouse.move(1150, 10);
+
+  // Pinned, finished and never paused itself; all three of its workers are paused.
+  expect(await paused(5007).count()).toBe(0);
+  expect(await row(5007).locator("[data-session-row-metadata] [title]").count()).toBe(0);
+  expect(await row(5007).getAttribute("aria-label")).not.toContain("paused");
+  // A paused manager holding its workers' parked work, and a chat's own parked turn, still show it.
+  expect(await paused(5003).count()).toBe(1);
+  expect(await paused(5002).count()).toBe(1);
+  await capture("paused-parent-collapsed");
+
+  // The workers' pause is still one hover away, and on each worker's own row.
+  await row(5007).hover();
+  const card = page.locator("[data-session-row-hover-details]");
+  await card.waitFor();
+  expect(await card.innerText()).toContain("3 sub-agents · 3 paused");
+  await page.mouse.move(1150, 10);
+  await card.waitFor({ state: "detached" });
+  await row(5007)
+    .locator("xpath=..")
+    .getByRole("button", { name: "Expand spawned sessions" })
+    .click();
+  await row(5008).waitFor();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  for (const worker of [5008, 5009, 5010]) expect(await paused(worker).count()).toBe(1);
+  expect(await paused(5007).count()).toBe(0);
+  await capture("paused-parent-expanded");
+}, 30_000);
+
+test("the row hover explains status, model and activity from the compact list row", async () => {
+  await page.goto(`${url}?scenario=hover&theme=light`);
+  const row = (number: number) =>
+    page.locator(
+      `a[data-session-row="00000000-0000-4000-9000-${String(number).padStart(12, "0")}"]`,
+    );
+  const card = page.locator("[data-session-row-hover-details]");
+
+  await row(3001).hover();
+  await card.waitFor();
+  const working = await card.innerText();
+  expect(working).toContain("Astra strategy takeover - preserve and improve Grocery Bot");
+  expect(working).toContain("Running");
+  expect(working).toContain("GPT-6 Astra · Max reasoning");
+  expect(working).toContain("5 sub-agents · 1 needs you · 1 unread failure · 2 running · 1 paused");
+  expect(working).toContain("2 background commands running");
+  expect(working).not.toMatch(/\b0 /);
+  await capture("hover-working");
+  // The card is not announced; the row describes the same facts instead.
+  const description = await row(3001).evaluate((link) =>
+    (link.getAttribute("aria-describedby") ?? "")
+      .split(" ")
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+      .join(" "),
+  );
+  expect(description).toContain("GPT-6 Astra, Max reasoning");
+  expect(description).toContain("5 sub-agents, 1 needs you, 1 unread failure, 2 running, 1 paused");
+
+  // Keyboard focus opens the same card for the roving row.
+  await page.mouse.move(1150, 10);
+  await card.waitFor({ state: "detached" });
+  await row(3003).focus();
+  await card.waitFor();
+  const waiting = await card.innerText();
+  // The fixture deadline is relative to the wall clock, so near midnight it
+  // lands on the next day and the label reads "tomorrow, HH:MM".
+  expect(waiting).toMatch(/Next check (?:at|tomorrow,) \d{2}:\d{2}/);
+  expect(waiting).toContain("Waiting for the nightly import to finish");
+
+  await page.mouse.move(1150, 10);
+  await row(3004).focus();
+  await row(3004)
+    .locator("xpath=..")
+    .getByRole("button", { name: "Expand spawned sessions" })
+    .click();
+  await row(3005).hover();
+  await page.waitForFunction(() =>
+    document
+      .querySelector("[data-session-row-hover-details]")
+      ?.textContent?.includes("Paused through"),
+  );
+  expect(await card.innerText()).toContain("Paused through Grocery Bot setup");
+
+  // On a phone-width rail the card opens below the row and stays on screen.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${url}?scenario=hover&theme=light`);
+  await row(3002).hover();
+  await card.waitFor();
+  const box = (await page.locator("[data-slot=hover-card-content]").boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(390);
+  expect(await card.innerText()).toContain("Waiting on you for 24 min");
+}, 30_000);
+
+const usageSiteId = "00000000-0000-4000-a000-000000000001";
+const checklistSiteId = "00000000-0000-4000-a000-000000000004";
+const conversationId = (n: number) => `00000000-0000-4000-9000-${String(n).padStart(12, "0")}`;
+const sidebar = () => page.getByRole("complementary", { name: "Workspace sidebar" });
+const sitePanel = () => page.getByRole("complementary", { name: "Chat", exact: true });
+const siteRow = (title: string) =>
+  sidebar().getByRole("link", { name: new RegExp(`^Open ${title}\\. Site`) });
+const railConversation = (title: string) =>
+  sidebar().getByRole("link", { name: new RegExp(`^Open ${title}\\.`) });
+const usageConversations = [
+  "Time filters across all graphs",
+  "Weekly active users by plan",
+  "Export usage to CSV",
+];
+
+/** Each conversation is listed exactly once, and still is after the rail settles. */
+async function expectEachConversationOnce(titles: string[]) {
+  const counts = () => Promise.all(titles.map((title) => railConversation(title).count()));
+  const deadline = Date.now() + 5_000;
+  while ((await counts()).some((count) => count !== 1) && Date.now() < deadline)
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
+  expect(await counts()).toEqual(titles.map(() => 1));
+}
+
+test("a Site row keeps its conversations nested whichever session is selected", async () => {
+  await page.goto(`${url}?scenario=sites&theme=light`);
+  await siteRow("Opengeni usage").waitFor();
+  // Its newest conversation is 2 minutes old, but its row sits at its last
+  // publish: below a chat active an hour ago.
+  expect(
+    await page.evaluate(() =>
+      [
+        ...document.querySelectorAll(
+          '[role="group"][aria-label="Default"] :is(a[data-session-row], [data-site-row] a)',
+        ),
+      ]
+        .slice(0, 2)
+        .map((row) => row.getAttribute("aria-label")?.split(".")[0]),
+    ),
+  ).toEqual(["Open Slack community connection test", "Open Opengeni usage"]);
+  // Collapsed by default with a count; nothing from the Site at the top level.
+  for (const title of usageConversations) expect(await railConversation(title).count()).toBe(0);
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .click();
+  for (const title of usageConversations) await railConversation(title).waitFor();
+  // Opening a nested conversation and then another session leaves the Site's
+  // conversations where they are.
+  const currentUrl = page.url();
+  await railConversation("Export usage to CSV").click();
+  await page.waitForURL((next) => next.toString() !== currentUrl);
+  await expectEachConversationOnce(usageConversations);
+  const nestedUrl = page.url();
+  await railConversation("Slack community connection test").click();
+  await page.waitForURL(
+    (next) => next.toString() !== nestedUrl && /\/sessions\//u.test(next.toString()),
+  );
+  await siteRow("Opengeni usage").waitFor();
+  expect(await siteRow("Opengeni usage").count()).toBe(1);
+  await expectEachConversationOnce(usageConversations);
+  // Collapsing and reopening lists them again.
+  await sidebar()
+    .getByRole("button", { name: "Collapse 3 conversations from Opengeni usage", exact: true })
+    .click();
+  for (const title of usageConversations) expect(await railConversation(title).count()).toBe(0);
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .click();
+  for (const title of usageConversations) await railConversation(title).waitFor();
+}, 30_000);
+
+test("a Site a chat made sits in that chat's project, and opening a Site keeps its place", async () => {
+  await page.goto(`${url}?scenario=sites&theme=light`);
+  // "Pricing page copy" made it in Website redesign; nobody has asked it
+  // anything, so the row has no count and nothing to disclose.
+  await group("Website redesign")
+    .getByRole("link", { name: "Open Pricing calculator. Site", exact: true })
+    .waitFor();
+  expect(
+    await sidebar()
+      .getByRole("button", { name: /from Pricing calculator$/u })
+      .count(),
+  ).toBe(0);
+  // An untouched Site sorts down with the old rows, behind Default's first step.
+  expect(await siteRow("Launch checklist").count()).toBe(0);
+  await showMore("Default").click();
+  await siteRow("Launch checklist").click();
+  await page.waitForURL(new RegExp(`/sites/${checklistSiteId}$`, "u"));
+  await page.waitForFunction(
+    (id) => window.sessionSidebarQa.siteOpens.includes(id),
+    checklistSiteId,
+  );
+  // Opening it is not activity, as opening a chat is not: it keeps its place
+  // once the sidebar has read the list again after the open.
+  const listsAtOpen = await page.evaluate(() => window.sessionSidebarQa.listCalls.length);
+  await page.evaluate(
+    ([workspace, site]) =>
+      window.dispatchEvent(
+        new CustomEvent("opengeni:site-opened", {
+          detail: { workspaceId: workspace, siteId: site },
+        }),
+      ),
+    [workspaceId, checklistSiteId] as const,
+  );
+  await page.waitForFunction(
+    (count) => window.sessionSidebarQa.listCalls.length > count,
+    listsAtOpen,
+  );
+  await page.waitForTimeout(300);
+  expect(await siteRow("Launch checklist").getAttribute("aria-current")).toBe("page");
+  expect(
+    await page.evaluate(() => {
+      const folder = document.querySelector('[role="group"][aria-label="Default"]');
+      const first = folder?.querySelector("a[data-session-row], [data-site-row] a");
+      return first?.textContent?.includes("Launch checklist") === true;
+    }),
+  ).toBe(false);
+  await capture("site-row-opened");
+}, 30_000);
+
+test("a Site row opens the Site beside its conversations; a nested one opens selected", async () => {
+  await page.goto(`${url}?scenario=sites&theme=dark`);
+  await siteRow("Opengeni usage").click();
+  await page.waitForURL(new RegExp(`/sites/${usageSiteId}$`, "u"));
+  expect(await siteRow("Opengeni usage").getAttribute("aria-current")).toBe("page");
+  await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
+  // The newest conversation is open as a regular chat; the sidebar, not the
+  // panel, lists the others.
+  await sitePanel().getByText("filters all four graphs together").waitFor();
+  expect(await sitePanel().getByRole("navigation").count()).toBe(0);
+  expect(await sitePanel().getByRole("heading", { level: 2 }).innerText()).toBe(
+    "Time filters across all graphs",
+  );
+  await capture("site-view");
+
+  // Clicking a nested conversation opens the same view with it selected, and
+  // its Site row opens so the selection is visible in the sidebar.
+  await page.goto(`${url}?scenario=sites&theme=dark`);
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .click();
+  await railConversation("Export usage to CSV").click();
+  await page.waitForURL(
+    new RegExp(`/sites/${usageSiteId}\\?conversation=${conversationId(903)}$`, "u"),
+  );
+  await sitePanel().getByText("one row per workspace and week").waitFor();
+  expect(await railConversation("Export usage to CSV").getAttribute("aria-current")).toBe("page");
+  expect(await siteRow("Opengeni usage").getAttribute("aria-current")).toBeNull();
+
+  // Switching in the sidebar updates the address and the panel together.
+  await railConversation("Weekly active users by plan").click();
+  await page.waitForURL(new RegExp(`conversation=${conversationId(902)}$`, "u"));
+  await sitePanel().getByText("Weekly active users last week").waitFor();
+  expect(await sitePanel().getByRole("heading", { level: 2 }).innerText()).toBe(
+    "Weekly active users by plan",
+  );
+  expect(await railConversation("Weekly active users by plan").getAttribute("aria-current")).toBe(
+    "page",
+  );
+
+  // Closing the Site row is respected while moving between its conversations.
+  await sidebar()
+    .getByRole("button", { name: "Collapse 3 conversations from Opengeni usage", exact: true })
+    .click();
+  await page.goBack();
+  await page.waitForURL(new RegExp(`conversation=${conversationId(903)}$`, "u"));
+  await sitePanel().getByText("one row per workspace and week").waitFor();
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .waitFor();
+  // As for any collapsed branch, only the selected conversation stays visible.
+  expect(await railConversation("Export usage to CSV").count()).toBe(1);
+  expect(await railConversation("Weekly active users by plan").count()).toBe(0);
+  expect(await railConversation("Time filters across all graphs").count()).toBe(0);
+
+  // A hidden chat comes back when a conversation is chosen in the sidebar.
+  await sidebar()
+    .getByRole("button", { name: "Expand 3 conversations from Opengeni usage", exact: true })
+    .click();
+  await sitePanel().getByRole("button", { name: "Hide chat" }).click();
+  await page.getByRole("button", { name: "Show chat", exact: true }).waitFor();
+  expect(await sitePanel().isHidden()).toBe(true);
+  await railConversation("Time filters across all graphs").click();
+  await page.waitForURL(new RegExp(`conversation=${conversationId(901)}$`, "u"));
+  await sitePanel().getByText("filters all four graphs together").waitFor();
+
+  // New is the one action: the composer replaces the open conversation.
+  await sitePanel().getByRole("button", { name: "New", exact: true }).click();
+  await sitePanel().getByText("Ask about Opengeni usage").waitFor();
+  await page.waitForURL(new RegExp(`/sites/${usageSiteId}$`, "u"));
+  expect(await siteRow("Opengeni usage").getAttribute("aria-current")).toBe("page");
+}, 30_000);
+
+// On macOS and Windows the window controls sit in the desktop window bar
+// across the top of the window; the Site view starts below it and keeps its
+// own spacing beside the collapsed and the open rail.
+const openSiteView = async (desktop: string, rail: string, query = "") => {
+  await page.goto(`${url}?scenario=sites&theme=dark&desktop=${desktop}&rail=${rail}${query}`);
+  // Chromium has no Windows window controls overlay: stand in for its title bar area.
+  if (desktop === "windows") {
+    await page.evaluate((height) => {
+      document.documentElement.style.setProperty("--og-window-bar-height", `${height}px`);
+    }, WINDOW_BAR_HEIGHT);
+  }
+};
+
+test("the Site view starts below the desktop window bar", async () => {
+  const toolbarStart = async (desktop: string, rail: string) => {
+    await openSiteView(desktop, rail);
+    // The collapsed rail has no Site rows; open the Site view the way the
+    // router would after a link.
+    await page.evaluate((path) => {
+      history.pushState(null, "", path);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, `/workspaces/${workspaceId}/sites/${usageSiteId}`);
+    await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
+    // Only the Site's own column: previews in its chat keep their spacing.
+    expect(await page.locator("[data-site-column] [aria-label='Chat']").count()).toBe(0);
+    const toolbar = page.locator("[data-site-column] [data-artifact-toolbar]");
+    const first = await toolbar.locator(":scope > div > *").first().boundingBox();
+    expect(first).not.toBeNull();
+    await expectWindowTop(page, desktop);
+    return first!;
+  };
+
+  for (const [desktop, rail, railWidth] of [
+    ["macos", "collapsed", 56],
+    ["windows", "collapsed", 56],
+    ["browser", "collapsed", 56],
+    ["macos", "open", 288],
+  ] as const) {
+    const start = await toolbarStart(desktop, rail);
+    expect(start.x).toBeLessThan(railWidth + 24);
+    expect(start.y).toBeGreaterThanOrEqual(desktop === "browser" ? 0 : WINDOW_BAR_HEIGHT);
+    if (desktop === "macos" && rail === "collapsed") {
+      await capture("site-view-macos-collapsed-rail");
+      // Full screen starts below the bar too, with its usual spacing.
+      await page.getByRole("button", { name: "Open Site full screen" }).click();
+      const back = await page.getByRole("button", { name: "Back", exact: true }).boundingBox();
+      expect(back!.x).toBeLessThan(30);
+      expect(back!.y).toBeGreaterThanOrEqual(WINDOW_BAR_HEIGHT);
+      await expectWindowTop(page, desktop);
+      await page.keyboard.press("Escape");
+    }
+  }
+}, 30_000);
+
+test("the Site publish form starts below the desktop window bar in a narrow Site column", async () => {
+  const backStart = async (desktop: string) => {
+    await openSiteView(desktop, "collapsed", "&publish&publishable");
+    // The widest chat leaves the Site its narrowest column (under 416px),
+    // where the form's page padding halves. The preview person is
+    // "sidebar-preview"; the Site view reads the width when it opens.
+    await page.evaluate((path) => {
+      localStorage.setItem(
+        "og.site-view.chat:v1:sidebar-preview",
+        JSON.stringify({ width: 720, collapsed: false }),
+      );
+      history.pushState(null, "", path);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, `/workspaces/${workspaceId}/sites/${usageSiteId}`);
+    await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
+    await page.locator("[data-site-column]").getByRole("button", { name: "Publish" }).click();
+    const form = page.locator("[data-site-column] [data-slot='form-frame'] > form");
+    const header = form.locator(":scope > header");
+    const back = header.getByRole("button").first();
+    await back.waitFor();
+    const column = await page.locator("[data-site-column]").boundingBox();
+    expect(column!.width).toBeLessThan(416);
+    const box = await back.boundingBox();
+    expect(box).not.toBeNull();
+    // The form keeps one left edge: the title, the fields and the buttons.
+    const edges = await form.evaluate((element) =>
+      [
+        element.querySelector(":scope > header h1"),
+        element.querySelector(":scope > [data-slot='form-body'] > div"),
+        element.querySelector(":scope > footer > div > div"),
+      ].map((node) => Math.round(node!.getBoundingClientRect().left)),
+    );
+    expect(new Set(edges).size).toBe(1);
+    expect(edges[0]).toBe(Math.round(box!.x));
+    await expectWindowTop(page, desktop);
+    return box!.x;
+  };
+
+  // The back link keeps the form's usual spacing on every platform.
+  for (const desktop of ["macos", "windows", "browser"]) {
+    expect(await backStart(desktop)).toBeLessThan(56 + 24);
+    if (desktop === "macos") await capture("site-publish-form-macos-narrow-column");
+  }
+}, 30_000);
+
+const parentId = conversationId(1);
+const childId = conversationId(11);
+const sessionRowBox = (id: string) =>
+  sidebar().locator(`a[data-session-row="${id}"]`).locator("..");
+const siteRowBox = (siteId: string) => sidebar().locator(`[data-site-row="${siteId}"]`);
+async function openRowActions() {
+  await page.goto(`${url}?scenario=row-actions&theme=light`);
+  await siteRow("Opengeni usage").waitFor();
+  await sessionRowBox(parentId).getByRole("button", { name: "Expand spawned sessions" }).click();
+  await railConversation("Check Slack bot scopes").waitFor();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+}
+
+test("every row shows Pin and Archive over its time on hover or focus, without moving", async () => {
+  await openRowActions();
+  const targets = [
+    {
+      box: sessionRowBox(parentId),
+      actions: sessionRowBox(parentId).locator("[data-session-quick-actions]"),
+      names: ["Pin session", "Archive session"],
+    },
+    {
+      box: sessionRowBox(childId),
+      actions: sessionRowBox(childId).locator("[data-session-quick-actions]"),
+      // Archive belongs to the workstream, so a spawned row names it.
+      names: ["Pin session", "Archive workstream"],
+    },
+    {
+      box: siteRowBox(usageSiteId),
+      actions: siteRowBox(usageSiteId).locator("[data-site-quick-actions]"),
+      names: ["Pin Site", "Archive Site"],
+    },
+  ];
+  for (const row of targets) {
+    await page.mouse.move(1100, 1000);
+    await page.waitForFunction(
+      (element) => element && getComputedStyle(element).opacity === "0",
+      await row.actions.elementHandle(),
+    );
+    const title = row.box.locator("a").first();
+    const before = { row: await row.box.boundingBox(), title: await title.boundingBox() };
+    await row.box.hover();
+    await page.waitForFunction(
+      (element) => element && getComputedStyle(element).opacity === "1",
+      await row.actions.elementHandle(),
+    );
+    for (const name of row.names)
+      await row.box.getByRole("button", { name, exact: true }).waitFor();
+    // The actions replace the time in place: the row and title keep their size.
+    expect(await row.box.boundingBox()).toEqual(before.row);
+    expect(await title.boundingBox()).toEqual(before.title);
+    const time = row.box.locator("[data-session-row-slot]").last();
+    expect(await time.evaluate((element) => getComputedStyle(element).visibility)).toBe("hidden");
+  }
+
+  // Tooltips name each action.
+  await siteRowBox(usageSiteId).getByRole("button", { name: "Pin Site", exact: true }).hover();
+  expect((await page.getByRole("tooltip").first().innerText()).trim()).toBe("Pin");
+  await capture("row-actions-site-hover");
+
+  // Keyboard: focus alone reveals them, and Tab reaches each one.
+  await page.mouse.move(1100, 1000);
+  await siteRow("Opengeni usage").focus();
+  const siteActions = siteRowBox(usageSiteId).locator("[data-site-quick-actions]");
+  await page.waitForFunction(
+    (element) => element && getComputedStyle(element).opacity === "1",
+    await siteActions.elementHandle(),
+  );
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
+    "Pin Site",
+  );
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
+    "Archive Site",
+  );
+}, 30_000);
+
+test("Pin moves a Site row and a spawned row into Pinned and back", async () => {
+  await openRowActions();
+  const pinned = () => group("Pinned");
+  await siteRowBox(usageSiteId).hover();
+  await siteRowBox(usageSiteId).getByRole("button", { name: "Pin Site", exact: true }).click();
+  await pinned()
+    .getByRole("link", { name: /^Open Opengeni usage\. Site\. Pinned/u })
+    .waitFor();
+  expect(await siteRow("Opengeni usage").count()).toBe(1);
+  await page.waitForFunction(() =>
+    window.sessionSidebarQa.siteSidebarCalls.some((call) => call.pinned === true),
+  );
+  // The toggle names its next action instead of also announcing a state.
+  const unpin = pinned().getByRole("button", { name: "Unpin Site", exact: true });
+  expect(await unpin.getAttribute("aria-pressed")).toBeNull();
+
+  // A spawned chat is pinned as its own shortcut, by keyboard.
+  await sessionRowBox(childId).getByRole("button", { name: "Pin session", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await pinned().locator(`a[data-session-row="${childId}"]`).waitFor();
+  await capture("row-actions-pinned");
+
+  await siteRowBox(usageSiteId).hover();
+  await unpin.click();
+  await page.waitForFunction(() => {
+    const folder = document.querySelector('[role="group"][aria-label="Pinned"]');
+    return !folder?.querySelector("[data-site-row]");
+  });
+  await group("Default")
+    .getByRole("link", { name: /^Open Opengeni usage\. Site,/u })
+    .waitFor();
+}, 30_000);
+
+test("Archive hides a Site row for this person with Undo; a spawned row archives its workstream", async () => {
+  await openRowActions();
+  await siteRowBox(usageSiteId).hover();
+  await siteRowBox(usageSiteId).getByRole("button", { name: "Archive Site", exact: true }).click();
+  await page.getByText("Site archived", { exact: true }).waitFor();
+  await page.getByText("Hidden from your sidebar only.", { exact: true }).waitFor();
+  expect(await siteRow("Opengeni usage").count()).toBe(0);
+  // Its conversations leave with it.
+  expect(await railConversation("Time filters across all graphs").count()).toBe(0);
+  await capture("row-actions-site-archived");
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await siteRow("Opengeni usage").waitFor();
+  expect(
+    await page.evaluate(() =>
+      window.sessionSidebarQa.siteSidebarCalls.map((call) => call.archived),
+    ),
+  ).toEqual([true, false]);
+
+  // Archiving from the right-click menu hands focus to the next row, not <body>.
+  await siteRowBox(usageSiteId).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Archive", exact: true }).click();
+  await page.getByText("Site archived", { exact: true }).waitFor();
+  await page.waitForFunction((siteId) => {
+    const active = document.activeElement;
+    return Boolean(
+      active?.closest("[data-session-row], [data-site-row]") &&
+      !active.closest(`[data-site-row="${siteId}"]`),
+    );
+  }, usageSiteId);
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await siteRow("Opengeni usage").waitFor();
+
+  // Archiving from the spawned row archives the whole workstream, with Undo.
+  await sessionRowBox(childId).hover();
+  await sessionRowBox(childId)
+    .getByRole("button", { name: "Archive workstream", exact: true })
+    .click();
+  await page.getByText(/^Archived “/).waitFor();
+  await page.waitForFunction(
+    (id) => !document.querySelector(`a[data-session-row="${id}"]`),
+    parentId,
+  );
+  expect(
+    await page.evaluate(() =>
+      window.sessionSidebarQa.archiveCalls.map((call) => [call.sessionId, call.archived]),
+    ),
+  ).toEqual([[parentId, true]]);
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await sidebar().locator(`a[data-session-row="${parentId}"]`).waitFor();
+}, 30_000);
+
+const ipoSiteId = "00000000-0000-4000-a000-000000000002";
+const pricingSiteId = "00000000-0000-4000-a000-000000000003";
+const siteInProject = (project: string, siteId: string) =>
+  group(project).locator(`[data-site-row="${siteId}"]`);
+
+/** Drag a row onto a project's header, as a person does. */
+async function dragRowToProject(row: Locator, project: string) {
+  await row.locator("a").first().hover();
+  await page.mouse.down();
+  try {
+    const header = group(project).locator(":scope > div[draggable]").first();
+    // Deliver dragover after entering the target before releasing the mouse.
+    await header.hover();
+    await header.hover();
+  } finally {
+    await page.mouse.up();
+  }
+}
+
+test("a Site row moves to another project or Default like a chat row, by menu or by dragging", async () => {
+  // `publish`: a member who may publish, so the row also offers Duplicate.
+  await page.goto(`${url}?scenario=sites&theme=light&publish`);
+  await siteInProject("Website redesign", pricingSiteId).waitFor();
+
+  // Right-click offers the Site's actions and the chat row's Move to project
+  // list, current project checked.
+  await siteInProject("Website redesign", pricingSiteId)
+    .locator("a")
+    .first()
+    .click({ button: "right" });
+  const menu = page.getByRole("menu");
+  await menu.getByText("Move to project", { exact: true }).waitFor();
+  expect(await menu.getByRole("menuitem").allInnerTexts()).toEqual([
+    "Copy link",
+    "Copy title",
+    "Pin",
+    "Duplicate",
+    "Site details",
+    "Archive",
+    "Default",
+    "Website redesign",
+    "Bugfixes",
+  ]);
+  expect(
+    await menu
+      .getByRole("menuitem", { name: "Website redesign", exact: true })
+      .getAttribute("aria-current"),
+  ).toBe("true");
+  await capture("site-row-move-menu");
+  await menu.getByRole("menuitem", { name: "Bugfixes", exact: true }).click();
+  await siteInProject("Bugfixes", pricingSiteId).waitFor();
+  expect(await siteInProject("Website redesign", pricingSiteId).count()).toBe(0);
+  expect(await page.evaluate(() => window.sessionSidebarQa.siteProjectCalls)).toEqual([
+    { siteId: pricingSiteId, fromChannelId: redesignId, channelId: bugfixesId },
+  ]);
+
+  // Default takes a Site out of its project, with its conversation; the Site
+  // is not archived.
+  await siteInProject("Website redesign", ipoSiteId)
+    .locator("a")
+    .first()
+    .click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Default", exact: true }).click();
+  await page.waitForFunction(() => window.sessionSidebarQa.siteProjectCalls.length === 2);
+  await page.waitForFunction(
+    (siteId) =>
+      !document.querySelector(`[aria-label="Website redesign"] [data-site-row="${siteId}"]`),
+    ipoSiteId,
+  );
+  if ((await siteInProject("Default", ipoSiteId).count()) === 0) await showMore("Default").click();
+  await siteInProject("Default", ipoSiteId)
+    .getByRole("button", { name: "Expand 1 conversation from IPO research dashboard", exact: true })
+    .click();
+  await railConversation("Compare IPO filings").waitFor();
+  expect(await railConversation("Compare IPO filings").count()).toBe(1);
+  expect(await page.evaluate(() => window.sessionSidebarQa.siteSidebarCalls)).toEqual([]);
+
+  // Dragging a Site row onto a project header moves it there.
+  await dragRowToProject(siteInProject("Bugfixes", pricingSiteId), "Website redesign");
+  await siteInProject("Website redesign", pricingSiteId).waitFor();
+  expect(await siteInProject("Bugfixes", pricingSiteId).count()).toBe(0);
+  expect((await page.evaluate(() => window.sessionSidebarQa.siteProjectCalls)).at(-1)).toEqual({
+    siteId: pricingSiteId,
+    fromChannelId: bugfixesId,
+    channelId: redesignId,
+  });
+
+  // A refused move puts the row back where it was, as for a chat.
+  await page.evaluate(() => {
+    window.sessionSidebarQa.failSiteProject = true;
+  });
+  await siteInProject("Website redesign", pricingSiteId)
+    .locator("a")
+    .first()
+    .click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Bugfixes", exact: true }).click();
+  await page
+    .getByText("Couldn't move the Site. Its previous project was restored.", { exact: true })
+    .waitFor();
+  await siteInProject("Website redesign", pricingSiteId).waitFor();
+  expect(await siteInProject("Bugfixes", pricingSiteId).count()).toBe(0);
+}, 30_000);
+
+test("right-click and the touch overflow menu offer Pin, Archive and Move on every row", async () => {
+  await openRowActions();
+  for (const target of [
+    { row: siteRowBox(usageSiteId), archive: "Archive" },
+    { row: sessionRowBox(childId), archive: "Archive workstream" },
+  ]) {
+    await target.row.locator("a").first().click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Pin", exact: true }).waitFor();
+    await page.getByRole("menuitem", { name: target.archive, exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+  }
+  const touch = await browser.newContext({
+    hasTouch: true,
+    viewport: { width: 1160, height: 1100 },
+  });
+  try {
+    const touchPage = await touch.newPage();
+    await touchPage.goto(`${url}?scenario=row-actions&theme=light`);
+    const row = touchPage.locator(`[data-site-row="${usageSiteId}"]`);
+    await row.waitFor();
+    expect(await row.locator("[data-site-quick-actions]").isVisible()).toBe(false);
+    await row.getByRole("button", { name: "Actions for Opengeni usage", exact: true }).click();
+    await touchPage.getByRole("menuitem", { name: "Pin", exact: true }).waitFor();
+    await touchPage.getByRole("menuitem", { name: "Archive", exact: true }).waitFor();
+    // And the same Move to project list as a chat row's.
+    await touchPage.getByRole("menu").getByText("Move to project", { exact: true }).waitFor();
+    expect(
+      await touchPage
+        .getByRole("menuitem", { name: "Default", exact: true })
+        .getAttribute("aria-current"),
+    ).toBe("true");
+    await touchPage.getByRole("menuitem", { name: "Bugfixes", exact: true }).waitFor();
+  } finally {
+    await touch.close();
+  }
 }, 30_000);

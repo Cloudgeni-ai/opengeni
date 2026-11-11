@@ -85,6 +85,15 @@ describe("first-party MCP receipt builder", () => {
   });
 
   test("maps session control persistence outcomes without caller-shape drift", () => {
+    // The new chat's canonical link is a receipt fact, only when known.
+    const link = `https://app.example.test/workspaces/w/sessions/${sessionCreateResult.session.id}`;
+    expect(sessionCreateMutationReceipt(sessionCreateResult, true, link).facts?.["chatUrl"]).toBe(
+      link,
+    );
+    expect(sessionCreateMutationReceipt(sessionCreateResult, true).facts).not.toHaveProperty(
+      "chatUrl",
+    );
+
     const base = {
       operation: "session_pause" as const,
       sessionId: "00000000-0000-4000-8000-000000000005",

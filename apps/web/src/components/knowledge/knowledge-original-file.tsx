@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { KnowledgeOriginalFileDownload } from "@opengeni/sdk";
-import { Button } from "@/components/ui/button";
-import { useAppContext } from "@/context";
-import { userErrorText } from "@/lib/api-error";
+import { Button } from "@opengeni/react/ui/button";
+import { useAppContext } from "@opengeni/react/app/app-context";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 
 /** Download authority follows the selected Knowledge revision, including private originals. */
 export function KnowledgeOriginalFile(props: {
@@ -137,7 +137,7 @@ function OriginalFilePreview(props: {
         </details>
       ) : null}
       {error ? (
-        <p role="alert" className="text-sm text-status-error">
+        <p role="alert" className="text-sm text-danger">
           Couldn't open the original file. {error}
         </p>
       ) : null}

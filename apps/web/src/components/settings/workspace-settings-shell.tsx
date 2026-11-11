@@ -1,13 +1,13 @@
 import {
   type WorkspaceSettingsSection,
   type WorkspaceManagementLocation,
-} from "@/lib/workspace-management-location";
+} from "@opengeni/react/app/lib/workspace-management-location";
 export {
   workspaceManagementLocation,
   workspaceSettingsSectionFromSearch,
   type WorkspaceSettingsSection,
   type WorkspaceManagementLocation,
-} from "@/lib/workspace-management-location";
+} from "@opengeni/react/app/lib/workspace-management-location";
 export { WORKSPACE_SETTINGS_COPY } from "./settings-rail";
 import { useRouterState } from "@tanstack/react-router";
 import type { ReactNode } from "react";
@@ -114,7 +114,13 @@ export function WorkspaceManagementShell({
       currentPage={currentPage}
       currentScope={rail.scopeOf(location)}
       page={page}
-      layout={location.kind === "page" ? "page" : "settings"}
+      layout={
+        location.kind === "page" ||
+        // Organization Insights is a wide dashboard, like the workspace one.
+        (location.kind === "organization" && rail.organizationSection === "insights")
+          ? "page"
+          : "settings"
+      }
       notice={
         organizationManagementOnly || location.kind === "organization" ? undefined : (
           <WorkspacePausedBanner workspaceId={workspaceId} />

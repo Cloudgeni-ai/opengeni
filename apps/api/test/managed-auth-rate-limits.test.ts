@@ -7,7 +7,9 @@ import {
   MANAGED_AUTH_DATABASE_POOL_OPTIONS,
 } from "../src/auth/managed-auth";
 import {
+  MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES,
   MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
+  MANAGED_AUTH_UNLIMITED_PATHS,
   MANAGED_AUTH_EMAIL_THROTTLE_KEY_PREFIX,
   MANAGED_AUTH_EMAIL_THROTTLES,
   ManagedAuthEmailThrottleError,
@@ -35,6 +37,17 @@ describe("managed auth client-address rate limits", () => {
       "/reset-password/*",
     ]) {
       expect(MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES).toHaveProperty([path]);
+    }
+  });
+
+  test("exempt only session reads and sign-out, and keep every credential limit", () => {
+    expect([...MANAGED_AUTH_UNLIMITED_PATHS]).toEqual(["/get-session", "/sign-out"]);
+    for (const path of MANAGED_AUTH_UNLIMITED_PATHS) {
+      expect(MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES[path]).toBe(false);
+      expect(MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES).not.toHaveProperty([path]);
+    }
+    for (const [path, rule] of Object.entries(MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES)) {
+      expect(MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES[path]).toEqual(rule);
     }
   });
 
@@ -73,6 +86,20 @@ describe("managed auth per-email throttles", () => {
     for (const throttle of Object.values(MANAGED_AUTH_EMAIL_THROTTLES)) {
       expect(throttle.perSourceMax).toBeGreaterThan(0);
       expect(throttle.perEmailMax / throttle.perSourceMax).toBeGreaterThanOrEqual(5);
+    }
+  });
+
+  test("admit at most 100 password attempts per account per hour", () => {
+    // ADA CASA / OWASP ASVS 1.1.1: no more than 100 failed attempts per hour
+    // on one account. Windows longer than an hour would hide a larger hourly
+    // budget, shorter ones would multiply it.
+    const signIn = MANAGED_AUTH_EMAIL_THROTTLES["/sign-in/email"];
+    expect(signIn.windowSeconds).toBe(60 * 60);
+    expect(signIn.perEmailMax).toBeLessThanOrEqual(100);
+    expect(signIn.perSourceMax).toBe(20);
+    for (const throttle of Object.values(MANAGED_AUTH_EMAIL_THROTTLES)) {
+      expect(throttle.windowSeconds).toBe(60 * 60);
+      expect(throttle.perEmailMax).toBeLessThanOrEqual(100);
     }
   });
 

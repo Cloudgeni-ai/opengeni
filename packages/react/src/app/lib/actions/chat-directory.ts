@@ -1,0 +1,391 @@
+/**
+ * What the app already knows about chats, so the command menu can answer
+ * instantly: rows the sidebar and searches have loaded, the chats someone
+ * opened recently in any of their workspaces (kept across reloads), and each
+ * workspace's sidebar order for next and previous chat. It is a cache for speed, never a source of authority: opening a chat
+ * still goes through the normal authorized reads.
+ */
+import type { SessionAvatar } from "@opengeni/sdk";
+import { useSyncExternalStore } from "react";
+import { sessionDisplayTitle, type SessionListRow } from "../../../session-list-model";
+
+export type ChatRecord = {
+  id: string;
+  workspaceId: string;
+  title: string;
+  /** The chat's avatar, drawn as the sidebar draws it; null when it has none. */
+  avatar: SessionAvatar | null;
+  updatedAt: number;
+  pinned: boolean;
+  archived: boolean;
+  /**
+   * The chat that started this one, for a sub-agent chat; null for a chat of
+   * its own. Kept across reloads, so it is known before the row is read again.
+   */
+  parentId: string | null;
+  /** That chat's title when this record was last written, for when it isn't loaded. */
+  parentTitle: string | null;
+  /** Present when the app holds a full or list row, needed for pin and archive. */
+  row: SessionListRow | null;
+  /** When `row` was last read from the server (ms), so its status is known to be current. */
+  readAt: number;
+};
+
+type WorkspaceOrder = { sidebarOrder: string[]; pinnedOrder: string[] };
+
+type DirectoryState = {
+  /** Every chat the app knows, in any of the person's workspaces. */
+  rows: Map<string, ChatRecord>;
+  /** Recently opened chat ids across workspaces, most recent first. */
+  recent: string[];
+  /** Each workspace's sidebar order (pinned first), for next and previous. */
+  orders: Map<string, WorkspaceOrder>;
+  version: number;
+};
+
+const RECENT_LIMIT = 50;
+const EMPTY_ORDER: WorkspaceOrder = { sidebarOrder: [], pinnedOrder: [] };
+const directories = new Map<string, DirectoryState>();
+const listeners = new Map<string, Set<() => void>>();
+
+function storageKey(subjectId: string): string {
+  return `opengeni.recentChats.${subjectId}`;
+}
+
+type StoredRecent = {
+  id: string;
+  workspaceId: string;
+  title: string;
+  at: number;
+  avatar?: SessionAvatar | undefined;
+  parentId?: string | undefined;
+  parentTitle?: string | undefined;
+};
+
+const AVATAR_KINDS = new Set(["emoji", "icon", "letters", "image"]);
+
+/** A stored avatar, or undefined when it is missing or not one this version draws. */
+function storedAvatar(value: unknown): SessionAvatar | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const kind = (value as { kind?: unknown }).kind;
+  return typeof kind === "string" && AVATAR_KINDS.has(kind) ? (value as SessionAvatar) : undefined;
+}
+
+function sameAvatar(a: SessionAvatar | null, b: SessionAvatar | null): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
+}
+
+function parseStored(raw: string | null, workspaceId?: string): StoredRecent[] {
+  try {
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item): StoredRecent[] => {
+      if (typeof item !== "object" || item === null) return [];
+      const entry = item as Partial<StoredRecent>;
+      const ws = typeof entry.workspaceId === "string" ? entry.workspaceId : workspaceId;
+      if (
+        typeof entry.id !== "string" ||
+        typeof ws !== "string" ||
+        typeof entry.title !== "string" ||
+        typeof entry.at !== "number"
+      ) {
+        return [];
+      }
+      const avatar = storedAvatar(entry.avatar);
+      const parentId = typeof entry.parentId === "string" ? entry.parentId : undefined;
+      const parentTitle =
+        parentId && typeof entry.parentTitle === "string" ? entry.parentTitle : undefined;
+      return [
+        {
+          id: entry.id,
+          workspaceId: ws,
+          title: entry.title,
+          at: entry.at,
+          ...(avatar ? { avatar } : {}),
+          ...(parentId ? { parentId } : {}),
+          ...(parentTitle ? { parentTitle } : {}),
+        },
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The recent chats kept across reloads. Earlier versions kept one list per
+ * workspace (`opengeni.recentChats.<subject>.<workspace>`); those merge into
+ * the one list the first time it is read.
+ */
+function readStoredRecent(subjectId: string): StoredRecent[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const storage = window.localStorage;
+    const key = storageKey(subjectId);
+    const current = storage.getItem(key);
+    if (current !== null) return parseStored(current);
+    const prefix = `${key}.`;
+    const legacyKeys: string[] = [];
+    for (let index = 0; index < storage.length; index++) {
+      const name = storage.key(index);
+      if (name?.startsWith(prefix)) legacyKeys.push(name);
+    }
+    if (legacyKeys.length === 0) return [];
+    const merged = legacyKeys
+      .flatMap((name) => parseStored(storage.getItem(name), name.slice(prefix.length)))
+      .sort((a, b) => b.at - a.at)
+      .slice(0, RECENT_LIMIT);
+    storage.setItem(key, JSON.stringify(merged));
+    for (const name of legacyKeys) storage.removeItem(name);
+    return merged;
+  } catch {
+    return [];
+  }
+}
+
+function directory(subjectId: string): DirectoryState {
+  let state = directories.get(subjectId);
+  if (!state) {
+    const stored = readStoredRecent(subjectId);
+    state = {
+      rows: new Map(
+        stored.map((item) => [
+          item.id,
+          {
+            id: item.id,
+            workspaceId: item.workspaceId,
+            title: item.title,
+            avatar: item.avatar ?? null,
+            updatedAt: item.at,
+            pinned: false,
+            archived: false,
+            parentId: item.parentId ?? null,
+            parentTitle: item.parentTitle ?? null,
+            row: null,
+            readAt: 0,
+          },
+        ]),
+      ),
+      recent: stored.map((item) => item.id),
+      orders: new Map(),
+      version: 0,
+    };
+    directories.set(subjectId, state);
+  }
+  return state;
+}
+
+function emit(subjectId: string): void {
+  const state = directory(subjectId);
+  state.version += 1;
+  for (const listener of listeners.get(subjectId) ?? []) listener();
+}
+
+function persistRecent(subjectId: string, state: DirectoryState): void {
+  if (typeof window === "undefined") return;
+  const stored: StoredRecent[] = state.recent.flatMap((id) => {
+    const record = state.rows.get(id);
+    if (!record) return [];
+    const parentTitle = chatParentTitle(state.rows, record);
+    return [
+      {
+        id,
+        workspaceId: record.workspaceId,
+        title: record.title,
+        at: record.updatedAt,
+        ...(record.avatar ? { avatar: record.avatar } : {}),
+        ...(record.parentId ? { parentId: record.parentId } : {}),
+        ...(record.parentId && parentTitle ? { parentTitle } : {}),
+      },
+    ];
+  });
+  try {
+    window.localStorage.setItem(storageKey(subjectId), JSON.stringify(stored));
+  } catch {
+    // Storage full or blocked: recent chats then last only for this page.
+  }
+}
+
+export function chatRecordFromRow(
+  row: SessionListRow,
+  readAt: number = Date.now(),
+  parentTitle: string | null = null,
+): ChatRecord {
+  const parentId = row.parentSessionId ?? null;
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    title: sessionDisplayTitle(row),
+    avatar: row.avatar ?? null,
+    updatedAt: Date.parse(row.updatedAt) || 0,
+    pinned: Boolean(row.pinned),
+    archived: Boolean(row.archived),
+    parentId,
+    parentTitle: parentId ? parentTitle : null,
+    row,
+    readAt,
+  };
+}
+
+/**
+ * Whether a chat lists with the person's own chats: every top-level chat, and
+ * a sub-agent chat they pinned. Pinning says "this one is a real agent to me".
+ * Other sub-agent chats show only once opened, or in their own search group.
+ */
+export function listsAsTopLevel(record: Pick<ChatRecord, "parentId" | "pinned">): boolean {
+  return record.parentId === null || record.pinned;
+}
+
+/** The title of the chat a sub-agent chat belongs to, when the app knows it. */
+export function chatParentTitle(
+  rows: ReadonlyMap<string, ChatRecord>,
+  record: Pick<ChatRecord, "parentId" | "parentTitle">,
+): string | null {
+  if (!record.parentId) return null;
+  return rows.get(record.parentId)?.title ?? record.parentTitle;
+}
+
+/** The parent's title to keep on a record: the live one, else what was kept before. */
+function knownParentTitle(state: DirectoryState, row: SessionListRow): string | null {
+  const parentId = row.parentSessionId ?? null;
+  if (!parentId) return null;
+  const previous = state.rows.get(row.id);
+  return (
+    state.rows.get(parentId)?.title ??
+    (previous?.parentId === parentId ? previous.parentTitle : null)
+  );
+}
+
+/**
+ * Changes when a row's status marks could change (working, waiting, needs you,
+ * failed, unread, scheduled, creator), so a status-only change re-renders the
+ * lists. Raw fields only: the marks themselves are drawn by the lazy lists.
+ */
+export function chatStatusKey(row: SessionListRow | null): string {
+  if (!row) return "";
+  return JSON.stringify([
+    row.status,
+    row.unread ?? null,
+    row.activelyWorking ?? null,
+    row.requiresActionSince ?? null,
+    row.treeStats ?? null,
+    row.hasUpcomingSchedules ?? null,
+    row.hasSchedules ?? null,
+    row.effectiveControl?.state ?? null,
+    "inputWait" in row ? Boolean(row.inputWait) : null,
+    row.createdBy?.subjectId ?? null,
+    row.parentSessionId,
+  ]);
+}
+
+/** Remember rows the app has read (sidebar pages, search results, the open chat). */
+export function rememberChats(subjectId: string, rows: readonly SessionListRow[]): void {
+  if (rows.length === 0) return;
+  const state = directory(subjectId);
+  const now = Date.now();
+  let changed = false;
+  for (const row of rows) {
+    const next = chatRecordFromRow(row, now, knownParentTitle(state, row));
+    const current = state.rows.get(row.id);
+    // The newest read always replaces the row (it carries the live status);
+    // only a change people can see re-renders the menus.
+    state.rows.set(row.id, next);
+    if (
+      current?.row === row ||
+      (current &&
+        current.row &&
+        current.title === next.title &&
+        sameAvatar(current.avatar, next.avatar) &&
+        current.updatedAt === next.updatedAt &&
+        current.pinned === next.pinned &&
+        current.archived === next.archived &&
+        current.parentTitle === next.parentTitle &&
+        chatStatusKey(current.row) === chatStatusKey(row))
+    ) {
+      continue;
+    }
+    changed = true;
+  }
+  if (changed) emit(subjectId);
+}
+
+/** The chat was opened: move it to the front of the recent list. */
+export function recordChatVisit(subjectId: string, row: SessionListRow): void {
+  const state = directory(subjectId);
+  const record = {
+    ...chatRecordFromRow(row, Date.now(), knownParentTitle(state, row)),
+    updatedAt: Date.now(),
+  };
+  const previous = state.rows.get(row.id);
+  state.rows.set(row.id, previous?.row && !record.row ? { ...previous, ...record } : record);
+  if (state.recent[0] !== row.id) {
+    state.recent = [row.id, ...state.recent.filter((id) => id !== row.id)].slice(0, RECENT_LIMIT);
+  }
+  persistRecent(subjectId, state);
+  emit(subjectId);
+}
+
+/** The sidebar reports the chats it shows, in order, so next and previous follow it. */
+export function setSidebarOrder(
+  subjectId: string,
+  workspaceId: string,
+  order: readonly string[],
+  pinnedOrder: readonly string[],
+): void {
+  const state = directory(subjectId);
+  const current = state.orders.get(workspaceId) ?? EMPTY_ORDER;
+  if (
+    current.sidebarOrder.length === order.length &&
+    current.sidebarOrder.every((id, index) => id === order[index]) &&
+    current.pinnedOrder.length === pinnedOrder.length &&
+    current.pinnedOrder.every((id, index) => id === pinnedOrder[index])
+  ) {
+    return;
+  }
+  state.orders.set(workspaceId, { sidebarOrder: [...order], pinnedOrder: [...pinnedOrder] });
+  emit(subjectId);
+}
+
+export type ChatDirectorySnapshot = Readonly<{
+  /** Chats in every workspace; each record names its workspace. */
+  rows: ReadonlyMap<string, ChatRecord>;
+  /** Recently opened chats across workspaces, most recent first. */
+  recent: readonly string[];
+  /** The given workspace's sidebar order and pinned order. */
+  sidebarOrder: readonly string[];
+  pinnedOrder: readonly string[];
+  version: number;
+}>;
+
+export function readChatDirectory(subjectId: string, workspaceId: string): ChatDirectorySnapshot {
+  const state = directory(subjectId);
+  const order = state.orders.get(workspaceId) ?? EMPTY_ORDER;
+  return {
+    rows: state.rows,
+    recent: state.recent,
+    sidebarOrder: order.sidebarOrder,
+    pinnedOrder: order.pinnedOrder,
+    version: state.version,
+  };
+}
+
+function subscribe(subjectId: string, listener: () => void): () => void {
+  let set = listeners.get(subjectId);
+  if (!set) {
+    set = new Set();
+    listeners.set(subjectId, set);
+  }
+  set.add(listener);
+  return () => {
+    set.delete(listener);
+  };
+}
+
+/** Re-renders when the directory changes; read the snapshot through `readChatDirectory`. */
+export function useChatDirectoryVersion(subjectId: string): number {
+  return useSyncExternalStore(
+    (listener) => subscribe(subjectId, listener),
+    () => directory(subjectId).version,
+    () => 0,
+  );
+}

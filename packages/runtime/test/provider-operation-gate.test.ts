@@ -89,4 +89,118 @@ describe("sandbox provider operation gate", () => {
     expect(captureError).toBe(failure);
     expect(await withSandboxProviderOperation(session, async () => "ready")).toBe("ready");
   });
+  test("an aborted queued capture never runs and releases the operations it held back", async () => {
+    const session = {};
+    const order: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = withSandboxProviderOperation(session, async () => {
+      order.push("first:start");
+      await firstBlocked;
+      order.push("first:end");
+    });
+    await Bun.sleep(0);
+    const abort = new AbortController();
+    const capture = withSandboxProviderCapture(
+      session,
+      async () => {
+        order.push("capture");
+      },
+      abort.signal,
+    );
+    const second = withSandboxProviderOperation(session, async () => {
+      order.push("second");
+    });
+    await Bun.sleep(0);
+    expect(order).toEqual(["first:start"]);
+
+    const reason = new Error("capture budget elapsed");
+    abort.abort(reason);
+    await expect(capture).rejects.toBe(reason);
+    await second;
+    expect(order).toEqual(["first:start", "second"]);
+
+    releaseFirst?.();
+    await first;
+    expect(order).toEqual(["first:start", "second", "first:end"]);
+    // The gate is fully released: a later capture is admitted immediately.
+    expect(await withSandboxProviderCapture(session, async () => "captured")).toBe("captured");
+  });
+
+  test("an aborted waiter keeps later queued captures ordered and exclusive", async () => {
+    const session = {};
+    const order: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = withSandboxProviderOperation(session, async () => {
+      await firstBlocked;
+      order.push("first:end");
+    });
+    await Bun.sleep(0);
+    const abort = new AbortController();
+    const abandoned = withSandboxProviderCapture(
+      session,
+      async () => {
+        order.push("abandoned");
+      },
+      abort.signal,
+    );
+    const kept = withSandboxProviderCapture(session, async () => {
+      order.push("kept");
+    });
+    const later = withSandboxProviderOperation(session, async () => {
+      order.push("later");
+    });
+    abort.abort(new Error("abandon"));
+    await expect(abandoned).rejects.toThrow("abandon");
+    await Bun.sleep(0);
+    // The remaining queued capture still holds operations back.
+    expect(order).toEqual([]);
+
+    releaseFirst?.();
+    await Promise.all([first, kept, later]);
+    expect(order).toEqual(["first:end", "kept", "later"]);
+  });
+
+  test("an already aborted signal rejects before taking the gate", async () => {
+    const session = {};
+    const reason = new Error("already elapsed");
+    let ran = false;
+    await expect(
+      withSandboxProviderCapture(
+        session,
+        async () => {
+          ran = true;
+        },
+        AbortSignal.abort(reason),
+      ),
+    ).rejects.toBe(reason);
+    expect(ran).toBe(false);
+    expect(await withSandboxProviderOperation(session, async () => "ready")).toBe("ready");
+  });
+
+  test("aborting after admission leaves the running capture in charge of its own settlement", async () => {
+    const session = {};
+    const abort = new AbortController();
+    let finish: (() => void) | undefined;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const capture = withSandboxProviderCapture(
+      session,
+      async () => {
+        await running;
+        return "settled";
+      },
+      abort.signal,
+    );
+    await Bun.sleep(0);
+    abort.abort(new Error("late"));
+    finish?.();
+    expect(await capture).toBe("settled");
+  });
 });

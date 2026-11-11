@@ -19,6 +19,7 @@ import type {
   SessionEventReadMode,
   SessionMcpMonitoringSource,
   SessionQueueSnapshot,
+  SessionMcpQueueSummary,
 } from "@opengeni/contracts";
 import {
   boundSessionEventPayload,
@@ -535,7 +536,7 @@ function projectEffectiveToolPolicy(value: Session["effectiveToolPolicy"]): {
 export function boundSessionCompactDetailMcp(
   session: Session,
   monitoring: SessionMcpMonitoringSource,
-  queue: SessionQueueSnapshot | null,
+  queue: SessionQueueSnapshot | SessionMcpQueueSummary | null,
   maxBytes = SESSION_DETAIL_MCP_MAX_BYTES,
 ) {
   const result = compactSessionMcpDetail(session, monitoring, queue);
@@ -553,11 +554,6 @@ export function boundSessionDetailMcp(
   effectiveControl: unknown = session.effectiveControl,
   maxBytes = SESSION_DETAIL_MCP_MAX_BYTES,
 ) {
-  const variableSetIds = session.variableSetIds;
-  // The plural selection is authoritative. Keep the singular/environment
-  // fields only as final-entry compatibility aliases so they cannot be read as
-  // complete attachment membership by newer consumers.
-  const variableSetId = variableSetIds.at(-1) ?? null;
   const title = session.title === null ? null : modelStringProjection(session.title, 512);
   const initialMessage = modelStringProjection(session.initialMessage, 4_000);
   const instructions =
@@ -618,9 +614,6 @@ export function boundSessionDetailMcp(
     sandboxGroupId: session.sandboxGroupId,
     activeSandboxId: session.activeSandboxId,
     activeEpoch: session.activeEpoch,
-    variableSetIds,
-    variableSetId,
-    environmentId: variableSetId,
     rigId: session.rigId,
     rigVersionId: session.rigVersionId,
     firstPartyMcpPermissions: permissions.value,
@@ -648,6 +641,9 @@ export function boundSessionDetailMcp(
     pinned: session.pinned,
     pinnedAt: session.pinnedAt,
     pinVersion: session.pinVersion,
+    // As in sessions_list full rows: archived chats are read-only.
+    ...(session.archived ? { archived: true } : {}),
+    ...(session.retention === undefined ? {} : { retention: session.retention }),
     ...(session.treeStats === undefined ? {} : { treeStats: session.treeStats }),
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
@@ -748,7 +744,6 @@ export function boundRigDetailMcp(
       : modelStringProjection(active.changelog, 2_000);
   const activeChecks = projectMonitoringContainer(active?.checks ?? [], 5_000);
   const activeHooks = projectMonitoringContainer(active?.credentialHooks ?? [], 1_500);
-  const activeVariableSets = projectMonitoringContainer(active?.defaultVariableSetIds ?? [], 1_500);
   const versions = projectMonitoringContainer(versionsPage.versions, 4_000);
   const changes = projectMonitoringContainer(changesPage.changes, 4_000);
   const fieldFacts: Record<string, SessionDetailFieldFact> = {
@@ -775,7 +770,6 @@ export function boundRigDetailMcp(
     },
     activeChecks: activeChecks.fact,
     activeCredentialHooks: activeHooks.fact,
-    activeDefaultVariableSetIds: activeVariableSets.fact,
     versions: versions.fact,
     changes: changes.fact,
   };
@@ -796,7 +790,6 @@ export function boundRigDetailMcp(
             setupScript: activeSetup?.value ?? null,
             checks: activeChecks.value,
             credentialHooks: activeHooks.value,
-            defaultVariableSetIds: activeVariableSets.value,
             changelog: activeChangelog?.value ?? null,
             createdBy:
               active.createdBy === null ? null : modelStringProjection(active.createdBy, 512).value,
@@ -824,7 +817,6 @@ export function boundRigDetailMcp(
       details: [
         ...activeChecks.details,
         ...activeHooks.details,
-        ...activeVariableSets.details,
         ...versions.details,
         ...changes.details,
       ].slice(0, 32),
@@ -856,11 +848,6 @@ export function boundRigDetailMcp(
       target: mutable.rig.activeVersion ?? {},
       field: "credentialHooks",
       fact: fieldFacts.activeCredentialHooks!,
-    },
-    {
-      target: mutable.rig.activeVersion ?? {},
-      field: "defaultVariableSetIds",
-      fact: fieldFacts.activeDefaultVariableSetIds!,
     },
   ];
   for (const fallback of rigFallbacks) {

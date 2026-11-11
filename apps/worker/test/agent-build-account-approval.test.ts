@@ -13,7 +13,9 @@ import {
   restoreInterruptedRunState,
   runAgentStream,
 } from "@opengeni/runtime";
-import { ScriptedModel, functionCall, startTestMcpServer, testSettings } from "@opengeni/testing";
+import { ScriptedModel, functionCall } from "@opengeni/testing/scripted-model";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 
 // Execute the production builder. Only unrelated persistence is stubbed; MCP
 // preparation, agent construction, approval interruption and replay remain real.
@@ -37,6 +39,9 @@ async function buildWorkerAgent(
       defaultModelId: null,
     }),
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, input) => input.catalog),
+    spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(
+      async (_db, input) => input.governance,
+    ),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
   ];
   const builtSettings: Settings[] = [];

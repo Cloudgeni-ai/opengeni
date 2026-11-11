@@ -2,7 +2,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { act, createElement, Fragment } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import type { RepositoryContextPickerProps } from "@/components/repository-picker";
+import type { RepositoryContextPickerProps } from "@opengeni/react/app/components/repository-picker";
 import { registerDom } from "../../../packages/react/test/render-hook";
 
 registerDom();
@@ -23,10 +23,12 @@ const context = {
   refreshGitHub: async () => {},
 };
 
-mock.module("@/context", () => ({ useAppContext: () => context }));
+mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
 
-const { useGitHubAppConnectLauncher } = await import("@/components/github-app-connect-launcher");
-const { RepositoryContextPicker } = await import("@/components/repository-picker");
+const { useGitHubAppConnectLauncher } =
+  await import("@opengeni/react/app/components/github-app-connect-launcher");
+const { RepositoryContextPicker } =
+  await import("@opengeni/react/app/components/repository-picker");
 
 const pickerProps: Omit<RepositoryContextPickerProps, "onConnectWorkspaceApp"> = {
   setupMode: "platform",
@@ -40,10 +42,8 @@ const pickerProps: Omit<RepositoryContextPickerProps, "onConnectWorkspaceApp"> =
   groups: [],
   selectedRepoIds: new Set<number>(),
   selectedRepoRefs: {},
-  selectedInstallationId: null,
   manualRepos: [],
   manualOpen: false,
-  githubAppOpen: false,
   org: "",
   pending: false,
   repoBusy: false,
@@ -55,11 +55,8 @@ const pickerProps: Omit<RepositoryContextPickerProps, "onConnectWorkspaceApp"> =
   onManualAdd: () => {},
   onManualUpdate: () => {},
   onManualRemove: () => {},
-  onGitHubAppOpenChange: () => {},
   onOrgChange: () => {},
   onStartGitHubApp: () => {},
-  onConfigureInstallation: async () => {},
-  onDisconnectInstallation: async () => {},
 } as unknown as Omit<RepositoryContextPickerProps, "onConnectWorkspaceApp">;
 
 /** The route shape: the launcher's dialog is hosted beside the menu, not in it. */
@@ -121,7 +118,7 @@ async function openMenuAndConnect(): Promise<void> {
     ),
   ).toEqual([]);
   const connect = [...menu()!.querySelectorAll<HTMLButtonElement>("button")].find(
-    (button) => button.textContent === "Connect workspace App",
+    (button) => button.textContent === "Install",
   );
   expect(connect).toBeTruthy();
   await act(async () => connect!.click());
@@ -192,17 +189,17 @@ describe("repository picker routes host the Connect dialog", () => {
   const read = (path: string) => Bun.file(`${import.meta.dir}/${path}`).text();
 
   test("the new-session picker opens the launcher it renders outside the menu", async () => {
-    const source = await read("routes/sessions-index.tsx");
+    const source = await read("../../../packages/react/src/app/routes/sessions-index.tsx");
     expect(source).toContain("const githubAppConnect = useGitHubAppConnectLauncher(workspaceId);");
     expect(source).toContain("{githubAppConnect.element}");
     expect(source).toContain("onConnectWorkspaceApp={githubAppConnect.open}");
   });
 
   test("the follow-up picker opens the session's route-level Connect dialog", async () => {
-    const source = await read("routes/session.tsx");
+    const source = await read("../../../packages/react/src/app/routes/session.tsx");
     // The route already hosts a Connect dialog outside every menu for reconnects.
     expect(source).toContain(
-      "() => setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport))",
+      "setReconnectRequest(githubAppConnectRequest(workspaceId, reconnectTransport, page.href()))",
     );
     expect(source).toContain("onConnectGitHubApp={connectGitHubApp}");
     expect(source).toContain("useFollowUpRepositories(props.session, props.onConnectGitHubApp)");

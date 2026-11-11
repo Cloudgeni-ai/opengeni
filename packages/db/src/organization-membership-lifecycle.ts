@@ -4,6 +4,7 @@ import {
   ListOrganizationAdministrationMembersResponse,
   ListOrganizationInvitationsResponse,
   ListOrganizationInvitationsPageResponse,
+  ListOrganizationMemberNamesResponse,
   ListOrganizationMembersResponse,
   ListSelfOrganizationMembershipsResponse,
   OrganizationInvitation,
@@ -25,6 +26,7 @@ import {
   type OrganizationAdministrationOverview as OrganizationAdministrationOverviewType,
   type OrganizationInvitation as OrganizationInvitationType,
   type OrganizationMember as OrganizationMemberType,
+  type OrganizationMemberName as OrganizationMemberNameType,
   type OrganizationPrivateSessionSettings as OrganizationPrivateSessionSettingsType,
   type OrganizationMembershipRole,
   type OrganizationRetentionDeletionClaim as OrganizationRetentionDeletionClaimType,
@@ -41,6 +43,7 @@ import {
 } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
+import { revokePersonalApiKeysForOwner } from "./personal-api-keys";
 import {
   rawRows,
   setSubjectRlsContext,
@@ -60,18 +63,26 @@ export async function createManagedOrganization(
     name: string;
     operationId: string;
     trialCreditsEnabled?: boolean;
+    trialCreditModelIds?: string[] | undefined;
   },
 ): Promise<CreateOrganizationResponseType> {
   return await db.transaction(async (tx) => {
     await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
     // This legacy first-organization route delegates to the same self-service
-    // receipt writer. Do not let it consume the one-shot receipt while the
-    // trial is enabled without issuing its transaction-atomic grant.
+    // receipt writer. The trigger now records zero-value Free eligibility;
+    // keep the old GUC only for compatibility with pre-0845 schemas.
     await rawRows(
       tx,
       sql`select pg_catalog.set_config(
       'opengeni.verified_signup_trial_enabled',
       ${input.trialCreditsEnabled === true ? "on" : "off"}, true
+    )`,
+    );
+    await rawRows(
+      tx,
+      sql`select pg_catalog.set_config(
+      'opengeni.signup_credit_model_ids',
+      ${input.trialCreditModelIds ? JSON.stringify(input.trialCreditModelIds) : ""}, true
     )`,
     );
     const [row] = await rawRows<{ result: unknown }>(
@@ -347,6 +358,8 @@ async function settleOrganizationMembershipProtocols(
   }
 }
 
+const EXTERNAL_USER_SUBJECT = /^external_user:[0-9a-f-]{36}$/;
+
 /**
  * Remove one workspace membership through the fenced SECURITY DEFINER
  * teardown (migration 0278): the same prepare/settle/command protocol as
@@ -447,6 +460,25 @@ export async function removeWorkspaceMember(
         return (row.result as { removed?: unknown } | null)?.removed === true;
       },
     );
+    // Every removal of an external member, by the app's key or by a person,
+    // stamps a revocation marker under the organization fence held above,
+    // even when no row was left to remove: a request that authenticated
+    // before this removal must not state the member back in afterwards.
+    if (EXTERNAL_USER_SUBJECT.test(input.targetSubjectId)) {
+      await withRlsContext(
+        txDb,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) => {
+          await scopedDb.execute(sql`insert into external_workspace_member_revocations
+              (account_id, workspace_id, subject_id, revocation_sequence)
+            values (${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.targetSubjectId},
+              nextval('external_workspace_member_revocation_seq'))
+            on conflict (account_id, workspace_id, subject_id) do update
+              set revocation_sequence = excluded.revocation_sequence,
+                revoked_at = clock_timestamp()`);
+        },
+      );
+    }
     if (organizationAdministrationCapabilityId) {
       await txDb.execute(
         sql`select close_organization_shared_workspace_administration_capability(
@@ -804,6 +836,48 @@ export async function listOrganizationAdministrationMembers(
   );
 }
 
+const MEMBER_NAMES_ROUTINE = "opengeni_private.list_organization_member_names_v1(uuid)";
+
+/**
+ * The names of the active people in the actor's organization, for any of its
+ * members (owner, admin or member), or null while the deployment's database
+ * still withholds the names list from the runtime (1211 creates it withheld;
+ * a later migration grants it). The database refuses an actor who is not an
+ * active member of exactly this organization (42501). Product users,
+ * services and keys are never listed, and no email, role or status is
+ * returned.
+ */
+export async function listOrganizationMemberNames(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<OrganizationMemberNameType[] | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      // A separate statement: EXECUTE is checked when a statement starts, so a
+      // guard inside the calling statement would not avoid the permission error.
+      const [granted] = await rawRows<{ granted: boolean | null }>(
+        scopedDb,
+        sql`select has_function_privilege(to_regprocedure(${MEMBER_NAMES_ROUTINE})::oid, 'EXECUTE')
+          as granted`,
+      );
+      if (granted?.granted !== true) return null;
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select opengeni_private.list_organization_member_names_v1(
+          ${input.organizationId}::uuid
+        ) as result`,
+      );
+      return ListOrganizationMemberNamesResponse.parse({
+        available: true,
+        members: row?.result ?? [],
+      }).members;
+    },
+  );
+}
+
 export async function getOrganizationAdministrationOverview(
   db: Database,
   input: { organizationId: string; actorSubjectId: string },
@@ -1081,7 +1155,16 @@ export async function updateOrganizationMember(
         );
         await settleOrganizationMembershipProtocols(tx as unknown as Database, settlements);
       }
-      return OrganizationMember.parse(await runCommand(tx as unknown as Database, command));
+      const member = OrganizationMember.parse(await runCommand(tx as unknown as Database, command));
+      // A person who leaves loses every key that acts as them here, so
+      // rejoining later never revives one. Suspension keeps keys: they stop
+      // working while suspended because each request rechecks membership.
+      if (transition.kind === "offboard" && member.status === "revoked")
+        await revokePersonalApiKeysForOwner(tx as unknown as Database, {
+          accountId: member.organizationId,
+          ownerSubjectId: member.subjectId,
+        });
+      return member;
     }),
   );
 }

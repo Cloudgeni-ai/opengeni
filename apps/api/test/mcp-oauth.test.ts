@@ -2,13 +2,18 @@ import { describe, expect, test } from "bun:test";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQLWrapper } from "drizzle-orm/sql";
 import { Hono } from "hono";
-import { testSettings } from "@opengeni/testing";
+import { createObservability } from "@opengeni/observability";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { createApp } from "../src/app";
 import { apiRequestBindingsForTransportPeer } from "../src/http/request-source";
 import {
   completeAuthorizationRedirect,
+  isMcpOAuthProtocolPostRequest,
   isMcpOAuthPublicProtocolPath,
   isMcpOAuthResourcePath,
+  MCP_OAUTH_PROTOCOL_MAX_BODY_BYTES,
   mcpOAuthBearerToken,
   mcpOAuthRedirectUriCandidates,
   registerMcpOAuthRoutes,
@@ -45,6 +50,13 @@ describe("MCP OAuth protocol", () => {
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["none"],
       authorization_response_iss_parameter_supported: true,
+    });
+    // RFC 8414 path-aware discovery (tried first by Claude) returns the same JSON.
+    const pathAware = await app.request("/.well-known/oauth-authorization-server/v1/mcp");
+    expect(pathAware.status).toBe(200);
+    expect(await pathAware.json()).toMatchObject({
+      issuer: "https://api.example.test",
+      registration_endpoint: "https://api.example.test/oauth/register",
     });
 
     const protectedResource = await app.request(
@@ -468,6 +480,91 @@ describe("MCP OAuth protocol", () => {
     } as ApiRouteDeps);
     expect((await app.request("/.well-known/oauth-authorization-server")).status).toBe(404);
     expect((await app.request("/oauth/register", { method: "POST" })).status).toBe(404);
+  });
+
+  test("refuses an oversized protocol body before parsing it or touching the database", async () => {
+    let queries = 0;
+    const app = new Hono();
+    registerMcpOAuthRoutes(app, {
+      settings: testSettings({ mcpOauthEnabled: true, publicBaseUrl: "https://api.example.test" }),
+      db: {
+        execute: async () => {
+          queries += 1;
+          return [];
+        },
+      } as ApiRouteDeps["db"],
+    } as ApiRouteDeps);
+    const oversized = "a&".repeat(MCP_OAUTH_PROTOCOL_MAX_BODY_BYTES / 2 + 1);
+    for (const [path, contentType] of [
+      ["/oauth/register", "application/json"],
+      ["/oauth/authorize", "application/x-www-form-urlencoded"],
+      ["/oauth/token", "application/x-www-form-urlencoded"],
+    ] as const) {
+      expect(isMcpOAuthProtocolPostRequest("POST", path)).toBe(true);
+      const response = await app.request(path, {
+        method: "POST",
+        headers: { "content-type": contentType },
+        body: oversized,
+      });
+      expect(response.status).toBe(413);
+      expect(await response.json()).toEqual({
+        code: "PAYLOAD_TOO_LARGE",
+        message: "Request body is too large.",
+      });
+    }
+    expect(queries).toBe(0);
+    // A body at the limit still reaches the handler, which looks up the client.
+    const atLimit = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: `client_id=unknown&pad=${"a".repeat(MCP_OAUTH_PROTOCOL_MAX_BODY_BYTES - 22)}`,
+    });
+    expect(atLimit.status).not.toBe(413);
+    expect(queries).toBeGreaterThan(0);
+    expect(isMcpOAuthProtocolPostRequest("GET", "/oauth/authorize")).toBe(false);
+    expect(isMcpOAuthProtocolPostRequest("POST", "/v1/mcp-connections/requests/x")).toBe(false);
+  });
+
+  test("the full API refuses a streamed protocol body at the small limit", async () => {
+    const app = createApp({
+      settings: testSettings({ mcpOauthEnabled: true, publicBaseUrl: "https://api.example.test" }),
+      db: {} as never,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+      managedAuth: null,
+      observability: createObservability(
+        {
+          serviceName: "opengeni",
+          environment: "test",
+          deploymentRevision: "revision-test",
+          observabilityStructuredLogs: false,
+          observabilityMetricsEnabled: false,
+          observabilityOtlpEndpoint: "",
+          observabilityOtlpHeaders: "",
+        },
+        { component: "api" },
+      ),
+    });
+    let pulledChunks = 0;
+    const chunkBytes = 4096;
+    const chunk = new TextEncoder().encode("a&".repeat(chunkBytes / 2));
+    // No Content-Length: only the limit on the streamed body can stop this.
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulledChunks += 1;
+        if (pulledChunks > 256) controller.close();
+        else controller.enqueue(chunk);
+      },
+    });
+    const response = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+      duplex: "half",
+    } as RequestInit);
+    expect(response.status).toBe(413);
+    // Refused just past 16 KiB, not after reading the whole 1 MiB.
+    expect(pulledChunks).toBeLessThan(MCP_OAUTH_PROTOCOL_MAX_BODY_BYTES / chunkBytes + 4);
   });
 
   test("recognizes OAuth bearer tokens only on the closed MCP resource set", () => {

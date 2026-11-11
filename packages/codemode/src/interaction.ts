@@ -1,6 +1,5 @@
 import type {
   AttemptToolResult,
-  AttachedBrowserBridge,
   AttachedBrowserDevice,
   AuthRun,
   AuthRunListResponse,
@@ -10,6 +9,9 @@ import type {
   BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticKind,
+  BrowserDownload,
+  BrowserDownloadListResponse,
+  BrowserDownloadSaveResponse,
   BrowserDomReadLocator,
   BrowserDomReadResponse,
   BrowserDomSafeAttribute,
@@ -24,7 +26,6 @@ import type {
   BrowserSession,
   BrowserSessionMutationResponse,
   BrowserTarget,
-  BrowserTargetListResponse,
   ComputerAction,
   ComputerActionReceipt,
   ComputerClipboard,
@@ -37,8 +38,6 @@ import type {
   ExternalAuthRunRequest,
   ExternalAuthRunResponse,
   InteractionPlacement,
-  ProtectedAuthFillRequest,
-  ProtectedAuthFillResponse,
   PublishBrowserRevisionResponse,
   ReportAuthRunRequest,
   RequestHumanInteractionToolInput,
@@ -67,6 +66,8 @@ const PATH = {
   browserAct: ["interaction", "browser", "act"],
   browserClipboard: ["interaction", "browser", "clipboard"],
   browserDebug: ["interaction", "browser", "debug"],
+  browserDownloads: ["interaction", "browser", "downloads"],
+  browserDownloadSave: ["interaction", "browser", "downloadSave"],
   browserAuth: ["interaction", "browser", "auth"],
   requestHuman: ["interaction", "requestHuman"],
   browserIdentity: ["interaction", "browser", "identity"],
@@ -88,8 +89,30 @@ export type InteractionDiscovery = {
   browsers: BrowserSession[];
   computers: ComputerSession[];
   identities: BrowserIdentity[];
-  attachedBrowserBridges: AttachedBrowserBridge[];
-  attachedBrowsers: AttachedBrowserDevice[];
+  /** Online machines ready for the extension; listed only when no attached
+   * profile is connected. `machine` is the computer's plain name;
+   * `onThisMachine` marks the computer this session runs on. */
+  attachedBrowserBridges: Array<{
+    enrollmentId: string;
+    machine?: string;
+    onThisMachine?: true;
+    connectedProfileCount: number;
+  }>;
+  attachedBrowsers: Array<{
+    id: string;
+    name: string;
+    profileLabel?: string;
+    /** The computer this profile is on, by its plain name. */
+    machine?: string;
+    /** Present when that computer is the one this session runs on. */
+    onThisMachine?: true;
+    browserName: string;
+    platform: AttachedBrowserDevice["platform"];
+    state: AttachedBrowserDevice["state"];
+    tabCount: number;
+    /** Capabilities this profile lacks; absent when it supports all of them. */
+    unsupported?: string[];
+  }>;
 };
 
 export type CodemodeBrowserOpenOptions = {
@@ -98,7 +121,10 @@ export type CodemodeBrowserOpenOptions = {
   name?: string | undefined;
   initialUrl?: string | undefined;
   headless?: boolean | undefined;
-  placement?: InteractionPlacement | undefined;
+  /** `{ kind: "attached_device" }` without a deviceId opens the person's own
+   * connected Chrome (the only, or most recently active, profile, preferring
+   * one on the computer this session runs on). */
+  placement?: InteractionPlacement | { kind: "attached_device" } | undefined;
   identityId?: string | undefined;
   baseRevisionId?: string | undefined;
   linkedComputerSessionId?: string | undefined;
@@ -141,12 +167,28 @@ export type CodemodeBrowserScreenshotMetadata = Readonly<{
   scrollY: number;
   capturedAt: string;
   fullPage: boolean;
+  /** Present only when a full-page capture is not exact, saying why. */
+  note?: string;
 }>;
 
 export type CodemodeBrowserScreenshot = CodemodeLocalImage &
   Readonly<{
     /** Small structured frame metadata; pixel bytes stay in the local image file. */
     metadata: CodemodeBrowserScreenshotMetadata;
+  }>;
+
+export type CodemodeComputerScreenshotOptions = {
+  /** Only this rectangle of the target's last full screenshot, in that screenshot's pixels. */
+  region?: { x: number; y: number; width: number; height: number } | undefined;
+  /** Save the image at this exact path. Existing files are never overwritten. */
+  saveTo?: string | undefined;
+};
+
+export type CodemodeComputerScreenshot = CodemodeLocalImage &
+  Readonly<{
+    /** The observation read with the image: its frameId and capturedFrame size
+     * address pointer actions on it. Pixel bytes stay in the local image file. */
+    observation: ComputerObservation;
   }>;
 
 export type CodemodeBrowserAgentNode = Readonly<{
@@ -156,30 +198,77 @@ export type CodemodeBrowserAgentNode = Readonly<{
   name?: string;
   description?: string;
   value?: string | { redacted: true; reason: string };
-  states: readonly string[];
-  actions: readonly string[];
+  /** Full length of a name, description or value the outline clipped; read
+   * the rest with a dom read of this ref. Absent when nothing was clipped. */
+  nameChars?: number;
+  descriptionChars?: number;
+  valueChars?: number;
+  /** Omitted when empty. */
+  states?: readonly string[];
+  /** Omitted when empty. */
+  actions?: readonly string[];
 }>;
 
 export type CodemodeBrowserAgentView = Readonly<{
-  kind: "compact";
   sourceKind: "snapshot" | "diff" | "none";
   nodes: readonly CodemodeBrowserAgentNode[];
-  sourceNodeCount: number;
-  omittedNodeCount: number;
-  removedRefCount: number;
-  clippedFieldCount: number;
-  maxNodes: number;
-  maxNodeBytes: number;
+  /** Nodes left out by the output budget; absent when nothing was left out. */
+  omittedNodeCount?: number;
+  /** The largest regions holding the left-out nodes. */
+  omittedRegions?: readonly Readonly<{ role: string; name?: string; count: number }>[];
+  removedRefCount?: number;
+  clippedFieldCount?: number;
+  /** The page was too large to read whole: at least this many elements were
+   * left unread. The view keeps the page's structure and the part on screen. */
+  unreadNodeCount?: number;
 }>;
 
-export type CodemodeBrowserAgentObservation = BrowserObservation & {
-  /** Present on the compact default; absent when the full tree was requested. */
-  agentView?: CodemodeBrowserAgentView;
-};
+/** A tab with the identity, page, selection and fences a next call needs. */
+export type CodemodeBrowserTarget = Readonly<{
+  id: string;
+  kind: BrowserTarget["kind"];
+  title: string;
+  url: string;
+  selected: boolean;
+  controllerGeneration: string;
+  targetGeneration: string;
+  documentGeneration: string | null;
+}>;
 
-export type CodemodeBrowserActionReceipt = Omit<BrowserActionReceipt, "observation"> & {
-  observation: CodemodeBrowserAgentObservation | null;
-};
+export type CodemodeBrowserTargetList = Readonly<{
+  browserSessionId: string;
+  targets: readonly CodemodeBrowserTarget[];
+}>;
+
+/** The compact default observation. Empty, zero and default fields are
+ * omitted; use observeFull() for the complete BrowserObservation. */
+export type CodemodeBrowserAgentObservation = Readonly<{
+  target: CodemodeBrowserTarget;
+  frameId?: string;
+  viewport?: Readonly<{
+    width: number;
+    height: number;
+    deviceScaleFactor?: number;
+    maxTouchPoints?: number;
+  }>;
+  focusedRef?: string;
+  changedRegions?: BrowserObservation["changedRegions"];
+  diagnostics?: BrowserObservation["diagnostics"];
+  dialog?: NonNullable<BrowserObservation["dialog"]>;
+  screenshot?: NonNullable<BrowserObservation["screenshot"]>;
+  notice?: string;
+  agentView: CodemodeBrowserAgentView;
+}>;
+
+/** The compact default receipt; pass view "full" for the complete
+ * BrowserActionReceipt with operation id and timestamps. */
+export type CodemodeBrowserActionReceipt = Readonly<{
+  targetId: string;
+  state: BrowserActionReceipt["state"];
+  error?: NonNullable<BrowserActionReceipt["error"]>;
+  targets?: BrowserActionReceipt["targets"];
+  observation?: CodemodeBrowserAgentObservation;
+}>;
 
 export type CodemodeBrowserActionOptions = BrowserActionFences & {
   view?: "compact" | "full" | "none" | undefined;
@@ -206,6 +295,7 @@ export type CodemodeBrowserDomReadOptions = BrowserActionFences &
           locator: BrowserDomReadLocator;
           attributes?: readonly BrowserDomSafeAttribute[];
           maxChars?: number;
+          offset?: number;
         }
       | { kind: "count"; selector: string };
   }>;
@@ -233,7 +323,11 @@ export type CodemodeBrowserAxReadResult = Readonly<{
 
 export type CodemodeBrowserReadResult =
   | CodemodeBrowserAxReadResult
-  | (BrowserDomReadResponse & { source: "dom" });
+  | (BrowserDomReadResponse & {
+      source: "dom";
+      /** Offset of the next page when the text or value was cut. */
+      nextOffset?: number;
+    });
 
 export type ComputerActionFences = {
   expectedTargetGeneration?: string | undefined;
@@ -378,6 +472,7 @@ export class CodemodeBrowser {
   readonly tabs: CodemodeBrowserTabCollection;
   readonly auth: CodemodeBrowserAuth;
   readonly clipboard: CodemodeBrowserClipboard;
+  readonly downloads: CodemodeBrowserDownloadCollection;
 
   constructor(
     private readonly client: CodemodeClientProvider,
@@ -386,6 +481,7 @@ export class CodemodeBrowser {
     this.tabs = new CodemodeBrowserTabCollection(client, id);
     this.auth = new CodemodeBrowserAuth(client, id);
     this.clipboard = new CodemodeBrowserClipboard(client, id, this.tabs);
+    this.downloads = new CodemodeBrowserDownloadCollection(client, id);
   }
 
   async refresh(callOptions: CodemodeCallOptions = {}): Promise<BrowserSession> {
@@ -506,6 +602,61 @@ export class CodemodeBrowser {
   }
 }
 
+export class CodemodeBrowserDownloadCollection {
+  constructor(
+    private readonly client: CodemodeClientProvider,
+    private readonly browserSessionId: string,
+  ) {}
+
+  async list(callOptions: CodemodeCallOptions = {}): Promise<BrowserDownloadListResponse> {
+    return await callStructured(
+      this.client,
+      PATH.browserDownloads,
+      { browserSessionId: this.browserSessionId, operation: "list" },
+      callOptions,
+    );
+  }
+
+  download(downloadId: string): CodemodeBrowserDownload {
+    return new CodemodeBrowserDownload(this.client, this.browserSessionId, downloadId);
+  }
+}
+
+export class CodemodeBrowserDownload {
+  constructor(
+    private readonly client: CodemodeClientProvider,
+    private readonly browserSessionId: string,
+    readonly id: string,
+  ) {}
+
+  async get(callOptions: CodemodeCallOptions = {}): Promise<BrowserDownload> {
+    return await callStructured(
+      this.client,
+      PATH.browserDownloads,
+      { browserSessionId: this.browserSessionId, operation: "get", downloadId: this.id },
+      callOptions,
+    );
+  }
+
+  async saveToWorkspace(
+    destinationPath: string,
+    options: { overwrite?: boolean | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserDownloadSaveResponse> {
+    return await callStructured(
+      this.client,
+      PATH.browserDownloadSave,
+      {
+        browserSessionId: this.browserSessionId,
+        downloadId: this.id,
+        destinationPath,
+        ...(options.overwrite === undefined ? {} : { overwrite: options.overwrite }),
+      },
+      callOptions,
+    );
+  }
+}
+
 export class CodemodeBrowserClipboard {
   constructor(
     private readonly client: CodemodeClientProvider,
@@ -526,14 +677,14 @@ export class CodemodeBrowserClipboard {
     text: string,
     options: BrowserActionFences & { targetId?: string | undefined } = {},
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     return await this.act({ type: "clipboard", operation: "write", text }, options, callOptions);
   }
 
   async clear(
     options: BrowserActionFences & { targetId?: string | undefined } = {},
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     return await this.act({ type: "clipboard", operation: "clear" }, options, callOptions);
   }
 
@@ -544,7 +695,7 @@ export class CodemodeBrowserClipboard {
       content?: "selection" | "value" | "text" | undefined;
     } = {},
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     const {
       targetId,
       expectedTargetGeneration,
@@ -571,7 +722,7 @@ export class CodemodeBrowserClipboard {
       text?: string | undefined;
     } = {},
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     const {
       targetId,
       expectedTargetGeneration,
@@ -595,7 +746,7 @@ export class CodemodeBrowserClipboard {
     action: BrowserAction,
     options: BrowserActionFences & { targetId?: string | undefined },
     callOptions: CodemodeCallOptions,
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     const { targetId, ...fences } = options;
     return await this.tabs
       .use(await this.tabs.resolveId(targetId, callOptions))
@@ -609,7 +760,7 @@ export class CodemodeBrowserTabCollection {
     private readonly browserSessionId: string,
   ) {}
 
-  async list(callOptions: CodemodeCallOptions = {}): Promise<BrowserTargetListResponse> {
+  async list(callOptions: CodemodeCallOptions = {}): Promise<CodemodeBrowserTargetList> {
     return await callStructured(
       this.client,
       PATH.browserTabs,
@@ -628,7 +779,7 @@ export class CodemodeBrowserTabCollection {
 
   async open(url?: string, callOptions: CodemodeCallOptions = {}): Promise<CodemodeBrowserTab> {
     const before = await this.list(callOptions);
-    const after = await callStructured<BrowserTargetListResponse>(
+    const after = await callStructured<CodemodeBrowserTargetList>(
       this.client,
       PATH.browserTabs,
       {
@@ -650,7 +801,7 @@ export class CodemodeBrowserTabCollection {
     targetId: string,
     callOptions: CodemodeCallOptions = {},
   ): Promise<CodemodeBrowserTab> {
-    const after = await callStructured<BrowserTargetListResponse>(
+    const after = await callStructured<CodemodeBrowserTargetList>(
       this.client,
       PATH.browserTabs,
       { operation: "select", browserSessionId: this.browserSessionId, targetId },
@@ -665,7 +816,7 @@ export class CodemodeBrowserTabCollection {
   async close(
     targetId: string,
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserTargetListResponse> {
+  ): Promise<CodemodeBrowserTargetList> {
     return await callStructured(
       this.client,
       PATH.browserTabs,
@@ -759,8 +910,15 @@ export class CodemodeBrowserTab {
     );
   }
 
-  async navigate(url: string, callOptions: CodemodeCallOptions = {}) {
-    return await this.act({ type: "navigate", url }, {}, callOptions);
+  /** Navigate this tab. `waitUntil` also waits for that load state, which is
+   * useful before a screenshot of a page that loads its data after `load`. */
+  async navigate(
+    url: string,
+    options: CodemodeCallOptions & { waitUntil?: "load" | "network_idle" | undefined } = {},
+  ) {
+    const { waitUntil, ...callOptions } = options;
+    const action = waitUntil ? { type: "navigate", url, waitUntil } : { type: "navigate", url };
+    return await this.act(action as BrowserAction, {}, callOptions);
   }
 
   async setPermission(
@@ -768,7 +926,7 @@ export class CodemodeBrowserTab {
     setting: BrowserPermissionSetting,
     fences: BrowserActionFences = {},
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     return await this.act({ type: "permission", permission, setting }, fences, callOptions);
   }
 
@@ -808,12 +966,12 @@ export class CodemodeBrowserTab {
     return new CodemodeBrowserLocator(this, { kind: "role", role, ...options });
   }
 
-  getByText(text: string) {
-    return new CodemodeBrowserLocator(this, { kind: "text", text });
+  getByText(text: string, exact?: boolean) {
+    return new CodemodeBrowserLocator(this, { kind: "text", text, ...(exact ? { exact } : {}) });
   }
 
-  getByLabel(text: string) {
-    return new CodemodeBrowserLocator(this, { kind: "label", text });
+  getByLabel(text: string, exact?: boolean) {
+    return new CodemodeBrowserLocator(this, { kind: "label", text, ...(exact ? { exact } : {}) });
   }
 
   getByPlaceholder(text: string) {
@@ -1010,27 +1168,6 @@ export class CodemodeAuthRun {
       PATH.browserAuth,
       {
         operation: "report",
-        browserSessionId: this.browserSessionId,
-        authRunId: this.id,
-        ...request,
-      },
-      callOptions,
-    );
-    return response.result;
-  }
-
-  async protectedFill(
-    request: Omit<ProtectedAuthFillRequest, "operationId">,
-    callOptions: CodemodeCallOptions = {},
-  ): Promise<ProtectedAuthFillResponse> {
-    const response = await callStructured<{
-      operation: "protected_fill";
-      result: ProtectedAuthFillResponse;
-    }>(
-      this.client,
-      PATH.browserAuth,
-      {
-        operation: "protected_fill",
         browserSessionId: this.browserSessionId,
         authRunId: this.id,
         ...request,
@@ -1289,6 +1426,39 @@ export class CodemodeComputerTarget {
       { computerSessionId: this.computerSessionId, targetId: this.id },
       callOptions,
     );
+  }
+
+  /** Observe the window or screen and write its screenshot to a local file
+   * (`saveTo`, or a private temporary file), like a browser tab's screenshot. */
+  async screenshot(
+    options: CodemodeComputerScreenshotOptions = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<CodemodeComputerScreenshot> {
+    const result = await (
+      await this.client()
+    ).callPath(
+      PATH.computerObserve,
+      {
+        computerSessionId: this.computerSessionId,
+        targetId: this.id,
+        ...(options.region === undefined ? {} : { region: options.region }),
+      },
+      callOptions,
+    );
+    if (result.isError) throw new CodemodeToolExecutionError(result);
+    if (!result.structuredContent) {
+      throw new Error("Codemode tool interaction.computer.observe returned no structured content");
+    }
+    if (!result.content.some((content) => content.type === "image")) {
+      throw new Error(
+        `${this.id} returned no screenshot: an app target has only its accessibility tree, so take the screenshot of one of its windows or of the screen`,
+      );
+    }
+    const [image] = await materializeCodemodeImages(result, {
+      ...(options.saveTo === undefined ? {} : { saveTo: options.saveTo }),
+      requireOne: true,
+    });
+    return { ...image!, observation: result.structuredContent as ComputerObservation };
   }
 
   async act(

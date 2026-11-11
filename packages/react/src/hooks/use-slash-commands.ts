@@ -1,5 +1,6 @@
 import type { KeyboardEvent } from "react";
 import { useCallback, useMemo, useRef, useState } from "react";
+import { useErrorMessage } from "../lib/error-message";
 import {
   argHint,
   filterCommands,
@@ -81,6 +82,7 @@ export type UseSlashCommandsResult = {
 };
 
 export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashCommandsResult {
+  const formatError = useErrorMessage();
   const { commands, context, handlers, value, setValue } = options;
   const [highlight, setHighlight] = useState(0);
   // Escape closes the palette but keeps the draft. We remember the dismissed
@@ -153,9 +155,9 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
       if (!context) {
         return null;
       }
-      return { ...context, ...handlers, confirm: () => handlers.confirm(command) };
+      return { ...context, ...handlers, formatError, confirm: () => handlers.confirm(command) };
     },
-    [context, handlers],
+    [context, handlers, formatError],
   );
 
   const execute = useCallback(
@@ -173,10 +175,10 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
           setValue("");
         }
       } catch (cause) {
-        ctx.notice({ tone: "error", message: errorMessage(cause) });
+        ctx.notice({ tone: "error", message: formatError(cause) });
       }
     },
-    [buildContext, setValue],
+    [buildContext, setValue, formatError],
   );
 
   const autocomplete = useCallback(
@@ -358,11 +360,4 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
     runAt,
     autocompleteHighlighted,
   };
-}
-
-function errorMessage(cause: unknown): string {
-  if (cause instanceof Error) {
-    return cause.message;
-  }
-  return String(cause);
 }

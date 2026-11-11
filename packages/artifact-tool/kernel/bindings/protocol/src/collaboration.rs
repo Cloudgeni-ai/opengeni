@@ -10,7 +10,7 @@ use opengeni_artifact_kernel::{
     decode_collaboration_snapshot, encode_collaboration_snapshot, AuthoredCellContent, CausalDot,
     CausalFrontier, CellBlock, CellCoord, CellRange, CellValue, CollaborationCommand,
     CollaborationOperation, CollaborationTransaction, CollaborativeWorkbook, DateValue,
-    FormulaError, Number, OperationId, ReplicaId, SheetGeneration, StableId,
+    DimensionAxis, FormulaError, Number, OperationId, ReplicaId, SheetGeneration, StableId,
     TransactionDisposition, TransactionId, MAX_CAUSAL_REPLICAS, MAX_CELLS_PER_TRANSACTION,
     MAX_OPERATIONS_PER_TRANSACTION,
 };
@@ -550,6 +550,22 @@ fn lower_transaction(
                 )?,
                 range: *range,
             },
+            SpreadsheetCommand::SetDimension {
+                sheet,
+                axis,
+                index,
+                pixels,
+            } => CollaborationCommand::SetDimension {
+                sheet: resolve_precondition(
+                    *sheet,
+                    &batch.commands,
+                    operation_ids,
+                    command_offset,
+                )?,
+                axis: *axis,
+                index: *index,
+                pixels: *pixels,
+            },
         };
         operations.push(CollaborationOperation::new(operation_id, command));
     }
@@ -1013,6 +1029,17 @@ impl Writer {
                 self.u8(5)?;
                 self.id(target.stable_id())
             }
+            CollaborationCommand::SetDimension {
+                sheet,
+                axis,
+                index,
+                pixels,
+            } => {
+                self.u8(if *axis == DimensionAxis::Row { 6 } else { 7 })?;
+                self.generation(*sheet)?;
+                self.u32(*index)?;
+                self.u32(pixels.unwrap_or(0))
+            }
         }
     }
 
@@ -1210,7 +1237,8 @@ impl<'a> Reader<'a> {
         total_cells: &mut usize,
         maximum_cells: usize,
     ) -> Result<CollaborationCommand, BindingError> {
-        match self.u8()? {
+        let tag = self.u8()?;
+        match tag {
             0 => {
                 let sheet_id = self.sheet_id()?;
                 let name = self.operation_string()?;
@@ -1291,6 +1319,26 @@ impl<'a> Reader<'a> {
             5 => Ok(CollaborationCommand::Undo {
                 target: OperationId::from_stable_id(self.id()?),
             }),
+            6 | 7 => {
+                let sheet = self.generation()?;
+                let axis = if tag == 6 {
+                    DimensionAxis::Row
+                } else {
+                    DimensionAxis::Column
+                };
+                let index = self.u32()?;
+                let raw = self.u32()?;
+                let pixels = (raw != 0).then_some(raw);
+                if !axis.valid_pixels(pixels) || pixels == Some(axis.default_pixels()) {
+                    return Err(BindingError::NonCanonical("invalid dimension pixels"));
+                }
+                Ok(CollaborationCommand::SetDimension {
+                    sheet,
+                    axis,
+                    index,
+                    pixels,
+                })
+            }
             tag => Err(BindingError::InvalidTag(tag)),
         }
     }
@@ -1624,6 +1672,77 @@ mod tests {
         let identities = derive_intent_identities(&intent).expect("identities");
         assert_eq!(identities.operation_ids.len(), 1);
         assert_eq!(identities.request_hash, sha256_text(&sha256_bytes(&intent)));
+    }
+
+    #[test]
+    fn dimension_commands_author_replay_hash_and_restore_match_both_runtime_profiles() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../contracts/test/fixtures/spreadsheet-artifact-dimensions.json"
+        ))
+        .unwrap();
+        let bytes = hex_bytes(fixture_str(&fixture, "commandHex"));
+        let decoded = decode_spreadsheet_commands(&bytes).unwrap();
+        assert_eq!(
+            encode_spreadsheet_commands(&decoded.commands).unwrap(),
+            bytes
+        );
+        let sheet_id = StableId::from_parts(1, 2);
+        let creation = OperationId::from_stable_id(StableId::from_parts(3, 4));
+        let mut state = CollaborativeWorkbook::new(55).unwrap();
+        seed_transaction(
+            &mut state,
+            StableId::from_parts(9, 1),
+            fixture_replica("2222222222222222"),
+            1,
+            CausalFrontier::new(),
+            creation.stable_id(),
+            CollaborationCommand::CreateSheet {
+                sheet_id,
+                name: "Data".into(),
+                after: None,
+            },
+        );
+        let prior = encode_collaboration_snapshot(&state).unwrap();
+        let base = encode_causal_frontier(state.frontier()).unwrap();
+        let request = intent(&bytes, 2, 1);
+        let mut native = CollaborationBindingSession {
+            state: Some(state.clone()),
+            limits: NATIVE_LIMITS,
+        };
+        let mut wasm = CollaborationBindingSession {
+            state: Some(state),
+            limits: super::super::WASM_LIMITS,
+        };
+        let committed = native.author_transaction(&request, &base).unwrap();
+        assert_eq!(wasm.author_transaction(&request, &base).unwrap(), committed);
+        assert_eq!(native.snapshot().unwrap(), wasm.snapshot().unwrap());
+        let hash = native.state_hash().unwrap();
+        assert_ne!(hash, sha256_text(&sha256_bytes(&prior)));
+        let mut replay = CollaborationBindingSession::open(&prior).unwrap();
+        replay.apply_committed(&committed).unwrap();
+        assert_eq!(replay.snapshot().unwrap(), native.snapshot().unwrap());
+        assert_eq!(replay.state_hash().unwrap(), hash);
+        let restored = CollaborationBindingSession::open(&native.snapshot().unwrap()).unwrap();
+        assert_eq!(restored.state_hash().unwrap(), hash);
+        let sheet = restored
+            .state
+            .as_ref()
+            .unwrap()
+            .workbook()
+            .sheet(sheet_id)
+            .unwrap();
+        assert_eq!(
+            sheet
+                .dimension_entries(DimensionAxis::Row)
+                .collect::<Vec<_>>(),
+            vec![(3, 48)]
+        );
+        assert_eq!(
+            sheet
+                .dimension_entries(DimensionAxis::Column)
+                .collect::<Vec<_>>(),
+            vec![(5, 180)]
+        );
     }
 
     #[test]

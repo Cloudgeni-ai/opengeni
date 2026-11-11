@@ -4,7 +4,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   type ScheduledTask,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   addSessionSystemUpdateWithSourceMutation,
   appendSessionEventsForTurnAttempt,
@@ -210,6 +210,8 @@ async function runOccurrence(ctx: Fixture, task: ScheduledTask) {
         personalResourceAuthoritySubjectId ?? causalHumanAuthority?.subjectId ?? null,
       causalHumanAuthority,
       xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+      claudeProviderAccountAuthoritySnapshot: { version: 1 as const, scope: "workspace" as const },
+      claudeAuthoritySubjectId: null,
       xaiAuthoritySubjectId: null,
       connectionAuthoritySubjectId: null,
       triggerInitiator: { kind: "service", subjectId: "scheduler" },

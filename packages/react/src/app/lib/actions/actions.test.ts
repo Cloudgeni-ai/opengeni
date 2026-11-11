@@ -1,0 +1,608 @@
+import { describe, expect, test } from "bun:test";
+import {
+  applicableChords,
+  chordAccelerator,
+  chordAriaKeys,
+  chordKeys,
+  chordLabel,
+  matchesChord,
+  type Chord,
+} from "./chords";
+import {
+  chatParentTitle,
+  listsAsTopLevel,
+  readChatDirectory,
+  recordChatVisit,
+  rememberChats,
+  type ChatRecord,
+} from "./chat-directory";
+import {
+  extendChatSwitcher,
+  isSwitcherKey,
+  openChatSwitcher,
+  stepChatSwitcher,
+  SWITCHER_LIMIT,
+} from "./chat-switcher";
+import { LOOSE_MATCH_BELOW, rankLabel, rankWithKeywords } from "./rank";
+import { actionTitle, appActions, stepWorkspace, type ActionEnv } from "./registry";
+import { englishMessages } from "../../../messages/en";
+import type { SessionListRow } from "../../../session-list-model";
+
+function key(
+  code: string,
+  modifiers: Partial<{
+    meta: boolean;
+    ctrl: boolean;
+    shift: boolean;
+    alt: boolean;
+    key: string;
+  }> = {},
+) {
+  return {
+    code,
+    key: modifiers.key ?? "",
+    metaKey: Boolean(modifiers.meta),
+    ctrlKey: Boolean(modifiers.ctrl),
+    shiftKey: Boolean(modifiers.shift),
+    altKey: Boolean(modifiers.alt),
+    repeat: false,
+    isComposing: false,
+  };
+}
+
+describe("chords", () => {
+  const newChat: Chord = { code: "KeyO", mod: true, shift: true };
+
+  test("⌘ on Mac and Ctrl elsewhere, exactly", () => {
+    expect(matchesChord(key("KeyO", { meta: true, shift: true }), newChat, "mac")).toBe(true);
+    expect(matchesChord(key("KeyO", { ctrl: true, shift: true }), newChat, "mac")).toBe(false);
+    expect(matchesChord(key("KeyO", { ctrl: true, shift: true }), newChat, "other")).toBe(true);
+    expect(matchesChord(key("KeyO", { meta: true, shift: true }), newChat, "other")).toBe(false);
+    // Extra modifiers are a different chord.
+    expect(matchesChord(key("KeyO", { meta: true, shift: true, alt: true }), newChat, "mac")).toBe(
+      false,
+    );
+    expect(matchesChord(key("KeyO", { meta: true }), newChat, "mac")).toBe(false);
+  });
+
+  test("punctuation matches the typed character on other layouts", () => {
+    const sheet: Chord = { code: "Slash", mod: true };
+    // US: the physical "/" key.
+    expect(matchesChord(key("Slash", { meta: true, key: "/" }), sheet, "mac")).toBe(true);
+    // Nordic: "/" is Shift+7.
+    expect(matchesChord(key("Digit7", { meta: true, shift: true, key: "/" }), sheet, "mac")).toBe(
+      true,
+    );
+    // Shift+7 that types something else is not the chord.
+    expect(matchesChord(key("Digit7", { meta: true, shift: true, key: "&" }), sheet, "mac")).toBe(
+      false,
+    );
+    // A chord that needs Shift only matches its physical key.
+    const copyLink: Chord = { code: "Comma", mod: true, shift: true };
+    expect(matchesChord(key("Comma", { meta: true, shift: true, key: "<" }), copyLink, "mac")).toBe(
+      true,
+    );
+    expect(matchesChord(key("KeyM", { meta: true, shift: true, key: "," }), copyLink, "mac")).toBe(
+      false,
+    );
+  });
+
+  test("held keys and input methods never fire", () => {
+    expect(
+      matchesChord({ ...key("KeyO", { meta: true, shift: true }), repeat: true }, newChat, "mac"),
+    ).toBe(false);
+    expect(
+      matchesChord(
+        { ...key("KeyO", { meta: true, shift: true }), isComposing: true },
+        newChat,
+        "mac",
+      ),
+    ).toBe(false);
+  });
+
+  test("AltGr typing on Windows never fires a Ctrl+Alt chord", () => {
+    // What Windows browsers report for AltGr+key: Ctrl and Alt, plus AltGraph.
+    const altGr = (code: string, character: string) => ({
+      ...key(code, { ctrl: true, alt: true, key: character }),
+      getModifierState: (modifier: string) => modifier === "AltGraph",
+    });
+    const chordFor = (id: string) =>
+      applicableChords(appActions().find((action) => action.id === id)!.chords, "web", "other")[0]!;
+    // "ą" on Polish keyboards and "{" on Czech and Hungarian ones; Pin uses the same shape.
+    expect(matchesChord(altGr("KeyA", "ą"), chordFor("chat.archive"), "other")).toBe(false);
+    expect(matchesChord(altGr("KeyB", "{"), chordFor("view.workspacePanel"), "other")).toBe(false);
+    expect(matchesChord(altGr("KeyP", "π"), chordFor("chat.pin"), "other")).toBe(false);
+    // A deliberate Ctrl+Alt on a layout without AltGr still works.
+    const plain = (code: string, character: string) => ({
+      ...key(code, { ctrl: true, alt: true, key: character }),
+      getModifierState: () => false,
+    });
+    expect(matchesChord(plain("KeyA", "a"), chordFor("chat.archive"), "other")).toBe(true);
+    expect(matchesChord(plain("KeyB", "b"), chordFor("view.workspacePanel"), "other")).toBe(true);
+    // Mac has no AltGr: ⌥⌘B with Option reported as AltGraph is still the chord.
+    expect(
+      matchesChord(
+        {
+          ...key("KeyB", { meta: true, alt: true, key: "∫" }),
+          getModifierState: (modifier: string) => modifier === "AltGraph",
+        },
+        chordFor("view.workspacePanel"),
+        "mac",
+      ),
+    ).toBe(true);
+  });
+
+  test("shows each platform's notation", () => {
+    const toggle: Chord = { code: "KeyS", mod: true, control: true };
+    expect(chordKeys(toggle, "mac")).toEqual(["⌃", "⌘", "S"]);
+    expect(chordLabel({ code: "Comma", mod: true, shift: true }, "mac")).toBe("⇧⌘,");
+    expect(chordLabel({ code: "Comma", mod: true, shift: true }, "other")).toBe("Ctrl+Shift+,");
+    expect(chordLabel({ code: "ArrowUp", alt: true }, "mac")).toBe("⌥↑");
+    expect(chordAriaKeys({ code: "ArrowUp", alt: true }, "other")).toBe("Alt+ArrowUp");
+    expect(chordAccelerator({ code: "KeyP", mod: true, alt: true })).toBe("CmdOrCtrl+Alt+P");
+    expect(chordAccelerator(toggle)).toBe("Ctrl+CmdOrCtrl+S");
+  });
+
+  test("browser-reserved keys stay on desktop", () => {
+    const action = appActions().find((candidate) => candidate.id === "chat.new")!;
+    expect(applicableChords(action.chords, "web", "mac").map((chord) => chord.code)).toEqual([
+      "KeyO",
+    ]);
+    expect(applicableChords(action.chords, "desktop", "mac").map((chord) => chord.code)).toEqual([
+      "KeyN",
+      "KeyO",
+    ]);
+    const inbox = appActions().find((candidate) => candidate.id === "go.inbox")!;
+    // Ctrl+Shift+I opens developer tools in browsers on Windows and Linux.
+    expect(applicableChords(inbox.chords, "web", "other")).toEqual([]);
+    expect(applicableChords(inbox.chords, "desktop", "other")).toHaveLength(1);
+  });
+
+  test("no two actions share a chord on any surface", () => {
+    for (const surface of ["web", "desktop"] as const) {
+      for (const platform of ["mac", "other"] as const) {
+        const seen = new Map<string, string>();
+        for (const action of appActions()) {
+          for (const chord of applicableChords(action.chords, surface, platform)) {
+            const label = chordLabel(chord, platform);
+            expect(seen.get(label) ?? action.id).toBe(action.id);
+            seen.set(label, action.id);
+          }
+        }
+      }
+    }
+  });
+
+  test("⌘B toggles the sidebar, as a formatting key with a standard key beside it", () => {
+    const sidebar = appActions().find((candidate) => candidate.id === "view.sidebar")!;
+    for (const platform of ["mac", "other"] as const) {
+      const chords = applicableChords(sidebar.chords, "desktop", platform);
+      expect(chordLabel(chords[0]!, platform)).toBe(platform === "mac" ? "⌘B" : "Ctrl+B");
+      expect(chords[0]!.formatting).toBe(true);
+      // The menu bar takes the first key that is not a formatting key.
+      const menuKey = chords.find((chord) => !chord.formatting)!;
+      expect(chordAccelerator(menuKey)).toBe(
+        platform === "mac" ? "Ctrl+CmdOrCtrl+S" : "CmdOrCtrl+Shift+S",
+      );
+    }
+  });
+});
+
+describe("ranking", () => {
+  test("prefix, then word start, then anywhere, then words in any order, then letters", () => {
+    const query = "deploy";
+    const prefix = rankLabel("Deploy the desktop app", query)!;
+    const wordStart = rankLabel("Fix deploy script", query)!;
+    const inside = rankLabel("Redeploying staging", query)!;
+    expect(prefix).toBeGreaterThan(wordStart);
+    expect(wordStart).toBeGreaterThan(inside);
+    const anyOrder = rankLabel("Fix the deploy script", "script fix")!;
+    expect(anyOrder).toBeLessThan(inside);
+    expect(anyOrder).toBeGreaterThan(rankLabel("Keyboard shortcuts", "kbsh")!);
+  });
+
+  test("ignores case and accents", () => {
+    expect(rankLabel("Møte om økonomi", "møte")).not.toBeNull();
+    expect(rankLabel("Café menu", "cafe")).not.toBeNull();
+    expect(rankLabel("ÅRSOPPGJØR", "årsopp")).not.toBeNull();
+  });
+
+  test("drops scattered letters", () => {
+    expect(rankLabel("A long title about many unrelated things", "zq")).toBeNull();
+    expect(rankLabel("Keyboard shortcuts", "kbsh")).not.toBeNull();
+    expect(rankLabel("Anything", "x")).toBeNull();
+    // Abbreviations start words; letters picked out of the middle of words don't.
+    expect(rankLabel("Refactor billing webhooks", "rbw")).not.toBeNull();
+    expect(rankLabel("Customer churn analysis", "rna")).toBeNull();
+  });
+
+  test("real matches outrank every letters-in-order guess", () => {
+    expect(rankLabel("Pin", "pin")!).toBeGreaterThanOrEqual(LOOSE_MATCH_BELOW);
+    expect(rankLabel("Fix the deploy script", "script fix")!).toBeGreaterThanOrEqual(
+      LOOSE_MATCH_BELOW,
+    );
+    expect(rankLabel("Postgres slow query investigation", "pin")!).toBeLessThan(LOOSE_MATCH_BELOW);
+  });
+
+  test("keywords find an action under another name, a little lower", () => {
+    const direct = rankWithKeywords("Copy link", ["share", "url"], "copy")!;
+    const byKeyword = rankWithKeywords("Copy link", ["share", "url"], "share")!;
+    expect(byKeyword).not.toBeNull();
+    expect(byKeyword).toBeLessThan(direct);
+  });
+});
+
+describe("chat switcher", () => {
+  const record = (id: string, extra: Partial<ChatRecord> = {}): ChatRecord => ({
+    id,
+    workspaceId: "w",
+    title: id,
+    avatar: null,
+    updatedAt: 1,
+    pinned: false,
+    archived: false,
+    parentId: null,
+    parentTitle: null,
+    row: null,
+    readAt: 0,
+    ...extra,
+  });
+  const directory = (recent: string[], records: ChatRecord[] = recent.map((id) => record(id))) => ({
+    recent,
+    rows: new Map(records.map((item) => [item.id, item])),
+  });
+
+  test("a press from a chat goes to the previous chat, and back again", () => {
+    const first = openChatSwitcher(directory(["a", "b", "c"]), "a", false)!;
+    expect(first.ids).toEqual(["a", "b", "c"]);
+    expect(first.ids[first.index]).toBe("b");
+    // Opening b moves it to the front, so the next press returns to a.
+    const second = openChatSwitcher(directory(["b", "a", "c"]), "b", false)!;
+    expect(second.ids[second.index]).toBe("a");
+  });
+
+  test("holding Control and pressing Tab walks down and wraps; Shift walks back", () => {
+    let state = openChatSwitcher(directory(["a", "b", "c"]), "a", false)!;
+    state = stepChatSwitcher(state, 1);
+    expect(state.ids[state.index]).toBe("c");
+    expect(state.visible).toBe(true);
+    state = stepChatSwitcher(state, 1);
+    expect(state.ids[state.index]).toBe("a");
+    state = stepChatSwitcher(state, -1);
+    expect(state.ids[state.index]).toBe("c");
+  });
+
+  test("Shift+Control+Tab starts at the oldest chat", () => {
+    const state = openChatSwitcher(directory(["a", "b", "c"]), "a", true)!;
+    expect(state.ids[state.index]).toBe("c");
+  });
+
+  test("away from a chat the most recent chat is the target", () => {
+    const state = openChatSwitcher(directory(["a", "b"]), null, false)!;
+    expect(state.ids[state.index]).toBe("a");
+  });
+
+  test("the open chat leads even before its visit is recorded", () => {
+    const state = openChatSwitcher(directory(["a", "b"]), "x", false)!;
+    expect(state.ids).toEqual(["x", "a", "b"]);
+    expect(state.ids[state.index]).toBe("a");
+  });
+
+  test("archived chats are left out, and nothing opens with nowhere to go", () => {
+    const rows = [record("a"), record("old", { archived: true })];
+    expect(openChatSwitcher(directory(["a", "old"], rows), "a", false)).toBeNull();
+    expect(openChatSwitcher(directory([]), null, false)).toBeNull();
+  });
+
+  test("a sub-agent chat the person opened is there to go back to", () => {
+    const rows = [record("a"), record("worker", { parentId: "a", parentTitle: "a" })];
+    // Working in the sub-agent chat, a press goes back to its parent...
+    const fromWorker = openChatSwitcher(directory(["worker", "a"], rows), "worker", false)!;
+    expect(fromWorker.ids[fromWorker.index]).toBe("a");
+    // ...and from the parent, straight back to the sub-agent chat.
+    const back = openChatSwitcher(directory(["a", "worker"], rows), "a", false)!;
+    expect(back.ids).toEqual(["a", "worker"]);
+    expect(back.ids[back.index]).toBe("worker");
+    expect(back.viewed).toBe(2);
+  });
+
+  test("sub-agent chats never opened stay out of the carry-on list, unless pinned", () => {
+    const rows = [
+      record("a", { updatedAt: 1 }),
+      record("b", { updatedAt: 2 }),
+      record("worker", { updatedAt: 9, parentId: "a" }),
+      record("pinned-worker", { updatedAt: 3, parentId: "a", pinned: true }),
+    ];
+    const state = openChatSwitcher(directory(["a"], rows), "a", false)!;
+    expect(state.ids).toEqual(["a", "pinned-worker", "b"]);
+    expect(state.viewed).toBe(1);
+    const grown = extendChatSwitcher(
+      state,
+      directory(["a"], [...rows, record("worker-2", { updatedAt: 10, parentId: "b" })]),
+    );
+    expect(grown).toBe(state);
+  });
+
+  test("chats in other workspaces join the list, unless that workspace is gone", () => {
+    const rows = [
+      record("a"),
+      record("b", { workspaceId: "other" }),
+      record("c", { workspaceId: "gone" }),
+    ];
+    const state = openChatSwitcher(
+      directory(["a", "b", "c"], rows),
+      "a",
+      false,
+      (workspaceId) => workspaceId !== "gone",
+    )!;
+    expect(state.ids).toEqual(["a", "b"]);
+    expect(state.ids[state.index]).toBe("b");
+  });
+
+  test("past the opened chats it carries on through other chats by latest activity", () => {
+    const rows = [
+      record("a", { updatedAt: 1 }),
+      record("b", { updatedAt: 2 }),
+      record("older", { updatedAt: 5 }),
+      record("newer", { updatedAt: 9, workspaceId: "other" }),
+      record("gone", { updatedAt: 8, archived: true }),
+      record("child", { updatedAt: 7, parentId: "a" }),
+    ];
+    const state = openChatSwitcher(directory(["a", "b"], rows), "a", false)!;
+    expect(state.ids).toEqual(["a", "b", "newer", "older"]);
+    expect(state.viewed).toBe(2);
+    // Tab keeps going into the older chats before it wraps.
+    let stepped = stepChatSwitcher(state, 1);
+    stepped = stepChatSwitcher(stepped, 1);
+    expect(stepped.ids[stepped.index]).toBe("older");
+  });
+
+  test("with no opened chats yet, the most recently active chat is the target", () => {
+    const rows = [record("a", { updatedAt: 1 }), record("b", { updatedAt: 2 })];
+    const state = openChatSwitcher(directory([], rows), null, false)!;
+    expect(state.ids).toEqual(["b", "a"]);
+    expect(state.viewed).toBe(0);
+    expect(state.ids[state.index]).toBe("b");
+  });
+
+  test("chats that load while it is open join at the end, and nothing else moves", () => {
+    const start = directory(["a", "b"], [record("a"), record("b"), record("c", { updatedAt: 3 })]);
+    const state = stepChatSwitcher(openChatSwitcher(start, "a", false)!, 1);
+    expect(extendChatSwitcher(state, start)).toBe(state);
+    const later = directory(
+      ["a", "b"],
+      [record("a"), record("b"), record("c", { updatedAt: 3 }), record("d", { updatedAt: 9 })],
+    );
+    const grown = extendChatSwitcher(state, later);
+    expect(grown.ids).toEqual(["a", "b", "c", "d"]);
+    expect(grown.index).toBe(state.index);
+    expect(grown.viewed).toBe(2);
+  });
+
+  test("the list stops at its limit", () => {
+    const ids = Array.from({ length: SWITCHER_LIMIT + 20 }, (_, index) => `c${index}`);
+    const rows = Array.from({ length: 30 }, (_, index) =>
+      record(`x${index}`, { updatedAt: index }),
+    );
+    const state = openChatSwitcher(
+      directory(ids, [...ids.map((id) => record(id)), ...rows]),
+      "c0",
+      false,
+    )!;
+    expect(state.ids).toHaveLength(SWITCHER_LIMIT);
+    expect(extendChatSwitcher(state, directory(ids, rows))).toBe(state);
+  });
+
+  test("only Control+Tab opens it", () => {
+    const tab = { code: "Tab", ctrlKey: true, metaKey: false, altKey: false };
+    expect(isSwitcherKey(tab)).toBe(true);
+    expect(isSwitcherKey({ ...tab, metaKey: true })).toBe(false);
+    expect(isSwitcherKey({ ...tab, altKey: true })).toBe(false);
+    expect(isSwitcherKey({ ...tab, ctrlKey: false })).toBe(false);
+    expect(isSwitcherKey({ ...tab, code: "KeyQ" })).toBe(false);
+  });
+});
+
+describe("sub-agent chats in the chat directory", () => {
+  const row = (id: string, extra: Partial<SessionListRow> = {}) =>
+    ({
+      id,
+      workspaceId: "w",
+      parentSessionId: null,
+      title: id,
+      titleSource: "user",
+      status: "idle",
+      createdAt: "2026-11-01T10:00:00.000Z",
+      updatedAt: "2026-11-01T10:00:00.000Z",
+      ...extra,
+    }) as SessionListRow;
+
+  test("a sub-agent chat names its parent, by the parent's latest title", () => {
+    const subject = `subagent-${crypto.randomUUID()}`;
+    rememberChats(subject, [row("worker", { parentSessionId: "lead", title: "Review PR" })]);
+    const rows = () => readChatDirectory(subject, "w").rows;
+    // Not known yet: nothing to say.
+    expect(chatParentTitle(rows(), rows().get("worker")!)).toBeNull();
+    rememberChats(subject, [row("lead", { title: "Release lead" })]);
+    expect(chatParentTitle(rows(), rows().get("worker")!)).toBe("Release lead");
+    rememberChats(subject, [row("lead", { title: "Release lead, v2" })]);
+    expect(chatParentTitle(rows(), rows().get("worker")!)).toBe("Release lead, v2");
+    expect(chatParentTitle(rows(), rows().get("lead")!)).toBeNull();
+  });
+
+  test("only top-level chats and pinned sub-agent chats list as the person's own", () => {
+    expect(listsAsTopLevel({ parentId: null, pinned: false })).toBe(true);
+    expect(listsAsTopLevel({ parentId: "lead", pinned: false })).toBe(false);
+    expect(listsAsTopLevel({ parentId: "lead", pinned: true })).toBe(true);
+  });
+
+  test("an opened sub-agent chat keeps its parent across reloads", () => {
+    const stored = new Map<string, string>();
+    const storage = {
+      getItem: (name: string) => stored.get(name) ?? null,
+      setItem: (name: string, value: string) => void stored.set(name, value),
+      removeItem: (name: string) => void stored.delete(name),
+      key: (index: number) => [...stored.keys()][index] ?? null,
+      get length() {
+        return stored.size;
+      },
+    };
+    const scope = globalThis as { window?: unknown };
+    const previous = scope.window;
+    scope.window = { localStorage: storage };
+    try {
+      const subject = `subagent-${crypto.randomUUID()}`;
+      rememberChats(subject, [row("lead", { title: "Release lead" })]);
+      recordChatVisit(subject, row("worker", { parentSessionId: "lead", title: "Review PR" }));
+      const saved = JSON.parse(stored.get(`opengeni.recentChats.${subject}`)!);
+      expect(saved[0]).toMatchObject({
+        id: "worker",
+        parentId: "lead",
+        parentTitle: "Release lead",
+      });
+      // A later load (another subject id stands in for a fresh page) reads it back.
+      const reloaded = `subagent-${crypto.randomUUID()}`;
+      stored.set(`opengeni.recentChats.${reloaded}`, JSON.stringify(saved));
+      const record = readChatDirectory(reloaded, "w").rows.get("worker")!;
+      expect(record.row).toBeNull();
+      expect(record.parentId).toBe("lead");
+      expect(listsAsTopLevel(record)).toBe(false);
+      expect(chatParentTitle(readChatDirectory(reloaded, "w").rows, record)).toBe("Release lead");
+    } finally {
+      scope.window = previous;
+    }
+  });
+});
+
+describe("workspace keys", () => {
+  const workspaces = [{ id: "a" }, { id: "b" }, { id: "c" }];
+
+  test("previous and next walk the picker's order and wrap around", () => {
+    expect(stepWorkspace(workspaces, "a", 1)).toBe("b");
+    expect(stepWorkspace(workspaces, "c", 1)).toBe("a");
+    expect(stepWorkspace(workspaces, "a", -1)).toBe("c");
+    expect(stepWorkspace(workspaces, "b", -1)).toBe("a");
+  });
+
+  test("one workspace has nowhere to go, and an unknown one starts at an end", () => {
+    expect(stepWorkspace([{ id: "a" }], "a", 1)).toBeNull();
+    expect(stepWorkspace(workspaces, "x", 1)).toBe("a");
+    expect(stepWorkspace(workspaces, "x", -1)).toBe("c");
+  });
+
+  test("⌥⌘↑ and ⌥⌘↓ on Mac, Ctrl+Alt elsewhere, plus Ctrl+Shift+PgUp/PgDn in the desktop app", () => {
+    const next = appActions().find((action) => action.id === "go.nextWorkspace")!;
+    const mac = applicableChords(next.chords, "web", "mac");
+    expect(mac.map((chord) => chordLabel(chord, "mac"))).toEqual(["⌥⌘↓"]);
+    expect(matchesChord(key("ArrowDown", { meta: true, alt: true }), mac[0]!, "mac")).toBe(true);
+    // ⌥↓ alone is the next chat.
+    expect(matchesChord(key("ArrowDown", { alt: true }), mac[0]!, "mac")).toBe(false);
+    expect(
+      applicableChords(next.chords, "web", "other").map((chord) => chordLabel(chord, "other")),
+    ).toEqual(["Ctrl+Alt+↓"]);
+    expect(
+      applicableChords(next.chords, "desktop", "other").map((chord) => chordLabel(chord, "other")),
+    ).toEqual(["Ctrl+Alt+↓", "Ctrl+Shift+PgDn"]);
+    expect(chordAccelerator(mac[0]!)).toBe("CmdOrCtrl+Alt+Down");
+  });
+});
+
+describe("meeting actions", () => {
+  const start = () => appActions().find((action) => action.id === "meetings.start")!;
+  const stop = () => appActions().find((action) => action.id === "meetings.stop")!;
+  function meetingEnv(state: ActionEnv["meetings"]) {
+    const calls: string[] = [];
+    const env = {
+      meetings:
+        state === null
+          ? null
+          : {
+              ...state,
+              start: () => calls.push("start"),
+              show: () => calls.push("show"),
+              stop: () => calls.push("stop"),
+            },
+    } as unknown as ActionEnv;
+    return { env, calls };
+  }
+  const recorder = (recorderState: NonNullable<ActionEnv["meetings"]>["state"]) =>
+    ({ state: recorderState }) as NonNullable<ActionEnv["meetings"]>;
+
+  test("Start recording reads as the Meetings page's button and sits in the File menu", () => {
+    const { env } = meetingEnv(recorder("idle"));
+    expect(actionTitle(start(), env, null)).toBe(
+      englishMessages["meetings.recorderPanel.startRecording"],
+    );
+    expect(start().group).toBe("meetings");
+    expect(start().desktopMenu).toBe("file");
+    expect(stop().desktopMenu).toBe("file");
+    expect(start().keywords).toContain("meeting");
+  });
+
+  test("⌃⌘N on Mac and Ctrl+Alt+N elsewhere, on the web and in the desktop app", () => {
+    for (const surface of ["web", "desktop"] as const) {
+      const mac = applicableChords(start().chords, surface, "mac");
+      expect(mac.map((chord) => chordLabel(chord, "mac"))).toEqual(["⌃⌘N"]);
+      expect(matchesChord(key("KeyN", { meta: true, ctrl: true }), mac[0]!, "mac")).toBe(true);
+      // ⌘N alone is New chat; ⌥⌘N is Safari's New Window.
+      expect(matchesChord(key("KeyN", { meta: true }), mac[0]!, "mac")).toBe(false);
+      expect(matchesChord(key("KeyN", { meta: true, alt: true }), mac[0]!, "mac")).toBe(false);
+      const other = applicableChords(start().chords, surface, "other");
+      expect(other.map((chord) => chordLabel(chord, "other"))).toEqual(["Ctrl+Alt+N"]);
+      expect(matchesChord(key("KeyN", { ctrl: true, alt: true }), other[0]!, "other")).toBe(true);
+      // Ctrl+Shift+N is the browsers' private window.
+      expect(matchesChord(key("KeyN", { ctrl: true, shift: true }), other[0]!, "other")).toBe(
+        false,
+      );
+    }
+    expect(chordAccelerator(applicableChords(start().chords, "desktop", "mac")[0]!)).toBe(
+      "Ctrl+CmdOrCtrl+N",
+    );
+    expect(chordAccelerator(applicableChords(start().chords, "desktop", "other")[0]!)).toBe(
+      "CmdOrCtrl+Alt+N",
+    );
+    // Stopping a meeting has no key, so a stray press never ends one.
+    expect(stop().chords ?? []).toEqual([]);
+  });
+
+  test("AltGr+N typing on Windows never starts a recording", () => {
+    const chord = applicableChords(start().chords, "web", "other")[0]!;
+    const altGr = {
+      ...key("KeyN", { ctrl: true, alt: true, key: "ń" }),
+      getModifierState: (modifier: string) => modifier === "AltGraph",
+    };
+    expect(matchesChord(altGr, chord, "other")).toBe(false);
+  });
+
+  test("hidden where meetings don't record; while one records it goes there and Stop joins", () => {
+    expect(start().available(meetingEnv(null).env, null)).toBe(false);
+    expect(stop().available(meetingEnv(null).env, null)).toBe(false);
+
+    // Before the capture code loads, Start starts as soon as it has.
+    const loading = meetingEnv(recorder(null));
+    expect(start().available(loading.env, null)).toBe(true);
+    void start().run(loading.env, null);
+    expect(loading.calls).toEqual(["start"]);
+
+    // After a recording stopped or failed, it starts the next one.
+    for (const state of ["idle", "stopped", "failed"] as const) {
+      const view = meetingEnv(recorder(state));
+      expect(actionTitle(start(), view.env, null)).toBe("Start recording");
+      expect(stop().available(view.env, null)).toBe(false);
+      void start().run(view.env, null);
+      expect(view.calls).toEqual(["start"]);
+    }
+
+    for (const state of ["starting", "recording", "paused", "stopping"] as const) {
+      const view = meetingEnv(recorder(state));
+      expect(start().available(view.env, null)).toBe(true);
+      expect(actionTitle(start(), view.env, null)).toBe("Go to recording");
+      void start().run(view.env, null);
+      expect(view.calls).toEqual(["show"]);
+      expect(stop().available(view.env, null)).toBe(state === "recording" || state === "paused");
+    }
+    const recording = meetingEnv(recorder("recording"));
+    void stop().run(recording.env, null);
+    expect(recording.calls).toEqual(["stop"]);
+  });
+});

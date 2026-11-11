@@ -1,11 +1,14 @@
 import type {
   ResourceRef,
   ScheduledTask,
+  ScheduledTaskEvents,
   ScheduledTaskScheduleSpec,
   ToolRef,
 } from "@opengeni/contracts";
 
 export const SCHEDULED_TASK_MCP_MAX_BYTES = 64 * 1024;
+/** Event triggers keep their conditions in a summary while they fit this. */
+export const SCHEDULED_TASK_EVENTS_MCP_MAX_BYTES = 8 * 1024;
 export const SCHEDULED_TASK_NAME_MAX_BYTES = 512;
 export const SCHEDULED_TASK_PROMPT_MAX_BYTES = 8 * 1024;
 export const SCHEDULED_TASK_SCHEDULE_FIELD_MAX_BYTES = 256;
@@ -253,6 +256,45 @@ function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
+/**
+ * An automation's event triggers and run policy. Conditions and MCP arguments
+ * give way to their counts when they would not fit.
+ */
+function scheduledTaskEventsMcp(events: ScheduledTaskEvents) {
+  const policy = {
+    once: events.once,
+    maxRunsPerHour: events.maxRunsPerHour,
+    completedAt: events.completedAt,
+    throttledSince: events.throttledSince,
+  };
+  const trigger = (entry: ScheduledTaskEvents["triggers"][number]) => ({
+    id: entry.id,
+    sourceId: entry.sourceId,
+    sourceKind: entry.sourceKind,
+    eventTypes: entry.eventTypes,
+    includeOwnEvents: entry.includeOwnEvents,
+    status: entry.status,
+    ...(entry.statusReason ? { statusReason: entry.statusReason } : {}),
+  });
+  const full = {
+    ...policy,
+    triggers: events.triggers.map((entry) => ({
+      ...trigger(entry),
+      conditions: entry.conditions,
+      ...(entry.arguments ? { arguments: entry.arguments } : {}),
+    })),
+  };
+  if (jsonBytes(full) <= SCHEDULED_TASK_EVENTS_MCP_MAX_BYTES) return full;
+  return {
+    ...policy,
+    triggers: events.triggers.map((entry) => ({
+      ...trigger(entry),
+      conditionCount: entry.conditions.length,
+      hasArguments: entry.arguments !== null,
+    })),
+  };
+}
+
 function mcpJsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value, null, 2), "utf8");
 }
@@ -309,6 +351,9 @@ function toolIdentity(
 
 export function scheduledTaskMcpSummary(task: ScheduledTask) {
   const action = task.action ?? ({ kind: "agent_turn" } as const);
+  const inheritsSessionSettings =
+    task.runMode === "existing_session" ||
+    (task.runMode === "reusable_session" && Boolean(task.reusableSessionId));
   const name = projectScheduledTaskUtf8(task.name, SCHEDULED_TASK_NAME_MAX_BYTES);
   const schedule = projectScheduledTaskSchedule(task.schedule);
   const model = task.agentConfig.model
@@ -319,6 +364,7 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
   const result = {
     id: task.id,
     name: name.value,
+    executionDigest: task.executionDigest,
     status: task.status,
     schedule: schedule.schedule,
     runMode: task.runMode,
@@ -345,18 +391,27 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
           },
     targetSessionId: task.targetSessionId,
     reusableSessionId: task.reusableSessionId,
-    variableSetId: task.variableSetId,
     rigId: task.rigId,
+    ...(task.events ? { events: scheduledTaskEventsMcp(task.events) } : {}),
     createdAt: createdAt.value,
     updatedAt: updatedAt.value,
     configuration: {
-      model: model?.value ?? null,
-      reasoningEffort: task.agentConfig.reasoningEffort ?? null,
-      sandboxBackend: task.agentConfig.sandboxBackend ?? null,
+      source: inheritsSessionSettings ? "target_session" : "task_defaults",
+      model: inheritsSessionSettings ? null : (model?.value ?? null),
+      reasoningEffort: inheritsSessionSettings ? null : (task.agentConfig.reasoningEffort ?? null),
+      sandboxBackend: inheritsSessionSettings ? null : (task.agentConfig.sandboxBackend ?? null),
+      executionTarget: inheritsSessionSettings ? null : (task.agentConfig.executionTarget ?? null),
       hasGoal: task.agentConfig.goal !== undefined,
       promptBytes: Buffer.byteLength(task.agentConfig.prompt, "utf8"),
       resourceCount: task.agentConfig.resources.length,
       toolCount: task.agentConfig.tools.length,
+      // Where a run's connectors come from: the chat it posts into, the
+      // workspace defaults at run time (plus `tools`), or exactly `tools`.
+      connectors: inheritsSessionSettings
+        ? "target_session"
+        : task.agentConfig.toolPolicy
+          ? "workspace_default"
+          : "listed",
       metadataKeyCount: Object.keys(task.agentConfig.metadata).length,
       taskMetadataKeyCount: Object.keys(task.metadata).length,
     },
@@ -379,6 +434,41 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
     },
   );
   return result;
+}
+
+/** Exact bounded text; JSON escapes preserve even legacy lone UTF-16 units. */
+export function scheduledTaskPromptPage(
+  task: ScheduledTask,
+  offset: number,
+  expectedExecutionDigest?: string,
+) {
+  if (offset > 0 && !expectedExecutionDigest)
+    throw new Error("Continue with the executionDigest from the first prompt page");
+  if (expectedExecutionDigest !== undefined && expectedExecutionDigest !== task.executionDigest)
+    throw new Error("Scheduled task changed. Restart the prompt read at offset 0.");
+  const text = task.agentConfig.prompt;
+  if (!Number.isInteger(offset) || offset < 0 || offset > text.length)
+    throw new Error("Invalid prompt offset");
+  const splitsPair = (at: number) =>
+    at > 0 &&
+    at < text.length &&
+    /[\uD800-\uDBFF]/.test(text[at - 1]!) &&
+    /[\uDC00-\uDFFF]/.test(text[at]!);
+  if (splitsPair(offset))
+    throw new Error("Prompt offset splits a surrogate pair; use nextOffset from the previous page");
+  let end = Math.min(text.length, offset + 2048);
+  if (splitsPair(end)) end -= 1;
+  return {
+    id: task.id,
+    executionDigest: task.executionDigest,
+    prompt: {
+      text: text.slice(offset, end),
+      offset,
+      nextOffset: end < text.length ? end : null,
+      totalLength: text.length,
+      unit: "utf16" as const,
+    },
+  };
 }
 
 function buildScheduledTaskDetailMcp(
@@ -419,12 +509,16 @@ function buildScheduledTaskDetailMcp(
         prompt: prompt.value,
         resources,
         tools,
+        ...(task.agentConfig.toolPolicy
+          ? { excludedDefaultConnectors: task.agentConfig.toolPolicy.excludedMcpServerIds }
+          : {}),
         metadataKeys,
         model: task.agentConfig.model
           ? projectScheduledTaskUtf8(task.agentConfig.model, SCHEDULED_TASK_MODEL_MAX_BYTES).value
           : null,
         reasoningEffort: task.agentConfig.reasoningEffort ?? null,
         sandboxBackend: task.agentConfig.sandboxBackend ?? null,
+        executionTarget: task.agentConfig.executionTarget ?? null,
         goal: goalText
           ? {
               text: goalText.value,
@@ -434,6 +528,18 @@ function buildScheduledTaskDetailMcp(
           : null,
       },
       taskMetadataKeys,
+      slackPosting: {
+        configurationKind: "legacy_destination_default",
+        requiredForBotPosting: false,
+        identity: task.agentConfig.slackBotConnectionId ? "opengeni_bot" : null,
+        connectionId: task.agentConfig.slackBotConnectionId ?? null,
+        channelId: task.agentConfig.slackBotChannelId ?? null,
+        configured: Boolean(
+          task.agentConfig.slackBotConnectionId && task.agentConfig.slackBotChannelId,
+        ),
+        setup:
+          "Use the available workspace Slack bot tools with the requested Slack workspace and channel. Saved destinations are defaults for older tasks. Personal Slack tools send as the connected person and must not substitute for a requested bot.",
+      },
     },
     detailProjection: {
       bounded: true,
@@ -516,6 +622,7 @@ export function boundScheduledTaskDetailMcp(task: ScheduledTask) {
         model: null,
         reasoningEffort: task.agentConfig.reasoningEffort ?? null,
         sandboxBackend: task.agentConfig.sandboxBackend ?? null,
+        executionTarget: task.agentConfig.executionTarget ?? null,
         goal: goalText
           ? {
               text: goalText.value,

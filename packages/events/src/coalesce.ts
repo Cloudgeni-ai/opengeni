@@ -10,6 +10,28 @@ const COALESCIBLE_DELTA_TYPES = new Set([
 export const SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES = 48 * 1024;
 const encoder = new TextEncoder();
 
+/**
+ * Some providers stream each reasoning summary part as its own delta
+ * ("**Checking the workspace**", then "**Inspecting guidance**"). Readers join
+ * reasoning fragments with this separator, so a part that opens bold right
+ * after one that closed bold starts a new paragraph instead of colliding
+ * ("****"). Every place that merges reasoning fragments (the worker's
+ * write-time merge, this read-side coalescer, the React projection) must use
+ * the same rule and preserve ambiguous split-marker boundaries when coalescing.
+ */
+export function reasoningDeltaSeparator(previous: string, next: string): string {
+  return previous.endsWith("**") && next.startsWith("**") ? "\n\n" : "";
+}
+
+/** A lone star cannot absorb another star without changing how a preceding
+ * fragment joins this run. For example, ['*', '*', '**b'] must not become
+ * ['*', '***b']. For every other nonempty run its first/last two characters
+ * determine the separator independently of earlier text; an empty run is an
+ * identity. Keep this boundary in both write-time and read-time coalescing. */
+export function canMergeReasoningDelta(previous: string, next: string): boolean {
+  return previous !== "*" || !next.startsWith("*");
+}
+
 export type CoalescedSessionEventPage = {
   events: SessionEvent[];
   /** Durable raw sequence covered by each returned synthetic event sequence. */
@@ -97,16 +119,20 @@ export function coalesceSessionEventDeltasWithCoverage(
       run.sandboxStream === sandboxStream &&
       run.sandboxCommandId === sandboxCommandId &&
       run.messageId === messageId &&
-      run.phase === phase
+      run.phase === phase &&
+      (event.type !== "agent.reasoning.delta" || canMergeReasoningDelta(run.text, text))
     ) {
-      const textBytes = encoder.encode(text).byteLength;
+      const piece =
+        (event.type === "agent.reasoning.delta" ? reasoningDeltaSeparator(run.text, text) : "") +
+        text;
+      const textBytes = encoder.encode(piece).byteLength;
       if (
         (run.textBytes === 0 && textBytes <= SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES) ||
         run.textBytes + textBytes <= SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES
       ) {
-        run.text += text;
+        run.text += piece;
         run.textBytes += textBytes;
-        run.lastSequence = event.sequence;
+        run.lastSequence = storedCoverageEnd(event);
         continue;
       }
       // The current segment is already useful and bounded. Flush before adding
@@ -119,7 +145,7 @@ export function coalesceSessionEventDeltasWithCoverage(
 
     run = {
       first: event,
-      lastSequence: event.sequence,
+      lastSequence: storedCoverageEnd(event),
       text,
       textBytes: encoder.encode(text).byteLength,
       sandboxName,
@@ -132,6 +158,18 @@ export function coalesceSessionEventDeltasWithCoverage(
 
   flush();
   return { events: coalesced, coveredThroughBySequence };
+}
+
+/**
+ * A stored delta may already cover later sequences: a folded run (see
+ * docs/session-storage-lifecycle.md) keeps `coalescedUntil`, the last sequence
+ * whose text it holds.
+ */
+function storedCoverageEnd(event: SessionEvent): number {
+  const until = asRecord(event.payload).coalescedUntil;
+  return typeof until === "number" && Number.isSafeInteger(until) && until > event.sequence
+    ? until
+    : event.sequence;
 }
 
 function isCoalescibleDelta(event: SessionEvent): boolean {

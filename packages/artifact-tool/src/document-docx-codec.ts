@@ -49,6 +49,7 @@ import {
   type DocumentTableStyle,
   type DocumentTextStyle,
 } from "./document";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 export {
   DOCX_MEDIA_TYPE,
@@ -123,8 +124,8 @@ export async function exportDocx(
     comments: { children: context.commentDefinitions },
     features: { trackRevisions: document.trackRevisions },
     evenAndOddHeaderAndFooters,
-    creator: "OpenGeni",
-    lastModifiedBy: "OpenGeni",
+    creator: "Opengeni",
+    lastModifiedBy: "Opengeni",
     revision: document.revision,
   });
   const bytes = await packDocxWithBoundedCompression(file, docx.Packer, [
@@ -2039,7 +2040,7 @@ function deterministicCoreProperties(revision: number): string {
   return (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">' +
-    "<dc:creator>OpenGeni</dc:creator><cp:lastModifiedBy>OpenGeni</cp:lastModifiedBy>" +
+    "<dc:creator>Opengeni</dc:creator><cp:lastModifiedBy>Opengeni</cp:lastModifiedBy>" +
     `<cp:revision>${revision}</cp:revision></cp:coreProperties>`
   );
 }
@@ -2205,13 +2206,6 @@ function denseDataArray(value: unknown, maximum: number, label: string): unknown
 
 async function documentModelDigest(document: Document): Promise<string> {
   return sha256Hex(new TextEncoder().encode(JSON.stringify(document.toJSON())));
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const ownedBytes = new Uint8Array(bytes.byteLength);
-  ownedBytes.set(bytes);
-  const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", ownedBytes));
-  return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function semanticNamespace(value: ImportedDocument): Promise<string> {

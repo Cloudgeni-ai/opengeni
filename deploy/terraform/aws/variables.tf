@@ -87,17 +87,19 @@ variable "kubernetes_workload_identity" {
 }
 
 variable "postgres" {
-  description = "Postgres mode. Use managed for RDS PostgreSQL or external to connect an existing compatible server."
+  description = "Postgres mode. Use managed for RDS PostgreSQL or external to connect an existing compatible server. Managed RDS admits the created VPC CIDR (network.create_vpc = true) or the EKS cluster security group (network.create_vpc = false); allowed_client_cidrs and allowed_security_group_ids add further explicit clients."
   type = object({
-    mode                   = string
-    existing_host          = optional(string)
-    engine_version         = optional(string, "16.3")
-    instance_class         = optional(string, "db.t4g.medium")
-    allocated_storage      = optional(number, 32)
-    administrator_login    = optional(string, "opengeni")
-    administrator_password = optional(string)
-    deletion_protection    = optional(bool, true)
-    skip_final_snapshot    = optional(bool, false)
+    mode                       = string
+    existing_host              = optional(string)
+    engine_version             = optional(string, "16.3")
+    instance_class             = optional(string, "db.t4g.medium")
+    allocated_storage          = optional(number, 32)
+    administrator_login        = optional(string, "opengeni")
+    administrator_password     = optional(string)
+    deletion_protection        = optional(bool, true)
+    skip_final_snapshot        = optional(bool, false)
+    allowed_client_cidrs       = optional(list(string), [])
+    allowed_security_group_ids = optional(list(string), [])
   })
   default = {
     mode = "external"
@@ -116,6 +118,20 @@ variable "postgres" {
   validation {
     condition     = var.deployment_phase != "complete" || var.postgres.mode != "managed" || try(length(var.postgres.administrator_password) >= 16, false)
     error_message = "postgres.administrator_password with at least 16 characters is required when postgres.mode is managed and deployment_phase is complete."
+  }
+
+  validation {
+    condition = alltrue([
+      for cidr in var.postgres.allowed_client_cidrs :
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", cidr)) &&
+      try(cidrsubnet(cidr, 0, 0) == cidr && tonumber(split("/", cidr)[1]) >= 8, false)
+    ])
+    error_message = "postgres.allowed_client_cidrs entries must be IPv4 CIDR blocks in network form (for example 10.20.0.0/16, not 10.20.1.5/16) with a prefix of /8 or longer; 0.0.0.0/0 and other near-global ranges are rejected."
+  }
+
+  validation {
+    condition     = alltrue([for sg in var.postgres.allowed_security_group_ids : can(regex("^sg-([0-9a-f]{8}|[0-9a-f]{17})$", sg))])
+    error_message = "postgres.allowed_security_group_ids entries must be EC2 security group ids: sg- followed by exactly 8 or 17 lowercase hexadecimal characters."
   }
 }
 

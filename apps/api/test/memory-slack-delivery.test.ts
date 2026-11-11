@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ClaimedMemorySlackPublication } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { SlackBotProviderError } from "../src/integrations/slack-bot";
 import {
   formatMemorySlackPublicationMessage,

@@ -83,20 +83,75 @@ export async function completeSelfServiceOrganizationSetup(
     organizationName: string;
     operationId: string;
     requestFingerprint: string;
+    /** Legacy compatibility flag; eligibility issuance is unconditional after migration 0845. */
     trialCreditsEnabled?: boolean;
+    trialCreditModelIds?: string[] | undefined;
   },
 ): Promise<CompleteSelfServiceOrganizationSetupResponseType> {
+  return (await completeSelfServiceOrganizationSetupWithSignupNetwork(db, input)).setup;
+}
+
+/** Keyed hashes of the trusted client network; never the address itself. */
+export type SignupNetworkSource = { addressHash: string; prefixHash: string };
+
+/**
+ * {@link completeSelfServiceOrganizationSetup} that also hands the setup
+ * receipt trigger the signup network (migration 1354). A new self-serve
+ * organization records it and may be refused with SQLSTATE OG429 by the
+ * network rate limit; an idempotent replay records and refuses nothing.
+ * `evaluateAccountIds` lists the accounts to evaluate after commit (this one
+ * first, then recent same-network organizations), empty when detection is off.
+ */
+export async function completeSelfServiceOrganizationSetupWithSignupNetwork(
+  db: Database,
+  input: {
+    authUserId: string;
+    actorSubjectId: string;
+    organizationName: string;
+    operationId: string;
+    requestFingerprint: string;
+    /** Legacy compatibility flag; eligibility issuance is unconditional after migration 0845. */
+    trialCreditsEnabled?: boolean;
+    trialCreditModelIds?: string[] | undefined;
+    signupNetwork?: SignupNetworkSource | null;
+  },
+): Promise<{
+  setup: CompleteSelfServiceOrganizationSetupResponseType;
+  evaluateAccountIds: string[];
+}> {
   return await db.transaction(async (tx) => {
     const txDb = tx as unknown as Database;
     await setSubjectRlsContext(txDb, input.actorSubjectId);
     // Transaction-local and set by the trusted API, never the request body.
-    // The AFTER INSERT receipt trigger handles the grant atomically with setup;
-    // replaying an old receipt cannot create a new grant after launch.
+    // The AFTER INSERT trigger records non-monetary Free eligibility atomically
+    // with setup. Keep the legacy GUC for pre-0845 compatibility; it cannot
+    // enable a monetary signup bonus on the current schema.
     await rawRows(
       txDb,
       sql`select pg_catalog.set_config(
       'opengeni.verified_signup_trial_enabled',
       ${input.trialCreditsEnabled === true ? "on" : "off"}, true
+    )`,
+    );
+    await rawRows(
+      txDb,
+      sql`select pg_catalog.set_config(
+      'opengeni.signup_credit_model_ids',
+      ${input.trialCreditModelIds ? JSON.stringify(input.trialCreditModelIds) : ""}, true
+    )`,
+    );
+    await rawRows(
+      txDb,
+      sql`select pg_catalog.set_config(
+      'opengeni.signup_network_source',
+      ${
+        input.signupNetwork
+          ? JSON.stringify({
+              addressHash: input.signupNetwork.addressHash,
+              prefixHash: input.signupNetwork.prefixHash,
+            })
+          : ""
+      }, true
     )`,
     );
     const [row] = await rawRows<{ result: unknown }>(
@@ -111,7 +166,16 @@ export async function completeSelfServiceOrganizationSetup(
         })}::jsonb
       ) as result`,
     );
-    return CompleteSelfServiceOrganizationSetupResponse.parse(row?.result);
+    const setup = CompleteSelfServiceOrganizationSetupResponse.parse(row?.result);
+    // Set only by the receipt trigger of this transaction, for a new receipt.
+    const [evaluate] = await rawRows<{ ids: string | null }>(
+      txDb,
+      sql`select pg_catalog.current_setting('opengeni.signup_network_evaluate_accounts', true) as ids`,
+    );
+    const evaluateAccountIds = (evaluate?.ids ?? "")
+      .split(",")
+      .filter((id) => /^[0-9a-f-]{36}$/u.test(id));
+    return { setup, evaluateAccountIds };
   });
 }
 
