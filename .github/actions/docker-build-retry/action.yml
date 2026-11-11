@@ -1,0 +1,106 @@
+name: Docker build with one retry
+description: >-
+  Runs docker/build-push-action and, if it fails, runs it once more with the
+  same inputs. Image builds fetch from GitHub releases, Debian snapshots and
+  the Actions cache, and any of those can fail for a moment (a corrupt
+  download fails its checksum, a cache blob goes missing, a mirror answers
+  503). The builder keeps the layers the first attempt finished, so the retry
+  only redoes what failed. A Dockerfile or source error fails both attempts.
+inputs:
+  context:
+    description: Build context.
+    required: true
+  file:
+    description: Dockerfile path.
+    required: true
+  target:
+    description: Build stage.
+    required: false
+    default: ""
+  platforms:
+    description: Target platforms.
+    required: false
+    default: ""
+  build-args:
+    description: Build arguments.
+    required: false
+    default: ""
+  build-contexts:
+    description: Additional named build contexts.
+    required: false
+    default: ""
+  outputs:
+    description: Build outputs (for example type=cacheonly for a cache-warming build).
+    required: false
+    default: ""
+  provenance:
+    description: Provenance attestation setting.
+    required: false
+    default: ""
+  push:
+    description: Whether to push the image.
+    required: false
+    default: "false"
+  tags:
+    description: Image tags.
+    required: false
+    default: ""
+  labels:
+    description: Image labels.
+    required: false
+    default: ""
+  cache-from:
+    description: Cache sources.
+    required: false
+    default: ""
+  cache-to:
+    description: Cache destinations.
+    required: false
+    default: ""
+outputs:
+  digest:
+    description: Image digest from the attempt that succeeded.
+    value: ${{ steps.first.outcome == 'success' && steps.first.outputs.digest || steps.retry.outputs.digest }}
+runs:
+  using: composite
+  steps:
+    - name: Build image
+      id: first
+      continue-on-error: true
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.file }}
+        target: ${{ inputs.target }}
+        platforms: ${{ inputs.platforms }}
+        build-args: ${{ inputs.build-args }}
+        build-contexts: ${{ inputs.build-contexts }}
+        outputs: ${{ inputs.outputs }}
+        provenance: ${{ inputs.provenance }}
+        push: ${{ inputs.push }}
+        tags: ${{ inputs.tags }}
+        labels: ${{ inputs.labels }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+    - name: Report the failed attempt
+      if: ${{ steps.first.outcome == 'failure' }}
+      shell: bash
+      run: echo "::warning::Image build attempt 1 failed; building once more with the same inputs"
+    - name: Build image again
+      id: retry
+      if: ${{ steps.first.outcome == 'failure' }}
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.file }}
+        target: ${{ inputs.target }}
+        platforms: ${{ inputs.platforms }}
+        build-args: ${{ inputs.build-args }}
+        build-contexts: ${{ inputs.build-contexts }}
+        outputs: ${{ inputs.outputs }}
+        provenance: ${{ inputs.provenance }}
+        push: ${{ inputs.push }}
+        tags: ${{ inputs.tags }}
+        labels: ${{ inputs.labels }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
