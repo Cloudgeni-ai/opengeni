@@ -370,6 +370,36 @@ test("an automatic restore from an older save tells the person when that save wa
   ).toEqual([]);
 });
 
+test("a safety refusal recovery says which tool results left the agent's context", () => {
+  const recovery = (sequence: number, extra: Record<string, unknown>) =>
+    event(sequence, "turn.recovery.requested", {
+      reason: "provider_safety_refusal",
+      code: "provider_safety_refusal",
+      retryable: false,
+      ...extra,
+    });
+  const notices = (events: SessionEvent[]) =>
+    buildTimeline(englishText, events).filter((item) => item.kind === "notice");
+  expect(
+    notices([recovery(1, { omittedToolResults: 1, omittedToolNames: ["exec_command"] })]),
+  ).toEqual([
+    expect.objectContaining({
+      tone: "input",
+      text: "The model provider's safety system refused a request, so a tool result from exec_command was removed from the agent's context. The agent continued without it.",
+    }),
+  ]);
+  expect(notices([recovery(1, { omittedToolResults: 2 })])).toEqual([
+    expect.objectContaining({
+      text: "The model provider's safety system refused a request, so 2 tool results were removed from the agent's context. The agent continued without them.",
+    }),
+  ]);
+  // Every other recovery request stays out of the conversation.
+  expect(
+    notices([event(1, "turn.recovery.requested", { reason: "provider_unavailable" })]),
+  ).toEqual([]);
+  expect(notices([recovery(1, {})])).toEqual([]);
+});
+
 function event(
   sequence: number,
   type: string,

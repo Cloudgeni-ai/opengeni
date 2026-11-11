@@ -1,5 +1,20 @@
 # Modular prompt changelog
 
+A provider safety refusal no longer leaves a chat refusing every later request.
+When the refused request added tool results after the provider's last accepted
+response, those results are marked on their stored rows and later requests
+(including compaction) carry a short note in place of each result body, so
+every call stays settled; the same turn then continues once. Only items that no
+accepted request contained change, so the cached prefix still applies. A
+compaction summary refused for safety now installs the existing trimmed
+checkpoint note instead of failing. No system prompt, developer prompt, tool
+schema or earlier-sent message changes. The note replaces the refused body
+(195 characters):
+
+```text
++ tool result body (refused request only): [Opengeni removed this tool result: the model provider's safety system refused the request that contained it. Continue without it, and avoid bringing the same content back into the conversation.]
+```
+
 The "Repository skills" system-prompt section no longer changes between turns
 of one chat. It used to carry the live index (or an unreachable, degraded or
 deferred notice), so a repository Skill added mid-chat, an offline Connected

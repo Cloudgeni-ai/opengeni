@@ -38,6 +38,7 @@ import {
   projectHistoryForProvider,
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,
+  projectSafetyRefusedToolResult,
   hasOpaqueProviderArtifact,
   type HistoryProviderApi,
   type OpenGeniRuntime,
@@ -60,6 +61,7 @@ export function projectServingProviderArtifacts(
     turnId?: string | null;
     position: number;
     providerArtifactInvalidatedAt?: Date | null;
+    providerArtifactInvalidationReason?: string | null;
   }>,
   options: {
     enabled?: boolean;
@@ -115,12 +117,21 @@ export function projectRejectedProviderArtifacts(
   rows: ReadonlyArray<{
     item: Record<string, unknown>;
     providerArtifactInvalidatedAt?: Date | null;
+    providerArtifactInvalidationReason?: string | null;
   }>,
 ): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
   for (const row of rows) {
     if (!row.providerArtifactInvalidatedAt) {
       out.push(row.item);
+      continue;
+    }
+    // A tool result that was in a request the provider's safety system
+    // refused keeps settling its call, with a short note in place of its body.
+    // Such rows follow the last response the provider accepted, so no
+    // accepted request ever contained the replaced text.
+    if (row.providerArtifactInvalidationReason === "provider_safety_refusal") {
+      out.push(projectSafetyRefusedToolResult(row.item));
       continue;
     }
     const type = typeof row.item.type === "string" ? row.item.type : undefined;

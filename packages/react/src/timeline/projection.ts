@@ -1635,6 +1635,35 @@ export function buildTimeline(
         // Recovery requests are durable control-plane evidence, not a user
         // message or proof that recovery succeeded. Live state already exposes
         // a genuinely recovering session; keep the raw event in Debug/audit.
+        // The one exception says what left the agent's context: tool results
+        // removed after the provider's safety system refused a request.
+        const omitted = numberOrNull(payload.omittedToolResults);
+        if (
+          payload.reason === "provider_safety_refusal" &&
+          omitted !== null &&
+          omitted > 0 &&
+          !event.duplicateOfEventId
+        ) {
+          const tools = Array.isArray(payload.omittedToolNames)
+            ? payload.omittedToolNames.filter(
+                (name): name is string => typeof name === "string" && name.length > 0,
+              )
+            : [];
+          closeStreamingTail();
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "input",
+            text:
+              tools.length > 0
+                ? t("timeline.projection.refusedToolResultsRemovedFrom", {
+                    count: omitted,
+                    tools: tools.join(", "),
+                  })
+                : t("timeline.projection.refusedToolResultsRemoved", { count: omitted }),
+            occurredAt: event.occurredAt,
+          });
+        }
         if (turnId) {
           startupRecoveryRevisionByTurn.set(
             turnId,

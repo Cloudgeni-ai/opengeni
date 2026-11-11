@@ -146,6 +146,12 @@ export type ActiveSessionHistoryRow = {
   turnId: string | null;
   item: Record<string, unknown>;
   providerArtifactInvalidatedAt: Date | null;
+  /**
+   * Why the provider made this row unusable as it is (see
+   * `providerArtifactInvalidation` on turn recovery); null or absent when it
+   * is not invalidated.
+   */
+  providerArtifactInvalidationReason?: string | null;
 };
 
 /** How an over-limit history was bounded for compaction. */
@@ -743,6 +749,7 @@ async function pageActiveHistory(
       elided: boolean;
       itemCodecVersion: number | null;
       providerArtifactInvalidatedAt: Date | null;
+      providerArtifactInvalidationReason: string | null;
     }> = await scopedDb
       .select({
         id: history.id,
@@ -752,6 +759,7 @@ async function pageActiveHistory(
         elided,
         itemCodecVersion: history.itemCodecVersion,
         providerArtifactInvalidatedAt: history.providerArtifactInvalidatedAt,
+        providerArtifactInvalidationReason: history.providerArtifactInvalidationReason,
       })
       .from(history)
       .where(

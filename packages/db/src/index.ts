@@ -89042,12 +89042,34 @@ export type RequestSessionTurnRecoveryInput = {
    */
   subscriptionLeaseBusy?: { startedAt: string; executionGeneration: number };
   fromStatuses?: SessionTurnStatus[];
+  /**
+   * Rows the provider's refusal of this attempt's request makes unusable as
+   * they are, marked on the exact rows (never rewritten) so later model reads
+   * project them. `encrypted_content_rejected` marks opaque reasoning and
+   * compaction artifacts; `provider_safety_refusal` marks tool results, whose
+   * body the projection then replaces with a short note.
+   */
   providerArtifactInvalidation?: {
     historyItemIds: string[];
     runStateId?: string;
-    reason: "encrypted_content_rejected";
+    reason: "encrypted_content_rejected" | "provider_safety_refusal";
   };
 };
+
+/**
+ * History item types a `provider_safety_refusal` invalidation may mark: tool
+ * results, whose body the model-facing projection replaces while the item
+ * still settles its call. The same set as the runtime's omissible tool results.
+ */
+export const SAFETY_REFUSAL_OMISSIBLE_HISTORY_TYPES: readonly string[] = [
+  "function_call_result",
+  "function_call_output",
+  "custom_tool_call_output",
+  "program_output",
+  "apply_patch_call_output",
+  "computer_call_result",
+  "shell_call_output",
+];
 
 export type RequestSessionTurnRecoveryResult =
   | {
@@ -89506,6 +89528,21 @@ export async function requestSessionTurnRecovery(
       let providerArtifactsInvalidated = 0;
       if (input.providerArtifactInvalidation) {
         const historyItemIds = [...new Set(input.providerArtifactInvalidation.historyItemIds)];
+        const invalidatedKind =
+          input.providerArtifactInvalidation.reason === "provider_safety_refusal"
+            ? sql`${schema.sessionHistoryItems.item} ->> 'type' in (${sql.join(
+                SAFETY_REFUSAL_OMISSIBLE_HISTORY_TYPES.map((type) => sql`${type}`),
+                sql`, `,
+              )})`
+            : and(
+                sql`${schema.sessionHistoryItems.item} ->> 'type' in ('reasoning', 'compaction')`,
+                sql`(
+                      nullif(${schema.sessionHistoryItems.item} ->> 'encrypted_content', '') is not null
+                      or nullif(${schema.sessionHistoryItems.item} ->> 'encryptedContent', '') is not null
+                      or nullif(${schema.sessionHistoryItems.item} -> 'providerData' ->> 'encrypted_content', '') is not null
+                      or nullif(${schema.sessionHistoryItems.item} -> 'providerData' ->> 'encryptedContent', '') is not null
+                    )`,
+              );
         const invalidatedHistory =
           historyItemIds.length > 0
             ? await tx
@@ -89523,13 +89560,7 @@ export async function requestSessionTurnRecovery(
                     eq(schema.sessionHistoryItems.active, true),
                     inArray(schema.sessionHistoryItems.id, historyItemIds),
                     isNull(schema.sessionHistoryItems.providerArtifactInvalidatedAt),
-                    sql`${schema.sessionHistoryItems.item} ->> 'type' in ('reasoning', 'compaction')`,
-                    sql`(
-                      nullif(${schema.sessionHistoryItems.item} ->> 'encrypted_content', '') is not null
-                      or nullif(${schema.sessionHistoryItems.item} ->> 'encryptedContent', '') is not null
-                      or nullif(${schema.sessionHistoryItems.item} -> 'providerData' ->> 'encrypted_content', '') is not null
-                      or nullif(${schema.sessionHistoryItems.item} -> 'providerData' ->> 'encryptedContent', '') is not null
-                    )`,
+                    invalidatedKind,
                   ),
                 )
                 .returning({ id: schema.sessionHistoryItems.id })

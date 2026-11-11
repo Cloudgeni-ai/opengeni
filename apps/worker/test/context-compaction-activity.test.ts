@@ -43,6 +43,7 @@ import * as schema from "@opengeni/db/schema";
 import { eq, sql } from "drizzle-orm";
 import {
   AnthropicProviderRejection,
+  buildSummaryItem,
   CompactionNeededError,
   AnthropicRequestSizeError,
   CompactionProviderResponseError,
@@ -3365,6 +3366,128 @@ describe("standalone context compaction execution", () => {
     expect(JSON.stringify(overlong.active)).not.toContain(TRIMMED_CONTEXT_NOTICE);
     expect(JSON.stringify(overlong.active)).not.toContain("an overlong summary an overlong");
     expect(overlong.warnings).toHaveLength(0);
+  });
+
+  test("an automatic compaction the provider refuses for safety trims history and keeps the earlier summary", async () => {
+    // Production shape: after an hour of work (sign-in typed into a simulator,
+    // screenshots taken) the turn-start compaction request to Claude came back
+    // HTTP 200 with stop_reason "refusal". It used to fail the turn with
+    // context_compaction_failed, and every later turn sent the same request.
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Refused compaction test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Refused compaction test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const refusedOutput = "simulator screenshot after typing the sign-in ".repeat(2_000);
+    const items = [
+      buildSummaryItem("Earlier checkpoint: the login screen is built and its tests pass."),
+      { type: "message", role: "user", content: "sign in on the simulator and check the flow" },
+      {
+        type: "function_call",
+        callId: "call-sim",
+        name: "simulator",
+        arguments: "{}",
+        status: "completed",
+      },
+      {
+        type: "function_call_result",
+        callId: "call-sim",
+        name: "simulator",
+        output: refusedOutput,
+      },
+      {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Signed in; the flow works." }],
+      },
+      { type: "message", role: "user", content: "now add the logout button" },
+    ];
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        items.map((item, position) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position,
+          item,
+        })),
+      );
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    const requests: string[] = [];
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 40_000 }),
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+      },
+      null,
+      async (_settings, input) => {
+        requests.push(JSON.stringify(input));
+        // Exactly what the summary request wrapper throws for Claude's refusal.
+        const refusal = new AnthropicProviderRejection("content_policy_violation", 200, "req_1");
+        throw new CompactionProviderResponseError(
+          compactionProviderFailureDiagnostics(refusal),
+          refusal,
+        );
+      },
+      { force: true, clearRequestedCompaction: true, trigger: "auto" },
+    );
+    expect(outcome).toMatchObject({ compacted: true });
+    if (!outcome.compacted) throw new Error("expected a trimmed checkpoint");
+    // Asked once; the refused summary request is never repeated.
+    expect(requests).toHaveLength(1);
+    expect(
+      outcome.events.find((event) => event.type === "session.context.compacted")?.payload,
+    ).toMatchObject({
+      implementation: DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
+      fallback: { reason: "provider_rejected" },
+    });
+    const active = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).map((row) => row.item);
+    // The newest request and the earlier checkpoint's summary carry over; the
+    // refused span (the screenshots) leaves the model's context.
+    expect(active).toContainEqual(
+      expect.objectContaining({ role: "user", content: "now add the logout button" }),
+    );
+    const checkpoint = active.find(
+      (item) => typeof item.content === "string" && item.content.startsWith(TRIMMED_CONTEXT_NOTICE),
+    );
+    expect(checkpoint?.content).toContain(
+      "Summary from an earlier checkpoint:\nEarlier checkpoint: the login screen is built",
+    );
+    expect(JSON.stringify(active)).not.toContain("simulator screenshot after typing");
   });
 
   test("a summary failure outside the summary request is not replaced by trimming", async () => {

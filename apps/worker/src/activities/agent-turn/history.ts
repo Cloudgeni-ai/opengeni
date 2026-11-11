@@ -1,5 +1,6 @@
 import { isCuaDesktopModelTool } from "@opengeni/contracts";
 import {
+  isOmissibleToolResult,
   normalizeProtocolJsonValue,
   TURN_OPERATIONAL_NOTICE_PREFIX,
   sanitizeHistoryItemsForModel,
@@ -97,6 +98,54 @@ export function selectRejectedProviderArtifactHistoryIds(
     remainingWireArtifacts.set(fingerprint, remaining - 1);
   }
   return selected;
+}
+
+/**
+ * The tool results a provider safety refusal of the next request most likely
+ * concerns: those after the newest item the model produced. Every earlier
+ * item was in a request the provider accepted (it answered with that newest
+ * item), so only these results are new to the refused request, and replacing
+ * their bodies leaves every accepted request's text as it was.
+ *
+ * Walks back from the end of active history over tool results (selected when
+ * not already invalidated) and over user, system and developer messages (kept:
+ * a person's words are never dropped), and stops at anything else: an
+ * assistant message, reasoning, a tool call, a checkpoint, or an unknown item.
+ * Returns the selected row IDs oldest first, with the tool names their calls
+ * used, for the person's notice.
+ */
+export function selectSafetyRefusedToolResults(
+  activeHistory: ReadonlyArray<{
+    id: string;
+    item: Record<string, unknown>;
+    providerArtifactInvalidatedAt: Date | null;
+  }>,
+): { historyItemIds: string[]; toolNames: string[] } {
+  const selected: Array<{ id: string; callId: string | undefined }> = [];
+  let boundary = activeHistory.length;
+  for (let index = activeHistory.length - 1; index >= 0; index -= 1) {
+    const row = activeHistory[index]!;
+    if (isOmissibleToolResult(row.item)) {
+      if (row.providerArtifactInvalidatedAt === null)
+        selected.unshift({ id: row.id, callId: toolCallIdFromSdkItem(row.item) });
+      continue;
+    }
+    const role = row.item.type === "message" ? row.item.role : undefined;
+    if (role === "user" || role === "system" || role === "developer") continue;
+    boundary = index;
+    break;
+  }
+  const callIds = new Set(selected.flatMap((entry) => (entry.callId ? [entry.callId] : [])));
+  const toolNames = new Set<string>();
+  for (const row of activeHistory.slice(0, Math.min(boundary + 1, activeHistory.length))) {
+    const callId = toolCallIdFromSdkItem(row.item);
+    if (!callId || !callIds.has(callId) || isOmissibleToolResult(row.item)) continue;
+    const name = typeof row.item.name === "string" ? row.item.name : null;
+    const type = typeof row.item.type === "string" ? row.item.type : null;
+    const label = name ?? (type?.endsWith("_call") ? type.slice(0, -"_call".length) : null);
+    if (label) toolNames.add(label);
+  }
+  return { historyItemIds: selected.map((entry) => entry.id), toolNames: [...toolNames] };
 }
 
 /** Literal final per-call boundary for replayed and current-turn model input. */

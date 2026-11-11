@@ -5759,6 +5759,14 @@ export const englishMessages = {
     "This chat's files couldn't be saved before its workspace machine shut down.",
   "timeline.projection.interrupted": "Interrupted.",
   "timeline.projection.needsYou": "Needs you",
+  "timeline.projection.refusedToolResultsRemoved_one":
+    "The model provider's safety system refused a request, so a tool result was removed from the agent's context. The agent continued without it.",
+  "timeline.projection.refusedToolResultsRemoved_other":
+    "The model provider's safety system refused a request, so {count} tool results were removed from the agent's context. The agent continued without them.",
+  "timeline.projection.refusedToolResultsRemovedFrom_one":
+    "The model provider's safety system refused a request, so a tool result from {tools} was removed from the agent's context. The agent continued without it.",
+  "timeline.projection.refusedToolResultsRemovedFrom_other":
+    "The model provider's safety system refused a request, so {count} tool results from {tools} were removed from the agent's context. The agent continued without them.",
   "timeline.projection.restoredFromOlderSave":
     "This chat's workspace machine was lost, so its files were restored from a save made at {time}. Changes made after that may be missing.",
   "timeline.projection.returnedToYourPreferredModel": "Returned to your preferred model.",

@@ -11,6 +11,7 @@ import {
   readSessionTurnSandboxBoxNotSaved,
   recordUsageEvent,
   getActiveSessionHistoryItemsPaged,
+  readActiveSessionHistory,
   readLease,
   SandboxLeaseSupersededError,
   isSessionEventPersistenceError,
@@ -97,7 +98,10 @@ import {
   compactionFailureReason,
   compactionFailureReasonFromError,
 } from "./errors";
-import { selectRejectedProviderArtifactHistoryIds } from "./history";
+import {
+  selectRejectedProviderArtifactHistoryIds,
+  selectSafetyRefusedToolResults,
+} from "./history";
 import { waitForTurnFinalizerStep, turnFinalizerCancellationSignal } from "./quiescence";
 import {
   SandboxDeadlineRotationError,
@@ -1423,6 +1427,96 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   );
   const coreLaneRecoverable = (lane: ReturnType<typeof createCoreCodexRequests> | undefined) =>
     !lane || lane.canRecover() || (!!coreUnknownRecoveryFailure && lane.unknownIsOwnAndSettled());
+  // The provider's safety system refused this request. Ordinary turns build
+  // each request from the same history, so without a change every later
+  // request, including the person's next message, is refused the same way.
+  // The tool results added since the provider's last accepted response are
+  // the new part of the refused request: mark exactly those rows so later
+  // model reads keep each call settled with a short note in place of its
+  // body, and continue the SAME turn once. Accepted requests' text is
+  // unchanged, so their cached prefix still applies. When nothing new can be
+  // marked (no such tool results, or they were marked already) the turn fails
+  // as before rather than send an equivalent request again.
+  const placedCore = coreClaude ?? coreCodex ?? coreXai;
+  if (
+    failure.code === "provider_safety_refusal" &&
+    !coreRequestOutcomeUnknown &&
+    !coreUnknownRecoveryFailure &&
+    !coreLeaseCheckpointFailed &&
+    eventing.publish &&
+    eventing.turnStartedPublished &&
+    attempt.turnId &&
+    attempt.triggerEventId &&
+    attempt.triggerType !== "session.context.compaction.requested"
+  ) {
+    const commitHistory = async () => {
+      await flushRuntimeBatcher();
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+    };
+    // A core lane holds the answered (refused) request until a checkpoint
+    // settles it, as on the retryable path below.
+    const lanesRecoverable =
+      placedCore && !coreLaneRecoverable(placedCore.requests)
+        ? await coreLanesRecoverAfterCheckpoint(placedCore, commitHistory)
+        : (await commitHistory(), true);
+    if (
+      lanesRecoverable &&
+      coreLaneRecoverable(coreCodex?.requests) &&
+      coreLaneRecoverable(coreXai?.requests) &&
+      coreLaneRecoverable(coreClaude?.requests)
+    ) {
+      // The bounded view of an over-limit history still holds its newest rows,
+      // which are all the selection reads.
+      const refused = selectSafetyRefusedToolResults(
+        (
+          await readActiveSessionHistory(db, input.workspaceId, input.sessionId, {
+            overLimit: "bounded_recovery",
+          })
+        ).items,
+      );
+      if (refused.historyItemIds.length > 0) {
+        const recovery = await requestTurnRecovery(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: attempt.turnId,
+          triggerEventId: attempt.triggerEventId,
+          attemptId: input.attemptId,
+          reason: "provider_safety_refusal",
+          detail: {
+            code: "provider_safety_refusal",
+            error: failure.error,
+            retryable: false,
+            ...(failure.requestId ? { requestId: failure.requestId } : {}),
+            omittedToolResults: refused.historyItemIds.length,
+            ...(refused.toolNames.length > 0 ? { omittedToolNames: refused.toolNames } : {}),
+          },
+          providerArtifactInvalidation: {
+            historyItemIds: refused.historyItemIds,
+            reason: "provider_safety_refusal",
+          },
+        });
+        if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
+          control.activityStatus = "cancelled";
+          control.turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
+        }
+        if (recovery.action === "recovering") {
+          acknowledgeRecoveryQuiescence();
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            recovery.events,
+          );
+          control.turnMetricOutcome = "recovering";
+          control.turnRecoveryCause = "provider";
+          control.activityStatus = "recovering";
+          control.activityError = error;
+          return claimedResult({ status: "recovering" });
+        }
+      }
+    }
+  }
   // A core lane holds the answered request that asked for a tool until the
   // next model call checkpoints it, so a retryable failure thrown while a
   // tool runs (a command that never started, an MCP transport failure) or a
@@ -1432,7 +1526,6 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   // replayed: a lane without every response stays unrecoverable. This holds
   // for every core provider: a lane's answered request is complete regardless
   // of who serves it.
-  const placedCore = coreClaude ?? coreCodex ?? coreXai;
   if (
     placedCore &&
     attempt.turnId &&

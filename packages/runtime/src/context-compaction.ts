@@ -118,6 +118,13 @@ export const USER_MESSAGE_TRUNCATION_MARKER =
 export const REMOTE_COMPACTION_TOOL_RESULT_OMISSION =
   "[Opengeni omitted tool result body for context compaction retry]";
 
+/**
+ * Model-visible body of a tool result that was in a request the model
+ * provider's safety system refused (see {@link projectSafetyRefusedToolResult}).
+ */
+export const SAFETY_REFUSED_TOOL_RESULT_OMISSION =
+  "[Opengeni removed this tool result: the model provider's safety system refused the request that contained it. Continue without it, and avoid bringing the same content back into the conversation.]";
+
 const RESULT_TYPE_BY_CALL_TYPE = TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE;
 const RESULT_TYPES = new Set(Object.values(RESULT_TYPE_BY_CALL_TYPE));
 const MODEL_GENERATED_ITEM_TYPES = new Set([
@@ -1570,16 +1577,57 @@ export function projectRemoteCompactionOverflowRetryInput(
 }
 
 function minimalRemoteCompactionToolResult(item: CompactionItem): CompactionItem {
-  const type = itemType(item);
-  switch (type) {
+  if (itemType(item) === "tool_search_output")
+    return Array.isArray(item.tools) && item.tools.length === 0 ? item : { ...item, tools: [] };
+  return toolResultWithOmittedBody(item, REMOTE_COMPACTION_TOOL_RESULT_OMISSION);
+}
+
+/**
+ * Tool result item types whose body can be replaced while the item still
+ * settles its call. `tool_search_output` is not one: it carries tool
+ * definitions, not output.
+ */
+const OMISSIBLE_TOOL_RESULT_TYPES = new Set([
+  "function_call_result",
+  "function_call_output",
+  "custom_tool_call_output",
+  "program_output",
+  "apply_patch_call_output",
+  "computer_call_result",
+  "shell_call_output",
+]);
+
+/** Whether `item` is a tool result whose body {@link toolResultWithOmittedBody} can replace. */
+export function isOmissibleToolResult(item: unknown): boolean {
+  return OMISSIBLE_TOOL_RESULT_TYPES.has(itemType(item) ?? "");
+}
+
+/**
+ * The view of a tool result whose request the model provider's safety system
+ * refused: the same item, still settling its call, with
+ * {@link SAFETY_REFUSED_TOOL_RESULT_OMISSION} in place of its body. Any other
+ * item is returned unchanged.
+ */
+export function projectSafetyRefusedToolResult(
+  item: Record<string, unknown>,
+): Record<string, unknown> {
+  return toolResultWithOmittedBody(item as CompactionItem, SAFETY_REFUSED_TOOL_RESULT_OMISSION);
+}
+
+/**
+ * `item` with its body replaced by `text`, in the shape its type requires: a
+ * text output, a screenshot card for a computer result (which must stay an
+ * image), or `text` as a shell result's stderr. Unchanged when it already is
+ * exactly that, or is not an {@link isOmissibleToolResult} item.
+ */
+function toolResultWithOmittedBody(item: CompactionItem, text: string): CompactionItem {
+  switch (itemType(item)) {
     case "function_call_result":
     case "function_call_output":
     case "custom_tool_call_output":
     case "program_output":
     case "apply_patch_call_output":
-      return item.output === REMOTE_COMPACTION_TOOL_RESULT_OMISSION
-        ? item
-        : { ...item, output: REMOTE_COMPACTION_TOOL_RESULT_OMISSION };
+      return item.output === text ? item : { ...item, output: text };
     case "computer_call_result": {
       const output = item.output as Record<string, unknown> | undefined;
       if (
@@ -1601,20 +1649,18 @@ function minimalRemoteCompactionToolResult(item: CompactionItem): CompactionItem
       const output = [
         {
           stdout: "",
-          stderr: REMOTE_COMPACTION_TOOL_RESULT_OMISSION,
+          stderr: text,
           outcome: { type: "exit", exitCode: null },
         },
       ];
-      return remoteCompactionShellOutputIsMinimal(item.output) ? item : { ...item, output };
+      return shellOutputIsOmission(item.output, text) ? item : { ...item, output };
     }
-    case "tool_search_output":
-      return Array.isArray(item.tools) && item.tools.length === 0 ? item : { ...item, tools: [] };
     default:
       return item;
   }
 }
 
-function remoteCompactionShellOutputIsMinimal(output: unknown): boolean {
+function shellOutputIsOmission(output: unknown, text: string): boolean {
   if (!Array.isArray(output) || output.length !== 1) return false;
   const result = output[0];
   if (!result || typeof result !== "object" || Array.isArray(result)) return false;
@@ -1622,7 +1668,7 @@ function remoteCompactionShellOutputIsMinimal(output: unknown): boolean {
   const outcome = record.outcome;
   return (
     record.stdout === "" &&
-    record.stderr === REMOTE_COMPACTION_TOOL_RESULT_OMISSION &&
+    record.stderr === text &&
     outcome !== null &&
     typeof outcome === "object" &&
     !Array.isArray(outcome) &&

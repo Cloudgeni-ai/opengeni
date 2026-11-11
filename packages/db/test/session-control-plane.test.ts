@@ -93,6 +93,7 @@ import {
   withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls,
+  readActiveSessionHistory,
 } from "../src/index";
 import * as schema from "../src/schema";
 import * as dbQueries from "../src/index";
@@ -847,6 +848,118 @@ describe("clean session control plane", () => {
       providerArtifactsInvalidated: 0,
     });
     expect((await getSessionTurn(client.db, grant.workspaceId!, turn!.id))?.status).toBe("running");
+  });
+
+  test("a safety refusal marks only tool results, records why, and refuses an equivalent retry", async () => {
+    const { grant, session } = await fixture();
+    await send(
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        subjectId: grant.subjectId,
+      },
+      session.id,
+      "safety refusal fixture",
+    );
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      session.temporalWorkflowId ?? `session-${session.id}`,
+      { attemptId },
+    );
+    expect(turn).not.toBeNull();
+    const existing = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const nextPosition = Math.max(-1, ...existing.map((row) => row.position)) + 1;
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [
+          {
+            position: nextPosition,
+            item: { type: "function_call", callId: "call-1", name: "run", arguments: "{}" },
+          },
+          {
+            position: nextPosition + 1,
+            item: { type: "function_call_result", callId: "call-1", output: "refused body" },
+          },
+        ],
+      }),
+    ).toBe(true);
+    const written = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).filter((row) => row.position >= nextPosition);
+    const callId = written[0]!.id;
+    const resultId = written[1]!.id;
+
+    // A call row is never marked, even if passed: only the result can be.
+    const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      reason: "provider_safety_refusal",
+      detail: { code: "provider_safety_refusal", retryable: false, omittedToolResults: 1 },
+      providerArtifactInvalidation: {
+        historyItemIds: [callId, resultId],
+        reason: "provider_safety_refusal",
+      },
+    });
+    expect(recovery).toMatchObject({ action: "recovering", providerArtifactsInvalidated: 1 });
+    const rows = await readActiveSessionHistory(client.db, grant.workspaceId!, session.id);
+    const marked = rows.items.filter((row) => row.position >= nextPosition);
+    expect(
+      marked.map((row) => ({
+        type: row.item.type,
+        invalidated: row.providerArtifactInvalidatedAt !== null,
+        reason: row.providerArtifactInvalidationReason,
+      })),
+    ).toEqual([
+      { type: "function_call", invalidated: false, reason: null },
+      { type: "function_call_result", invalidated: true, reason: "provider_safety_refusal" },
+    ]);
+    // The stored item is unchanged; model reads project it.
+    expect(marked[1]!.item).toMatchObject({ output: "refused body" });
+    expect(
+      recovery.action === "recovering"
+        ? recovery.events.find((event) => event.type === "turn.recovery.requested")?.payload
+        : null,
+    ).toMatchObject({
+      reason: "provider_safety_refusal",
+      omittedToolResults: 1,
+      providerArtifactsInvalidated: 1,
+    });
+
+    // The recovered attempt refused again: nothing new can be marked, so the
+    // same request is never sent again.
+    const retryAttemptId = crypto.randomUUID();
+    const retried = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      session.temporalWorkflowId ?? `session-${session.id}`,
+      { attemptId: retryAttemptId },
+    );
+    expect(retried?.id).toBe(turn!.id);
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: turn!.id,
+        triggerEventId: retried!.triggerEventId,
+        attemptId: retryAttemptId,
+        reason: "provider_safety_refusal",
+        providerArtifactInvalidation: {
+          historyItemIds: [callId, resultId],
+          reason: "provider_safety_refusal",
+        },
+      }),
+    ).toEqual({ action: "not_recoverable", events: [], providerArtifactsInvalidated: 0 });
   });
 
   test("provider-artifact recovery invalidates the frozen approval state for the same turn", async () => {

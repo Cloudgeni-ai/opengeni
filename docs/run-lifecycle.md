@@ -367,10 +367,21 @@ span multiple batches. Model input reads those batches from canonical history
 in position order, never reconstructs them from update rows, and never requires
 one shared history-item id across the whole turn.
 
-Provider safety refusals terminate the turn with `provider_safety_refusal` and
-the original diagnostic. They are neither temporary provider unavailability
-nor credential failures, even when carried by a 5xx response. Same-turn recovery
-and account rotation must not replay them.
+Provider safety refusals are neither temporary provider unavailability nor
+credential failures, even when carried by a 5xx response. Same-turn retry and
+account rotation never replay the refused request. Ordinary turns build each
+request from the same history, so a refused request would otherwise make every
+later one refused too. When the refused request added tool results after the
+provider's last accepted response, failure settlement marks exactly those rows
+(`provider_artifact_invalidation_reason = 'provider_safety_refusal'`; the stored
+items never change) and recovers the same turn once. Model reads, compaction
+included, keep each call settled with a short note in place of the result body;
+no accepted request's text changes, so its cached prefix still applies. The
+timeline shows which tool results were removed. A person's message is never
+removed. A refusal with nothing new to mark (no such results, or they were
+marked already) terminates the turn with `provider_safety_refusal` and the
+original diagnostic. A compaction summary request refused for safety falls back
+to the deterministic trimmed checkpoint, which carries the earlier summary.
 
 Session display titles are durable session metadata, not a truncation of model
 history. Creation and migration use `New conversation` only as the durable
