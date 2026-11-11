@@ -691,6 +691,9 @@ spec:
             next_step: 'Find the failing route in Grafana and check API logs, API memory and database health; roll back if it started right after a deploy.'
             description: Group the bounded route/status series in Grafana, then correlate the affected route with Postgres append latency and application logs.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
+        # On low-traffic routes the p95 is effectively the slowest request, so
+        # also require at least two requests slower than 2.5 s (the nearest
+        # bucket above the threshold): one cold read does not page.
         - alert: OpenGeniCoreReadLatencyHigh
           expr: |
             histogram_quantile(
@@ -699,6 +702,11 @@ spec:
             ) > 2
             and on(route)
             sum by (route) (increase(opengeni_http_request_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"}[10m])) >= 10
+            and on(route)
+            (
+              sum by (route) (increase(opengeni_http_request_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"}[10m]))
+              - sum by (route) (increase(opengeni_http_request_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id",le="2.5"}[10m]))
+            ) >= 2
           for: 5m
           labels:
             severity: warning

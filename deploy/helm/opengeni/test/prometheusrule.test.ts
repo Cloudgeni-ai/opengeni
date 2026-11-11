@@ -310,6 +310,9 @@ describe("turn-capacity Prometheus alerts", () => {
           "opengeni_http_request_duration_seconds_bucket",
           'method="GET"',
           'route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"',
+          // A single slow request on a quiet route must not page.
+          'le="2.5"',
+          ") >= 2",
         ],
       ],
     ]);
