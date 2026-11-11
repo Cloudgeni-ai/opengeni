@@ -22,6 +22,7 @@ import {
   type OpenGeniNativeCallLabels,
 } from "./call-view";
 import {
+  nativeCallHandle,
   nativeRealtimeModelSupported,
   useNativeRealtimeCall,
   type NativeCallAdapter,
@@ -64,8 +65,13 @@ export type NativeAgentCallContextValue = {
    * current one, for example a session opened from a link.
    */
   callSession(sessionId: string, workspaceId?: string): void;
-  /** A call from outside the app: `sessionId`, or wherever the host sends outside calls. */
-  callFromOutside(sessionId: string | null): Promise<void>;
+  /**
+   * A call from outside the app: `sessionId`, or wherever the host sends
+   * outside calls. `workspaceId` names the session's workspace when it may not
+   * be the current one (a voice command, a link); it must belong to the
+   * signed-in account, whose client makes every request.
+   */
+  callFromOutside(sessionId: string | null, workspaceId?: string | null): Promise<void>;
   /**
    * Hide the on-call pill while a screen shows this session's conversation
    * (its own call button already returns to the call). Returns the release.
@@ -75,10 +81,16 @@ export type NativeAgentCallContextValue = {
 
 export type NativeOutsideCallContext = {
   client: ChatClient<OpenGeniClient>;
+  /** The workspace the call runs in: the one the request named, else the current one. */
   workspaceId: string;
-  /** The session the request named (Phone recents), or null (Siri, a control, a shortcut). */
+  /** The session the request named (Phone recents, a voice command), or null (Siri, a control, a shortcut). */
   requested: string | null;
-  /** Whether a session still exists (deleted sessions answer false). */
+  /**
+   * The workspace the request named with its session (a voice command, a
+   * recent call, a link), or null when it named none and the current one applies.
+   */
+  requestedWorkspaceId?: string | null;
+  /** Whether a session still exists in `workspaceId` (deleted sessions answer false). */
   sessionExists(sessionId: string): Promise<boolean>;
   /** Optional host policy: the newest top-level session, or a new voice-first session. */
   latestOrNew(): Promise<string>;
@@ -178,7 +190,11 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
       setTarget((current) =>
         current?.sessionId === sessionId && current.workspaceId === callWorkspaceId
           ? current
-          : { workspaceId: callWorkspaceId, sessionId, systemTarget: sessionId },
+          : {
+              workspaceId: callWorkspaceId,
+              sessionId,
+              systemTarget: nativeCallHandle(callWorkspaceId, sessionId),
+            },
       );
       setExpanded(true);
     },
@@ -186,11 +202,14 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
   );
 
   const callFromOutside = useCallback(
-    async (requested: string | null) => {
+    async (requested: string | null, requestedWorkspace?: string | null) => {
       if (!workspaceId) return;
+      // A workspace means nothing without the session it holds.
+      const requestedWorkspaceId = (requested && requestedWorkspace) || null;
+      const callWorkspaceId = requestedWorkspaceId ?? workspaceId;
       try {
         const sessionExists = (sessionId: string) =>
-          client.getSession(workspaceId, sessionId).then(
+          client.getSession(callWorkspaceId, sessionId).then(
             () => true,
             (error: unknown) => {
               if (error instanceof OpenGeniApiError && error.status === 404) return false;
@@ -199,28 +218,38 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
           );
         const latestOrNew = async () => {
           // Sub-agent sessions are not conversations.
-          const [latest] = await client.listSessions(workspaceId, {
+          const [latest] = await client.listSessions(callWorkspaceId, {
             limit: 1,
             parentSessionId: null,
           });
           if (latest) return latest.id;
           // An idle session shell: voice is its first interaction.
-          const created = await client.createSession(workspaceId, { startMode: "realtime" });
+          const created = await client.createSession(callWorkspaceId, {
+            startMode: "realtime",
+          });
           return created.id;
         };
-        const context = { client, workspaceId, requested, sessionExists, latestOrNew };
+        const context: NativeOutsideCallContext = {
+          client,
+          workspaceId: callWorkspaceId,
+          requested,
+          requestedWorkspaceId,
+          sessionExists,
+          latestOrNew,
+        };
         const sessionId = resolveOutsideCall
           ? await resolveOutsideCall(context)
-          : (requested ?? (await client.createSession(workspaceId, { startMode: "realtime" })).id);
+          : (requested ??
+            (await client.createSession(callWorkspaceId, { startMode: "realtime" })).id);
         // Generic Phone recents must remain generic on the next call. Only
         // explicit session calls record a session handle with CallKit.
         setTarget((current) =>
-          current?.sessionId === sessionId
+          current?.sessionId === sessionId && current.workspaceId === callWorkspaceId
             ? current
             : {
-                workspaceId,
+                workspaceId: callWorkspaceId,
                 sessionId,
-                systemTarget: requested,
+                systemTarget: requested ? nativeCallHandle(callWorkspaceId, sessionId) : null,
               },
         );
         setExpanded(true);
@@ -275,12 +304,18 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
   outsideRef.current = callFromOutside;
   useEffect(() => {
     if (!callAdapter || !workspaceId) return;
+    const take = () =>
+      void callAdapter.takePendingStartRequest().then((pending) => {
+        if (pending) void outsideRef.current(pending.target, pending.workspaceId);
+      });
     const unsubscribe = callAdapter.subscribe((event) => {
-      if (event.type === "startRequested") void outsideRef.current(event.target);
+      if (event.type !== "startRequested") return;
+      // A request that waits natively is taken, so it starts exactly once:
+      // whichever of this event and the take below comes first gets it.
+      if (event.requestId) take();
+      else void outsideRef.current(event.target, event.workspaceId);
     });
-    void callAdapter.takePendingStartRequest().then((pending) => {
-      if (pending) void outsideRef.current(pending.target);
-    });
+    take();
     return unsubscribe;
   }, [callAdapter, workspaceId]);
 

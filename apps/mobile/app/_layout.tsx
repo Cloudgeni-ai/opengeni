@@ -80,6 +80,11 @@ export default function RootLayout() {
                   />
                   <Stack.Screen name="session/[id]" options={{ title: "" }} />
                   <Stack.Screen name="settings" options={{ title: "Settings" }} />
+                  <Stack.Screen
+                    name="voice-command"
+                    // A page sheet, like a new automation: it opens with the keyboard up.
+                    options={{ headerShown: false, presentation: "modal" }}
+                  />
                   <Stack.Screen name="wake-phrase" options={{ title: "" }} />
                   <Stack.Screen
                     name="workspaces"

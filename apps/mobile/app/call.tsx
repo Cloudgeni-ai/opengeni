@@ -1,14 +1,16 @@
 import { Redirect, useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
 import { useAccount } from "@/account";
+import { appSessionPath } from "@/app-links";
 import { useAgentCall } from "@/call";
 
 /**
  * opengeni://call starts a call from outside the app (a Shortcut, the Action
- * button, a widget); opengeni://call?session=<id> calls that session.
+ * button, a widget); opengeni://call?session=<id> calls that session, and
+ * &workspace=<id> names its workspace when it may not be the current one.
  */
 export default function CallLink() {
-  const { session } = useLocalSearchParams<{ session?: string }>();
+  const { session, workspace } = useLocalSearchParams<{ session?: string; workspace?: string }>();
   const { workspaceId } = useAccount();
   const { callFromOutside } = useAgentCall();
   const [started, setStarted] = useState(false);
@@ -16,7 +18,18 @@ export default function CallLink() {
   useEffect(() => {
     if (started || !workspaceId) return;
     setStarted(true);
-    void callFromOutside(session ?? null);
-  }, [callFromOutside, session, started, workspaceId]);
-  return started ? <Redirect href={session ? `/session/${session}` : "/"} /> : null;
+    void callFromOutside(session ?? null, workspace ?? null);
+  }, [callFromOutside, session, started, workspace, workspaceId]);
+  if (!started) return null;
+  return (
+    <Redirect
+      href={
+        session
+          ? workspace
+            ? appSessionPath(session, workspace, null)
+            : `/session/${session}`
+          : "/"
+      }
+    />
+  );
 }

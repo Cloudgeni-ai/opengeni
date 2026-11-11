@@ -21,6 +21,12 @@ import {
   unpinCallSession,
 } from "@/call-preferences";
 import { AppThemeProvider } from "@/theme";
+import { nativeCallCommands } from "@/voice-command-model";
+import {
+  activateVoiceCommands,
+  markVoiceCommandMissing,
+  subscribeVoiceCommands,
+} from "@/voice-commands";
 import { resolveOutsideCallTarget } from "./call-routing";
 
 export function useAgentCall(): NativeAgentCallContextValue {
@@ -45,6 +51,14 @@ export function sharedCallAdapter(): NativeCallAdapter | null {
 async function resolveOutsideCall(context: NativeOutsideCallContext): Promise<string> {
   const opened = getLastOpenedSessionId(context.workspaceId);
   return resolveOutsideCallTarget(context, {
+    missing: (sessionId) => {
+      const command = markVoiceCommandMissing(context.workspaceId, sessionId);
+      return new Error(
+        command
+          ? `The chat for “${command.name}” no longer exists, so this voice command is off. You can remove it in Settings.`
+          : "This chat no longer exists.",
+      );
+    },
     target: getOutsideCallTarget(),
     pinned: getPinnedCallSession(),
     opened,
@@ -60,9 +74,13 @@ async function resolveOutsideCall(context: NativeOutsideCallContext): Promise<st
  * you read the chat, leave the app or lock the phone.
  */
 export function CallProvider({ children }: { children: ReactNode }) {
-  const { client, workspaceId, models } = useAccount();
+  const { client, workspaceId, models, status, account } = useAccount();
   const callAdapter = useMemo(() => sharedCallAdapter(), []);
   useEffect(() => (callAdapter ? connectCallAudioToWebRtc(callAdapter) : undefined), [callAdapter]);
+  useVoiceCommandCatalog(
+    callAdapter,
+    status === "signedOut" ? null : status === "ready" ? (account?.id ?? null) : undefined,
+  );
   const codexConnected = models.some(
     (model) => model.provider === "codex" || model.id.startsWith("codex/"),
   );
@@ -87,4 +105,35 @@ export function CallProvider({ children }: { children: ReactNode }) {
       {children}
     </NativeAgentCallProvider>
   );
+}
+
+/**
+ * Siri and the launcher offer the signed-in account's voice commands only:
+ * switching accounts swaps them, signing out removes them. While the account
+ * still loads (`undefined`) the system keeps what it has, so a command that
+ * launched the app keeps working.
+ */
+function useVoiceCommandCatalog(
+  adapter: NativeCallAdapter | null,
+  accountId: string | null | undefined,
+) {
+  useEffect(() => {
+    if (accountId !== undefined) void activateVoiceCommands(accountId);
+  }, [accountId]);
+  useEffect(() => {
+    const write = adapter?.setCallCommands?.bind(adapter);
+    if (!write || accountId === undefined) return;
+    let last: string | null = null;
+    return subscribeVoiceCommands((loaded) => {
+      // Until this account's commands load, the previous account's are still here.
+      if (loaded.accountId !== accountId) return;
+      const next = nativeCallCommands(loaded.commands);
+      const key = JSON.stringify(next);
+      if (key === last) return;
+      last = key;
+      void write(next).catch((error: unknown) => {
+        if (__DEV__) console.warn("Couldn't update voice commands", error);
+      });
+    });
+  }, [adapter, accountId]);
 }
