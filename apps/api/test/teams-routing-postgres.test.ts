@@ -95,6 +95,7 @@ async function fixture(options: { routing?: boolean; personal?: boolean } = {}) 
       teamsBotClientSecret: "test",
       teamsBotTenantId: tenant,
       teamsBotAllowedTenantIds: [tenant],
+      teamsBotAllowedChannelIds: [`${tenant}:19:channel`],
       teamsWorkspaceRoutingEnabled: options.routing ?? true,
       integrationsStateSecret: "test",
       webBaseUrl: "https://app.example.test",
@@ -140,6 +141,16 @@ async function fixture(options: { routing?: boolean; personal?: boolean } = {}) 
     conversation: { id: `a:${from}`, conversationType: "personal", tenantId: tenant },
     channelData: { tenant: { id: tenant } },
     text,
+  });
+  /** A channel message that mentions the bot. */
+  const channelMention = (text: string) => ({
+    ...message(`<at>Opengeni</at> ${text}`),
+    conversation: {
+      id: `19:channel;messageid=${crypto.randomUUID()}`,
+      conversationType: "channel",
+    },
+    channelData: { tenant: { id: tenant }, channel: { id: "19:channel" } },
+    entities: [{ type: "mention", mentioned: { id: botId }, text: "<at>Opengeni</at>" }],
   });
   /** Sends a 1:1 message and returns the texts Teams was sent in reply (typing aside). */
   const say = async (text: string) => {
@@ -236,6 +247,8 @@ async function fixture(options: { routing?: boolean; personal?: boolean } = {}) 
     agent,
     inboxCount,
     outcomes,
+    app,
+    channelMention,
   };
 }
 
@@ -470,4 +483,39 @@ test("only an organization admin who manages the connected workspace's integrati
     expectedVersion: 0,
   });
   expect(stale.status).toBe(409);
+});
+
+test("only switch commands that name something are switches; requests and shared chats are read as before", async () => {
+  const f = await fixture();
+  expect(await f.say("switch Research")).toEqual([
+    "Now using **Research**. New messages start work there. Send **switch** to change.",
+  ]);
+  // Ordinary requests that start like a command are queued, not answered.
+  for (const text of ["use Postgres instead", "switch to dark mode"]) {
+    const before = await f.inboxCount();
+    await f.say(text);
+    expect(await f.inboxCount()).toBe(before + 1);
+  }
+  // A one-word name that matches nothing is still a switch, refused.
+  expect(await f.say("switch Desgin")).toEqual([
+    "You have no workspace or agent called **Desgin**. Send **switch** to see them.",
+  ]);
+  // A channel mention is read as before: never a switch.
+  const before = await f.inboxCount();
+  await handleTeamsActivity(f.deps, f.app, f.channelMention("switch the deploy to blue-green"));
+  expect(await f.inboxCount()).toBe(before + 1);
+});
+
+test("the app's name never moves a chat whose workspace was lost to another workspace", async () => {
+  const f = await fixture({ personal: true });
+  expect(await f.say("switch Research")).toHaveLength(1);
+  await shared.admin`delete from workspace_memberships where workspace_id=${f.research} and subject_id=${f.subject}`;
+  const before = await f.inboxCount();
+  expect(await f.say("Opengeni: summarize the week")).toEqual([
+    "You can no longer start chats in **Research** from Teams. Send **switch** to choose another. No chat was started.",
+  ]);
+  expect(await f.inboxCount()).toBe(before);
+  // The lost choice is forgotten: the next message uses the Personal workspace.
+  await f.say("summarize the week");
+  expect(await f.inboxCount()).toBe(before + 1);
 });

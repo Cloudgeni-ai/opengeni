@@ -1453,21 +1453,10 @@ export async function handleTeamsActivity(
     await unconnected();
     return { status: 200 };
   }
-  if (deps.settings.teamsWorkspaceRoutingEnabled) {
-    if (m.personal) return await routeTeamsPersonalMessage(deps, app, m, i, replies, observed);
-    // Choosing where chats go is a 1:1 matter; a shared chat stays where it is.
-    if (teamsSwitchCommand(m.text)) {
-      const sent = await once(() =>
-        send(
-          replies.app,
-          m,
-          "Send **switch** to me in a direct message to choose the workspace or agent your chats with me use.",
-        ),
-      );
-      if (sent === DUPLICATE_REPLY) return duplicate();
-      return { status: 200 };
-    }
-  }
+  // Workspace routing is a 1:1 matter: group chats and channels keep the
+  // installation's workspace and read every message as before.
+  if (deps.settings.teamsWorkspaceRoutingEnabled && m.personal)
+    return await routeTeamsPersonalMessage(deps, app, m, i, replies, observed);
   const grant = await actorGrant(deps, i, m.actorId);
   if (!grant) {
     const sent = await once(async () => {
@@ -1691,8 +1680,9 @@ async function routeTeamsPersonalMessage(
     });
   }
   const named = command?.kind === "named" ? teamsRouteOptionNamed(directory, command.name) : null;
-  // "switch the deploy to blue-green" names nothing here: it's a request, not a switch.
-  if (command?.kind === "named" && (named || command.name.split(/\s+/u).length <= 3)) {
+  // "switch to dark mode" names nothing here: it's a request, not a switch.
+  // A single unknown word ("switch Desgin") is most likely a typo.
+  if (command?.kind === "named" && (named || !/\s/u.test(command.name.trim()))) {
     const option = named;
     if (option === "ambiguous")
       return await reply(
@@ -2569,6 +2559,8 @@ async function drainRoute(
       return;
     try {
       let turnId: string | null;
+      // Set when the route's agent went away and a plain chat answers instead.
+      let agentDropped = false;
       if (!r.session_bound) {
         // Personal workspaces were turned off after this 1:1 route was made:
         // refuse with the admission notice; the next message starts in the
@@ -2610,8 +2602,10 @@ async function drainRoute(
         // An agent that went away between routing and create answers as a
         // plain chat in the same workspace, as in Slack.
         const created = await createRouteSession(r.agent_id ?? null).catch((error: unknown) => {
-          if (r.agent_id && error instanceof SessionAgentNotFoundError)
+          if (r.agent_id && error instanceof SessionAgentNotFoundError) {
+            agentDropped = true;
             return createRouteSession(null);
+          }
           throw error;
         });
         turnId = created.initialTurnId;
@@ -2640,7 +2634,7 @@ async function drainRoute(
       const routing = (inbound.payload as TeamsRoutedPayload).teamsRouting;
       const where =
         routing?.announce && routing.workspaceLabel
-          ? ` in **${routing.workspaceLabel}**${routing.agentName ? ` with **${routing.agentName}**` : ""}`
+          ? ` in **${routing.workspaceLabel}**${routing.agentName && !agentDropped ? ` with **${routing.agentName}**` : ""}`
           : "";
       if (!r.session_bound)
         await enqueueSessionNotice(deps, i, r, 0, {

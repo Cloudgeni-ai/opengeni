@@ -49,7 +49,10 @@ describe("Teams switch commands", () => {
     expect(teamsSwitchCommand("/agents")).toEqual({ kind: "list" });
     expect(teamsSwitchCommand("switch 2")).toEqual({ kind: "pick", position: 2 });
     expect(teamsSwitchCommand("switch to Research")).toEqual({ kind: "named", name: "Research" });
-    expect(teamsSwitchCommand("use +planner")).toEqual({ kind: "named", name: "+planner" });
+    expect(teamsSwitchCommand("switch +planner")).toEqual({ kind: "named", name: "+planner" });
+    // "use" is an ordinary word: "use Postgres instead" is a request.
+    expect(teamsSwitchCommand("use Postgres instead")).toBeNull();
+    expect(teamsSwitchCommand("use +planner")).toBeNull();
     expect(teamsSwitchCommand("switch the deploy to blue-green please")).toEqual({
       kind: "named",
       name: "the deploy to blue-green please",
@@ -115,6 +118,23 @@ describe("where a Teams 1:1 message goes", () => {
         source: "main",
       }),
     );
+    // A remembered workspace that no longer works is refused, never swapped
+    // for the Personal or only workspace.
+    expect(
+      route("Opengeni Assistant: summarize", { workspaceId: "finance", agentId: null }),
+    ).toEqual({
+      kind: "denied",
+      text: "You can no longer start chats in **the workspace this chat used** from Teams. Send **switch** to choose another. No chat was started.",
+      forgetChoice: true,
+    });
+    expect(
+      resolveTeamsRoute({
+        text: "Opengeni:",
+        appName: "Opengeni Assistant",
+        directory: directory({ personalWorkspaceId: "home" }),
+        choice: { workspaceId: "finance", agentId: null },
+      }).kind,
+    ).toBe("denied");
   });
 
   test("a remembered choice is used while it works and refused once it doesn't", () => {

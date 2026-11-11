@@ -94,7 +94,7 @@ export function teamsSwitchCommand(
   const lower = value.toLowerCase();
   if (["switch", "workspace", "workspaces", "agents", "agent"].includes(lower))
     return { kind: "list" };
-  const match = /^(?:switch|use)(?: to)? (.+)$/iu.exec(value);
+  const match = /^switch(?: to)? (.+)$/iu.exec(value);
   if (!match) return null;
   const rest = match[1]!.trim();
   if (/^\d{1,3}$/u.test(rest)) return { kind: "pick", position: Number(rest) };
@@ -264,9 +264,17 @@ export function resolveTeamsRoute(input: {
   }
 
   // 2. Back to the main assistant, in the workspace the chat already uses.
+  //    A remembered workspace that no longer works is refused and forgotten,
+  //    as in step 4; nothing starts somewhere else.
   const main = mainAddress(input.text, input.appName);
   if (main) {
-    const base = choiceLive ? choiceLive.workspaceId : defaultWorkspace(directory);
+    if (input.choice && label(input.choice.workspaceId) === null)
+      return {
+        kind: "denied",
+        text: teamsChoiceUnavailableText(null),
+        forgetChoice: true,
+      };
+    const base = input.choice ? input.choice.workspaceId : defaultWorkspace(directory);
     if (!base) return { kind: "denied", text: TEAMS_NO_WORKSPACE_TEXT };
     const target = { workspaceId: base, agentId: null };
     if (main.remainder === null)
