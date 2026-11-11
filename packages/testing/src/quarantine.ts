@@ -4,8 +4,8 @@ import entries from "../quarantine.json" with { type: "json" };
 
 /**
  * A known-flaky test that still runs everywhere but whose failure does not
- * fail its lane. Each entry names a tracking issue; remove the entry when
- * that issue is fixed. See docs/testing-quarantine.md.
+ * fail its lane, until its `expires` date. Each entry names a tracking issue;
+ * remove the entry when that issue is fixed. See docs/testing-quarantine.md.
  */
 export type QuarantineEntry = {
   /** Repository-relative test file. */
@@ -16,20 +16,61 @@ export type QuarantineEntry = {
   issue: string;
   /** What fails and why it is quarantined rather than fixed. */
   reason: string;
+  /** The day (YYYY-MM-DD, UTC) the entry was added or last renewed. */
+  added: string;
+  /**
+   * The last day (YYYY-MM-DD, UTC) the quarantine holds, at most
+   * QUARANTINE_MAX_DAYS after `added`. From the next day the test fails
+   * normally again.
+   */
+  expires: string;
 };
 
 export const QUARANTINE: readonly QuarantineEntry[] = entries;
 
+/** The longest an entry may quarantine a test before it is fixed or renewed. */
+export const QUARANTINE_MAX_DAYS = 30;
+
+export type QuarantineOptions = {
+  /** Report a body still running after this many milliseconds as a failure and end the test. */
+  deadlineMs?: number;
+  /** The list to consult; the checked-in list by default. */
+  entries?: readonly QuarantineEntry[];
+  /** The current time, for expiry; the clock by default. */
+  now?: () => Date;
+};
+
 const repositoryRoot = resolve(import.meta.dir, "../../..");
 
-export function quarantineEntry(testFile: string, title: string): QuarantineEntry | undefined {
+export function quarantineEntry(
+  testFile: string,
+  title: string,
+  list: readonly QuarantineEntry[] = QUARANTINE,
+): QuarantineEntry | undefined {
   const file = relative(repositoryRoot, resolve(testFile)).split("\\").join("/");
-  return QUARANTINE.find((entry) => entry.file === file && entry.test === title);
+  return list.find((entry) => entry.file === file && entry.test === title);
 }
 
 /** `enforce` makes quarantined failures fail again, for example while fixing one. */
 export function quarantineEnforced(env: Record<string, string | undefined> = process.env): boolean {
   return env.OPENGENI_TEST_QUARANTINE === "enforce";
+}
+
+/** Whether the entry's last day has passed, so its test fails normally again. */
+export function quarantineExpired(entry: QuarantineEntry, now: Date = new Date()): boolean {
+  const lastMoment = Date.parse(`${entry.expires}T23:59:59.999Z`);
+  // An unreadable date counts as expired: the test fails normally.
+  return !(lastMoment >= now.getTime());
+}
+
+const reportedExpired = new Set<QuarantineEntry>();
+
+function reportExpired(entry: QuarantineEntry): void {
+  if (reportedExpired.has(entry)) return;
+  reportedExpired.add(entry);
+  console.log(
+    `::warning title=Test quarantine expired::${entry.file}: ${entry.test} expired on ${entry.expires} and fails normally again; fix it or renew the entry (${entry.issue})`,
+  );
 }
 
 function reportQuarantinedFailure(entry: QuarantineEntry, error: unknown): void {
@@ -69,10 +110,14 @@ export function quarantinable<Args extends unknown[]>(
   testFile: string,
   title: string,
   body: (...args: Args) => unknown,
-  options: { deadlineMs?: number } = {},
+  options: QuarantineOptions = {},
 ): (...args: Args) => unknown {
-  const entry = quarantineEntry(testFile, title);
+  const entry = quarantineEntry(testFile, title, options.entries);
   if (!entry || quarantineEnforced()) return body;
+  if (quarantineExpired(entry, options.now?.() ?? new Date())) {
+    reportExpired(entry);
+    return body;
+  }
   return async (...args: Args) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -114,7 +159,7 @@ export function quarantinable<Args extends unknown[]>(
 export function quarantineTest<Registrar extends (...args: never[]) => unknown>(
   base: Registrar,
   testFile: string,
-  options: { deadlineMs?: number } = {},
+  options: QuarantineOptions = {},
 ): Registrar {
   return new Proxy(base, {
     apply(target, thisArg, args: unknown[]) {
@@ -122,7 +167,7 @@ export function quarantineTest<Registrar extends (...args: never[]) => unknown>(
       if (
         typeof title === "string" &&
         typeof body === "function" &&
-        quarantineEntry(testFile, title)
+        quarantineEntry(testFile, title, options.entries)
       ) {
         if (body.length > 0) {
           throw new Error(`a quarantined test cannot use a done callback: ${title}`);

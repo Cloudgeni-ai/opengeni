@@ -3,54 +3,72 @@
     "file": "packages/browserd/test/attached-extension-frame.e2e.test.ts",
     "test": "an action right after an observation works when a password manager's menu ends the tab's debugging in between",
     "issue": "https://github.com/Cloudgeni-ai/opengeni/issues/7548",
-    "reason": "The click after Chrome ends the tab's debugging sometimes fails or reports target_stale; a re-attach race in browserd."
+    "reason": "The click after Chrome ends the tab's debugging sometimes fails or reports target_stale; a re-attach race in browserd.",
+    "added": "2026-11-11",
+    "expires": "2026-12-11"
   },
   {
     "file": "packages/browserd/test/attached-extension-frame.e2e.test.ts",
     "test": "frames the page adds while the menu is removed stay, even when other tabs have the menu open",
     "issue": "https://github.com/Cloudgeni-ai/opengeni/issues/7548",
-    "reason": "Observation sometimes fails with 'Browser tab debugging unavailable' instead of the expected menu error; a re-attach race in browserd."
+    "reason": "Observation sometimes fails with 'Browser tab debugging unavailable' instead of the expected menu error; a re-attach race in browserd.",
+    "added": "2026-11-11",
+    "expires": "2026-12-11"
   },
   {
     "file": "test/e2e/browser-accounts-acceptance.e2e.ts",
     "test": "real users add, race, switch, re-authenticate, deep-link, and revoke without stale tenant state",
     "issue": "https://github.com/Cloudgeni-ai/opengeni/issues/7549",
-    "reason": "Extra WebKit 'access control checks' page errors and account-menu timeouts during account switching."
+    "reason": "Extra WebKit 'access control checks' page errors and account-menu timeouts during account switching.",
+    "added": "2026-11-11",
+    "expires": "2026-12-11"
   },
   {
     "file": "test/e2e/timeline-exchange-fold.browser.e2e.ts",
     "test": "expanding live work pulls its progress notes into the row at 1280px",
     "issue": "https://github.com/Cloudgeni-ai/opengeni/issues/7550",
-    "reason": "The prompt above the notes sometimes jumps about 580px when the work row opens at 1280px."
+    "reason": "The prompt above the notes sometimes jumps about 580px when the work row opens at 1280px.",
+    "added": "2026-11-11",
+    "expires": "2026-12-11"
   },
   {
     "file": "scripts/build-publishable-packages.test.ts",
     "test": "keeps active B authoritative against stale A and interposing C",
     "issue": "https://github.com/Cloudgeni-ai/opengeni/issues/7551",
-    "reason": "One of three concurrent builders sometimes exits 1 without output; a suspected race in the build cache lock."
+    "reason": "One of three concurrent builders sometimes exits 1 without output; a suspected race in the build cache lock.",
+    "added": "2026-11-11",
+    "expires": "2026-12-11"
   },
   {
     "file": "test/e2e/session-pins.browser.e2e.ts",
     "test": "normalizes search-only creators and counts hierarchical browse roots",
     "issue": "https://github.com/Cloudgeni-ai/opengeni/issues/7552",
-    "reason": "Browse rows sometimes change after workspace search closes."
+    "reason": "Browse rows sometimes change after workspace search closes.",
+    "added": "2026-11-11",
+    "expires": "2026-12-11"
   },
   {
     "file": "test/e2e/session-pins.browser.e2e.ts",
     "test": "loads project pages independently without pagination on empty projects",
     "issue": "https://github.com/Cloudgeni-ai/opengeni/issues/7552",
-    "reason": "The revalidation read sometimes asks for limit 60 instead of 56."
+    "reason": "The revalidation read sometimes asks for limit 60 instead of 56.",
+    "added": "2026-11-11",
+    "expires": "2026-12-11"
   },
   {
     "file": "test/e2e/session-pins.browser.e2e.ts",
     "test": "pins through UI, reconciles another device, and stays above newer paged/search rows",
     "issue": "https://github.com/Cloudgeni-ai/opengeni/issues/7552",
-    "reason": "After an offline unpin fails, the header's Unpin action sometimes does not come back."
+    "reason": "After an offline unpin fails, the header's Unpin action sometimes does not come back.",
+    "added": "2026-11-11",
+    "expires": "2026-12-11"
   },
   {
     "file": "packages/db/test/unified-knowledge-postgres.test.ts",
     "test": "explicit PDF evidence preparation retains one source outside default discovery",
     "issue": "https://github.com/Cloudgeni-ai/opengeni/issues/7553",
-    "reason": "PDF parsing occasionally hangs until the 120 s test timeout; normally about 1 s."
+    "reason": "PDF parsing occasionally hangs until the 120 s test timeout; normally about 1 s.",
+    "added": "2026-11-11",
+    "expires": "2026-12-11"
   }
 ]

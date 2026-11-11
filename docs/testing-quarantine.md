@@ -19,11 +19,25 @@ the only place that decides what is quarantined. Each entry has:
   prefixes. For a title built from a template, list the concrete title, so
   only that case is quarantined;
 - `issue`: the public GitHub issue in this repository that tracks the fix;
-- `reason`: what fails, in a sentence.
+- `reason`: what fails, in a sentence;
+- `added`: the day (`YYYY-MM-DD`, UTC) the entry was added or last renewed;
+- `expires`: the last day the quarantine holds, at most 30 days after `added`.
 
 `packages/testing/test/quarantine.test.ts` checks that every entry still points
-at an existing test registered through `quarantineTest`, has a tracking issue
-and is listed once.
+at an existing test registered through `quarantineTest`, has a tracking issue,
+is listed once, and ends at most 30 days after it was added.
+
+## Expiry
+
+A quarantine always ends. From the day after `expires`, the test fails
+normally again, and the run gets a `Test quarantine expired` warning. The list
+check itself never fails because a date has passed, so an expired entry fails
+only its own test, not unrelated work.
+
+To renew, after checking that the issue is still being worked on, set `added`
+to today and `expires` to at most 30 days later in a pull request labelled
+`test-policy-change`, and note the renewal on the issue. If the issue is
+closed, the test is fixed: remove the entry instead.
 
 ## Quarantining a test
 
