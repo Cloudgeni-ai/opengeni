@@ -1614,6 +1614,7 @@ spec:
             ) > 0
             and on (node)
             opengeni:workload_node:present{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+          for: 10m
           labels:
             severity: warning
           annotations:
@@ -1621,8 +1622,8 @@ spec:
             headline: 'Server {{ "{{ $labels.node }}" }}: container runtime errors'
             value: '{{ "{{ printf `%.0f` $value }}" }} error(s) (5 min)'
             user_impact: 'Pods on this server may fail to start or restart, making services look down.'
-            next_step: 'Check the operation type and node health; confirm repeated errors or affected pods before replacing the node.'
-            description: Runtime errors during node pressure can make unrelated services appear unavailable and can prevent clean replacement capacity from starting.
+            next_step: 'Check the operation type and node health; confirm affected pods before replacing the node.'
+            description: Runtime errors have kept recurring on this node for at least 10 minutes. Persistent runtime errors during node pressure can make unrelated services appear unavailable and can prevent clean replacement capacity from starting. A single burst, such as kubelet retrying the removal of a container the runtime is already removing during a rollout, does not page.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniNodeNotReady
           expr: |
