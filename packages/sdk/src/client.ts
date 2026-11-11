@@ -982,7 +982,8 @@ function sessionListQuery(options: {
  * Which Slack installation a legacy Slack agent call is for. The Slack agent
  * list shows an agent once per installation; pass that record's
  * `connectionId`. Channels and intros of an agent in several installations
- * need it (`slack_agent_installation_required`); other calls act on the
+ * need it (`slack_agent_installation_required`) unless exactly one of them
+ * belongs to the path workspace; other calls act on the
  * agent itself and only use it to pick which record they return.
  */
 export type SlackAgentInstallationOptions = {

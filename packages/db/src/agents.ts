@@ -100,7 +100,7 @@ export type AgentRecord = {
   /**
    * Who can use it: anyone in the organization from chat integrations, not
    * only the workspace. Always false for an Only me agent. While the agent is
-   * in Slack, its installations' `open` decides (see
+   * in Slack, it is open only if every installation's `open` is (see
    * AGENT_ORGANIZATION_ACCESS_SQL).
    */
   organizationAccess: boolean;
@@ -253,15 +253,18 @@ function mapInstall(row: InstallRow): AgentSlackInstallRecord {
  * Whether anyone in the organization can use agent `a`, until the contract
  * step. This release writes `agents.organization_access` and the same value
  * as `open` on every Slack installation; the previous release only reads and
- * writes each installation's `open`. So while the agent is in Slack, its
- * installations decide, and a narrowing the previous release made there
- * (during the rollout or after a rollback) holds. The flag decides only for
- * an agent in no Slack installation, which the previous release can't open.
+ * writes each installation's `open`, one installation at a time. So while the
+ * agent is in Slack, it is open only if every installation is: a close the
+ * previous release made in one installation (during the rollout or after a
+ * rollback), or a closed installation it added, closes the agent, and this
+ * release's next write of the agent writes that to every installation. The
+ * flag decides only for an agent in no Slack installation, which the previous
+ * release can't open.
  */
 const AGENT_ORGANIZATION_ACCESS_SQL = `(case when exists (select 1 from agent_slack_installs oi
     where oi.agent_id = a.id and oi.account_id = a.account_id)
-  then exists (select 1 from agent_slack_installs oi
-    where oi.agent_id = a.id and oi.account_id = a.account_id and oi.open)
+  then not exists (select 1 from agent_slack_installs oi
+    where oi.agent_id = a.id and oi.account_id = a.account_id and not oi.open)
   else a.organization_access end)`;
 
 const AGENT_COLUMNS = sql.raw(`a.id::text as id, a.account_id::text as account_id,
@@ -1246,7 +1249,7 @@ function mapProjection(row: ProjectionRow, fallbackHome: string | null): SlackAg
     knowledgeCollectionId: row.memory_enabled ? row.memory_collection_id : null,
     memoryEnabled: row.memory_enabled,
     // Anyone in the organization (see AGENT_ORGANIZATION_ACCESS_SQL): the
-    // agent is in Slack here, so its installations decide.
+    // agent is in Slack here, so it is open only if every installation is.
     open: row.agent_organization_access,
     createdBySubjectId: row.agent_created_by_subject_id ?? row.enabled_by_subject_id ?? "",
     version: Number(row.agent_version),
@@ -1364,6 +1367,9 @@ export type AgentMissingFromSlack = {
  * workspace through the organization read. The caller decides which of them
  * belong here (never a personal workspace's, only agents whose workspace is
  * linked to this Slack workspace).
+ *
+ * An agent whose row here an older release wrote without the installation's
+ * workspace is listed too, so placing it again fills that in.
  */
 export async function listAgentsMissingFromSlack(
   db: Database,
@@ -1385,7 +1391,8 @@ export async function listAgentsMissingFromSlack(
           and a.visibility = 'workspace'
           and not exists (select 1 from agent_slack_installs i
             where i.agent_id = a.id and i.account_id = a.account_id
-              and i.connection_id = ${input.connectionId}::uuid)
+              and i.connection_id = ${input.connectionId}::uuid
+              and i.install_workspace_id is not null)
         order by a.created_at, a.id`,
     );
     return rows.map((row) => ({

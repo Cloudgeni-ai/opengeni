@@ -425,6 +425,43 @@ describe("agents data layer (restricted runtime role)", () => {
       version: current!.version,
     });
 
+    // A previous-release server closes it in one installation only: the
+    // agent is closed everywhere, and this release's next edit keeps it so.
+    await shared.admin`update agent_slack_installs set open = false
+      where agent_id = ${agent.id} and connection_id = ${org.connectionId}`;
+    expect((await getAgent(app.db, org.homeScope, agent.id))?.organizationAccess).toBe(false);
+    for (const connectionId of [org.connectionId, org.otherConnectionId]) {
+      expect(
+        await getSlackAgent(app.db, { accountId: org.accountId, agentId: agent.id, connectionId }),
+      ).toMatchObject({ open: false });
+    }
+    const edited = await updateAgent(app.db, org.homeScope, {
+      agentId: agent.id,
+      expectedVersion: null,
+      actorSubjectId: org.owner,
+      patch: { description: "Still closed." },
+    });
+    expect(edited).toMatchObject({ kind: "updated", agent: { organizationAccess: false } });
+    expect(
+      (await listAgentSlackInstalls(app.db, org.homeScope, [agent.id])).map(
+        (install) => install.open,
+      ),
+    ).toEqual([false, false]);
+    // Opening it again opens every installation.
+    expect(
+      await updateAgent(app.db, org.homeScope, {
+        agentId: agent.id,
+        expectedVersion: null,
+        actorSubjectId: org.owner,
+        patch: { organizationAccess: true },
+      }),
+    ).toMatchObject({ kind: "updated", agent: { organizationAccess: true } });
+    expect(
+      (await listAgentSlackInstalls(app.db, org.homeScope, [agent.id])).map(
+        (install) => install.open,
+      ),
+    ).toEqual([true, true]);
+
     // Off in one installation: the other installation, the agent and its revisions stay.
     expect(
       await deleteAgentSlackInstall(app.db, org.homeScope, {
@@ -701,7 +738,8 @@ describe("agents data layer (restricted runtime role)", () => {
     // The same Slack person (Enterprise Grid) or channel (Slack Connect) in
     // both installations: until the legacy drop removes the per-agent unique
     // keys older binaries still use, the second installation's record counts
-    // as made, instead of failing.
+    // as made, instead of failing. The "next time" hint is not offered again;
+    // the open-use notice is shown rather than skipped.
     expect(
       await touchSlackAgentUserState(app.db, org.otherInstallScope, {
         connectionId: org.otherConnectionId,
@@ -717,7 +755,7 @@ describe("agents data layer (restricted runtime role)", () => {
         slackUserId: "U0ONE",
         interactionId: crypto.randomUUID(),
       }),
-    ).toBe(false);
+    ).toBe(true);
     await recordSlackAgentIntroPost(app.db, org.otherInstallScope, {
       connectionId: org.otherConnectionId,
       slackAgentId: agent.id,
@@ -867,6 +905,28 @@ describe("agents data layer (restricted runtime role)", () => {
     expect((await getAgent(app.db, org.homeScope, other.id))?.version).toBe(before);
     expect(await missing(org.installScope, org.connectionId)).toEqual([
       expect.objectContaining({ id: third.id }),
+    ]);
+
+    // A row an older release wrote without its installation's workspace is
+    // listed again, and placing it again fills the workspace in.
+    await shared.admin`update agent_slack_installs set install_workspace_id = null
+      where agent_id = ${other.id} and connection_id = ${org.connectionId}`;
+    expect((await missing(org.installScope, org.connectionId)).map((row) => row.id)).toEqual([
+      other.id,
+      third.id,
+    ]);
+    expect(
+      await putAgentSlackInstall(app.db, org.homeScope, {
+        agentId: other.id,
+        connectionId: org.connectionId,
+        slackTeamId: "T0AGENTS",
+        installWorkspaceId: org.install,
+        actorSubjectId: null,
+        automatic: true,
+      }),
+    ).toMatchObject({ kind: "saved", install: { installWorkspaceId: org.install } });
+    expect((await missing(org.installScope, org.connectionId)).map((row) => row.id)).toEqual([
+      third.id,
     ]);
   }, 120_000);
 

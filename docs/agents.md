@@ -234,10 +234,12 @@ and other integrations (Teams) read the same way.
   says `organization`. No backfill (FORCE RLS would hide the rows from the
   migration principal). Every write keeps `open` on each of its installations
   equal to the column, and until a later step stops reading `open`, while an
-  agent is in Slack its installations' `open` decides; the column decides
-  only for an agent in no Slack installation. So a server on the previous
-  release behaves the same during the rollout, and a change made through its
-  old switch (including closing it) holds, also after a rollback. A previous
+  agent is in Slack it is open only if every installation's `open` is true;
+  the column decides only for an agent in no Slack installation. So a server
+  on the previous release behaves the same during the rollout, and a change
+  made through its old switch holds, also after a rollback: closing it in one
+  Slack workspace closes the agent, and the next write writes that to every
+  installation. A previous
   release's server adding the agent to a new Slack workspace writes `open`
   false there, which closes it to the organization until an organization
   admin reopens it (it fails closed).
@@ -282,8 +284,12 @@ person (Enterprise Grid) or shared channel (Slack Connect) in two installations
 of one agent hits them, and that installation's hint, open notice or intro
 record counts as already made.
 
-Rolling back past the API switch is not safe once the contract is applied:
-older binaries rely on the dropped triggers and foreign keys.
+Upgrade requirement (self-hosted and embedded deployments included): apply
+the contract only when every running binary already contains the API switch
+(#7274, with #6922, #7000, #7156, #7281, #6998 and #7275), so upgrade through
+such a release first. Rolling back past the API switch is not safe once the
+contract is applied: older binaries rely on the dropped triggers and foreign
+keys, and their legacy writes would fail the new keys.
 
 The API switch release itself (the previous release, during the rollout or
 after a rollback to it) still finds an installation's workspace through
@@ -291,8 +297,14 @@ after a rollback to it) still finds an installation's workspace through
 turned on in Slack therefore falls back to its home workspace there, and an
 agent in several installations is seen only through the installation it
 joined first: in the others a pick from a route card answers that the agent
-is gone, and turning it on in another installation is refused. That degrades
-until this release serves again; it does not change any data.
+is gone ("That agent no longer exists"), the legacy Slack agents item routes
+answer 404 for an agent whose installation lives in another workspace, and
+turning it on in another installation is refused. A previous release that
+has the agent page's Move here (the one-Slack-workspace limit) offers it for
+such an agent; using it deletes the other installation's channel settings,
+which this release then adds back empty. These are accepted rollout and
+rollback effects: they fail closed (refuse or hide, never widen access) and
+end when this release serves again.
 
 ### Chats bound to an agent
 
@@ -415,7 +427,8 @@ is migrated and the column stays:
   per installation (an agent in two installations shows in both lists, with
   the agent's own `version`). Item routes take `?connectionId=` for the
   installation; channels and intros of an agent in several installations
-  need it (`slack_agent_installation_required`). Open use is the agent's own
+  need it (`slack_agent_installation_required`), unless exactly one of them
+  belongs to the path workspace, which is then used. Open use is the agent's own
   and changes it in every installation. Deleting one through the old
   endpoint deletes the agent: a shared agent can't leave only one linked
   Slack workspace.

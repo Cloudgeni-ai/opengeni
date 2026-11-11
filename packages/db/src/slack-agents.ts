@@ -39,7 +39,12 @@ import * as schema from "./schema";
  * rollout, so they stay until the legacy drop. Until then, the same Slack
  * person (Enterprise Grid) or channel (Slack Connect) in two installations of
  * one agent hits them: that installation's record is then taken as already
- * made by the other one.
+ * made by the other one. Known gaps until the legacy drop: on Slack Connect, a
+ * channel shared by two installations records only the first one's intro, so
+ * the other installation's channel list doesn't show the agent introduced
+ * there; and an Enterprise Grid person's "next time" hint is offered once for
+ * both. The open-use notice is the exception: it is shown again rather than
+ * skipped (see `claimSlackAgentOpenNotice`).
  */
 const LEGACY_AGENT_UNIQUE_KEYS = new Set([
   "slack_agent_user_states_agent_user_uq",
@@ -360,6 +365,11 @@ export async function touchSlackAgentUserState(
  * Claim the one-time open-agent notice for a person and agent: true only for
  * the chat that claims it (and repairs of that chat), never again after.
  * Records first use too, like `touchSlackAgentUserState`.
+ *
+ * When the person's record for this agent is another installation's (the
+ * legacy per-agent key, Enterprise Grid), this installation can't record the
+ * claim, so the notice is shown: telling someone again that the workspace can
+ * see the chat is harmless, never telling them is not.
  */
 export async function claimSlackAgentOpenNotice(
   db: Database,
@@ -400,7 +410,7 @@ export async function claimSlackAgentOpenNotice(
           });
         return row?.openNoticeInteractionId === input.interactionId;
       }),
-    false,
+    true,
   );
 }
 

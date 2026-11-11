@@ -591,6 +591,17 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
         [install.connectionId, other].sort(),
       );
     }
+    // With exactly one of them belonging to the path workspace, that one is
+    // used: the request gets past the choice to its own validation.
+    const [elsewhere] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name) values (${install.accountId}, 'Elsewhere')
+      returning id`;
+    await shared!.admin`update agent_slack_installs set install_workspace_id = ${elsewhere!.id}
+      where agent_id = ${agentId} and connection_id = ${install.connectionId}`;
+    const defaulted = await call(install.orgAdmin, "POST", `${item}/intro`, { channelIds: [] });
+    expect(defaulted.status).toBe(400);
+    await shared!.admin`update agent_slack_installs set install_workspace_id = ${install.home}
+      where agent_id = ${agentId} and connection_id = ${install.connectionId}`;
 
     // Open use is the agent's own: opening it from one installation opens it
     // in both, with no installation named.

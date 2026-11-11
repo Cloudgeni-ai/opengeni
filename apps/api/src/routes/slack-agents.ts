@@ -301,23 +301,35 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   /**
    * Channels and intros belong to one Slack installation. Without
-   * `connectionId`, an agent in several installations is refused with
-   * `slack_agent_installation_required` (details list the connection ids)
-   * rather than acting on whichever comes first. Agent-level edits (name,
-   * description, avatar, Instructions, open use) and deleting the agent need
-   * no installation.
+   * `connectionId`, an agent in several installations uses the one whose own
+   * workspace is the path workspace when exactly one is; otherwise it is
+   * refused with `slack_agent_installation_required` (details list the
+   * connection ids) rather than acting on whichever comes first. Agent-level
+   * edits (name, description, avatar, Instructions, open use) and deleting the
+   * agent need no installation. Returns the agent as that installation sees it.
    */
   const requireChosenInstallation = async (
     c: Parameters<typeof requireAccessGrant>[0],
     agent: SlackAgentRecord,
-  ): Promise<void> => {
-    if (c.req.query("connectionId")?.trim()) return;
+  ): Promise<SlackAgentRecord> => {
+    if (c.req.query("connectionId")?.trim()) return agent;
     const installs = await listAgentSlackInstalls(
       deps.db,
       { accountId: agent.targetAccountId, workspaceId: agent.targetWorkspaceId },
       [agent.id],
     );
-    if (installs.length <= 1) return;
+    if (installs.length <= 1) return agent;
+    const workspaceId = c.req.param("workspaceId");
+    const here = installs.filter((install) => install.installWorkspaceId === workspaceId);
+    if (here.length === 1) {
+      if (here[0]!.connectionId === agent.connectionId) return agent;
+      const chosen = await getSlackAgent(deps.db, {
+        accountId: agent.targetAccountId,
+        agentId: agent.id,
+        connectionId: here[0]!.connectionId,
+      });
+      if (chosen) return chosen;
+    }
     throw new ApiHttpError(409, {
       code: "conflict",
       message: "This agent is in more than one Slack installation. Choose one with connectionId.",
@@ -422,8 +434,9 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   app.get(`${base}/:agentId/channels`, async (c) => {
-    const { grant, agent } = await requireManagedAgent(c);
-    await requireChosenInstallation(c, agent);
+    const managed = await requireManagedAgent(c);
+    const { grant } = managed;
+    const agent = await requireChosenInstallation(c, managed.agent);
     c.header("cache-control", "private, no-store");
     const cursor = z.string().max(1_024).safeParse(c.req.query("cursor"));
     return c.json(
@@ -432,8 +445,9 @@ export function registerSlackAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   app.post(`${base}/:agentId/intro`, async (c) => {
-    const { grant, agent } = await requireManagedAgent(c);
-    await requireChosenInstallation(c, agent);
+    const managed = await requireManagedAgent(c);
+    const { grant } = managed;
+    const agent = await requireChosenInstallation(c, managed.agent);
     const payload = await parseRequestJson(c, SlackAgentIntroRequest);
     return c.json(await postSlackAgentIntro(deps, grant, agent, payload));
   });
