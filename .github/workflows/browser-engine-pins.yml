@@ -8,6 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write # dispatch PR CI on the pull request's exact head
   contents: write
   pull-requests: write
 
@@ -52,6 +53,7 @@ jobs:
           git switch -C "$branch"
           git commit -am "chore(images): update browser engines" -m "$summary"
           git push --force origin "$branch"
+          head_sha="$(git rev-parse HEAD)"
           body="$(printf 'Automated pin refresh.\n\n%s\n\nThe Chrome .deb SHA-256 was checked against the downloaded bytes, and the Chromium snapshot was checked to list both packages on amd64 and arm64.' "$summary")"
           if gh pr view "$branch" --json state --jq .state 2>/dev/null | grep -q OPEN; then
             gh pr edit "$branch" --body "$body"
@@ -59,3 +61,7 @@ jobs:
             gh pr create --base main --head "$branch" \
               --title "chore(images): update browser engines" --body "$body"
           fi
+          # Pushes made with GITHUB_TOKEN start no pull_request workflows, and the
+          # merge batcher batches a PR only once PR CI passed on its exact head.
+          number="$(gh pr view "$branch" --json number --jq .number)"
+          gh workflow run pr-ci.yml --ref "$branch" -f pr_number="$number" -f head_sha="$head_sha"
