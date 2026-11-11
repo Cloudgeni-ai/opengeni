@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import * as posture from "../packages/db/src/runtime-posture";
 import {
   REMOVAL_GOVERNED_FROM_ORDINAL,
@@ -219,4 +221,220 @@ describe("migration previous-release guard", () => {
       [0, "drops view old_view"],
     ]);
   });
+
+  test("target-schema capabilities and PUBLIC's shared-policy predicates are dependencies", () => {
+    const capability = posture.RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.find((routine) =>
+      routine.startsWith("create_agent_child_session("),
+    )!;
+    const predicate = posture.RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES[0]!;
+    for (const body of [
+      `REVOKE EXECUTE ON FUNCTION public.${capability} FROM opengeni_app;`,
+      `DROP FUNCTION public.${capability};`,
+      "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM opengeni_app;",
+      `REVOKE EXECUTE ON FUNCTION public.${predicate} FROM PUBLIC;`,
+      "REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;",
+      `REVOKE EXECUTE ON FUNCTION opengeni_private.${posture.VAULT_RUNTIME_ROUTINES[0]} FROM opengeni_app;`,
+    ]) {
+      expect({ body, kinds: kinds(rolling(body)) }).toEqual({
+        body,
+        kinds: ["previous-release-dependency"],
+      });
+    }
+  });
+
+  test("a grant back restores only what the revoked grantees or a recreate needed", () => {
+    const fn = `opengeni_private.${COMPACT_INVENTORY}`;
+    for (const body of [
+      // Granted back to another role: the runtime still lacks it.
+      `REVOKE EXECUTE ON FUNCTION ${fn} FROM opengeni_app;\nGRANT EXECUTE ON FUNCTION ${fn} TO opengeni_migrator;`,
+      // Recreated with fewer privileges than the runtime needs.
+      "DROP TABLE workspaces;\nCREATE TABLE workspaces (id uuid);\nGRANT SELECT ON workspaces TO opengeni_app;",
+    ]) {
+      expect({ body, kinds: kinds(rolling(body)) }).toEqual({
+        body,
+        kinds: ["previous-release-dependency"],
+      });
+    }
+    expect(
+      kinds(
+        rolling(
+          `REVOKE EXECUTE ON FUNCTION ${fn} FROM opengeni_app;\nGRANT EXECUTE ON FUNCTION ${fn} TO PUBLIC;`,
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  test("reads removals hidden in concatenation, placeholders and helpers it calls", () => {
+    for (const body of [
+      "DO $$ BEGIN EXECUTE 'REVOKE EXECUTE ON FUNCTION opengeni_private.' || 'list_uncompacted_recording_tracks_v1(integer, text) FROM opengeni_app'; END $$;",
+      "DO $$ BEGIN EXECUTE format('REVOKE EXECUTE ON FUNCTION %I.list_uncompacted_recording_tracks_v1(integer, text) FROM opengeni_app', 'opengeni_private'); END $$;",
+      `CREATE FUNCTION pg_temp.withhold() RETURNS void LANGUAGE plpgsql AS $$ BEGIN REVOKE EXECUTE ON FUNCTION opengeni_private.${COMPACT_INVENTORY} FROM opengeni_app; END $$;\nSELECT pg_temp.withhold();`,
+    ]) {
+      expect({ body, kinds: kinds(rolling(body)) }).toEqual({
+        body,
+        kinds: ["previous-release-dependency"],
+      });
+    }
+    // Only an unconditional top-level CREATE makes an object new to this migration.
+    expect(
+      kinds(
+        rolling(
+          "DO $$ BEGIN IF to_regclass('reporting_summary') IS NULL THEN CREATE VIEW reporting_summary AS SELECT 1; END IF; END $$;\nDROP VIEW reporting_summary;",
+        ),
+      ),
+    ).toEqual(["unannotated-removal"]);
+    // Session temporary objects are always new.
+    expect(kinds(rolling("DROP TABLE IF EXISTS pg_temp.workspaces;"))).toEqual([]);
+  });
+
+  test("a release whose posture cannot be read fails the guard", () => {
+    for (const name of [
+      "RUNTIME_DEFINER_ROUTINES",
+      "DEFERRED_RUNTIME_PRIVATE_ROUTINES",
+      "RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES",
+      "RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES",
+      "RUNTIME_TABLE_PRIVILEGES",
+    ]) {
+      expect(() => previousReleaseContract("release x", { ...posture, [name]: undefined })).toThrow(
+        name,
+      );
+    }
+  });
+
+  test("a retiring feature's routines may go with the last of its tables", () => {
+    const source = [
+      "const WIDGET_ROUTINES = [",
+      '  "count_widgets(uuid)",',
+      "] as const;",
+      "const RETIRING_WIDGET_ROUTINES: ReadonlySet<string> = new Set([",
+      "  ...WIDGET_ROUTINES,",
+      '  "widget_json(uuid)",',
+      "]);",
+    ].join("\n");
+    const release = previousReleaseContract(
+      "the previous release",
+      {
+        ...posture,
+        RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES: [
+          ...posture.RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+          "count_widgets(uuid)",
+          "widget_json(uuid)",
+        ],
+        RETIRING_FEATURE_TABLES: { widgets: ["widgets", "widget_parts"] },
+      },
+      null,
+      source,
+    );
+    expect([...release.retiringRoutines.keys()]).toEqual([
+      "count_widgets(uuid)",
+      "widget_json(uuid)",
+    ]);
+    const drops = "DROP FUNCTION public.count_widgets(uuid);\nDROP FUNCTION widget_json(uuid);";
+    expect(kinds(rolling(`${drops}\nDROP TABLE widgets, widget_parts;`), [release])).toEqual([]);
+    // An earlier migration of the same change dropped the other table.
+    expect(
+      analyzeMigrationPreviousRelease(
+        file,
+        rolling(`${drops}\nDROP TABLE widgets;`),
+        [release],
+        GOVERNED,
+        new Set(["widget_parts"]),
+      ),
+    ).toEqual([]);
+    for (const body of [
+      // Readiness still requires the routines while any table remains.
+      `${drops}\nDROP TABLE widgets;`,
+      drops,
+      // Present without EXECUTE is never tolerated.
+      "REVOKE EXECUTE ON FUNCTION count_widgets(uuid) FROM opengeni_app;\nDROP TABLE widgets, widget_parts;",
+    ]) {
+      expect({ body, kinds: kinds(rolling(body), [release]) }).toEqual({
+        body,
+        kinds: ["previous-release-dependency"],
+      });
+    }
+  });
+});
+
+describe("check-migration-previous-release CLI", () => {
+  const CLI = join(ROOT, "scripts/check-migration-previous-release.ts");
+  const ROUTINE = "inventory_v1(integer)";
+
+  /** A minimal posture module: the routine is required unless `deferred`. */
+  const postureSource = (deferred: boolean) =>
+    [
+      `export const RUNTIME_DEFINER_ROUTINES = ["${ROUTINE}"];`,
+      `export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = ${deferred ? `["${ROUTINE}"]` : "[]"};`,
+      "export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [];",
+      "export const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES = [];",
+      'export const RUNTIME_TABLE_PRIVILEGES = { workspaces: ["SELECT"] };',
+      "export const RETIRING_FEATURE_TABLES = {};",
+      "",
+    ].join("\n");
+
+  function repoWithHistory() {
+    const root = mkdtempSync(join(tmpdir(), "migration-previous-release-"));
+    const run = (...args: string[]) =>
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@example.com",
+          "-c",
+          "commit.gpgsign=false",
+          ...args,
+        ],
+        { cwd: root, encoding: "utf8" },
+      ).trim();
+    const write = (path: string, text: string) => {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), text);
+    };
+    const commit = (message: string) => {
+      run("add", "-A");
+      run("commit", "--quiet", "-m", message);
+      return run("rev-parse", "HEAD");
+    };
+    run("init", "--quiet", "--initial-branch=main");
+    write("packages/db/drizzle/0001_init.sql", "-- deployment-mode: rolling\nSELECT 1;\n");
+    write("packages/db/src/role-relationships.ts", "export {};\n");
+    write("packages/db/src/runtime-posture.ts", postureSource(true));
+    const pin = commit("pin: defers the routine");
+    write(
+      "scripts/runtime-posture-baseline.json",
+      JSON.stringify({ schemaVersion: 1, status: "production", sourceCommit: pin, release: "img" }),
+    );
+    write("packages/db/src/runtime-posture.ts", postureSource(false));
+    commit("a staging release requires the routine");
+    write("packages/db/src/runtime-posture.ts", postureSource(true));
+    commit("main defers it again");
+    run("checkout", "--quiet", "-b", "change");
+    return { root, write, commit };
+  }
+
+  const check = (root: string) =>
+    spawnSync("bun", [CLI, "--base", "main"], { cwd: root, encoding: "utf8" });
+
+  test("judges added migrations against every posture revision from the pin to the merge base", () => {
+    const { root, write, commit } = repoWithHistory();
+    try {
+      expect(check(root).stdout).toContain("no migration added");
+      write(
+        "packages/db/drizzle/0002_revoke.sql",
+        `-- deployment-mode: rolling\nREVOKE EXECUTE ON FUNCTION opengeni_private.${ROUTINE} FROM opengeni_app;\n`,
+      );
+      // Untracked files count, so the check works before a commit too.
+      const untracked = check(root);
+      expect(untracked.status).toBe(1);
+      expect(untracked.stderr).toContain("0002_revoke.sql (previous-release-dependency)");
+      // Neither the pin nor the merge base requires it; the revision between them does.
+      expect(untracked.stderr).toContain(`routine ${ROUTINE}, whose runtime EXECUTE main `);
+      commit("revoke");
+      expect(check(root).status).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

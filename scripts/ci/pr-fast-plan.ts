@@ -33,7 +33,8 @@ export const PR_INVENTORY_TESTS: readonly { test: string; areas: readonly string
     test: "scripts/check-migration-immutability.test.ts",
     areas: ["packages/db/drizzle/", "scripts/check-migration-immutability"],
   },
-  // Judges the real 1283 migration by the real runtime-posture declarations.
+  // Judges the real 1283 migration by the real runtime-posture declarations,
+  // and the CLI against a temporary git history.
   {
     test: "scripts/check-migration-previous-release.test.ts",
     areas: [
@@ -42,6 +43,9 @@ export const PR_INVENTORY_TESTS: readonly { test: string; areas: readonly string
       "scripts/migration-previous-release",
       "scripts/check-migration-previous-release",
       "scripts/migration-deployment-mode",
+      "scripts/migration-rls-backfills",
+      "scripts/runtime-posture-baseline",
+      "packages/db/src/migration-phases",
     ],
   },
   // The expected test inventory: a new root e2e file must be registered.
