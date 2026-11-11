@@ -622,6 +622,34 @@ async fn a_disk_not_read_whole_books_all_it_may_take() {
     lab.assert_clean();
 }
 
+/// A running disk whose read does not return in time, as on a host whose
+/// file system makes extent reads wait (#6976), books all it may take for
+/// that reading, and as before once it can be read again. The agent never
+/// waits for it: the test is watched from outside its runtime.
+#[test]
+fn a_running_disk_read_late_books_all_it_may_take() {
+    super::stuck_disk::within(|| async {
+        let gauge = DiskGauge::default();
+        let (lab, disk, written) = awake_with_written_disk(&gauge).await;
+        let stuck = super::stuck_disk::Stuck::at(&disk);
+        let late = read_free(&gauge, &lab, None).await;
+        drop(stuck);
+        assert_booked_again(written, late);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let read = read_free(&gauge, &lab, None).await;
+            if read.abs_diff(written) <= WRITTEN / 256 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the disk was not booked as before once readable: {written} then {read}"
+            );
+        }
+        lab.assert_clean();
+    });
+}
+
 /// Has the agent of `lab` read plenty free on its disk, just after
 /// `change` is made if one is given, and tells what more wakes may book.
 async fn read_free(gauge: &DiskGauge, lab: &Lab, change: Option<Box<dyn FnOnce() + Send>>) -> u64 {

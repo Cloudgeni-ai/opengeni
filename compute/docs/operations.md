@@ -522,7 +522,14 @@ to hosts that offer them; other pools' teams reach none.
   registers. A stalled member and a draining host each keep their place
   in the group's size, so a growth asks for the hosts it is short on top
   of them, and the service does not suggest shrinking while a member is
-  stalled. List hosts with the operator key:
+  stalled. `--scale-max` bounds the hosts that take sandboxes: a draining
+  host takes none, so the group may grow past the maximum by one place for
+  each draining member it lists, and a host left draining never keeps the
+  group from growing. Mind cost and quota while several hosts drain at
+  once. A stalled member counts against the maximum. Undraining a host
+  while the group is past its maximum leaves it there: shrinking is only
+  suggested, never done. Remove the drained host (below) to come back
+  within it. List hosts with the operator key:
 
   ```sh
   curl -s -H "X-API-Key: $operator_key" "$COMPUTE_API/v1/hosts" | jq
