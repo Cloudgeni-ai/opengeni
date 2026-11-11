@@ -4525,13 +4525,13 @@ export const englishMessages = {
   "sessionAdmission.grantBody":
     "Your next message needs a machine or other personal resource that isn’t allowed for this chat.",
   "sessionAdmission.grantNext":
-    "Its owner can allow it for this chat. Your message starts by itself once they do.",
+    "The resource’s owner can allow it for this chat. Your message starts by itself once they do.",
   "sessionAdmission.grantTitle": "Not allowed for this chat",
   "sessionAdmission.machineAccessBody": "This chat isn’t allowed to use “{machine}”.",
   "sessionAdmission.machineAccessOthersBody":
     "This chat isn’t allowed to use {owner}’s machine “{machine}”.",
   "sessionAdmission.machineAccessOthersNext":
-    "Only {owner} can allow it. Your message starts by itself once they do.",
+    "Only {owner} can allow it. The message starts by itself once they do.",
   "sessionAdmission.machineAccessOwnerNext":
     "Allow it for this chat and your message starts right away.",
   "sessionAdmission.machineAccessOwnerPausedNext":
@@ -4541,7 +4541,7 @@ export const englishMessages = {
   "sessionAdmission.machineAccessOwnerSettingsPausedNext":
     "Allow it in the machine’s settings. Your message starts when the chat is resumed.",
   "sessionAdmission.machineAccessSharedNote":
-    "This chat is shared, so people in this workspace will see what the agent does on the machine.",
+    "People in this workspace will see what the agent does on the machine.",
   "sessionAdmission.machineAccessTitle": "Machine access needed",
   "sessionAdmission.machineChangeFailed":
     "The machine change could not be confirmed. Refresh and try again.",

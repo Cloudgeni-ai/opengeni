@@ -222,7 +222,7 @@ describe("session admission notice", () => {
     });
     expect(container.textContent).toContain("Machine access needed");
     expect(container.textContent).toContain(
-      "Only Alex can allow it. Your message starts by itself once they do.",
+      "Only Alex can allow it. The message starts by itself once they do.",
     );
     expect(container.querySelector("button")).toBeNull();
   });
@@ -265,14 +265,14 @@ describe("session admission notice", () => {
       onAllowMachine: async () => {},
     });
     expect(container.textContent).toContain(
-      "This chat is shared, so people in this workspace will see what the agent does on the machine.",
+      "People in this workspace will see what the agent does on the machine.",
     );
     await act(async () => root!.unmount());
     root = undefined;
     container.remove();
     // Workspace visibility in a Personal workspace: nobody else sees the chat.
     await render({ session: shared, machineAccess: ownMachine, onAllowMachine: async () => {} });
-    expect(container.textContent).not.toContain("This chat is shared");
+    expect(container.textContent).not.toContain("People in this workspace will see");
   });
 
   test("route: the shared line follows the heads-up's rule, and the heads-up steps aside only for it", async () => {
@@ -299,7 +299,7 @@ describe("session admission notice", () => {
       machineAccess: { ...ownMachine, waitingWork: [{ name: "Alex", isYou: false, results: 1 }] },
       onAllowMachine: async () => {},
     });
-    expect(container.textContent).not.toContain("This chat is shared");
+    expect(container.textContent).not.toContain("People in this workspace will see");
   });
 
   test("someone else in a paused chat still sees the paused note", async () => {

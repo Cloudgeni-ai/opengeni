@@ -198,7 +198,8 @@ export function useSessionStart({
       cancelled = true;
     };
   }, [askOwner, canReadWorkspace, knownKind, visibleToWorkspace, workspaceClient, workspaceId]);
-  const sharedChat = visibleToWorkspace && knownKind !== null && knownKind !== "personal";
+  const sharedChat =
+    askOwner && visibleToWorkspace && knownKind !== null && knownKind !== "personal";
   const allowClient = client as unknown as Partial<AllowMachineClient>;
   const ownMachine =
     needsMachineAccess && machineAccess?.isOwner

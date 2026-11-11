@@ -494,10 +494,9 @@ for (const [kind, sharedLine] of [
       await flush();
       const text = view.container.textContent ?? "";
       expect(text).toContain("Machine access needed");
-      const line =
-        "This chat is shared, so people in this workspace will see what the agent does on the machine.";
+      const line = "People in this workspace will see what the agent does on the machine.";
       if (sharedLine) expect(text).toContain(line);
-      else expect(text).not.toContain("This chat is shared");
+      else expect(text).not.toContain("People in this workspace will see");
       await view.unmount();
     } finally {
       delete (client as Record<string, unknown>).listUserResourceAuthorities;
