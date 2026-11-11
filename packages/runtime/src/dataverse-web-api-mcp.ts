@@ -233,7 +233,8 @@ type Request = {
   path: string;
   body?: unknown;
   headers?: Record<string, string>;
-  pageSize?: number;
+  /** Rows per page for reads; null leaves paging to the query itself (FetchXML count). */
+  pageSize?: number | null;
 };
 
 export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
@@ -330,7 +331,12 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
           throw new DataverseError("fetchXml must be a <fetch> document.");
         const payload = await this.request(
           toolName,
-          { method: "GET", path: `${table}?fetchXml=${encodeURIComponent(fetchXml)}` },
+          {
+            method: "GET",
+            path: `${table}?fetchXml=${encodeURIComponent(fetchXml)}`,
+            // Dataverse lets a page-size preference override the FetchXML count.
+            ...(/^<fetch\b[^>]*\scount\s*=/iu.test(fetchXml) ? { pageSize: null } : {}),
+          },
           signal,
         );
         return this.page(payload);
@@ -347,7 +353,7 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
           },
           signal,
         );
-        return { record: tidy(payload) };
+        return { record: withoutEmpty(tidy(payload)) };
       }
       case "dataverse_update_record": {
         const table = identifier(args.table, ENTITY_SET, "table");
@@ -363,7 +369,7 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
           },
           signal,
         );
-        return { record: tidy(payload) };
+        return { record: withoutEmpty(tidy(payload)) };
       }
       case "dataverse_delete_record": {
         const table = identifier(args.table, ENTITY_SET, "table");
@@ -575,7 +581,7 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
       : AbortSignal.timeout(REQUEST_TIMEOUT_MS);
     const prefer = [
       ANNOTATIONS,
-      ...(request.method === "GET"
+      ...(request.method === "GET" && request.pageSize !== null
         ? [`odata.maxpagesize=${request.pageSize ?? DEFAULT_PAGE_SIZE}`]
         : []),
       ...(request.headers?.prefer ? [request.headers.prefer] : []),
@@ -729,6 +735,11 @@ function tidy(row: Record<string, unknown>): Record<string, unknown> {
         : value;
   }
   return out;
+}
+
+/** A written record returns every column; empty ones only add noise. */
+function withoutEmpty(row: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).filter(([, value]) => value !== null));
 }
 
 /** The `pagingcookie` attribute value from Dataverse's paging cookie annotation. */

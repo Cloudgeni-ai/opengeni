@@ -166,6 +166,20 @@ describe("Dataverse Web API bridge", () => {
       moreRecords: true,
       pagingCookie: '<cookie page="1"></cookie>',
     });
+    expect((calls[0]!.init.headers as Record<string, string>).prefer).toContain(
+      "odata.maxpagesize=",
+    );
+  });
+
+  test("leaves paging to a FetchXML count", async () => {
+    const { instance, calls } = server(() => Response.json({ value: [] }));
+    await instance.callToolResult("dataverse_fetchxml", {
+      table: "accounts",
+      fetchXml: '<fetch count="5" page="2"><entity name="account" /></fetch>',
+    });
+    expect((calls[0]!.init.headers as Record<string, string>).prefer).not.toContain(
+      "odata.maxpagesize",
+    );
   });
 
   test("describes a table with choices and lookup bindings", async () => {
