@@ -520,7 +520,13 @@ function declaredPrivateRoutines(
 ): Map<string, string> {
   const routines = new Map<string, string>();
   const ownerInternal = sourceList(source, posture, "OWNER_INTERNAL_PRIVATE_ROUTINES");
-  if (!Array.isArray(legacyPrivate) || legacyPrivate.length === 0) return routines;
+  // A release that imports the frozen inventory must supply it.
+  if (source.includes("runtime-posture-legacy-routines.json")) {
+    if (!Array.isArray(legacyPrivate) || legacyPrivate.length === 0)
+      throw new Error(
+        `${label}: its runtime posture imports runtime-posture-legacy-routines.json, but no private routine inventory was read from it`,
+      );
+  } else if (!Array.isArray(legacyPrivate) || legacyPrivate.length === 0) return routines;
   if (!ownerInternal?.complete)
     throw new Error(
       `${label}: cannot read runtime posture list OWNER_INTERNAL_PRIVATE_ROUTINES${ownerInternal ? ` (unreadable item ${ownerInternal.unreadable[0] ?? "?"})` : ""}; update scripts/migration-previous-release.ts to read it`,

@@ -341,6 +341,15 @@ describe("migration previous-release guard", () => {
     expect(
       check("REVOKE EXECUTE ON FUNCTION opengeni_private.owner_trigger_v1() FROM opengeni_app;"),
     ).toEqual(["unannotated-removal"]);
+    // A release that imports the legacy inventory must supply it.
+    expect(() =>
+      previousReleaseContract(
+        "release x",
+        posture,
+        null,
+        `import legacyRoutines from "./runtime-posture-legacy-routines.json";\n${source}`,
+      ),
+    ).toThrow("runtime-posture-legacy-routines.json");
     // An owner-internal list it cannot read in full fails the guard.
     for (const unreadable of [
       "const OTHER_ROUTINES = [];",
