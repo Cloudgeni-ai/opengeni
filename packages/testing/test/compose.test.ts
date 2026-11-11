@@ -78,6 +78,44 @@ test("sandbox build network failures are retryable, build errors are not", () =>
   );
 });
 
+test("only the failing build step decides whether a failure is retryable", () => {
+  // Step #7 hit a network error and recovered through apt's own retries;
+  // step #12 then failed on a real compile error.
+  const recoveredThenRealFailure = [
+    "#7 [base 2/6] RUN apt-get update && apt-get install -y curl",
+    "#7 3.2 E: Failed to fetch https://snapshot.debian.org/archive/x.deb  503  Service Unavailable",
+    "#7 4.9 Get:1 https://snapshot.debian.org/archive/x.deb [120 kB]",
+    "#7 DONE 12.0s",
+    "#12 [build 4/6] RUN bun run build",
+    "#12 8.1 error TS2304: Cannot find name 'missing'.",
+    '#12 ERROR: process "/bin/sh -c bun run build" did not complete successfully: exit code: 2',
+    "------",
+    " > [build 4/6] RUN bun run build:",
+    "8.1 error TS2304: Cannot find name 'missing'.",
+    "------",
+    'ERROR: failed to solve: process "/bin/sh -c bun run build" did not complete successfully: exit code: 2',
+  ].join("\n");
+  expect(isTransientSandboxBuildFailure(failedBuild(recoveredThenRealFailure))).toBe(false);
+
+  const failingStepNetworkError = [
+    "#7 [base 2/6] RUN apt-get update",
+    "#7 DONE 3.0s",
+    "#9 [base 3/6] ADD --checksum=sha256:33e1 https://github.com/x/releases/download/v1/x.tgz /x.tgz",
+    "#9 ERROR: digest mismatch sha256:bef1: sha256:33e1",
+    "ERROR: failed to solve: digest mismatch sha256:bef1: sha256:33e1",
+  ].join("\n");
+  expect(isTransientSandboxBuildFailure(failedBuild(failingStepNetworkError))).toBe(true);
+
+  // Without step markers, an early recovered error far above the final summary does not count.
+  const unmarked = [
+    "E: Failed to fetch https://snapshot.debian.org/archive/x.deb  503  Service Unavailable",
+    ...Array.from({ length: 40 }, (_, index) => `progress ${index}`),
+    "COPY failed: file not found in build context",
+    "ERROR: failed to solve: file not found",
+  ].join("\n");
+  expect(isTransientSandboxBuildFailure(failedBuild(unmarked))).toBe(false);
+});
+
 test("sandbox build retries network failures within one overall budget", async () => {
   let clock = 0;
   const timeouts: number[] = [];

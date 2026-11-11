@@ -449,8 +449,13 @@ type SandboxBuildResult = {
  */
 export function isTransientSandboxBuildFailure(result: SandboxBuildResult): boolean {
   if (result.exitCode === 0 || result.timedOut) return false;
-  const output = `${result.stderr}\n${result.stdout}`;
-  if (/no space left on device/iu.test(output)) return false;
+  const fullOutput = `${result.stdout}\n${result.stderr}`;
+  // A full disk stays full, wherever it shows up.
+  if (/no space left on device/iu.test(fullOutput)) return false;
+  // Only the step that failed decides: an earlier step that hit a network
+  // error and recovered through its own retries must not make a later real
+  // build error look retryable.
+  const output = failingBuildOutput(fullOutput);
   return [
     /digest mismatch/iu,
     /blob sha256:[0-9a-f]+: not found/iu,
@@ -460,6 +465,38 @@ export function isTransientSandboxBuildFailure(result: SandboxBuildResult): bool
     /connection reset by peer|unexpected EOF|TLS handshake timeout|i\/o timeout/iu,
     /Temporary failure resolving|Could not resolve host/iu,
   ].some((pattern) => pattern.test(output));
+}
+
+/** Lines before a final error summary that still count as the failure, when no step reports its error. */
+const FAILURE_CONTEXT_LINES = 20;
+
+/**
+ * The part of a BuildKit log that belongs to the failure: every line of the
+ * failing step (`#N ...` for the step that reports `#N ERROR`) and everything
+ * from its error onward (the failing step's output box and the final
+ * `ERROR: failed to solve` summary). Without a step error, the final error
+ * summary and the lines before it.
+ */
+export function failingBuildOutput(output: string): string {
+  const lines = output.split(/\r?\n/u);
+  const stepError = lines.findIndex((line) => /^#\d+ ERROR\b/u.test(line));
+  if (stepError >= 0) {
+    const step = /^(#\d+) /u.exec(lines[stepError]!)![1]!;
+    const stepLines = lines.slice(0, stepError).filter((line) => line.startsWith(`${step} `));
+    return [...stepLines, ...lines.slice(stepError)].join("\n");
+  }
+  let summary = -1;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (/^(?:ERROR|error)\b/u.test(lines[index]!.trim())) {
+      summary = index;
+      break;
+    }
+  }
+  const tailStart =
+    summary >= 0
+      ? Math.max(0, summary - FAILURE_CONTEXT_LINES)
+      : lines.length - FAILURE_CONTEXT_LINES;
+  return lines.slice(Math.max(0, tailStart)).join("\n");
 }
 
 /**
