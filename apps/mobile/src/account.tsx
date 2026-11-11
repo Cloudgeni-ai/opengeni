@@ -45,6 +45,7 @@ import {
 import { planAccountPick, wayBackWhenLeaving } from "@/account-switching";
 import { openLinkFromApp } from "@/app-link-registry";
 import { recordingRequests } from "@/feedback/recent-errors";
+import { forgetVoiceCommands } from "@/voice-commands";
 import { signInThroughWeb, type WebSignInResult } from "@/web-sign-in";
 
 /** The deployment a new account signs in to unless the person names another. */
@@ -496,6 +497,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         console.warn("Native sign-out: no stored credential for the account");
       }
       await forgetAccountToken(id);
+      // Its voice commands leave Siri and the launcher with it.
+      await forgetVoiceCommands(id);
       supersedeReads(id);
       noteRead(id, false);
       // Other writers (the launch check) may have saved meanwhile.

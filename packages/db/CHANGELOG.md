@@ -1,5 +1,94 @@
 # @opengeni/db
 
+## 6.15.0
+
+### Minor Changes
+
+- 60d067d: Claude subscription usage now matches what Claude reports today. The usage refresh reads the account's limit reset grants (presenting Claude Code's CLI surface, which Claude requires for them) and, while at a limit, the at-limit reset program. `ClaudeSubscriptionUsage` gains optional `limitResets`, `wallReset`, `limits`, `extraUsage`, `surfaceWindows` and `serviceState`, and the SDK exports their types. The account page lists each grant with what it clears, resets left, expiry and whether it can be used now. `@opengeni/db` adds the adapter-level claim and claim-then-refresh helpers (idempotent request ids); Opengeni never claims a grant on its own.
+
+  The weekly limit model responses call `seven_day_overage_included` is treated as the weekly Fable limit: it limits Fable models only and shows as "Fable week". Responses served in the slow tier or grace zone mark a connection constrained (`SubscriptionQuota.constrainedUntil`): it still serves, but placement prefers accounts with plain capacity, and busy slow-tier slots are a short rate limit rather than the weekly limit.
+
+- bf804ef: Chats created with an API key are now labelled by the key's name with an "API key" hint in the sidebar's creator groups and hover cards (for example "Codex operator 2026-09-11 · API key") instead of a raw principal id, and other services show a "Service" hint; a key or service without a name shows just "API key" or "Service", never an id. An API key's chats form one group (people and services keep their exact frozen kind) even when older chats recorded the key as a subject and newer ones as a service, keys that share a name are told apart by a number, and an API key never gets a person's initials chip. On the Schedules page, a schedule owned by an API key shows a bot icon instead of initials, and "API key" instead of the raw key id when the key has no name. How people are shown is unchanged.
+
+  The session list API accepts `createdBySubjectId` without `createdByKind`, matching every session that subject created whichever kind it was recorded as; `createdByKind` alone is still rejected. The SDK's `listSessionPage` `createdBy.kind` is now optional to match, and `@opengeni/db` session list filters accept a creator without a kind. Requests that send both keep their exact behaviour.
+
+### Patch Changes
+
+- 20e9d79: An event added to a chat while Opengeni is archiving it, after the archive has read the chat's events, again appears in the stored transcript. Since the transcript started being written from the events the archive bundle reads, such an event was left out of both the bundle and the transcript. One more read after the bundle picks up these late events; normally it finds none.
+
+  Purging an archived chat's content now treats an invalid starting table (not a whole number, negative, or past the last table) as the first table. Such a value could previously skip every table and record the purge as complete with content still left. Valid starting tables behave as before.
+
+- 5525e63: A waiting turn now restates its reset to everyone who was told, not only the person. When a later check finds the reset later than the one announced (its time passed without capacity, or a longer limit binds) or unknown, the session's timeline gets a new waiting event naming the reset that now holds, and a worker's parent gets a further `child_waiting_capacity` notice whose dedupe key adds that reset (child lifecycle notice protocol revision 4). An unchanged or earlier reset says nothing new.
+- cd033ae: A Codex model gated above the client version Opengeni presents no longer strands turns. The version refusal ("requires a newer version of Codex") now fails the turn with `codex_client_version_rejected` and is never treated as a plan refusal, even when it carries an upgrade code. When the backend hides a model from every connected account's live model list, home-provider placement no longer waits behind another account's unrelated quota reset: it runs on capacity, and the provider's answer decides. Nothing is written against the account, so service returns as soon as the presented version is new enough.
+- 464e61f: Collect session content blobs that no model-context snapshot or tool catalog refers to any more. Each model request replaced the attempt's snapshot and left the replaced request body chunks behind until the session was archived; the session storage maintenance pass can now delete them under a per-session lock that every blob writer and snapshot reader holds shared. Migration 1359 adds the collector without runtime access; a later migration grants it.
+- 3bab763: `ConnectPanel` now keeps the organization approval help up when a sign-in comes back cancelled or denied with an administrator approval link stored on the attempt, for example after someone leaves Microsoft's "Need admin approval" page with Cancel or "Return to the application without granting consent". It used to treat the cancel as finished and quietly go back to the service list. The help offers the message for IT, the approval link, "Try signing in again" (a fresh setup for the same service unless the host passes `onRetry`) and "Back to connections". A plain cancel that stores no approval link still closes quietly.
+
+  `ConnectPanel`, `ConnectChooser`, `ConnectAccounts` and `ConnectionDiscovery` accept `finishInPopup`. Set it when your `onAuthorize` opens the provider's sign-in in a popup: the popup then ends on a small page that closes itself instead of loading your return URL, a second copy of your app, inside it. The closing page now says "Go back to where you started to continue" rather than naming the chat.
+
+  Once a service connects, older unfinished setups by the same person for the same service, owner and destination no longer appear in the pending list (`GET /v1/workspaces/:workspaceId/connect/attempts`), so a host's "continue setup" entry for that service goes away. Custom connections (MCP servers, OpenAPI and GraphQL sources) share one provider ID across different services and are never hidden this way.
+
+  The page a sign-in popup ends on and the page an administrator sees after the Microsoft approval link can now use the deployment's language: set `OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON` (fields `lang`, `signInFinishedTitle`, `signInFinishedBody`, `adminApprovedTitle`, `adminApprovedBody`, `adminNotApprovedTitle`, `adminNotApprovedBody`, `closeWindow`). Any field left out stays in English. `@opengeni/config` exports `parseConnectResultPageTextJson` and `ConnectResultPageTextSchema`.
+
+- b81b7be: The direct model API (`/v1/workspaces/:workspaceId/chat/completions` and its `/models` list) is now always API use, whatever credential signs the call. A person's own browser session or native app credential is billed like an API key: only purchased credit pays, never Free or other plan credit, and connected subscriptions are not offered. Without credit the call is refused with `api_credits_required`, as before; the message on this endpoint now ends "Add credits to use the API." for every caller, API keys included. An agent's call keeps its chat's origin, a trusted in-process dispatcher's origin is kept, and internal (legacy) accounts stay app use. Chats and other app features are unchanged. `billingOriginOverride` in `@opengeni/db` reads the origin a trusted dispatcher fixed.
+- 2107e6f: Removing a duplicate login no longer leaves a connector saying "Sign in again" next to a working account. A connector's status now follows the person's accounts that still exist: a working one first, then one that needs signing in again; a removed login no longer counts. When only removed logins are left, the connector offers Connect instead of a Reconnect that could never succeed. The same applies in chat: a connector card no longer refuses with "More than one personal account matches" because of removed duplicates; it reconnects the person's one remaining login, or connects a new one when none is left.
+
+  The OAuth client no longer counts as part of an account's identity. A login made before a deployment replaced its OAuth client (for example its Google client) is still recognised as the same account: connecting again reuses it instead of saving a duplicate, and reconnecting it no longer fails as a different account. Migration 1362 merges the duplicate personal Slack, Gmail, Google Calendar, Google Drive and Atlassian logins that were saved under different clients, using migration 1226's rules (same person, server, authorization server and verified account; the kept login must hold every scope of the merged one; logins that something depends on, now including Slack agents, are left in place). Of two working logins it keeps the one that refreshed most recently, so a login on a retired client is no longer kept over one that has refreshed since.
+
+  Gmail no longer sends `include_granted_scopes`. Gmail, Google Drive and Google Calendar share one Google client, so Google's consent screen listed the person's earlier Drive and Calendar grants, and the Gmail token carried them. Gmail now asks for and holds only Gmail access. Connecting Gmail, Drive or Calendar shows Google's account picker, and reconnecting an account names it to Google, so Google no longer signs in whichever account the browser used last.
+
+- 060c983: A sub-agent failure that its parent agent has already received no longer shows a red dot or an "unread failures" count on the parent's sidebar row, hover card, project totals or Needs you, and nothing the failed session logs afterwards counts as unread there either. Failures nobody took on still show: a top-level chat that fails, a failure whose notice its parent has not consumed, or a sub-agent that fails again after a retry. Sessions carry a new optional `failureHandled` flag.
+- ab4941f: Reject rolling migrations that revoke, drop or rename a routine, table privilege or schema that the previous release's runtime posture still requires, judged against the posture of the main merge base and the pinned production baseline.
+- 05ac4a2: Existing meetings' audio is now converted to the compact kept format too. The recording retention sweep converts a few tracks per run to one Opus file per track and deletes their uploaded pieces, as new meetings already are.
+- 6c6eac9: A missing runtime EXECUTE grant no longer takes the API and workers out of service. When the runtime role lacks EXECUTE on a routine the binary requires (a declared private routine or a target-schema capability), startup and readiness now report it as degraded and stay ready. It is reported through a structured warning, the `opengeni_runtime_database_degraded_findings` gauge and the new `OpenGeniRuntimeDatabaseGrantMissing` warning alert. Calls to the affected routines still fail with a permission error. A finding counts as degraded only when granting the missing EXECUTE removes it without raising any other finding.
+
+  Unsafe posture still fails startup and readiness:
+
+  - excess, PUBLIC or forbidden privileges
+  - wrong owners or search paths
+  - RLS problems
+  - forbidden role attributes or memberships
+  - missing CONNECT or schema USAGE
+  - missing or ambiguous objects
+  - anything that cannot be inspected
+
+  The posture CLI (the Helm migration job), the runtime-posture compatibility workflow and the previous-binary checks keep the strict evaluation, where every finding still fails.
+
+  Embedders: `runtimeDatabaseReadyCheck` and the worker's `databasePosture` readiness now also degrade on a missing required grant. Both take an optional listener for the degraded findings (`onDegraded`, and `onDegradedDatabasePosture` on `runOpenGeniWorker`). New exports from `@opengeni/db`:
+
+  - `classifyRuntimeDatabasePosture`, `assertRuntimeDatabaseReadiness` and `reportRuntimeDatabaseDegraded`
+  - the types `RuntimeDatabasePostureFindings`, `RuntimeDatabaseDegradedListener` and `RuntimeDatabaseDegradedObserver`
+  - the constants `RUNTIME_DATABASE_DEGRADED_GAUGE`, `RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS` and `RUNTIME_DATABASE_DEGRADED_LOG_FINDINGS`
+
+- c71c1d1: Agents are told when their managed sandbox was stopped. A stopped sandbox is restored from its saved `/workspace`, so files elsewhere (such as `/tmp`) and running programs may be gone, and agents used to find out only from failing commands. The first turn attempt after a stop the agent hasn't acted since now carries one sentence with the time and what may be gone. With the short idle grace, this appears on most turns that follow a pause after sandbox use. A box found lost during a turn is not covered. The reaper's stop event now records `providerStopped`, so a Connected Machine's drain, which stops nothing, is not reported.
+- 329ad8f: Free-credit farm protection by signup network. Each new self-serve organization records keyed hashes of the owner's client (IPv4 address or IPv6 /64) and its /24 or /48 prefix (never the address itself, kept 90 days), in every mode; invited members are never recorded. A new owner-only, revision-fenced setting (`off` by default) can observe or enforce an IP-velocity rule that holds Free credit, not access or purchased funds, from the 3rd new organization from one address within 24 hours, and can refuse organization setup with HTTP 429 after 5 from one address in an hour. The onboarding screen shows the server's message for that refusal. `scripts/operator/promotion-decisions.ts` adds `--network-velocity`, `--network-velocity-set`, `--network-holds` and `--network-release-holds`. See `docs/signup-abuse-protection.md`.
+- f22647a: The system prompt no longer changes when repository Skills are added or removed, the workspace becomes unreachable or degraded, or a turn switches between deferred and indexed Skill discovery. It keeps one stable "Repository skills" notice, and the live index reaches the model as a durable "Repository skills" developer history item, written only when it changes, frozen per turn and placed before the turn that first sees it. The current run sees the item at the same position later turns load it from, so earlier signed Claude thinking and cached prefixes stay valid. The one-shot request for a missing session title is now part of the turn's operational notice instead of being appended to the first request's system prompt. New exports: `ensureSessionRepositorySkills` (`@opengeni/db`), `repositorySkillsContextItem`, `readRepositorySkillsContext` and `latestRepositorySkillsIndex` (`@opengeni/contracts`), and the `publishRepositorySkills` agent option (`@opengeni/runtime`).
+- 3721c96: Index the turn-start lookups that walked whole session histories: the next turn position, the attempt-claim recovery-warning receipt checks, and the skill write receipt lookups behind every preference snapshot.
+- 4459bd7: Voice calls open and follow along more cleanly. The voice model now gets the agent's working notes as whole messages when each note completes. Before, every streaming fragment ("You pic", "ked up, so…") arrived as its own context item, and final answers showed up twice. A final answer now reaches the voice once, as the turn's result. The resume prompt for chats with earlier voice calls no longer demands total silence at the start, which contradicted a call the agent placed ("speak first"). The placed-call opening also says to answer right away, or to answer the person's hello if they spoke first.
+- ee44e4b: A voice call now hears the agent's actual answer when the agent ends its turn by waiting for input. That answer is stored as the turn's `reply` with an empty `output`, and the realtime projection read only `output`, so the voice model received an empty result and made an outcome up. The projection now uses `output`, then `reply`, and when a turn finished with neither it says so explicitly instead of sending empty text.
+- Updated dependencies [708848c]
+- Updated dependencies [b110015]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [19ab8c3]
+- Updated dependencies [cd033ae]
+- Updated dependencies [3bab763]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [dfeab20]
+- Updated dependencies [e3df016]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+  - @opengeni/config@6.15.0
+  - @opengeni/subscriptions@6.15.0
+  - @opengeni/codex@6.15.0
+  - @opengeni/observability@6.15.0
+  - @opengeni/codemode@6.15.0
+  - @opengeni/network@6.15.0
+  - @opengeni/xai-subscription@6.15.0
+
 ## 6.14.0
 
 ### Minor Changes

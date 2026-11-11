@@ -7,12 +7,21 @@ import {
   LoaderCircleIcon,
   ShieldCheckIcon,
 } from "lucide-react";
-import { useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type HTMLAttributes,
+  type ReactNode,
+} from "react";
 import type { ToolActionReview, ToolReviewDetailsPage, ToolReviewStatus } from "@opengeni/sdk";
 import { cn } from "../lib/cn";
 import { SecretRefText } from "./secret-ref-chip";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { reviewFacts } from "../approval-review-model";
+import { toolActionTitle, wordedToolActionReview } from "../tool-action-wording";
 import {
   DecisionActions,
   DecisionButton,
@@ -365,7 +374,7 @@ export function DeclineButton({
 
 /** One host-neutral review. All callbacks refer to the immutable action; none can edit it. */
 export function ToolActionReviewCard({
-  review,
+  review: savedReview,
   onApprove,
   onReject,
   submitting,
@@ -387,6 +396,8 @@ export function ToolActionReviewCard({
   bare?: boolean | undefined;
 }) {
   const t = useOpenGeniText();
+  // The host's words for the action, its fields, the reason and the button.
+  const review = useMemo(() => wordedToolActionReview(savedReview, t), [savedReview, t]);
   const titleId = useId();
   const canApprove = review.availableActions.includes("approve") && !!onApprove;
   const canReject = review.availableActions.includes("reject") && !!onReject;
@@ -569,7 +580,7 @@ export function ToolActionReviewDetails({
         tabIndex={-1}
         className="m-0 break-words text-og-md font-semibold outline-hidden [overflow-wrap:anywhere]"
       >
-        {review.title}
+        {toolActionTitle(t, review.toolName) ?? review.title}
       </h2>
       {review.accountLabel ? (
         <p className="m-0 mt-1 text-og-sm text-og-fg-muted">{review.accountLabel}</p>

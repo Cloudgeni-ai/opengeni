@@ -2203,7 +2203,7 @@ jobs:
     # succeeded; other events still build the image after validation settles.
     environment: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'public-release' || 'ci-build' }}
     needs: [automation-admission, plan, artifact-runtime, release-image-validation]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && (github.event_name != 'push' || github.ref != 'refs/heads/main' || needs.release-image-validation.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && !startsWith(github.ref, 'refs/heads/batch/') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && (github.event_name != 'push' || github.ref != 'refs/heads/main' || needs.release-image-validation.result == 'success') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -2290,6 +2290,8 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -2313,6 +2315,60 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=opengeni-ci-api
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-api,ignore-error=true' || '' }}
+          build-args: |
+            OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+  # A batch candidate has no release approval to order (release-image-validation
+  # skips it), but a job starts only once every job it needs has settled, even
+  # one that is skipped, so api-image would wait for the last test lane. The
+  # batch builds the same API image here as soon as the artifact runtime is
+  # ready; the final aggregates still require every lane and image.
+  batch-api-image:
+    name: Build batch API workload image
+    environment: ci-build
+    needs: [plan, artifact-runtime]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/batch/') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Download exact artifact runtime inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.artifact-runtime.outputs.artifact_name }}
+          path: .release/artifact-runtime
+
+      - name: Free runner disk before the image build
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
+
+      - name: Build API image
+        id: api_image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/opengeni.Dockerfile
+          target: api
+          platforms: linux/amd64
+          push: false
+          tags: opengeni-api:ci
+          labels: |
+            org.opencontainers.image.revision=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=opengeni-ci-api
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
@@ -2340,6 +2396,8 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -2386,6 +2444,8 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -2443,6 +2503,8 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -2493,6 +2555,8 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -2543,6 +2607,8 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -2565,13 +2631,19 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=opengeni-ci-relay
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-relay,ignore-error=true' || '' }}
+  # The sandbox images are the longest image builds, and the artifact runtime
+  # is only their last few layers. They start with the other lanes, build every
+  # layer that does not need the runtime while artifact-runtime is still
+  # producing it, then wait for its run-local artifact (uploaded only once
+  # artifact-runtime proved it) and finish the build from the warm cache.
   sandbox-image:
     name: Build headless sandbox workload image
-    needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    needs: [automation-admission, plan]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.plan.outputs.artifact_runtime_required == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     permissions:
+      actions: read # find this run's artifact runtime inputs
       contents: read
       packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
     outputs:
@@ -2582,17 +2654,14 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Download exact artifact runtime inputs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ needs.artifact-runtime.outputs.artifact_name }}
-          path: .release/artifact-runtime
       - name: Set up QEMU
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -2601,11 +2670,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build headless sandbox layers before the runtime inputs exist
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          DOCKER_BUILD_SUMMARY: false
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: .
+          file: docker/sandbox.Dockerfile
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          outputs: type=cacheonly
+          provenance: false
+          cache-from: type=gha,scope=opengeni-ci-sandbox
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Wait for exact artifact runtime inputs
+        id: runtime_inputs
+        timeout-minutes: 60
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: bun scripts/ci/wait-for-run-artifact.ts --name "artifact-runtime-containers-$SOURCE_SHA" --producer "Build exact artifact runtime inputs"
+
+      - name: Download exact artifact runtime inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ steps.runtime_inputs.outputs.artifact_name }}
+          path: ${{ runner.temp }}/artifact-runtime
+
       - name: Build headless sandbox image
         id: sandbox_image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
+          build-contexts: artifact-runtime-inputs=${{ runner.temp }}/artifact-runtime
           file: docker/sandbox.Dockerfile
           platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -2622,11 +2725,12 @@ jobs:
   # controller on the same source revision.
   desktop-image:
     name: Build desktop sandbox workload image
-    needs: [automation-admission, plan, artifact-runtime]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    needs: [automation-admission, plan]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.plan.outputs.artifact_runtime_required == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     permissions:
+      actions: read # find this run's artifact runtime inputs
       contents: read
       packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only
     outputs:
@@ -2643,13 +2747,10 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Download exact artifact runtime inputs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ${{ needs.artifact-runtime.outputs.artifact_name }}
-          path: .release/artifact-runtime
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cleanup: false # the hosted runner is discarded; removing the builder took minutes
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -2658,11 +2759,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build desktop sandbox layers before the runtime inputs exist
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          DOCKER_BUILD_SUMMARY: false
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: .
+          file: docker/desktop.Dockerfile
+          platforms: linux/amd64
+          build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          outputs: type=cacheonly
+          provenance: false
+          cache-from: type=gha,scope=opengeni-ci-desktop
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Wait for exact artifact runtime inputs
+        id: runtime_inputs
+        timeout-minutes: 60
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: bun scripts/ci/wait-for-run-artifact.ts --name "artifact-runtime-containers-$SOURCE_SHA" --producer "Build exact artifact runtime inputs"
+
+      - name: Download exact artifact runtime inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ steps.runtime_inputs.outputs.artifact_name }}
+          path: ${{ runner.temp }}/artifact-runtime
+
       - name: Build desktop sandbox image
         id: desktop_image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
+          build-contexts: artifact-runtime-inputs=${{ runner.temp }}/artifact-runtime
           file: docker/desktop.Dockerfile
           platforms: linux/amd64
           build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -2692,6 +2827,7 @@ jobs:
       - automation-admission
       - plan
       - api-image
+      - batch-api-image
       - worker-image
       - web-image
       - artifact-materializer-image
@@ -2707,7 +2843,7 @@ jobs:
     steps:
       - name: Require every workload image build
         env:
-          API_IMAGE_RESULT: ${{ needs.api-image.result }}
+          API_IMAGE_RESULT: ${{ startsWith(github.ref, 'refs/heads/batch/') && needs.batch-api-image.result || needs.api-image.result }}
           WORKER_IMAGE_RESULT: ${{ needs.worker-image.result }}
           WEB_IMAGE_RESULT: ${{ needs.web-image.result }}
           ARTIFACT_MATERIALIZER_IMAGE_RESULT: ${{ needs.artifact-materializer-image.result }}

@@ -2,7 +2,7 @@ import { wakePhraseSetupAvailable } from "@opengeni/react-native";
 import { useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import Constants from "expo-constants";
 import { Stack, router } from "expo-router";
-import { Alert } from "react-native";
+import { Alert, Platform } from "react-native";
 import { useAccount, usePickAccount } from "@/account";
 import { setAppearance, useAppearancePreference, type AppearancePreference } from "@/appearance";
 import { serverLabel } from "@/account-store";
@@ -22,7 +22,8 @@ import { dismissToHome } from "@/navigation";
 import { startFeedback } from "@/feedback/draft";
 import { setShakeToSendFeedback, useShakeToSendFeedback } from "@/feedback/preference";
 import { AppThemeProvider } from "@/theme";
-import { callAssistantName } from "@/wake-phrase";
+import { useVoiceCommands } from "@/voice-commands";
+import { callAssistantName, voiceCommandRequest } from "@/wake-phrase";
 import { openOnWeb, webPaths } from "@/web-links";
 
 export default function SettingsScreen() {
@@ -41,7 +42,8 @@ function Settings() {
   const appearance = useAppearancePreference();
   const shakeToSendFeedback = useShakeToSendFeedback();
   const { target: outsideCallTarget, pinned: pinnedCallSession } = useOutsideCallPreferences();
-  const { accounts, account, workspace, organizations, signOut } = useAccount();
+  const { accounts, account, workspace, workspaces, organizations, signOut } = useAccount();
+  const voiceCommands = useVoiceCommands();
   const pickAccount = usePickAccount();
   const inbox = useInboxSettings();
   const { notifications, agentCalls } = useNotificationSettingsSections(inbox);
@@ -196,6 +198,45 @@ function Settings() {
           onPress: () => router.push("/wake-phrase"),
         },
       ],
+    });
+  }
+  if (account) {
+    const ios = Platform.OS === "ios";
+    sections.push({
+      id: "voice-commands",
+      title: "Voice commands",
+      footer: voiceCommands.length
+        ? ios
+          ? `Say “${voiceCommandRequest("<name>")}” to Siri to call that chat. Works only while your phone is unlocked.`
+          : `Touch and hold the ${callAssistantName()} icon to call one of these chats. Works only while your phone is unlocked.`
+        : `Call a chat by name. To add one, open the chat, tap ⋯ and choose “Add voice command”.`,
+      rows: voiceCommands.length
+        ? voiceCommands.map((each) => {
+            const elsewhere =
+              each.workspaceId !== workspace?.id
+                ? workspaces.find((candidate) => candidate.id === each.workspaceId)?.name
+                : undefined;
+            // The chat's title only when it says more than the name does.
+            const chat =
+              each.chatTitle && each.chatTitle !== each.name ? each.chatTitle : undefined;
+            const subtitle = [chat, elsewhere].filter(Boolean).join(" · ");
+            return {
+              kind: "navigate" as const,
+              id: `voice-command-${each.id}`,
+              title: each.name,
+              ...(subtitle ? { subtitle } : {}),
+              ...(each.missing ? { detail: "Chat deleted", detailTone: "danger" as const } : {}),
+              onPress: () =>
+                router.push({ pathname: "/voice-command", params: { command: each.id } }),
+            };
+          })
+        : [
+            {
+              kind: "navigate" as const,
+              id: "voice-commands-empty",
+              title: "No voice commands yet",
+            },
+          ],
     });
   }
   if (account) {

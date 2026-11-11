@@ -114,6 +114,7 @@ mock.module("@opengeni/react-native/expo", () => ({
 }));
 mock.module("@/app-link-registry", () => ({ openLinkFromApp: () => undefined }));
 mock.module("@/feedback/recent-errors", () => ({ recordingRequests: (each: unknown) => each }));
+mock.module("@/voice-commands", () => ({ forgetVoiceCommands: async () => undefined }));
 mock.module("@/web-sign-in", () => ({ signInThroughWeb: async () => webSignIn }));
 // What the person answers about recordings still uploading, and what was removed.
 let recordingsChoice: "none" | "wait" | "discard" = "none";

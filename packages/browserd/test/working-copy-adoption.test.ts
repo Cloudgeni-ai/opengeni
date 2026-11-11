@@ -136,6 +136,21 @@ describe("working copy manifest", () => {
     expect((await workingCopyManifest(paths.live)).digest).not.toBe(first.digest);
   });
 
+  test("leaves the browser's cache directory out, as the controller drops it at every stop", async () => {
+    const { paths } = await fixture();
+    const before = await workingCopyManifest(paths.live);
+    await mkdir(join(paths.live, "browser-cache", "Default", "Cache"), { recursive: true });
+    await writeFile(join(paths.live, "browser-cache", "Default", "Cache", "data_0"), "cached");
+    const cached = await workingCopyManifest(paths.live);
+    expect(cached.excluded).toEqual([
+      "browser-cache",
+      "chrome-launch",
+      "working-runtime.sqlite-shm",
+    ]);
+    expect(cached.digest).toBe(before.digest);
+    expect(cached.bytes).toBe(before.bytes);
+  });
+
   test("excludes only the controller's own indexes and launcher, never user entries", async () => {
     const { root, paths } = await fixture();
     // User data whose names merely look like derived entries.
