@@ -87,6 +87,20 @@ for name in $STEPS; do
 done
 echo "gate of $SRC on $(hostname), $(uname -r), steps: $STEPS"
 
+# The guest build needs musl-gcc. It is installed before any step runs,
+# while the runner's network is known to work: CI runs have failed to
+# resolve the package mirror by the time the guest build starts. A failed
+# install refreshes a possibly stale package index and tries once more,
+# showing why if that fails too.
+if { wants guest || wants conformance; } && ! command -v musl-gcc >/dev/null; then
+  apt_log=$(mktemp)
+  sudo apt-get install -y -qq -o DPkg::Lock::Timeout=60 musl-tools >/dev/null 2>&1 ||
+    { sudo apt-get update -qq && sudo apt-get install -y -qq -o DPkg::Lock::Timeout=60 musl-tools; } \
+      >/dev/null 2>"$apt_log" ||
+    tail -n 5 "$apt_log" >&2
+  rm -f "$apt_log"
+fi
+
 if wants fmt; then
   step fmt
   check fmt '^Diff' cargo fmt --all --check
@@ -158,15 +172,6 @@ if wants lab; then
 fi
 guest_built=true
 if wants guest || wants conformance; then
-  if ! command -v musl-gcc >/dev/null; then
-    # A runner's package index can be stale, so a failed install refreshes
-    # it and tries once more, showing why if that fails too.
-    apt_log=$(mktemp)
-    sudo apt-get install -y -qq musl-tools >/dev/null 2>&1 ||
-      { sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools; } >/dev/null 2>"$apt_log" ||
-      tail -n 5 "$apt_log" >&2
-    rm -f "$apt_log"
-  fi
   step "guest build ($GUEST)"
   # Without a guest the guest and conformance tests fail for that reason
   # alone; the build's failure is the one the gate reports.
