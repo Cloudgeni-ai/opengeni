@@ -5375,7 +5375,8 @@ export const sessions = pgTable(
       .$type<SessionRemovedRepository[]>()
       .notNull()
       .default([]),
-    skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
+    // `skills` (the Skill folders the session carries itself) is deliberately
+    // not part of this row model; see `sessionSkillSets` below.
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     // Frozen creator fact. This is used for creation attribution and for the
@@ -5803,6 +5804,24 @@ export const sessions = pgTable(
     ),
   }),
 );
+
+/**
+ * The `sessions.skills` column: the complete Skill folders a session carries
+ * itself (every file's content), often hundreds of kilobytes per session and
+ * copied to every child. It lives in the sessions table but is not part of the
+ * `sessions` row model above, so ordinary row reads, `RETURNING` clauses and
+ * the per-event session row locks never select it: selecting it makes
+ * PostgreSQL fetch and decompress the whole TOASTed value and ship it to the
+ * process on every hot path. Read it only where the Skill content is actually
+ * used (see `sessionRowWithSkillsColumns` and `readSessionSkills`), and write
+ * it only through this table.
+ */
+export const sessionSkillSets = pgTable("sessions", {
+  id: uuid("id").primaryKey(),
+  accountId: uuid("account_id").notNull(),
+  workspaceId: uuid("workspace_id").notNull(),
+  skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
+});
 
 export const organizationUserResourceGrants = pgTable(
   "organization_user_resource_grants",

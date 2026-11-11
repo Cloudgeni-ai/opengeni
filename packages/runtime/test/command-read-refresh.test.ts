@@ -609,3 +609,123 @@ test('waitFor "any" returns once one of several owned commands settles', async (
     snapshot(result).commands.map((command: { terminal: boolean }) => command.terminal),
   ).toEqual([false, true]);
 });
+
+test("a refresh the machine never answers cannot stretch command_wait past its wait", async () => {
+  const waits: unknown[] = [];
+  let unhandled = 0;
+  const onUnhandled = () => unhandled++;
+  process.on("unhandledRejection", onUnhandled);
+  let fail: (error: unknown) => void = () => undefined;
+  const started = Date.now();
+  try {
+    const result = await executeCommandReadWithRefresh({
+      toolName: "command_wait",
+      args: { commandId, waitSeconds: 1 },
+      minRefreshBudgetMs: 300,
+      call: async (readArgs) => {
+        waits.push(readArgs.waitSeconds);
+        return receipt(false, ["retained"]);
+      },
+      // The machine's host is restarting: the refresh hangs, then fails long
+      // after the caller's wait.
+      refresh: async () =>
+        await new Promise<boolean>((_resolve, reject) => {
+          fail = reject;
+        }),
+    });
+    const waited = Date.now() - started;
+    expect(waited).toBeGreaterThanOrEqual(900);
+    expect(waited).toBeLessThan(2_500);
+    // One read before the refresh, and one without waiting once the wait is spent.
+    expect(waits).toEqual([0, 0]);
+    expect(snapshot(result)).toMatchObject({
+      terminal: false,
+      chunks: ["retained"],
+      freshness: { status: "refresh_unavailable", retryable: true },
+      timedOut: true,
+    });
+    // The abandoned refresh settling later is never an unhandled rejection.
+    fail(new Error("agent offline"));
+    await Bun.sleep(10);
+    expect(unhandled).toBe(0);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("a zero-second read still gives an answering refresh its few seconds", async () => {
+  const calls: string[] = [];
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_read",
+    args: { commandId, waitSeconds: 0 },
+    call: async (readArgs) => {
+      calls.push(`api:${readArgs.waitSeconds}`);
+      return receipt(calls.length > 1, calls.length > 1 ? ["fresh"] : []);
+    },
+    refresh: async () => {
+      calls.push("refresh");
+      await Bun.sleep(300);
+      return true;
+    },
+  });
+  expect(calls).toEqual(["api:0", "refresh", "api:0"]);
+  expect(snapshot(result)).toMatchObject({ terminal: true, chunks: ["fresh"] });
+  expect(snapshot(result).freshness).toBeUndefined();
+});
+
+test("several slow refreshes share one bound instead of each getting their own", async () => {
+  const ids = Array.from(
+    { length: 8 },
+    (_, index) => `6cfa95ae-29cc-48cb-9ab1-2613d15f1d${index.toString().padStart(2, "0")}`,
+  );
+  const refreshed: string[] = [];
+  const started = Date.now();
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandIds: ids, waitSeconds: 0 },
+    minRefreshBudgetMs: 500,
+    call: async () => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            commands: ids.map((id) => ({ commandId: id, terminal: false, chunks: [] })),
+          }),
+        },
+      ],
+    }),
+    refresh: async (id) => {
+      refreshed.push(id);
+      await Bun.sleep(200);
+      return true;
+    },
+  });
+  // Eight refreshes of 200 ms each would take 1.6 s; the shared bound ends them by 0.5 s.
+  expect(Date.now() - started).toBeLessThan(1_200);
+  expect(refreshed.length).toBeLessThan(ids.length);
+  // The commands the bound cut off are marked not fresh too, not only the one it caught.
+  const commands = snapshot(result).commands as { commandId: string; freshness?: unknown }[];
+  const stale = commands.filter((command) => command.freshness !== undefined);
+  expect(stale.map((command) => command.commandId)).toEqual(ids.slice(refreshed.length - 1));
+});
+
+test("cancelling a read stops waiting for a refresh the machine never answers", async () => {
+  const controller = new AbortController();
+  const reads: unknown[] = [];
+  setTimeout(() => controller.abort(), 100);
+  const started = Date.now();
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandId, waitSeconds: 20 },
+    signal: controller.signal,
+    call: async (readArgs) => {
+      reads.push(readArgs.waitSeconds);
+      return receipt(false, ["retained"]);
+    },
+    refresh: async () => await new Promise<boolean>(() => undefined),
+  });
+  expect(Date.now() - started).toBeLessThan(1_000);
+  // No further read once cancelled.
+  expect(reads).toEqual([0]);
+  expect(snapshot(result)).toMatchObject({ terminal: false, chunks: ["retained"] });
+});

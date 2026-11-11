@@ -350,8 +350,10 @@ export function repositoryUnavailableRefusalMessage(t: OpenGeniText, error: Erro
 
 /**
  * The server's own reason for a refused request, as a sentence, or null when
- * the response carries none. Reads both the API envelope (`error.message`)
- * and a route's own top-level `{ code, message }` body.
+ * the response carries none. Reads the API envelope (`error.message`), a
+ * route's own top-level `{ code, message }` body, and a host endpoint's
+ * `{ error: "sentence", code, details }` body. A bare `error` word such as
+ * `"maintenance"` or `"invalid_request"` is a marker, not a reason.
  */
 function serverRefusalReason(error: OpenGeniApiError): string | null {
   let body: unknown;
@@ -365,7 +367,9 @@ function serverRefusalReason(error: OpenGeniApiError): string | null {
     record?.error && typeof record.error === "object"
       ? (record.error as Record<string, unknown>)
       : record;
-  const message = envelope?.message;
+  const hostReason =
+    typeof record?.error === "string" && /\s/u.test(record.error.trim()) ? record.error : undefined;
+  const message = typeof envelope?.message === "string" ? envelope.message : hostReason;
   if (typeof message !== "string") return null;
   const text = message.trim().slice(0, 300);
   if (!text) return null;
@@ -528,6 +532,37 @@ function composerErrorReference(t: OpenGeniText, error: Error, message: string):
   return error instanceof OpenGeniApiError && error.correlationId
     ? t("lib.format.messageReferenceCorrelationid", { message, correlationId: error.correlationId })
     : message;
+}
+
+/**
+ * Definite refusals of what was asked (input or state) whose own reason tells
+ * the person what to change. Permission and missing-item refusals (403, 404)
+ * keep the neutral copy: their text can name internal permissions or brands.
+ */
+const EXPLAINED_CREATE_REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 409, 422]);
+
+/**
+ * What a refused or failed new chat says. Typed refusals (a speed or model
+ * that isn't available, credits, usage limits) keep their worded copy. Any
+ * other definite refusal says the server's or host's own reason instead of the
+ * SDK's generic copy for its status, so the person can change the model, speed
+ * or effort and send again. Uncertain outcomes keep the neutral copy, because
+ * the stock new chat then offers the exact retry.
+ */
+export function newConversationErrorMessage(t: OpenGeniText, error: Error): string {
+  const message = composerSubmissionErrorMessage(t, error);
+  if (
+    !(error instanceof OpenGeniApiError) ||
+    error.outcomeUnknown ||
+    !EXPLAINED_CREATE_REFUSAL_STATUSES.has(error.status)
+  )
+    return message;
+  // Only the SDK's bare copy for this status is generic; typed copy (setup,
+  // seats, Site refusals, worded create refusals) already says what to do.
+  const generic = formatErrorMessage(
+    new OpenGeniApiError(error.status, "", { outcomeUnknown: false }),
+  );
+  return message === generic ? (serverRefusalReason(error) ?? message) : message;
 }
 
 /** These definitive refusals need a payment, allowance or model change, not an unchanged retry. */

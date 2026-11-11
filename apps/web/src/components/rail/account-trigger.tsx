@@ -6,6 +6,7 @@ import { Loader2Icon } from "lucide-react";
 
 import { OrganizationInvitationDot } from "@/components/organization-invitations";
 import { Avatar, AvatarFallback, AvatarImage } from "@opengeni/react/ui/avatar";
+import { displayImageSrc } from "@opengeni/react/app/lib/content-hosting";
 import { cn } from "@opengeni/react/app/lib/utils";
 
 function userInitial(label: string): string {
@@ -41,7 +42,7 @@ export function AccountTrigger({
     >
       <span className="relative shrink-0">
         <Avatar size="sm">
-          {image ? <AvatarImage src={image} alt="" /> : null}
+          {image ? <AvatarImage src={displayImageSrc(image)} alt="" /> : null}
           <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
             {userInitial(displayName)}
           </AvatarFallback>

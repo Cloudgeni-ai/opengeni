@@ -7,6 +7,7 @@ import {
   type PullFile,
 } from "./github";
 import { MIGRATIONS_DIR } from "../migration-ordinals";
+import { MAINTAINER, evaluate, loadGuardedPatterns } from "../ci/model-request-review";
 import {
   REGENERATION_ARTIFACT,
   REGENERATION_FILE,
@@ -100,6 +101,12 @@ export interface PassOptions {
   now?: () => number;
   log?: (line: string) => void;
   randomId?: () => string;
+  /**
+   * Guarded model request path patterns; by default the model request section
+   * of main's `.github/CODEOWNERS`, read once per pass. A missing or malformed
+   * section stops the pass rather than landing anything unchecked.
+   */
+  modelRequestPatterns?: string[];
 }
 
 interface Context {
@@ -108,6 +115,9 @@ interface Context {
   now: () => number;
   log: (line: string) => void;
   randomId: () => string;
+  modelRequestPatterns: string[];
+  /** The author of each queued PR, as last observed, for the model request review. */
+  authors: Map<number, string | null>;
   /** GraphQL node IDs of queued PRs with auto-merge on, for ejection. */
   autoMerge: Map<number, string>;
   /** Head, branch and changed files of each queued PR whose migration the pass moves. */
@@ -134,6 +144,8 @@ function context(gh: GitHub, options: PassOptions & { dryRun?: boolean }): Conte
     now: options.now ?? Date.now,
     log: options.log ?? ((line) => console.log(line)),
     randomId: options.randomId ?? (() => crypto.randomUUID().replaceAll("-", "").slice(0, 12)),
+    modelRequestPatterns: options.modelRequestPatterns ?? loadGuardedPatterns(),
+    authors: new Map(),
     autoMerge: new Map(),
     renumbering: new Map(),
     regenerating: new Map(),
@@ -153,6 +165,7 @@ async function observe(ctx: Context): Promise<Observation> {
   ctx.renumbering.clear();
   ctx.regenerating.clear();
   ctx.queuedSlots.clear();
+  ctx.authors.clear();
   // Main's numbered files per directory, read once a pass and only when needed.
   const mainNumbered = new Map<string, Promise<NumberedFile[]>>();
   const onMain = (directory: string) => {
@@ -166,6 +179,7 @@ async function observe(ctx: Context): Promise<Observation> {
   for (const pull of await gh.queuedPulls(QUEUE_LABEL)) {
     if (pull.draft || !pull.sameRepository) continue;
     if (pull.autoMergeAt !== null) ctx.autoMerge.set(pull.number, pull.id);
+    ctx.authors.set(pull.number, pull.author ?? null);
     const check = await gh.check(pull.headSha, PR_CHECK);
     const ownRun = check?.workflow === PR_WORKFLOW && check.runHeadSha === pull.headSha;
     const current = ownRun && check?.status === "completed";
@@ -173,6 +187,17 @@ async function observe(ctx: Context): Promise<Observation> {
     const version = pull.headRef === VERSION_BRANCH;
     const changed = green ? await gh.pullFiles(pull.number) : [];
     const files = changed?.flatMap((f) => (f.previous ? [f.path, f.previous] : [f.path])) ?? null;
+    // A PR that changes what Opengeni sends to model providers waits, like a PR
+    // whose CI has not passed, until the maintainer approves its current head.
+    // Too many files to list needs that approval too.
+    const modelReview = green
+      ? await modelRequestReview(ctx, pull.number, pull.headSha, files)
+      : null;
+    const awaitingModelReview = modelReview !== null && !modelReview.pass;
+    if (awaitingModelReview)
+      ctx.log(
+        `Holding #${pull.number}: it changes model request files and ${MAINTAINER} has not approved ${pull.headSha.slice(0, 10)}`,
+      );
     const added = numberedFiles(
       (changed ?? []).filter((f) => ADDED.has(f.status)).map((f) => f.path),
     );
@@ -254,7 +279,7 @@ async function observe(ctx: Context): Promise<Observation> {
       title: pull.title,
       headSha: pull.headSha,
       queuedAt,
-      greenAt: green ? (check?.completedAt ?? now) : null,
+      greenAt: green && !awaitingModelReview ? (check?.completedAt ?? now) : null,
       conflict,
       parked: conflict === null ? parked : null,
       renumber: conflict === null ? renumber : [],
@@ -266,6 +291,7 @@ async function observe(ctx: Context): Promise<Observation> {
       ...(headAt === undefined ? {} : { headAt }),
       // Too many files to list is treated like a CI change: it runs alone.
       controlPlane: files === null || isControlPlane(files),
+      ...(awaitingModelReview ? { awaitingModelReview: true as const } : {}),
     });
     ctx.queuedSlots.set(
       pull.number,
@@ -294,6 +320,32 @@ async function observe(ctx: Context): Promise<Observation> {
     batches.push(batch);
   }
   return { now, mainSha, pulls, batches };
+}
+
+/**
+ * The model request review verdict for a PR head (scripts/ci/model-request-review.ts).
+ * `files` are its changed paths with renamed-from paths, or null when too many
+ * to list; read here when not given.
+ */
+async function modelRequestReview(
+  ctx: Context,
+  number: number,
+  headSha: string,
+  files?: string[] | null,
+) {
+  const paths =
+    files !== undefined
+      ? files
+      : ((await ctx.gh.pullFiles(number))?.flatMap((f) =>
+          f.previous ? [f.path, f.previous] : [f.path],
+        ) ?? null);
+  return evaluate({
+    patterns: ctx.modelRequestPatterns,
+    files: paths,
+    headSha,
+    author: ctx.authors.get(number) ?? null,
+    reviews: () => ctx.gh.reviews(number),
+  });
 }
 
 /**
@@ -797,6 +849,21 @@ async function land(ctx: Context, batch: Batch) {
     return;
   }
   if ((await gh.mainSha()) !== manifest.base) return;
+  // The model request review, once more on the exact heads about to land: a
+  // member's new head with the tested tree lands even before PR CI ran on it,
+  // so the hold at observation never saw that head.
+  for (const member of manifest.members) {
+    const head = batch.sameTree?.[member.number] ?? member.head;
+    if (!(await modelRequestReview(ctx, member.number, head)).pass) {
+      await abandon(
+        ctx,
+        batch,
+        `#${member.number} needs the maintainer's approval of its model request changes on ${head.slice(0, 10)}`,
+        member.number,
+      );
+      return;
+    }
+  }
   for (const member of manifest.members) {
     const sha = await gh.mergePull(member.number, {
       sha: batch.sameTree?.[member.number] ?? member.head,

@@ -307,7 +307,8 @@ async fn prune<S: Store>(service: Arc<Service<S>>) {
     }
 }
 
-/// Forgets the captured images nothing uses any more (ADR 22), every
+/// Forgets the captured and built images nothing uses any more (ADR 22,
+/// ADR 35), every
 /// [`service::COLLECT_EVERY`]. Every replica looks: marking an image as
 /// being collected is one write, and one a replica left half collected is
 /// finished by the next look.
@@ -318,8 +319,8 @@ async fn collect_images<S: Store>(service: Arc<Service<S>>) {
         every.tick().await;
         match service.collect_images().await {
             Ok(0) => {}
-            Ok(forgotten) => tracing::info!(forgotten, "forgot captured images nothing uses"),
-            Err(error) => tracing::warn!(%error, "forgetting captured images failed"),
+            Ok(forgotten) => tracing::info!(forgotten, "forgot stored images nothing uses"),
+            Err(error) => tracing::warn!(%error, "forgetting stored images failed"),
         }
     }
 }
