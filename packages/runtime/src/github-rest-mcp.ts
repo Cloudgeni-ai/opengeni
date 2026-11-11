@@ -863,7 +863,7 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
     const page = String(optionalPositiveInteger(args.page, "page", 100) ?? 1);
     if (toolName === "organizations_list") return await this.listOrganizations(toolName);
     const owner = requiredString(args.owner, "owner", 39);
-    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(owner)) {
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$/u.test(owner)) {
       throw new GitHubRestInputError("owner must be a GitHub user or organization login");
     }
     const filter = optionalString(args.filter, "filter", 100);

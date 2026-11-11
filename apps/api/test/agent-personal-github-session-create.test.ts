@@ -276,6 +276,7 @@ async function personWithYourGitHub(allRepositories: "read" | "write" | null) {
     const known = {
       "/repos/acme/elsewhere": githubRepository("acme/elsewhere", "77", true),
       "/repos/acme/read-only": githubRepository("acme/read-only", "78", false),
+      "/repos/octocat_acme/tools": githubRepository("octocat_acme/tools", "79", true),
     }[url.pathname];
     // GitHub no longer accepts the person's token for this one.
     if (url.pathname === "/repos/acme/token-revoked") return new Response("{}", { status: 401 });
@@ -353,7 +354,13 @@ async function personWithYourGitHub(allRepositories: "read" | "write" | null) {
     `;
     return { session, delegations: row!.delegations as Array<Record<string, any>> } as const;
   }
-  return { call, child, credentialBindingId, connection, githubCalls, root };
+  const selection = {
+    accountId: originGrant.accountId,
+    originWorkspaceId: target!.id,
+    subjectId,
+    connectionId: connection.id,
+  };
+  return { call, child, credentialBindingId, connection, githubCalls, root, db, selection };
 }
 
 describe("agent-created workers act as the person (real PostgreSQL)", () => {
@@ -581,5 +588,53 @@ describe("agent-created workers act as the person (real PostgreSQL)", () => {
       repositoryCount: 1,
       allRepositories: { enabled: true, access: "write" },
     });
+  });
+
+  test("an enterprise managed user's own repositories (owner with an underscore) work", async () => {
+    if (!shared) return;
+    const person = await personWithYourGitHub("write");
+    const created = await person.child([
+      {
+        kind: "repository",
+        uri: "https://github.com/octocat_acme/tools.git",
+        ref: "main",
+        connectionType: "github_personal",
+      },
+    ]);
+    if ("error" in created) throw new Error(created.error);
+    expect(created.session.resources).toEqual([
+      expect.objectContaining({
+        uri: "https://github.com/octocat_acme/tools",
+        repositoryId: "79",
+        access: "write",
+      }),
+    ]);
+    // The chosen list stores it too (the database checks the owner shape).
+    const current = await getPersonalGitHubRepositorySelectionState(person.db, person.selection);
+    if (!current) throw new Error("repository selection head is missing");
+    const replaced = await replacePersonalGitHubRepositorySelections(person.db, {
+      ...person.selection,
+      expectedConnectionAuthorityGeneration: current.connectionAuthorityGeneration,
+      expectedSelectionGeneration: current.selectionGeneration,
+      idempotencyKey: crypto.randomUUID(),
+      repositories: [
+        {
+          repositoryId: "79",
+          fullName: "octocat_acme/tools",
+          canonicalUrl: "https://github.com/octocat_acme/tools",
+          defaultBranch: "main",
+          visibility: "private",
+          private: true,
+          archived: false,
+          disabled: false,
+          permissions: { pull: true, triage: false, push: true, maintain: false, admin: false },
+          selectedAccess: "write",
+          lastVerifiedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    expect(replaced.repositories.map((repository) => repository.fullName)).toEqual([
+      "octocat_acme/tools",
+    ]);
   });
 });
