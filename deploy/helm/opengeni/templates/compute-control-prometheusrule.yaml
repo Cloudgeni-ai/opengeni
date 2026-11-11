@@ -13,7 +13,12 @@ compute_fleet_host_info, which is how every host alert is scoped.
 {{- $hosts := printf "compute_fleet_host_info{%s}" $scope }}
 {{- $liveHosts := printf "compute_fleet_host_info{%s,state=\"live\"}" $scope }}
 {{- $runbook := "https://github.com/Cloudgeni-ai/opengeni/blob/main/compute/docs/operations.md" }}
-{{- $spareBytes := mul (int (default 4096 (($cc.alerts).spareMemoryMib))) 1048576 }}
+{{- $alerts := default dict $cc.alerts }}
+{{- $spareMib := int (default 0 $alerts.spareMemoryMib) }}
+{{- $createRatio := default 0.1 $alerts.createFailureRatio }}
+{{- $createMinimum := int (default 5 $alerts.createMinimum) }}
+{{- $agentRestarts := int (default 2 $alerts.agentRestarts) }}
+{{- $refusedWakes := int (default 3 $alerts.refusedWakes) }}
 {{- $createFailures := "no_capacity|unavailable|unknown_outcome|host|internal|init_failed" }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
@@ -185,25 +190,25 @@ spec:
               sum(rate(compute_control_requests_total{ {{- $scope }},method="POST",route="/v1/sandboxes",outcome=~"{{ $createFailures }}"}[30m]))
               /
               sum(rate(compute_control_requests_total{ {{- $scope }},method="POST",route="/v1/sandboxes",outcome=~"ok|{{ $createFailures }}"}[30m]))
-            ) > 0.1
+            ) > {{ $createRatio }}
             and
-            sum(increase(compute_control_requests_total{ {{- $scope }},method="POST",route="/v1/sandboxes",outcome=~"ok|{{ $createFailures }}"}[30m])) >= 5
+            sum(increase(compute_control_requests_total{ {{- $scope }},method="POST",route="/v1/sandboxes",outcome=~"ok|{{ $createFailures }}"}[30m])) >= {{ $createMinimum }}
           for: 10m
           labels:
             severity: warning
           annotations:
-            summary: 'More than 10% of new compute sandboxes fail to be created, for lack of room or in the service, a host or the store.'
+            summary: 'More than {{ mulf $createRatio 100 }}% of new compute sandboxes fail to be created, for lack of room or in the service, a host or the store.'
             headline: 'Compute sandbox creates failing'
             value: '{{ "{{ $value | humanizePercentage }}" }} failing (30 min)'
             user_impact: 'New chats on compute get no sandbox, so they cannot run commands.'
             next_step: 'Check compute_control_requests_total for POST /v1/sandboxes by outcome, and the replicas'' logs.'
         - alert: OpenGeniComputeHostAgentRestarting
           expr: |
-            max by (host_name) (increase(compute_control_host_registrations_total{ {{- $scope }}}[6h])) >= 2
+            max by (host_name) (increase(compute_control_host_registrations_total{ {{- $scope }}}[6h])) >= {{ $agentRestarts }}
           labels:
             severity: warning
           annotations:
-            summary: 'A compute host registered afresh at least twice in six hours: its agent keeps starting again (stopped by its watchdog when stuck, crashed or rebooted), or its lease keeps lapsing.'
+            summary: 'A compute host registered afresh at least {{ $agentRestarts }} times in six hours: its agent keeps starting again (stopped by its watchdog when stuck, crashed or rebooted), or its lease keeps lapsing.'
             headline: 'Compute host {{ "{{ $labels.host_name }}" }} agent keeps restarting'
             value: '{{ "{{ printf `%.0f` $value }}" }} fresh registration(s) (6 h)'
             user_impact: 'While its agent restarts, the host''s sandboxes do not answer and their wakes wait or fail.'
@@ -211,7 +216,9 @@ spec:
             runbook_url: {{ printf "%s#observing" $runbook }}
         - alert: OpenGeniComputeHostRefusingWakes
           expr: |
-            sum by (host_name) (increase(compute_control_host_refusals_total{ {{- $scope }},kind="wake"}[30m])) >= 3
+            sum by (host_name) (increase(compute_control_host_refusals_total{ {{- $scope }},kind="wake"}[30m])) >= {{ $refusedWakes }}
+            and
+            sum by (host_name) (increase(compute_control_host_refusals_total{ {{- $scope }},kind="wake"}[10m])) > 0
           for: 15m
           labels:
             severity: warning
@@ -228,12 +235,13 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: 'A compute host has not renewed its 30-second lease for over 20 seconds: its agent is stuck or the host is cut off from the control service.'
+            summary: 'A compute host holding sandboxes has not renewed its 30-second lease for over 20 seconds: its agent is stuck or the host is cut off from the control service. The leader waits for such a host for its give-up time (give_up_after) before giving it up; a host with no sandboxes is given up sooner.'
             headline: 'Compute host {{ "{{ $labels.host_name }}" }} unreachable'
             value: '{{ "{{ printf `%.0f` $value }}" }}s since a renewal'
             user_impact: 'Its sandboxes do not answer; if it stays silent, its VMs stop and lose their running programs.'
-            next_step: 'Check the host''s instance and its journal in Cloud Logging; the control service gives it up once its lease runs out.'
-            runbook_url: {{ printf "%s#hosts" $runbook }}
+            next_step: 'Check the host''s instance and its journal in Cloud Logging; OpenGeniComputeHostGivenUp follows if the leader gives it up.'
+            runbook_url: {{ printf "%s#hosts-1" $runbook }}
+        {{- if gt $spareMib 0 }}
         - alert: OpenGeniComputeFleetFull
           expr: |
             max(
@@ -243,7 +251,7 @@ spec:
               )
               and on (host_name)
               {{ $liveHosts }}
-            ) < {{ $spareBytes }}
+            ) < {{ mul $spareMib 1048576 }}
             and
             max(compute_fleet_group_size{ {{- $scope }}}) >= max(compute_fleet_group_max_size{ {{- $scope }}})
           for: 15m
@@ -252,9 +260,10 @@ spec:
           annotations:
             summary: 'The compute host group is at its maximum size and no live host can promise another sandbox''s memory, so the fleet can neither place nor grow.'
             headline: 'Compute fleet full at its maximum size'
-            value: '{{ "{{ $value | humanize }}" }}B free on the roomiest host'
+            value: '{{ "{{ $value | humanize1024 }}" }}B free on the roomiest host'
             user_impact: 'New sandboxes and wakes are refused or wait, so chats on compute cannot run commands.'
             next_step: 'Raise the group''s maximum (computeControl.scaling.max) or the hosts'' size, or drain a host whose sandboxes can move.'
+        {{- end }}
         {{- if ($cc.metrics).hostsTo }}
         - alert: OpenGeniComputeHostMetricsFailing
           expr: |

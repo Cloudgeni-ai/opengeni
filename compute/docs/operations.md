@@ -1034,25 +1034,37 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   it to adopt). These need no host metrics, so they alert with
   `computeControl.metrics.port` alone:
   - `OpenGeniComputeHostAgentRestarting`: a host registered afresh at
-    least twice in six hours. One in-place upgrade restarts each agent
-    once and does not fire it.
-  - `OpenGeniComputeHostRefusingWakes`: a host refused three wakes or more
-    as full in half an hour, for a quarter of an hour.
+    least `computeControl.alerts.agentRestarts` (2) times in six hours.
+    One in-place upgrade restarts each agent once and does not fire it;
+    raise the threshold where agents are upgraded in place more often.
+  - `OpenGeniComputeHostRefusingWakes`: a host refused
+    `computeControl.alerts.refusedWakes` (3) wakes or more as full in half
+    an hour, and refused one in the last ten minutes, for a quarter of an
+    hour; a single burst that stops does not fire it.
   - `OpenGeniComputeHostUnreachable` (critical): a host has not renewed
-    its 30-second lease for over 20 seconds, for a minute. Once its lease
-    runs out, `OpenGeniComputeHostGivenUp` follows, and
-    `OpenGeniComputeHostGiveUpFailing` if its fence keeps failing.
+    its 30-second lease for over 20 seconds, for a minute. The leader
+    waits for a silent host that holds sandboxes for its give-up time
+    (`give_up_after`, 120 seconds by default) before giving it up, which
+    is what lets this fire; a silent host with no sandboxes is given up
+    sooner and raises only `OpenGeniComputeHostGivenUp` (and
+    `OpenGeniComputeHostGiveUpFailing` if its fence keeps failing).
   - `OpenGeniComputeFleetFull`: the host group is at its maximum size
     (`compute_fleet_group_size` against `compute_fleet_group_max_size`)
     and no live host can promise `computeControl.alerts.spareMemoryMib`
     more (free plus reclaimable memory; 4096 by default, about one
-    sandbox's memory request), for a quarter of an hour.
-  - `OpenGeniComputeCreatesFailing`: over a tenth of `POST /v1/sandboxes`
-    that did not fail for the caller's own mistake failed, for lack of
-    room or in the service, a host or the store, over half an hour with
-    five or more.
+    sandbox's memory request), for a quarter of an hour. It looks at
+    memory only, and exists only for a group the service sizes; 0 turns
+    it off.
+  - `OpenGeniComputeCreatesFailing`: over
+    `computeControl.alerts.createFailureRatio` (a tenth) of
+    `POST /v1/sandboxes` that did not fail for the caller's own mistake
+    failed, for lack of room or in the service, a host or the store, over
+    half an hour with `computeControl.alerts.createMinimum` (5) or more.
+    Creates through the E2B front door are not counted.
 - **Read a host's journal in Cloud Logging.** The host's journal reaches
-  its serial console, and the Terraform module turns on the instance's
+  its serial console (the GCE Ubuntu image forwards the system log to the
+  console; staging's hosts show `compute-host` lines there), and the
+  Terraform module turns on the instance's
   serial port logging (`journal_to_cloud_logging`, on by default), so
   Cloud Logging keeps it (30 days by default) with nothing running on
   the host, and it stays readable after the host is gone:
@@ -1068,8 +1080,9 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   same way. Hosts made from an earlier template ship theirs once the
   project's or the instance's metadata has `serial-port-logging-enable`
   set to `TRUE`, without a restart. An organization policy
-  (`compute.disableSerialPortLogging`) can forbid it; then set
-  `journal_to_cloud_logging` to false and read the console with
+  (`compute.disableSerialPortLogging`) can forbid it, and then refuses to
+  create hosts from a template that asks for it; set
+  `journal_to_cloud_logging` to false there and read the console with
   `gcloud compute instances get-serial-port-output`.
 - **Distinguish booking headroom from filesystem space.**
   `compute_fleet_host_disk_booking_headroom_bytes` is what more wakes may book after

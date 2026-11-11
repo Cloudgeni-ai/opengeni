@@ -284,7 +284,7 @@ resource "google_compute_instance_template" "host" {
     enable_integrity_monitoring = true
   }
 
-  metadata = {
+  metadata = merge({
     block-project-ssh-keys   = length(var.ssh_source_ranges) == 0 ? "true" : "false"
     enable-oslogin           = "TRUE"
     enable-guest-attributes  = "TRUE"
@@ -301,11 +301,12 @@ resource "google_compute_instance_template" "host" {
     compute-advertise        = var.advertise_interface
     compute-advertise-public = var.advertise_public_address ? "true" : "false"
     startup-script           = file("${path.module}/host-startup.sh")
-
-    # The journal reaches the serial console; this sends the console to
-    # Cloud Logging, with nothing running on the host.
-    serial-port-logging-enable = var.journal_to_cloud_logging ? "TRUE" : "FALSE"
-  }
+    },
+    # The journal reaches the serial console (the GCE image forwards it);
+    # this sends the console to Cloud Logging, with nothing running on the
+    # host. Off leaves the key out, so a project-wide setting still applies.
+    var.journal_to_cloud_logging ? { serial-port-logging-enable = "TRUE" } : {},
+  )
 
   lifecycle {
     create_before_destroy = true

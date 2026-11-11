@@ -25,6 +25,8 @@ export function expandAlertTemplate(text: string, sample: Sample): string {
         return humanizeDuration(sample.value);
       case "$value | humanize":
         return humanize(sample.value);
+      case "$value | humanize1024":
+        return humanize1024(sample.value);
       case "printf `%.0f` $value":
         return sample.value.toFixed(0);
       default:
@@ -84,4 +86,16 @@ function humanizeDuration(value: number): string {
   if (hours !== 0) return `${sign}${hours}h ${minutes}m ${Math.trunc(seconds)}s`;
   if (minutes !== 0) return `${sign}${minutes}m ${Math.trunc(seconds)}s`;
   return `${sign}${formatG4(seconds)}s`;
+}
+
+/** Prometheus' humanize1024: binary prefixes (ki, Mi, Gi, ...) above 1. */
+function humanize1024(value: number): string {
+  if (Math.abs(value) <= 1 || !Number.isFinite(value)) return formatG4(value);
+  let prefix = "";
+  for (const next of ["ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi", "Yi"]) {
+    if (Math.abs(value) < 1024) break;
+    prefix = next;
+    value /= 1024;
+  }
+  return `${formatG4(value)}${prefix}`;
 }

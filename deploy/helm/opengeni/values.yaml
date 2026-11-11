@@ -1632,11 +1632,24 @@ computeControl:
     # metrics, and the host alerts are left out.
     hostsTo: ""
   alerts:
+    # Thresholds of the OpenGeniCompute alerts, per environment.
     # OpenGeniComputeFleetFull fires when the host group is at its maximum
     # size and no live host can promise this much more memory (free plus
     # reclaimable): about one sandbox's memory request
-    # (OPENGENI_COMPUTE_MEMORY_REQUEST_MIB).
+    # (OPENGENI_COMPUTE_MEMORY_REQUEST_MIB). Memory only, and only for a
+    # group the service sizes. 0: no FleetFull alert.
     spareMemoryMib: 4096
+    # OpenGeniComputeCreatesFailing: more than this share of sandbox creates
+    # (POST /v1/sandboxes) fail in 30 minutes, out of at least createMinimum.
+    createFailureRatio: 0.1
+    createMinimum: 5
+    # OpenGeniComputeHostAgentRestarting: a host registers afresh this many
+    # times in six hours. Raise it where hosts' agents are upgraded in place
+    # more often.
+    agentRestarts: 2
+    # OpenGeniComputeHostRefusingWakes: a host refuses this many wakes as
+    # full in 30 minutes, and is still refusing.
+    refusedWakes: 3
   hostsService:
     # Hosts dial this endpoint from outside the cluster: a LoadBalancer
     # (annotations for an internal one) or a NodePort.

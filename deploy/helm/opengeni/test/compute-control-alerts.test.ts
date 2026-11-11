@@ -677,6 +677,30 @@ describe("compute alerts", () => {
         fires: [],
       },
       {
+        name: "one burst of refused wakes that stops is no alert",
+        series: [
+          {
+            series: `compute_control_host_refusals_total{${own},pod="a",host_name="h1",kind="wake"}`,
+            values: "0x4 3x76",
+          },
+        ],
+        alert: "OpenGeniComputeHostRefusingWakes",
+        at: "22m",
+        fires: [],
+      },
+      {
+        name: "another release's host refusing wakes",
+        series: [
+          {
+            series: `compute_control_host_refusals_total{${other},pod="b",host_name="h1",kind="wake"}`,
+            values: "0+1x80",
+          },
+        ],
+        alert: "OpenGeniComputeHostRefusingWakes",
+        at: "40m",
+        fires: [],
+      },
+      {
         name: "a host silent for half a minute",
         series: [
           {
@@ -694,6 +718,18 @@ describe("compute alerts", () => {
           {
             series: `compute_fleet_host_renewal_age_seconds{${own},pod="a",host_name="h1"}`,
             values: "1x10 9x10",
+          },
+        ],
+        alert: "OpenGeniComputeHostUnreachable",
+        at: "7m",
+        fires: [],
+      },
+      {
+        name: "another release's host silent",
+        series: [
+          {
+            series: `compute_fleet_host_renewal_age_seconds{${other},pod="b",host_name="h1"}`,
+            values: "1x10 30x10",
           },
         ],
         alert: "OpenGeniComputeHostUnreachable",
@@ -748,6 +784,38 @@ describe("compute alerts", () => {
         at: "40m",
         fires: [],
       },
+      {
+        name: "a few failures among many creates",
+        series: [createsBy("ok", "0+20x80"), createsBy("host", "0+1x80")],
+        alert: "OpenGeniComputeCreatesFailing",
+        at: "40m",
+        fires: [],
+      },
     ]);
   }, 180_000);
+
+  test("take their thresholds from computeControl.alerts", async () => {
+    const tuned = await render([
+      ...enabled,
+      "computeControl.alerts.spareMemoryMib=0",
+      "computeControl.alerts.createFailureRatio=0.25",
+      "computeControl.alerts.createMinimum=50",
+      "computeControl.alerts.agentRestarts=4",
+      "computeControl.alerts.refusedWakes=10",
+    ]);
+    const rules = alerts(tuned);
+    expect(rules.has("OpenGeniComputeFleetFull")).toBe(false);
+    expect(rules.get("OpenGeniComputeCreatesFailing")!.expr).toContain(") > 0.25");
+    expect(rules.get("OpenGeniComputeCreatesFailing")!.expr).toContain(">= 50");
+    expect(rules.get("OpenGeniComputeCreatesFailing")!.annotations.summary).toContain(
+      "More than 25%",
+    );
+    expect(rules.get("OpenGeniComputeHostAgentRestarting")!.expr).toContain(">= 4");
+    expect(rules.get("OpenGeniComputeHostRefusingWakes")!.expr).toContain(">= 10");
+    const defaults = alerts(await render(enabled));
+    expect(defaults.get("OpenGeniComputeFleetFull")!.expr).toContain(`< ${4096 * 1048576}`);
+    expect(defaults.get("OpenGeniComputeCreatesFailing")!.annotations.summary).toContain(
+      "More than 10%",
+    );
+  });
 });
