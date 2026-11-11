@@ -22,7 +22,7 @@
     },
     {
       "path": ".github/workflows/browser-engine-pins.yml",
-      "sha256": "a54a211bd0e0d439a1c88b9ec046872536ba4f54762fd8d409859ef0b02054b9"
+      "sha256": "ee47d9206c0910c09728df3cd01347a9c8db7d8619f62fab76f33de06d893f7f"
     },
     {
       "path": ".github/workflows/ci.yml",
@@ -178,7 +178,7 @@
     },
     {
       "path": ".github/workflows/xai-client-version-pin.yml",
-      "sha256": "bd9aaaa3a10bae03eaed3ebb59916705efecdf73ec33f77696c20ccf68acb205"
+      "sha256": "0c3214b9764dc82e1a23cce1d1b19939211e02f9532277e3f196cf5d18f96502"
     }
   ],
   "actions": [
@@ -641,7 +641,7 @@
       "workflow": ".github/workflows/browser-engine-pins.yml",
       "job": "update",
       "step": "Open or update the pull request",
-      "sha256": "7bbb7ad1c6768781bd6388bc7b5e1e0c437a3e8789a9b2e4da1db47259c50cd8"
+      "sha256": "bfb397f6f9d10848e6f2c45b36f0be47e785bd1e7254f4222c435988b447f3b3"
     },
     {
       "workflow": ".github/workflows/browser-engine-pins.yml",
@@ -2405,7 +2405,7 @@
       "workflow": ".github/workflows/xai-client-version-pin.yml",
       "job": "update",
       "step": "Open or update the pull request",
-      "sha256": "d59097bce2fd938d54a69f7b48632da3aa75419236ea372ac06f5b84285f230b"
+      "sha256": "fb8fd0c12fecf82f40446d72a0f7cf34bc3c0019c075b6302c4b63822af7221c"
     },
     {
       "workflow": ".github/workflows/xai-client-version-pin.yml",
