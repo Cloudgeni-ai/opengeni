@@ -299,7 +299,10 @@ describe("scheduled task default Sandbox Environment", () => {
         triggerType: "scheduled",
         producerKey: `repository-removed-${crypto.randomUUID()}`,
       })
-      .catch(() => ({ action: "refused" as const }));
+      .catch((error: unknown) => {
+        expect(String(error)).toContain("outside the selected authority");
+        return { action: "refused" as const };
+      });
     expect(later.action).not.toBe("signal");
     const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id);
     expect(runs.filter((item) => item.status === "dispatched").map((item) => item.id)).toEqual([
