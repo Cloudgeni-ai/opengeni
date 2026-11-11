@@ -84,7 +84,7 @@ describe("verdict", () => {
   test("fails when the producer never shows a job", () => {
     expect(verdict(false, [], producer, 0, ABSENT_POLLS_WITHOUT_PRODUCER)).toEqual({
       kind: "failed",
-      reason: `${producer} has no job in this run`,
+      reason: `${producer} started no jobs in this run`,
     });
   });
 
@@ -100,10 +100,18 @@ describe("verdict", () => {
       kind: "failed",
       reason: `${producer} was skipped`,
     });
-    expect(verdict(false, caller("in_progress", null), producer, 0, 1000)).toEqual({
+    expect(verdict(false, caller("in_progress", null), producer, 0)).toEqual({
       kind: "wait",
       pending: 0,
     });
+    // A caller listed without its called jobs counts as a producer with no jobs.
+    for (const [status, conclusion] of [
+      ["in_progress", null],
+      ["completed", "success"],
+    ] as const)
+      expect(
+        verdict(false, caller(status, conclusion), producer, 0, ABSENT_POLLS_WITHOUT_PRODUCER),
+      ).toEqual({ kind: "failed", reason: `${producer} started no jobs in this run` });
   });
 });
 
@@ -179,12 +187,31 @@ describe("waitForArtifact", () => {
       sleep: async () => {},
       log: () => {},
     });
-    expect(result).toEqual({ kind: "failed", reason: `${producer} has no job in this run` });
+    expect(result).toEqual({ kind: "failed", reason: `${producer} started no jobs in this run` });
     expect(reads.polls).toBe(ABSENT_POLLS_WITHOUT_PRODUCER + 1);
   });
 
-  test("ends before the wait step's 60-minute timeout", () => {
-    expect(DEADLINE_MS).toBeLessThan(60 * 60_000);
+  test("ends with room for one last poll before the wait step's 60-minute timeout", () => {
+    // A poll makes up to three reads, each retried for about 137 seconds.
+    expect(DEADLINE_MS + 3 * 137_000).toBeLessThan(60 * 60_000);
+  });
+
+  test("a rate-limited 403 keeps waiting", async () => {
+    let calls = 0;
+    const reads: RunReads = {
+      async artifactListed() {
+        if (calls++ < REFUSED_READS * 2) throw new GitHubReadError(403, "runs/42/artifacts", true);
+        return true;
+      },
+      async latestJobs() {
+        return [];
+      },
+    };
+    const result = await waitForArtifact(reads, "artifact", producer, {
+      sleep: async () => {},
+      log: () => {},
+    });
+    expect(result).toEqual({ kind: "ready" });
   });
 
   test("fails after GitHub refuses the reads repeatedly", async () => {
@@ -276,6 +303,32 @@ describe("githubRunReads", () => {
       "https://api.github.com/repos/o/r/actions/runs/42/jobs?filter=latest&per_page=100&page=1",
       "https://api.github.com/repos/o/r/actions/runs/42/jobs?filter=latest&per_page=100&page=2",
     ]);
+  });
+
+  test("tells a rate-limited 403 from a refused read", async () => {
+    const answer = (headers: Record<string, string>, status = 403) =>
+      githubRunReads(
+        "o/r",
+        "42",
+        "token",
+        (async () => new Response("no", { status, headers })) as unknown as typeof fetch,
+        { delaysMs: [] },
+      )
+        .artifactListed("a")
+        .then(
+          () => undefined,
+          (error: GitHubReadError) => ({ refused: error.refused, rateLimited: error.rateLimited }),
+        );
+    expect(await answer({ "x-ratelimit-remaining": "0" })).toEqual({
+      refused: false,
+      rateLimited: true,
+    });
+    expect(await answer({ "retry-after": "60" })).toEqual({ refused: false, rateLimited: true });
+    expect(await answer({ "x-ratelimit-remaining": "4000" })).toEqual({
+      refused: true,
+      rateLimited: false,
+    });
+    expect(await answer({}, 404)).toEqual({ refused: true, rateLimited: false });
   });
 
   test("a failed read throws instead of looking like a missing artifact", async () => {

@@ -18,22 +18,42 @@ export type Verdict =
 export const SETTLED_POLLS_WITHOUT_ARTIFACT = 6;
 /** Polls in a row the producer may show no job at all before the wait fails. */
 export const ABSENT_POLLS_WITHOUT_PRODUCER = 30;
-/** Reads in a row that may be refused (401, 403, 404) before the wait fails. */
+/**
+ * Reads in a row that may be refused (401, 403 or 404, but not a rate limit)
+ * before the wait fails.
+ */
 export const REFUSED_READS = 3;
 /**
- * Below the wait step's 60-minute timeout, so the wait reports why it failed
+ * Leaves room under the wait step's 60-minute timeout for one last poll, whose
+ * reads retry for up to about 7 minutes, so the wait reports why it failed
  * instead of being killed.
  */
-export const DEADLINE_MS = 55 * 60_000;
+export const DEADLINE_MS = 50 * 60_000;
 
 /** A GitHub read that answered with an error status. */
 export class GitHubReadError extends Error {
   constructor(
     readonly status: number,
     path: string,
+    /** GitHub also answers a rate-limited read with 403. */
+    readonly rateLimited = false,
   ) {
-    super(`GitHub ${status} for ${path}`);
+    super(`GitHub ${status}${rateLimited ? " (rate limited)" : ""} for ${path}`);
   }
+
+  /** A permission, token or run problem that retrying will not fix. */
+  get refused(): boolean {
+    return [401, 403, 404].includes(this.status) && !this.rateLimited;
+  }
+}
+
+/** GitHub's rate-limit answers, as scripts/ci/github-pr-ci.ts reads them. */
+export function isRateLimited(response: Response): boolean {
+  if (response.status !== 403 && response.status !== 429) return false;
+  return (
+    response.headers.get("x-ratelimit-remaining") === "0" ||
+    Number(response.headers.get("retry-after")) > 0
+  );
 }
 
 /**
@@ -66,8 +86,8 @@ export function verdict(
   );
   if (failed) return { kind: "failed", reason: `${failed.name} concluded ${failed.conclusion}` };
   const pending = produced.filter((job) => job.status !== "completed").length;
-  if (!caller && produced.length === 0 && absentPolls >= ABSENT_POLLS_WITHOUT_PRODUCER)
-    return { kind: "failed", reason: `${producer} has no job in this run` };
+  if (produced.length === 0 && absentPolls >= ABSENT_POLLS_WITHOUT_PRODUCER)
+    return { kind: "failed", reason: `${producer} started no jobs in this run` };
   if (produced.length > 0 && pending === 0 && settledPolls >= SETTLED_POLLS_WITHOUT_ARTIFACT) {
     const skipped = produced.find((job) => job.conclusion === "skipped");
     return {
@@ -96,7 +116,8 @@ export function githubRunReads(
   const headers = { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" };
   const get = async (path: string): Promise<Record<string, unknown>> => {
     const response = await retryingFetch(fetcher, `${api}/${path}`, { headers }, 30_000, retry);
-    if (!response.ok) throw new GitHubReadError(response.status, `runs/${runId}/${path}`);
+    if (!response.ok)
+      throw new GitHubReadError(response.status, `runs/${runId}/${path}`, isRateLimited(response));
     return (await response.json()) as Record<string, unknown>;
   };
   return {
@@ -141,9 +162,9 @@ export async function waitForArtifact(
       refusedReads = 0;
       const result = verdict(listed, jobs, producer, settledPolls, absentPolls);
       if (result.kind !== "wait") return result;
-      const present = jobs.some(
-        (job) => job.name === producer || job.name.startsWith(`${producer} / `),
-      );
+      // Only the called workflow's jobs count: a caller job listed without
+      // them is a producer that never started its work.
+      const present = jobs.some((job) => job.name.startsWith(`${producer} / `));
       absentPolls = present ? 0 : absentPolls + 1;
       settledPolls = present && result.pending === 0 ? settledPolls + 1 : 0;
       if (result.pending !== lastPending) {
@@ -154,7 +175,7 @@ export async function waitForArtifact(
       // GitHub failing to answer is not evidence about the producer; keep
       // waiting until the deadline. A read refused again and again (a missing
       // permission or a wrong run) will not recover, so fail it early.
-      const refused = error instanceof GitHubReadError && [401, 403, 404].includes(error.status);
+      const refused = error instanceof GitHubReadError && error.refused;
       refusedReads = refused ? refusedReads + 1 : 0;
       if (refusedReads >= REFUSED_READS)
         return { kind: "failed", reason: `GitHub refused ${refusedReads} reads: ${String(error)}` };
