@@ -695,11 +695,11 @@ spec:
           expr: |
             histogram_quantile(
               0.95,
-              sum by (le, route) (rate(opengeni_http_request_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"}[10m]))
+              sum by (le, route) (rate(opengeni_http_request_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"}[5m]))
             ) > 2
             and on(route)
-            sum by (route) (increase(opengeni_http_request_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"}[10m])) >= 10
-          for: 5m
+            sum by (route) (increase(opengeni_http_request_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"}[5m])) >= 10
+          for: 10m
           labels:
             severity: warning
           annotations:
@@ -708,7 +708,7 @@ spec:
             value: 'p95 {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Opening workspaces and session lists feels slow in the app.'
             next_step: 'Check database CPU and slow queries before adding API pods.'
-            description: Workspace or session reads are slow enough to degrade the interactive control plane. Inspect database CPU, active queries, event append latency, and request volume before scaling API pods.
+            description: Workspace or session reads have stayed slow (p95 over 2 seconds in every 5-minute window for 10 minutes) and degrade the interactive control plane. A few-second burst, such as one page load during a slow query or pod start, does not page. Inspect database CPU, active queries, event append latency, and request volume before scaling API pods.
         # Product-level failure safety net: a route whose refusals (401/403/409/422)
         # jump against its own one-day baseline, or that refuses most of its
         # traffic. Use the classified rejection counter so an ended attempt's
