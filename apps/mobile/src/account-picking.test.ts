@@ -114,6 +114,7 @@ mock.module("@opengeni/react-native/expo", () => ({
 }));
 mock.module("@/app-link-registry", () => ({ openLinkFromApp: () => undefined }));
 mock.module("@/feedback/recent-errors", () => ({ recordingRequests: (each: unknown) => each }));
+mock.module("@/voice-commands", () => ({ forgetVoiceCommands: async () => undefined }));
 mock.module("@/web-sign-in", () => ({ signInThroughWeb: async () => webSignIn }));
 
 const { AccountProvider, useAccount, usePickAccount } = await import("./account");

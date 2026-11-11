@@ -12,6 +12,10 @@ import UIKit
 /// the app without unlocking it) waits for the phone to be unlocked, and is
 /// dropped if that does not happen soon after. App Intents ask for the unlock
 /// themselves (their authentication policy).
+///
+/// "Locked" is protected data being unavailable, the only lock state iOS
+/// exposes: with a passcode it starts about 10 seconds after the screen
+/// locks, and a phone without a passcode never reaches it.
 public class OpenGeniCallAppDelegateSubscriber: ExpoAppDelegateSubscriber {
   /// How long a request made while locked waits for the unlock.
   private static let unlockWindow: TimeInterval = 30

@@ -39,7 +39,7 @@ function sameName(a: string, b: string): boolean {
 
 /**
  * A short name to start from: the chat's agent when it has its own name
- * ("Kai"), else the first few words of the chat's title.
+ * ("Atlas"), else the first few words of the chat's title.
  */
 export function suggestedVoiceCommandName(input: {
   agentName?: string | null | undefined;
