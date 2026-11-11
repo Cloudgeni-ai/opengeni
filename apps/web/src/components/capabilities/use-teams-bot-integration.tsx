@@ -8,7 +8,12 @@ import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import type { IntegrationAdapter } from "./use-api-integration-accounts";
 import { MICROSOFT_TEAMS_LOGO_URL } from "./use-microsoft-teams-integration";
-import { clearTeamsFragment, teamsErrorText, teamsFragmentToken } from "@/lib/teams-connect";
+import {
+  clearTeamsFragment,
+  savePendingTeamsLink,
+  teamsErrorText,
+  teamsFragmentToken,
+} from "@/lib/teams-connect";
 
 export function useTeamsBotIntegration({
   workspaceId,
@@ -228,16 +233,16 @@ export function useTeamsBotIntegration({
             }
           }}
           title="Link your Teams account?"
-          description="Link the Teams account that opened this page to your signed-in Opengeni account. The bot will use your access when you ask it to work."
-          confirmLabel="Link my account"
+          description="To confirm the Teams account is yours, sign in to Microsoft with the account you use in Teams. It's then linked to your signed-in Opengeni account, and the bot uses your access when you ask it to work."
+          confirmLabel="Sign in with Microsoft"
           onConfirm={async () => {
             if (!linkRequest || linkRequest.scope !== scope) return false;
             try {
-              await api.linkAccount(linkRequest.token);
-              clearTeamsFragment("teams_link");
-              setLinkRequest(null);
-              await refresh();
-              toast.success("Teams account linked. Return to Teams to continue.");
+              // Microsoft returns to the setup page, which finishes the link.
+              const { authorizationUrl } = await api.startLinkSignIn(linkRequest.token);
+              savePendingTeamsLink({ linkToken: linkRequest.token, workspaceId });
+              window.location.assign(authorizationUrl);
+              return false;
             } catch (caught) {
               setLinkError(
                 teamsErrorText(

@@ -12,10 +12,11 @@ export type RawNativeCallEvent = {
   muted?: boolean;
   route?: string;
   target?: string | null;
+  workspaceId?: string | null;
+  requestId?: string | null;
   token?: string | null;
   reason?: string;
   sessionId?: string;
-  workspaceId?: string;
   subjectId?: string;
   title?: string;
   ringUntil?: string;
@@ -86,7 +87,13 @@ export function parseNativeCallEvent(raw: RawNativeCallEvent): NativeCallEvent |
     case "audioSessionDeactivated":
       return { type: raw.type };
     case "startRequested":
-      return { type: "startRequested", target: raw.target ?? null };
+      return {
+        type: "startRequested",
+        target: raw.target ?? null,
+        // A workspace means nothing without the session it holds.
+        workspaceId: raw.target ? (raw.workspaceId ?? null) : null,
+        ...(raw.requestId ? { requestId: raw.requestId } : {}),
+      };
     case "voipToken":
       return { type: "voipToken", token: raw.token ?? null };
     case "incoming":

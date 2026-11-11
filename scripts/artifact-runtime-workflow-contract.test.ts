@@ -169,9 +169,8 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
 
     const runtimeConsumers = [
       parsed.jobs["api-image"],
+      parsed.jobs["batch-api-image"],
       parsed.jobs["artifact-materializer-image"],
-      parsed.jobs["sandbox-image"],
-      parsed.jobs["desktop-image"],
     ];
     for (const job of runtimeConsumers) {
       expect(job?.steps?.find((step) => step.name === "Check out repository")?.with?.ref).toBe(
@@ -181,6 +180,32 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
         job?.steps?.find((step) => step.name === "Download exact artifact runtime inputs")?.with
           ?.name,
       ).toBe("${{ needs.artifact-runtime.outputs.artifact_name }}");
+    }
+    // The sandbox images start before artifact-runtime finishes and wait in
+    // the job for the artifact it uploads, by its exact name, in this run.
+    const runtimeWorkflow = Bun.YAML.parse(
+      await readFile(resolve(root, ".github/workflows/artifact-runtime.yml"), "utf8"),
+    ) as { jobs: Record<string, CiJob> };
+    const upload = runtimeWorkflow.jobs.aggregate?.steps?.find(
+      (step) => step.name === "Upload verified runtime inputs",
+    );
+    expect(upload?.with?.name).toBe("artifact-runtime-containers-${{ inputs.source_sha }}");
+    for (const jobName of ["sandbox-image", "desktop-image"]) {
+      const job = parsed.jobs[jobName];
+      expect(job?.steps?.find((step) => step.name === "Check out repository")?.with?.ref).toBe(
+        exactCiSource,
+      );
+      const wait = job?.steps?.find(
+        (step) => step.name === "Wait for exact artifact runtime inputs",
+      );
+      expect(wait?.env?.SOURCE_SHA).toBe(exactCiSource);
+      expect(wait?.run).toBe(
+        `bun scripts/ci/wait-for-run-artifact.ts --name "artifact-runtime-containers-$SOURCE_SHA" --producer "${parsed.jobs["artifact-runtime"]?.name}"`,
+      );
+      expect(
+        job?.steps?.find((step) => step.name === "Download exact artifact runtime inputs")?.with
+          ?.name,
+      ).toBe("${{ steps.runtime_inputs.outputs.artifact_name }}");
     }
 
     const serverBuilds = [

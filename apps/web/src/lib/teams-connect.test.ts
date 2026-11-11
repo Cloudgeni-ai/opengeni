@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import {
+  clearPendingTeamsLink,
+  readPendingTeamsLink,
   readPendingTeamsSetup,
+  savePendingTeamsLink,
   savePendingTeamsSetup,
   teamsAuthReturnPath,
   teamsErrorText,
@@ -9,6 +12,7 @@ import {
   teamsFragmentToken,
   teamsMicrosoftFailureText,
   teamsMicrosoftReturn,
+  teamsMicrosoftSignInPurpose,
   teamsRouteMissing,
 } from "./teams-connect";
 import { signupReturnPath } from "./signup-attribution";
@@ -111,6 +115,30 @@ describe("Teams self-serve Microsoft sign-in return", () => {
       JSON.stringify({ setupToken: "p", workspaceId: "ws", replaceOwnLink: "yes", savedAt: 1_000 }),
     );
     expect(readPendingTeamsSetup(storage, 2_000)).toEqual({ setupToken: "p", workspaceId: "ws" });
+  });
+
+  test("keeps an account link's proof and workspace through its sign-in, briefly", () => {
+    const storage = memoryStorage();
+    savePendingTeamsLink({ linkToken: "link-proof", workspaceId: "ws" }, storage, 1_000);
+    expect(readPendingTeamsLink(storage, 2_000)).toEqual({
+      linkToken: "link-proof",
+      workspaceId: "ws",
+    });
+    // A pending link is never read as a pending setup.
+    expect(readPendingTeamsSetup(storage, 2_000)).toBeNull();
+    expect(readPendingTeamsLink(storage, 1_000 + 15 * 60_000 + 1)).toBeNull();
+    expect(readPendingTeamsLink(storage, 999)).toBeNull();
+    clearPendingTeamsLink(storage);
+    expect(readPendingTeamsLink(storage, 2_000)).toBeNull();
+  });
+
+  test("tells a link sign-in from a setup sign-in by its state's purpose", () => {
+    const state = (value: unknown) =>
+      `${Buffer.from(JSON.stringify(value)).toString("base64url")}.signature`;
+    expect(teamsMicrosoftSignInPurpose(state({ purpose: "teams-account-link" }))).toBe("link");
+    expect(teamsMicrosoftSignInPurpose(state({ purpose: "teams-admin-setup" }))).toBe("setup");
+    for (const unknown of [undefined, "", "signed-state", state({ purpose: "other" }), "%%%.x"])
+      expect(teamsMicrosoftSignInPurpose(unknown)).toBeNull();
   });
 
   test("reads exactly one code and state, or Microsoft's error", () => {
