@@ -121,6 +121,10 @@ fn only_the_leader_reports_the_fleet() {
         ),
         Some(1.5)
     );
+    assert_eq!(
+        value(&text, "compute_fleet_host_epoch{host_name=\"hosts-a\"}"),
+        Some(1.0)
+    );
 
     // The count moves after standing still 12 s: one gap of 12 s, and
     // the next note starts the next gap.

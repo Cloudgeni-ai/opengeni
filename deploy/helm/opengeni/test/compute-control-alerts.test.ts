@@ -563,8 +563,8 @@ describe("compute alerts", () => {
   test("fire on what compute's incidents look like", async () => {
     const groups = await render(enabled);
     const sixHours = 6 * 120;
-    const restarts = (values: string) => ({
-      series: `compute_control_host_registrations_total{${own},pod="a",host_name="h1"}`,
+    const epochs = (values: string, pod = "a", release = own) => ({
+      series: `compute_fleet_host_epoch{${release},pod="${pod}",host_name="h1"}`,
       values,
     });
     const createsBy = (outcome: string, values: string) => ({
@@ -603,39 +603,35 @@ describe("compute alerts", () => {
     await evaluate(groups, [
       {
         name: "an agent restarting twice in six hours",
-        series: [restarts(`0x100 1x200 2x${sixHours}`)],
+        series: [epochs(`5x100 7x200 9x${sixHours}`)],
         alert: "OpenGeniComputeHostAgentRestarting",
         at: "3h",
         fires: [{ labels: { host_name: "h1" }, value: 2 }],
       },
       {
         name: "one restart, as an in-place upgrade makes, is no alert",
-        series: [restarts(`0x100 1x${sixHours}`)],
+        series: [epochs(`5x100 7x${sixHours}`)],
         alert: "OpenGeniComputeHostAgentRestarting",
         at: "3h",
         fires: [],
       },
       {
-        name: "restarts counted by a replica that started since still count",
-        series: [
-          restarts(`0x100 1x40`),
-          {
-            series: `compute_control_host_registrations_total{${own},pod="b",host_name="h1"}`,
-            values: `_x140 0x20 2x${sixHours}`,
-          },
-        ],
+        name: "restarts either side of a rollout of the service both count",
+        series: [epochs(`5x100 7x40`), epochs(`_x140 7x20 9x${sixHours}`, "b")],
         alert: "OpenGeniComputeHostAgentRestarting",
         at: "3h",
         fires: [{ labels: { host_name: "h1" }, value: 2 }],
       },
       {
         name: "another release's host restarting",
-        series: [
-          {
-            series: `compute_control_host_registrations_total{${other},pod="b",host_name="h1"}`,
-            values: `0+1x${sixHours}`,
-          },
-        ],
+        series: [epochs(`0+1x${sixHours}`, "b", other)],
+        alert: "OpenGeniComputeHostAgentRestarting",
+        at: "3h",
+        fires: [],
+      },
+      {
+        name: "a host's first registration and a change of leader are no restarts",
+        series: [epochs(`_x20 5x100`), epochs(`_x110 5x${sixHours}`, "b")],
         alert: "OpenGeniComputeHostAgentRestarting",
         at: "3h",
         fires: [],

@@ -1033,10 +1033,13 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   `wake` of a sandbox it holds, `place` of one created on it or given to
   it to adopt). These need no host metrics, so they alert with
   `computeControl.metrics.port` alone:
-  - `OpenGeniComputeHostAgentRestarting`: a host registered afresh at
-    least `computeControl.alerts.agentRestarts` (2) times in six hours.
-    One in-place upgrade restarts each agent once and does not fire it;
-    raise the threshold where agents are upgraded in place more often.
+  - `OpenGeniComputeHostAgentRestarting`: a host's epoch, which the
+    leader reports from the fleet table (`compute_fleet_host_epoch`),
+    changed at least `computeControl.alerts.agentRestarts` (2) times in
+    six hours, for a minute. It survives compute-control rollouts, since
+    the epoch is durable. One in-place upgrade restarts each agent once
+    and does not fire it; raise the threshold where agents are upgraded
+    in place more often.
   - `OpenGeniComputeHostRefusingWakes`: a host refused
     `computeControl.alerts.refusedWakes` (3) wakes or more as full in half
     an hour, and refused one in the last ten minutes, for a quarter of an

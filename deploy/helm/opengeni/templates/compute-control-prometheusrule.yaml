@@ -204,7 +204,8 @@ spec:
             next_step: 'Check compute_control_requests_total for POST /v1/sandboxes by outcome, and the replicas'' logs.'
         - alert: OpenGeniComputeHostAgentRestarting
           expr: |
-            max by (host_name) (increase(compute_control_host_registrations_total{ {{- $scope }}}[6h])) >= {{ $agentRestarts }}
+            changes((max by (host_name) (compute_fleet_host_epoch{ {{- $scope }}}))[6h:1m]) >= {{ $agentRestarts }}
+          for: 1m
           labels:
             severity: warning
           annotations:

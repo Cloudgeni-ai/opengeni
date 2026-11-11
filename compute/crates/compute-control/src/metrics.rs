@@ -449,8 +449,13 @@ fn bytes(mib: u64) -> Num {
 }
 
 /// The gauges each host the service counts on has.
-fn host_gauges() -> [HostGauge; 11] {
+fn host_gauges() -> [HostGauge; 12] {
     [
+        (
+            "compute_fleet_host_epoch",
+            "The registration a host holds: a number that rises each time it registers afresh (its agent started again or its lease lapsed). Its changes count fresh registrations whichever replica leads, across restarts of the service.",
+            |host| Num::Whole(host.target.epoch.0),
+        ),
         (
             "compute_fleet_host_memory_bytes",
             "Memory a host gives sandboxes in all.",
