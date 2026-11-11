@@ -11,10 +11,11 @@
 --    (auth_sessions.ip_address). The database reduces them to the exact
 --    network and keeps only an HMAC-SHA256 under a random per-schema key
 --    stored in an owner-only table. Recorded for each new self-serve owner
---    at setup; for the owner of an account when it becomes denied or held;
---    and at every later sign-in of such an owner, so the networks are kept
---    after their sessions end. Invited members are never recorded. Session
---    use is the session's creation (sign-in) time.
+--    at setup, and for the owner of an account when it becomes denied or
+--    held (through the decision setter), so the networks are kept after
+--    their sessions end; an operator can capture again later sign-ins.
+--    Invited members are never recorded. Session use is the session's
+--    creation (sign-in) time.
 -- 2. Signup networks. The API-keyed address hash of 1354
 --    (signup_network_sources) of denied and held accounts is matched too.
 -- 3. Detect and hold. free_plan_credit_eligible evaluates the current account
@@ -56,8 +57,8 @@ CREATE INDEX signup_network_owner_addresses_last_seen
   ON opengeni_private.signup_network_owner_addresses (data_schema, last_seen_at);
 REVOKE ALL ON opengeni_private.signup_network_owner_addresses FROM PUBLIC;
 
--- Owners of accounts that were denied or held, so their later sign-ins are
--- recorded too. Written when the decision is made; never invited members.
+-- Owners of accounts that were denied or held when they were captured (the
+-- coverage the review listing reports). Never invited members.
 CREATE TABLE opengeni_private.signup_network_flagged_owners (
   data_schema text NOT NULL,
   account_id uuid NOT NULL,
@@ -166,8 +167,7 @@ END $$;
 REVOKE ALL ON FUNCTION opengeni_private.record_signup_owner_session_networks(text,uuid,text) FROM PUBLIC;
 
 -- Captures the owner (never invited members) of one denied or held account:
--- remembers the owner so later sign-ins are recorded, and records their
--- current session networks. Returns false when the account has no
+-- remembers the owner and records their current session networks. Returns false when the account has no
 -- self-serve owner. Owner context only.
 CREATE OR REPLACE FUNCTION opengeni_private.capture_flagged_owner_session_networks(
   p_data_schema text, p_account_id uuid
@@ -217,58 +217,41 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION opengeni_private.capture_all_flagged_owner_session_networks(text) FROM PUBLIC;
 
--- A decision becoming denied or held captures that account's owner.
--- Best-effort: a capture failure never blocks the decision.
-CREATE OR REPLACE FUNCTION opengeni_private.capture_flagged_owner_on_decision() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+-- The 0981 decision setter (body unchanged first), plus: a decision becoming
+-- denied or held captures that account's owner. Every decision goes through
+-- this setter. Best-effort: a capture failure never blocks the decision.
+CREATE OR REPLACE FUNCTION opengeni_private.set_promotion_decision(
+  p_account_id uuid, p_decision text, p_policy_version text, p_rule_id text,
+  p_evidence jsonb, p_actor text, p_expected_revision bigint DEFAULT NULL
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+DECLARE prior promotion_decisions%ROWTYPE;
+  result promotion_decisions%ROWTYPE;
 BEGIN
-  BEGIN
-    PERFORM opengeni_private.capture_flagged_owner_session_networks(TG_TABLE_SCHEMA, NEW.account_id);
-  EXCEPTION WHEN OTHERS THEN
-    RAISE WARNING 'denied network capture skipped (%)', SQLSTATE;
-  END;
-  RETURN NULL;
+  PERFORM pg_advisory_xact_lock(hashtext(p_account_id::text));
+  SELECT * INTO prior FROM promotion_decisions WHERE account_id=p_account_id;
+  IF p_expected_revision IS NOT NULL AND p_expected_revision <> coalesce(prior.revision,0) THEN
+    RAISE EXCEPTION 'Promotion decision changed' USING ERRCODE='40001';
+  END IF;
+  INSERT INTO promotion_decisions
+    (account_id, decision, revision, actor)
+  VALUES (p_account_id,p_decision,coalesce(prior.revision,0)+1,p_actor)
+  ON CONFLICT (account_id) DO UPDATE SET decision=excluded.decision, revision=excluded.revision,
+    actor=excluded.actor,updated_at=clock_timestamp()
+  RETURNING * INTO result;
+  INSERT INTO opengeni_private.promotion_decision_history
+    (data_schema,account_id,revision,decision,actor,updated_at,policy_version,rule_id,evidence)
+  VALUES (session_tenancy_fence_target_schema()::regnamespace::text,result.account_id,result.revision,result.decision,
+    result.actor,result.updated_at,p_policy_version,p_rule_id,p_evidence);
+  IF result.decision IN ('denied', 'held') THEN
+    BEGIN
+      PERFORM opengeni_private.capture_flagged_owner_session_networks(
+        session_tenancy_fence_target_schema()::regnamespace::text, result.account_id);
+    EXCEPTION WHEN OTHERS THEN
+      RAISE WARNING 'denied network capture skipped (%)', SQLSTATE;
+    END;
+  END IF;
+  RETURN to_jsonb(result);
 END $$;
-REVOKE ALL ON FUNCTION opengeni_private.capture_flagged_owner_on_decision() FROM PUBLIC;
-
--- A sign-in of a captured owner whose account is still denied or held
--- records its network. One indexed lookup for everyone else. Best-effort: a
--- failure never blocks the sign-in.
-CREATE OR REPLACE FUNCTION opengeni_private.record_flagged_owner_sign_in() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
-DECLARE flagged record; address_hash_value text;
-BEGIN
-  BEGIN
-    FOR flagged IN SELECT f.account_id FROM opengeni_private.signup_network_flagged_owners f
-      JOIN promotion_decisions d ON d.account_id = f.account_id AND d.decision IN ('denied', 'held')
-      WHERE f.data_schema = TG_TABLE_SCHEMA AND f.auth_user_id = NEW.user_id
-    LOOP
-      address_hash_value := coalesce(address_hash_value,
-        opengeni_private.signup_network_session_hash(TG_TABLE_SCHEMA, NEW.ip_address));
-      EXIT WHEN address_hash_value IS NULL;
-      INSERT INTO opengeni_private.signup_network_owner_addresses AS existing(data_schema, account_id,
-        address_hash, first_seen_at, last_seen_at)
-      VALUES (TG_TABLE_SCHEMA, flagged.account_id, address_hash_value,
-        coalesce(NEW.created_at, clock_timestamp()), coalesce(NEW.created_at, clock_timestamp()))
-      ON CONFLICT (data_schema, account_id, address_hash) DO UPDATE
-        SET first_seen_at = least(existing.first_seen_at, excluded.first_seen_at),
-          last_seen_at = greatest(existing.last_seen_at, excluded.last_seen_at);
-    END LOOP;
-  EXCEPTION WHEN OTHERS THEN
-    RAISE WARNING 'denied network sign-in record skipped (%)', SQLSTATE;
-  END;
-  RETURN NULL;
-END $$;
-REVOKE ALL ON FUNCTION opengeni_private.record_flagged_owner_sign_in() FROM PUBLIC;
-
-CREATE TRIGGER signup_network_capture_flagged_owner
-  AFTER INSERT OR UPDATE OF decision ON promotion_decisions
-  FOR EACH ROW WHEN (NEW.decision IN ('denied', 'held'))
-  EXECUTE FUNCTION opengeni_private.capture_flagged_owner_on_decision();
-CREATE TRIGGER signup_network_flagged_owner_sign_in
-  AFTER INSERT ON auth_sessions
-  FOR EACH ROW WHEN (NEW.ip_address IS NOT NULL)
-  EXECUTE FUNCTION opengeni_private.record_flagged_owner_sign_in();
 
 -- 1354 settings plus deniedNetworkMode (off unless set).
 CREATE OR REPLACE FUNCTION opengeni_private.signup_network_velocity_settings(p_data_schema text)
@@ -612,8 +595,7 @@ BEGIN
       OR (n.nspname = 'opengeni_private' AND p.proname IN ('grant_verified_signup_trial_credit',
         'set_signup_network_velocity', 'evaluate_signup_denied_network',
         'record_signup_owner_session_networks', 'capture_flagged_owner_session_networks',
-        'capture_all_flagged_owner_session_networks', 'capture_flagged_owner_on_decision',
-        'record_flagged_owner_sign_in'))
+        'capture_all_flagged_owner_session_networks', 'set_promotion_decision'))
   LOOP
     EXECUTE format('ALTER FUNCTION %s SET search_path = pg_catalog, %I, opengeni_private, pg_temp', routine, data_schema);
   END LOOP;
@@ -622,7 +604,7 @@ BEGIN
       'signup_network_velocity_settings', 'evaluate_signup_denied_network', 'signup_network_exact_unit',
       'signup_network_session_hash', 'record_signup_owner_session_networks',
       'capture_flagged_owner_session_networks', 'capture_all_flagged_owner_session_networks',
-      'capture_flagged_owner_on_decision', 'record_flagged_owner_sign_in')
+      'set_promotion_decision')
   LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', routine);
   END LOOP;

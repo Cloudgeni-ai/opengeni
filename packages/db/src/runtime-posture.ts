@@ -581,11 +581,6 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "capture_product_lifecycle_fact()",
   "observe_credit_grant()",
   "backfill_product_lifecycle_facts(text, integer)",
-  // Migration 1361: owner-run trigger functions of the denied network rule.
-  // They capture a denied or held account owner's sign-in networks as keyed
-  // hashes when the decision is made and at that owner's later sign-ins.
-  "capture_flagged_owner_on_decision()",
-  "record_flagged_owner_sign_in()",
   "validate_mcp_account_bindings(jsonb, jsonb)",
   "fence_mcp_account_bindings()",
   "guard_mcp_operation_immutable()",

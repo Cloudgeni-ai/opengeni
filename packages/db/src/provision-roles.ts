@@ -2751,8 +2751,6 @@ BEGIN
       'record_signup_owner_session_networks(text,uuid,text)',
       'capture_flagged_owner_session_networks(text,uuid)',
       'capture_all_flagged_owner_session_networks(text)',
-      'capture_flagged_owner_on_decision()',
-      'record_flagged_owner_sign_in()',
       'signup_network_session_hash(text,text)',
       'signup_network_exact_unit(text)',
       'wake_teams_route_for_session_event()',

@@ -348,7 +348,7 @@ test("currently held accounts count, released and eligible accounts do not, and 
   }
 }, 180_000);
 
-test("decisions and later sign-ins capture networks that outlive the sessions; the backfill covers old denials", async () => {
+test("decisions capture networks that outlive the sessions; the operator capture adds later sign-ins and old denials", async () => {
   if (!shared || !client) return;
   await enforce();
   try {
@@ -360,7 +360,7 @@ test("decisions and later sign-ins capture networks that outlive the sessions; t
     const later = await owner([ip]);
     expect(await decision(later.accountId)).toMatchObject(HELD);
 
-    // A later sign-in of a denied owner is recorded at sign-in.
+    // A later sign-in of a denied owner is captured by the operator capture.
     const comeback = address();
     const projection = await getCanonicalHumanIdentityProjection(client.db, farm.userId);
     const binding = await getCanonicalHumanExactLoginBindingForAuthUser(client.db, {
@@ -368,6 +368,7 @@ test("decisions and later sign-ins capture networks that outlive the sessions; t
       providerId: "credential",
     });
     await session(farm.userId, comeback, projection, binding);
+    expect((await captureFlaggedSignupNetworkOwners(ownerClient!.db)).failed).toBe(0);
     await shared.admin`delete from auth_sessions where user_id = ${farm.userId}`;
     const afterComeback = await owner([comeback]);
     expect(await decision(afterComeback.accountId)).toMatchObject(HELD);

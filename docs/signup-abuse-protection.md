@@ -245,11 +245,12 @@ prefixes never take part:
   is the sign-in address.
 
 The new owner's session networks are recorded at organization setup. When an
-account becomes `denied` or `held`, a trigger captures its owner's session
-networks (newest 200 sessions in the last 90 days) and remembers the owner
-(`opengeni_private.signup_network_flagged_owners`); each later sign-in of that
-owner is recorded as it happens, so the networks outlast the sessions. Setup
-itself only writes the new account's own rows. The migration captures every
+account becomes `denied` or `held`, the decision setter captures its owner's
+session networks (newest 200 sessions in the last 90 days) and remembers the
+owner (`opengeni_private.signup_network_flagged_owners`), so the networks
+outlast the sessions. Sign-ins after the decision are captured when the capture
+runs again (`--network-capture-flagged`). Setup itself only writes the new
+account's own rows. The migration captures every
 account already denied or held, account by account, including those decided
 before 1354; a failure is a migration warning with counts, and
 `--network-holds` reports `deniedNetworkCoverage` (denied or held accounts and
