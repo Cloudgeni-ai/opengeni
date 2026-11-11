@@ -2,14 +2,17 @@ import {
   ComputerNativeCommand,
   ComputerNativeReceipt,
   ComputerOperationReceipt,
+  parseInteractionFailureReason,
   parseInteractionDriverDiagnostic,
   type InteractionDriverDiagnostic,
+  type InteractionFailureReason,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { parseBrowserFrameMetadata, type BrowserFrameMetadata } from "@opengeni/sdk";
 import { olderBrowserControllerMessage } from "./browser-controller-compatibility";
 import {
+  BROWSER_ACTION_RECEIPT_FAILURE_REASON_PARAMETER,
   BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_NOTES_VERSION,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
@@ -626,11 +629,22 @@ export class BrowserControlRequestError extends Error {
     /** Operator-only context the controller sent beside a driver failure;
      * logged, never shown to callers. */
     readonly diagnostic: InteractionDriverDiagnostic | null = null,
+    /** Operator-only reason the controller sent beside a typed driver
+     * failure (see InteractionFailureReason); for metrics, never shown to
+     * callers. */
+    readonly failureReason: InteractionFailureReason | null = null,
   ) {
     super(error.message);
     this.retryable = error.retryable;
   }
 }
+
+/** A browser action receipt with the operator-only failure reason the
+ * controller returned beside it, if any. The reason is not part of
+ * BrowserActionReceipt: remove it before passing the receipt on. */
+export type BrowserControlActionReceipt = BrowserActionReceiptValue & {
+  failureReason?: InteractionFailureReason;
+};
 
 export class BrowserControlUnsupportedError extends Error {
   readonly name = "BrowserControlUnsupportedError";
@@ -2389,7 +2403,7 @@ export class BrowserControlSessionClient {
   async action(
     command: BrowserActionCommandValue,
     options: BrowserObservationNoticeRequest = {},
-  ): Promise<BrowserActionReceiptValue> {
+  ): Promise<BrowserControlActionReceipt> {
     const parsed = BrowserActionCommand.parse(command);
     if (
       parsed.browserSessionId !== this.reference.browserSessionId ||
@@ -2405,10 +2419,10 @@ export class BrowserControlSessionClient {
         async (timeoutMs) =>
           await this.parent.requestForSession({
             method: "POST",
-            // Controllers that predate resolved targets, notes or notices
-            // ignore these parameters.
+            // Controllers that predate resolved targets, notes, notices or
+            // failure reasons ignore these parameters.
             path: withObservationNotices(
-              `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1&${BROWSER_ACTION_RECEIPT_NOTES_PARAMETER}=${BROWSER_ACTION_RECEIPT_NOTES_VERSION}`,
+              `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1&${BROWSER_ACTION_RECEIPT_NOTES_PARAMETER}=${BROWSER_ACTION_RECEIPT_NOTES_VERSION}&${BROWSER_ACTION_RECEIPT_FAILURE_REASON_PARAMETER}=1`,
               options,
             ),
             token: this.controlToken,
@@ -2439,7 +2453,15 @@ export class BrowserControlSessionClient {
       }
       throw error;
     }
-    return BrowserActionReceipt.parse(data);
+    // The failure reason travels beside the receipt's own fields.
+    let failureReason: InteractionFailureReason | null = null;
+    if (isRecord(data) && "failureReason" in data) {
+      const { failureReason: sent, ...receipt } = data;
+      failureReason = parseInteractionFailureReason(sent);
+      data = receipt;
+    }
+    const receipt = BrowserActionReceipt.parse(data);
+    return failureReason === null ? receipt : { ...receipt, failureReason };
   }
 
   /** API-broker-only file authority path. Signed read URLs are materialized by
@@ -3207,6 +3229,7 @@ function parseEnvelope(body: string, status: number): unknown {
         parsed.data.code === "driver_failed" || parsed.data.code === "resource_unavailable"
           ? parseInteractionDriverDiagnostic(value.diagnostic)
           : null,
+        parseInteractionFailureReason(value.failureReason),
       );
     }
   }
