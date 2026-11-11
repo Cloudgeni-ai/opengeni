@@ -133,7 +133,7 @@ export function AgentSlackIntroPage({
       title={`Introduce ${agent.name}`}
       description={
         handle
-          ? `Post a short intro so people know to ask ${agentSlackCall(handle)}.`
+          ? `Post a short intro so people know to ask ${agentSlackCall(agent.name)}.`
           : "Post a short intro so people know to ask it."
       }
       back={{ label: agent.name, onClick: onClose }}

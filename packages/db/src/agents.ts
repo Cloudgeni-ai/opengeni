@@ -617,9 +617,7 @@ export type UpdateAgentOutcome =
   | { kind: "not_found" }
   | { kind: "version_conflict"; current: AgentRecord }
   /** The new name clashes with another agent in a Slack installation it is in. */
-  | { kind: "slack_name_taken"; connectionId: string }
-  /** The change would make an agent that is in Slack Only me. */
-  | { kind: "requires_workspace_visibility" };
+  | { kind: "slack_name_taken"; connectionId: string };
 
 async function lockAgent(
   tx: Database,
@@ -704,12 +702,18 @@ export async function updateAgent(
         return { kind: "version_conflict" as const, current };
       }
       const { patch } = input;
-      const installs = await installsOf(tx, home, current.id);
-      // Checked under the row lock: an agent in Slack is always shared.
-      if (patch.visibility === "private" && installs.length > 0) {
-        return { kind: "requires_workspace_visibility" as const };
-      }
+      let installs = await installsOf(tx, home, current.id);
       await markDualWrite(tx);
+      // Checked under the row lock: an agent in Slack is always shared, so
+      // making it Only me takes it out of every Slack workspace, the same way
+      // turning Slack off does (its channel settings there go with it).
+      if (patch.visibility === "private" && installs.length > 0) {
+        for (const install of installs) {
+          await deleteLegacySlackRow(tx, current.accountId, install);
+          await tx.execute(sql`delete from agent_slack_installs where id = ${install.id}::uuid`);
+        }
+        installs = [];
+      }
       const name = patch.name ?? current.name;
       const was = current.content?.stored ?? { instructions: "", firstMessage: "" };
       // New Instructions were written over the joined text the person saw, so
@@ -904,6 +908,12 @@ async function deleteLegacySlackRow(
   );
 }
 
+/**
+ * The legacy row's required creator for an agent no person made (an API key)
+ * that Opengeni made available in Slack on its own.
+ */
+const AUTOMATIC_SLACK_CREATOR = "opengeni:agents";
+
 export type PutAgentSlackInstallOutcome =
   | { kind: "saved"; install: AgentSlackInstallRecord; agent: AgentRecord; created: boolean }
   | { kind: "not_found" }
@@ -931,7 +941,21 @@ export async function putAgentSlackInstall(
     installWorkspaceId: string;
     open?: boolean;
     expectedVersion?: number;
-    actorSubjectId: string;
+    /** Null when Opengeni made it available on its own (every linked Slack workspace). */
+    actorSubjectId: string | null;
+    /**
+     * Opengeni adds it on its own (a shared agent is in every linked Slack
+     * workspace): the agent's version stays, so nobody's open edit of it
+     * conflicts. A person turning it on or changing open use bumps it.
+     */
+    automatic?: boolean;
+    /**
+     * While an agent is in one Slack installation at a time: move it here from
+     * the other one in the same transaction, so it is never in neither and a
+     * concurrent catch-up can't put it back in between. Its open use, channel
+     * settings and intros there go with it.
+     */
+    moveFromOther?: boolean;
   },
 ): Promise<PutAgentSlackInstallOutcome> {
   try {
@@ -948,7 +972,11 @@ export async function putAgentSlackInstall(
       const existing = installs.find((install) => install.connectionId === input.connectionId);
       const other = installs.find((install) => install.connectionId !== input.connectionId);
       if (!existing && other) {
-        return { kind: "single_install" as const, connectionId: other.connectionId };
+        if (!input.moveFromOther) {
+          return { kind: "single_install" as const, connectionId: other.connectionId };
+        }
+        await deleteLegacySlackRow(tx, home.accountId, other);
+        await tx.execute(sql`delete from agent_slack_installs where id = ${other.id}::uuid`);
       }
       if (existing) {
         if (input.expectedVersion !== undefined && existing.version !== input.expectedVersion) {
@@ -976,9 +1004,12 @@ export async function putAgentSlackInstall(
         values (${agent.id}::uuid, ${home.accountId}::uuid, ${home.workspaceId}::uuid,
           ${input.connectionId}::uuid, ${input.slackTeamId}, ${nameKey}, ${input.open ?? false},
           ${input.actorSubjectId})`);
-      // Turning Slack on changes the agent, so a stale edit of it conflicts.
-      await tx.execute(sql`update agents set version = version + 1, updated_at = now()
-        where id = ${agent.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
+      // A person turning Slack on changes the agent, so a stale edit of it
+      // conflicts; Opengeni adding it on its own changes nothing they edit.
+      if (!input.automatic) {
+        await tx.execute(sql`update agents set version = version + 1, updated_at = now()
+          where id = ${agent.id}::uuid and workspace_id = ${home.workspaceId}::uuid`);
+      }
       const enabled = (await getAgent(tx, home, agent.id)) ?? agent;
       await withRlsContext(
         tx,
@@ -995,7 +1026,8 @@ export async function putAgentSlackInstall(
               ${legacySlackInstructions(agent)},
               ${agent.memoryEnabled ? agent.memoryCollectionId : null}::uuid,
               ${input.open ?? false},
-              ${agent.createdBySubjectId ?? input.actorSubjectId}, ${enabled.version}::integer)`);
+              ${agent.createdBySubjectId ?? input.actorSubjectId ?? AUTOMATIC_SLACK_CREATOR},
+              ${enabled.version}::integer)`);
         },
       );
       const saved = (await installsOf(tx, home, agent.id)).find(
@@ -1423,6 +1455,53 @@ export async function listSlackAgentProjectionsForConnection(
     return (
       await withProjectionInstructions(tx, installHome.accountId, projections, readableIds(rows))
     ).sort(compareProjections);
+  });
+}
+
+/** A shared agent of the organization that no Slack installation answers to yet. */
+export type AgentMissingFromSlack = {
+  id: string;
+  /** Its home workspace. */
+  workspaceId: string;
+  name: string;
+  createdBySubjectId: string | null;
+};
+
+/**
+ * Shared agents in the installation's organization that are not available
+ * in any Slack installation yet, oldest first, so that when two share a name
+ * the older one keeps it. Read from the installation's own workspace through
+ * the organization read. The caller decides where each one goes (never a
+ * personal workspace's, only Slack workspaces its workspace is linked to).
+ */
+export async function listAgentsMissingFromSlack(
+  db: Database,
+  installHome: AgentHome,
+): Promise<AgentMissingFromSlack[]> {
+  return await withRlsContext(db, installHome, async (tx) => {
+    const rows = await rawRows<{
+      id: string;
+      workspace_id: string;
+      name: string;
+      created_by_subject_id: string | null;
+    }>(
+      tx,
+      sql`select a.id::text as id, a.workspace_id::text as workspace_id, a.name,
+          a.created_by_subject_id
+        from agents a
+        where a.account_id = ${installHome.accountId}::uuid
+          and a.visibility = 'workspace'
+          -- One Slack workspace per agent until the agents contract step: an
+          -- agent available anywhere already is not missing here.
+          and not exists (select 1 from agent_slack_installs i where i.agent_id = a.id)
+        order by a.created_at, a.id`,
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      workspaceId: row.workspace_id,
+      name: row.name,
+      createdBySubjectId: row.created_by_subject_id,
+    }));
   });
 }
 
