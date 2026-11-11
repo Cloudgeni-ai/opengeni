@@ -360,14 +360,14 @@ impl Sim {
         let op = ops[usize::try_from(self.rng.below(ops.len() as u64)).unwrap()];
         let (sandbox, step) = self.running.remove(&op).unwrap();
         let failed = self.rng.below(8) == 0 && matches!(step, Step::Fetch | Step::Save);
-        // A checkpoint may be cancelled before it writes anything; otherwise
-        // it writes up to a save's worth, its memory image, whatever it
-        // comes to.
+        // A checkpoint may be cancelled before it writes anything. It writes
+        // no memory image either way (ADR 34): what its guest writes over
+        // the clone of its disk is the guest's own growth.
         let checkpoint = (step == Step::Checkpoint).then(|| self.rng.below(3));
         let wrote = checkpoint != Some(0);
         if let Some(model) = self.models.get_mut(&sandbox) {
             match step {
-                Step::Save | Step::Checkpoint if wrote => {
+                Step::Save => {
                     let bytes = self.rng.below(model.size.save + 1);
                     self.used += bytes;
                     self.unread += bytes;

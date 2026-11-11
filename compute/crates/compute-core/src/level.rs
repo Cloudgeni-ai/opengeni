@@ -237,10 +237,12 @@ pub enum Step {
     /// Copy the current saved state to object storage: Local to Remote, and
     /// Saved to Archived. A paused VM is left as it is.
     Archive,
-    /// Copy a running VM's state to object storage as it was at one moment,
-    /// pausing it only while its memory and disk are captured. The VM goes
-    /// on running, so the copy is never current and the state does not
-    /// change: it bounds what losing the host costs a sandbox in use.
+    /// Copy a running VM's disk to object storage as it was at one moment,
+    /// without its memory and without pausing it. The VM goes on running,
+    /// so the copy is never current and the state does not change: it
+    /// bounds what losing the host costs a sandbox in use to its files'
+    /// changes since, and its running programs, which a lost host costs in
+    /// any case.
     Checkpoint,
     /// Delete the local copy: Archived to Remote.
     Evict,

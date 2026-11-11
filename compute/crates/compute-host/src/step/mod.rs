@@ -134,9 +134,6 @@ pub(crate) struct Reading {
     pub cpu: Option<Duration>,
     /// Traffic so far, if it could be read.
     pub io: Option<u64>,
-    /// Whether it is the last reading before the step pauses the VM, so
-    /// the guest's window ends with it.
-    pub last_before_pause: bool,
 }
 
 impl Reading {
@@ -147,16 +144,6 @@ impl Reading {
             at: tokio::time::Instant::now(),
             cpu: engine.cpu_time(vm).ok(),
             io: engine.io_bytes(vm).ok(),
-            last_before_pause: false,
-        }
-    }
-
-    /// The same reading, marked as the last before the VM pauses.
-    #[must_use]
-    pub fn before_pause(self) -> Self {
-        Self {
-            last_before_pause: true,
-            ..self
         }
     }
 }

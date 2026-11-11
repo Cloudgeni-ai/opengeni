@@ -202,7 +202,9 @@ enabling it changes no session's backend.
 9. **Checkpoints.** A running sandbox whose create names no sleep config
    (Opengeni's never does) is checkpointed to the store after every ten
    minutes it runs: losing its host costs it what it did since its newest
-   copy (ADR 18). `--checkpoint-every-s` (through
+   copy (ADR 18). A checkpoint copies the disk alone and never pauses the
+   VM; memory is saved only when the sandbox goes idle or is handed off
+   (ADR 34). `--checkpoint-every-s` (through
    `computeControl.extraArgs`) sets that target for the fleet; 0 takes
    none.
 10. **Metrics.** Set `computeControl.metrics.port` (for example 9464) to

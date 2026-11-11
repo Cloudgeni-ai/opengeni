@@ -286,7 +286,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                             .watches_io()
                             .then(|| self.engine.io_bytes(&live.vm).ok())
                             .flatten(),
-                        last_before_pause: false,
                     })
                 }
                 (None, Some(view)) if view.runs() && view.step == Some(Step::Checkpoint) => None,
