@@ -137,8 +137,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * only new transcripts keep it compact.
  * 1344 withholds the end of a call's ring on the other phones; until it is
  * granted, settling a call sends no ended push and those phones ring out.
- * 1359 withholds the session content collector and its inventory; until they
- * are granted, unreferenced content blobs stay until the session is archived.
+ * 1359 withheld the session content collector and its inventory; 1361 grants
+ * them.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -148,8 +148,6 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "list_due_slack_agent_update_installations_v1(integer)",
   "list_uncompacted_recording_tracks_v1(integer, text)",
   "end_agent_call_rings_v1(uuid)",
-  "session_content_garbage_candidates_v1(integer)",
-  "collect_session_content_garbage_v1(uuid, uuid, integer)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
