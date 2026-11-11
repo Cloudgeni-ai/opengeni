@@ -149,6 +149,62 @@ function stepIndex(parsed: ParsedWorkflow, jobName: string, name: string): numbe
 }
 
 describe("release image workflow contract", () => {
+  test("the CI image build wrapper forwards every input to one pinned build and one retry", async () => {
+    const wrapper = Bun.YAML.parse(await action("docker-build-retry")) as {
+      inputs: Record<string, unknown>;
+      outputs: Record<string, { value: string }>;
+      runs: {
+        using: string;
+        steps: Array<{
+          id?: string;
+          if?: string;
+          uses?: string;
+          "continue-on-error"?: boolean;
+          with?: Record<string, string>;
+        }>;
+      };
+    };
+    expect(wrapper.runs.using).toBe("composite");
+    const builds = wrapper.runs.steps.filter((step) => step.uses);
+    expect(builds.map((step) => [step.id, step.uses, step.if, step["continue-on-error"]])).toEqual([
+      [
+        "first",
+        "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+        undefined,
+        true,
+      ],
+      [
+        "retry",
+        "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+        "${{ steps.first.outcome == 'failure' }}",
+        undefined,
+      ],
+    ]);
+    const forwarded = Object.fromEntries(
+      Object.keys(wrapper.inputs).map((name) => [name, `\${{ inputs.${name} }}`]),
+    );
+    for (const build of builds) expect(build.with).toEqual(forwarded);
+    expect(wrapper.outputs.digest?.value).toBe(
+      "${{ steps.first.outcome == 'success' && steps.first.outputs.digest || steps.retry.outputs.digest }}",
+    );
+
+    // Every CI image build goes through the wrapper with inputs it declares.
+    const ci = Bun.YAML.parse(
+      await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8"),
+    ) as { jobs: Record<string, { steps?: Array<{ uses?: string; with?: object }> }> };
+    const ciBuilds = Object.values(ci.jobs).flatMap((job) =>
+      (job.steps ?? []).filter((step) => step.uses?.includes("build-push")),
+    );
+    expect(ciBuilds).toEqual([]);
+    const wrapped = Object.values(ci.jobs).flatMap((job) =>
+      (job.steps ?? []).filter((step) => step.uses === "./.github/actions/docker-build-retry"),
+    );
+    expect(wrapped).toHaveLength(8);
+    for (const step of wrapped) {
+      for (const name of Object.keys(step.with ?? {})) expect(wrapper.inputs).toHaveProperty(name);
+    }
+  });
+
   test("both agent bake consumers install source dependencies and bind the checked-out source identity", async () => {
     const [ci, candidate] = await Promise.all([
       workflow("ci.yml"),
@@ -1889,7 +1945,7 @@ ${parser}`,
           typeof step === "object" &&
           step !== null &&
           "uses" in step &&
-          step.uses === "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a",
+          step.uses === "./.github/actions/docker-build-retry",
       ).map((step) => ({
         jobName,
         name: step.name,
@@ -1901,37 +1957,37 @@ ${parser}`,
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "d9be49da8de0bf094f36e45a50d107e62fa5a943363677cf3bb57aa3ae78a728",
+        fingerprint: "f9b514069dc7b801a51df6e9f82f995aff9d1dd99dc8b847da7ef99e55aa7a35",
       },
       {
         jobName: "worker-image",
         name: "Build worker image",
-        fingerprint: "0c2430cebf299cdd02d0ffb566b99f7784b4836e0875a14a04ed123b7aca6492",
+        fingerprint: "307774ed642aa66817fc7371a48c40cb6f7d63ea8b4e6e8b09cb37c4f75ba487",
       },
       {
         jobName: "web-image",
         name: "Build web image",
-        fingerprint: "5736dc1b51fcbee06c29956af88027acd2cde555b84553825b44edac1909b0f2",
+        fingerprint: "8be22303b9c3720f675c5dba4f60eb2e24f839eddcc2428841921836a9c4ab09",
       },
       {
         jobName: "artifact-materializer-image",
         name: "Build artifact materializer image",
-        fingerprint: "d976fef25bf6adeb9a0d0d190f3ca8c47de3be0b05791a8c5bc2979d812e6d68",
+        fingerprint: "6583f0f1b5b4785d1175081c9600003b3a5fdfd486021e69ad60a1ae1da0ec5e",
       },
       {
         jobName: "artifact-outbox-dispatcher-image",
         name: "Build artifact outbox dispatcher image",
-        fingerprint: "e663f1ad4f6b4a7fc9eae122a4e8dd8e04f5bf561e7d98f8eb02ddc2c0fd5270",
+        fingerprint: "aa4f30a4e0931f9585de0395bfa73392c7ea9501c0326f217d49a5b9abb17809",
       },
       {
         jobName: "relay-image",
         name: "Build relay image",
-        fingerprint: "85a84ad374b1d6bd51ba3307f8292a28479c25f4cd3005429a7df002ad68c5de",
+        fingerprint: "581a68697d8364b519a87099411898b15520eeda56c8b13ca628ac6e6025d444",
       },
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "dbb5ad8af626207769d4e46c0b10a8c06709d154ab34131378191bf167c6cd45",
+        fingerprint: "76319cc5879c9e6b6fd92b4333e287209b05d826dba2f36cf7011259dd430fe6",
       },
     ]);
 
