@@ -96,7 +96,12 @@ export function useTeamsBotIntegration({
               : { label: "Not connected", tone: "idle" },
     connection: installed
       ? [
-          { label: "Bot", value: "Connected to this workspace" },
+          {
+            label: "Bot",
+            value: status?.workspaceRouting
+              ? "Connected to your organization"
+              : "Connected to this workspace",
+          },
           { label: "Your account", value: status?.linked ? "Linked" : "Not linked" },
           ...(status?.delivery && deliveryNeedsAttention
             ? [

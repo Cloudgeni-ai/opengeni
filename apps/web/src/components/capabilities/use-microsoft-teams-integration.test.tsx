@@ -653,6 +653,34 @@ test("the bot card is named after the deployment's Teams app, with Opengeni as t
   }
 });
 
+test("the bot row says the organization is connected with workspace routing, this workspace without", async () => {
+  window.history.replaceState(null, "", `/workspaces/${ws}/plugins`);
+  for (const [workspaceRouting, expected] of [
+    [true, "Connected to your organization"],
+    [false, "Connected to this workspace"],
+  ] as const) {
+    prepare(async () => ({
+      enabled: true,
+      configured: true,
+      setupAvailable: true,
+      installation: { active: true, workspaceId: ws, tenantId: "tenant" },
+      linked: true,
+      workspaceRouting,
+    }));
+    let adapter: ReturnType<typeof useTeamsBotIntegration> | undefined;
+    function Harness() {
+      adapter = useTeamsBotIntegration({ workspaceId: ws });
+      return adapter.dialogs;
+    }
+    const view = await render(<Harness />);
+    try {
+      expect(adapter?.model.connection.find((row) => row.label === "Bot")?.value).toBe(expected);
+    } finally {
+      await view.cleanup();
+    }
+  }
+});
+
 test("an organization member without access to the connected workspace links on the Teams page", async () => {
   const connected = "44444444-4444-4444-8444-444444444444";
   const requests: any[][] = [];

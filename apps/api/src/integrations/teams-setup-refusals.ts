@@ -51,7 +51,10 @@ const REFUSALS = {
     403,
     "Opengeni can't be connected for this Teams organization yet. Contact Opengeni support.",
   ],
-  shared_workspace_required: [422, "Choose a shared workspace to connect Teams to."],
+  shared_workspace_required: [
+    422,
+    "Connect Teams from a shared workspace, not a Personal workspace.",
+  ],
   workspace_linked_elsewhere: [
     409,
     "This workspace is linked to another Teams organization. Choose another workspace.",
