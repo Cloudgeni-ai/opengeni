@@ -16,7 +16,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { resolve as resolvePath } from "node:path";
 import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -430,7 +430,7 @@ describe("session content garbage collection", () => {
 
     // Runs exactly the block the storage lifecycle doc gives operators.
     const doc = await readFile(
-      resolve(import.meta.dir, "../../../docs/session-storage-lifecycle.md"),
+      resolvePath(import.meta.dir, "../../../docs/session-storage-lifecycle.md"),
       "utf8",
     );
     const section = doc.slice(doc.indexOf("### Collecting unreferenced blobs"));
