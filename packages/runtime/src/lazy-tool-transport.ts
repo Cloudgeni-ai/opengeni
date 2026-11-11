@@ -1619,15 +1619,16 @@ export class LazyToolRuntime {
             : keywordRanking(unit.text, depth),
         ),
       );
-    // Without a selector, the strongest few matches for each request are
-    // loaded: the top of its fused ranking, else its best keyword match and
-    // those close to it. When nothing ranks, the top-ranked candidate still
-    // is, since an empty result hides candidates that fit.
+    // Without a selector, each request loads the top of its fused ranking,
+    // else its best keyword match and the close ones from the same
+    // integration (a fused ranking has no scores to tell close from far).
+    // When nothing ranks, the top-ranked candidate still loads, since an
+    // empty result hides candidates that fit.
     const lexical = () =>
       named.length
         ? named
         : fused
-          ? [...new Set(fused.flatMap((ranking) => ranking.slice(0, STRONGEST_PER_REQUEST)))]
+          ? [...new Set(fused.flatMap((ranking) => ranking.slice(0, 1)))]
           : strongest.length
             ? strongest
             : keywordRanking(query, 1);

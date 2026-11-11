@@ -32,11 +32,12 @@ call. This page describes what a search does and how a deployment configures it.
    was not clear, up to five next candidates are listed by name.
 5. **Without a decision model**, or when it fails or has not answered within 8
    seconds, each request's best candidate is loaded together with the next ones
-   that score close to it (at least 0.7 of the best), up to three per request, and
-   the remaining candidates are listed by name. A task usually needs a tool with its
-   siblings (create a session, then message it), so one search brings them instead
-   of one search each. Another connection's copy of the same operation is not
-   loaded with it; the account notice names it instead. A selection not answered within 2.5 seconds sends one
+   from the same integration that score close to it (at least 0.7 of the best), up
+   to three per request, and the remaining candidates are listed by name. A task
+   usually needs a tool with its siblings (create a session, then message it), so
+   one search brings them instead of one search each. A close match from another
+   integration or connection is a rival reading of the request, not a sibling: it
+   is listed, not loaded. A selection not answered within 2.5 seconds sends one
    identical request beside it; the first answer wins and the other is cancelled.
    Each fallback is counted in `opengeni_tool_search_selection_fallbacks_total` by
    reason (`deadline`, `rate_limited`, `provider_error`, `request_failed`,

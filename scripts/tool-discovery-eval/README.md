@@ -202,7 +202,10 @@ the wall time of the turn. Each scenario is one person message in a fresh chat. 
 turn runs through the real Agents SDK runner, the runtime's progressive tool disclosure
 on the chosen route and the real composed system prompt, against a real Responses
 model. Calls to other tools get a fixed simulated success, so the result measures the
-path to the right tools, not the tools themselves.
+path to the right tools, not the tools themselves. The shell answers that no shell is
+available and `skill_read` that no Skills are installed. The system prompt is the
+composed prompt of the `all/docker` case in the runtime's agent-instruction parity
+fixtures, so the harness imports those test fixtures.
 
 ```sh
 TOOL_EVAL_AGENT_BASE_URL=https://<resource>.openai.azure.com/openai/v1 \

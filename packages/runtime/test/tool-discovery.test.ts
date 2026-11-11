@@ -569,6 +569,18 @@ describe("decision selection", () => {
       names(accounts.strongestMatches("search and read email messages in the mailbox", 3)),
     ).toEqual(["mail_home__read_message", "mail_home__search_messages"]);
   });
+  test("a close match from another integration is a rival reading, not a sibling", () => {
+    const index = new ToolSearchIndex([
+      candidate("workspace__sessions_list", "List sessions (chats) in this workspace."),
+      candidate("workspace__session_get", "Get one session (chat) in this workspace."),
+      candidate("messenger__list_chats", "List my chats and their sessions in the messenger."),
+    ]);
+    // The messenger tool scores almost as high and covers the request, but it
+    // is another reading of "my chats": it stays a named candidate.
+    expect(names(index.strongestMatches("list my chats and sessions", 3))).toEqual([
+      "workspace__sessions_list",
+    ]);
+  });
   test("a request its best match does not fully cover loads only that match", () => {
     const index = new ToolSearchIndex([
       candidate("vault__secret_search", "Search saved secrets and logins by name."),
@@ -597,6 +609,22 @@ describe("decision selection", () => {
       "workspace__notify_user",
     ]);
     expect(names(index.rank("the person was notified", 1))).toEqual(["workspace__notify_user"]);
+    // Sending a notification is the tool's own operation, so a messaging
+    // tool's "send" does not outrank it.
+    const messaging = new ToolSearchIndex([
+      candidate("workspace__notify_user", "Notify the person in their inbox and on their phone."),
+      candidate(
+        "messenger__send_message",
+        "Send a message as the person to one of their chats, on the chat's network.",
+      ),
+      candidate("mail__send_email", "Send an email message."),
+      candidate("chat__post_message", "Post a message in a channel."),
+      candidate("sms__send_text", "Send a text message to a phone number."),
+      candidate("mail__read_message", "Read one email message."),
+    ]);
+    expect(names(messaging.rank("send the user a notification message", 1))).toEqual([
+      "workspace__notify_user",
+    ]);
   });
   test("selects only authorized candidates, returns a compact receipt and freezes selected schemas", async () => {
     let calls = 0;
