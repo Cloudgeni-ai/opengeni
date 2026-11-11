@@ -18,9 +18,12 @@ never cancelled for one. The oldest ready PRs fill the rest of a priority
 batch, after the priority PRs and without waiting for the batching window, so
 priority PRs that arrive one at a time do not each take a round alone. A
 priority CI or batcher change still runs alone. While a failed batch is being
-split, the fill leaves out the PRs its halves hold, and priority batches and
-those halves take turns: after a priority batch goes ahead of a half, that half
-goes next, so priority PRs that keep arriving cannot stall a bisection.
+split, a priority batch has no fill, and priority batches and those halves
+take turns: after a priority batch goes ahead of a half, that half goes next,
+and the halves run in the order they were split off, oldest first. A priority
+batch that is cancelled (say a member got a new head) is rebuilt ahead of the
+halves; it never becomes one of them. So neither priority PRs that keep
+arriving nor PRs queued later can stall a bisection.
 
 ## Releasing: a Version PR holds main
 
@@ -168,7 +171,9 @@ and members of the running batch are never regenerated.
    go into separate groups. A PR removed from a batch that went ahead of the
    bisection, or a Version PR, leaves its groups as they were. A failed
    batch with both priority and other PRs is split into its priority PRs, tested
-   first, and the rest, so a broken fill delays them one round. When the rest
+   first, and the rest, so a broken fill delays them one round (one that went
+   ahead of a bisection queues all its halves behind that bisection's). When
+   the rest
    has at least two PRs and at least as many as the priority PRs, it is halved
    at once: it is then at least as likely to hold what broke the batch, and
    testing it whole again would usually only fail once more first. Priority PRs in
