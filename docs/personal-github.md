@@ -302,6 +302,20 @@ Your GitHub access is refused with a message naming the cause. The child then
 inherits the connection use through durable propagation; it never receives
 another person's connection or more than the parent turn holds.
 
+A schedule an agent creates this way acts as the person on later runs only
+because their Your GitHub use is already standing: a login is turned on per
+workspace (an `always` `connection.use` grant, D-54) or is theirs in their
+Personal workspace, never for one message or one chat. Each run re-resolves the
+owner's current connection and repository access, so turning the login off,
+disconnecting, or removing the repository stops later runs instead of falling
+back to another identity.
+
+Repository owners follow GitHub's login rules, including enterprise managed
+users, whose logins carry an underscore suffix (`octocat_acme`): 1 to 39
+letters, digits, `-` or `_`, starting with a letter or digit
+(`GITHUB_OWNER_LOGIN_PATTERN` in `packages/contracts/src/personal-github.ts`;
+migration 1361 widens the stored selection check the same way).
+
 Managed sandboxes consume this authority through Opengeni's dedicated personal
 GitHub smart-HTTP broker. The worker mints a five-minute encrypted bearer bound
 to the exact account, workspace, session/root, turn, active attempt and

@@ -970,7 +970,7 @@ function gatewayGitServices(
   return {
     openClaims: gateway.openClaims,
     validRouteKey: (key) =>
-      /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/u.test(key) &&
+      /^[A-Za-z0-9][A-Za-z0-9_-]{0,38}\/[A-Za-z0-9._-]{1,100}$/u.test(key) &&
       !key.endsWith("/.") &&
       !key.endsWith("/.."),
     resolveAuthority: async (claims, routeKey) => {

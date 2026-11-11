@@ -6541,7 +6541,7 @@ export const McpPersonalConnectionDelegation = /* @__PURE__ */ defineSchema(() =
       repositories.forEach((repository, index) => {
         const canonicalUrl = repository.canonicalUrl.toLowerCase();
         if (
-          !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(
+          !/^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(
             repository.fullName,
           ) ||
           repository.canonicalUrl !== `https://github.com/${repository.fullName}`
