@@ -231,13 +231,28 @@ inventory, not a provisioning grant list. Never regenerate it from a live
 database to silence findings. New named private capabilities need explicit
 registration and their own authority tests.
 
+**A missing required EXECUTE grant degrades; it doesn't take pods out.**
+The strict posture check (`db:assert-runtime-posture` in the Helm migration
+job, the runtime-posture compatibility workflow and the previous-binary
+tests) still rejects every finding, including a required runtime EXECUTE
+grant that is missing. Running API and worker processes classify findings
+first (`classifyRuntimeDatabasePosture`). A finding that goes away once the
+contract-required EXECUTE grants are present (and raises nothing else) is
+degraded. It is logged as `Runtime database posture is degraded`, counted
+in `opengeni_runtime_database_degraded_findings`, and alerted as
+`OpenGeniRuntimeDatabaseGrantMissing`. Startup and readiness still pass,
+and only the calls to those routines fail. Every other finding stays fatal
+for startup and readiness. So a migration that revokes a grant the previous
+binary still requires no longer takes the fleet out, but the release gates
+still catch it. Withhold and defer grants as described below.
+
 **A new definer the runtime must call takes two releases.** Create it without
 runtime EXECUTE, and register it in `RUNTIME_DEFINER_ROUTINES` and
 `DEFERRED_RUNTIME_PRIVATE_ROUTINES` so readiness accepts it with or without
 the grant. Code that calls it treats `insufficient_privilege` as "not yet".
 Once a binary that knows it is the previous release (the pinned baseline
 below), grant it in a rolling migration, drop it from
-`DEFERRED_RUNTIME_PRIVATE_ROUTINES` so readiness requires it, and remove the
+`DEFERRED_RUNTIME_PRIVATE_ROUTINES` so the posture contract requires it, and remove the
 "not yet" handling. A new non-RLS table the runtime writes needs the same two
 steps, with readiness accepting no runtime DML or all four. 0929, 0930, 0932
 and 0935 granted on creation instead; 0937 withheld those grants and the
