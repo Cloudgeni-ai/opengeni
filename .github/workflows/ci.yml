@@ -2285,6 +2285,7 @@ jobs:
           df -h /
 
       - name: Set up QEMU
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
@@ -2304,7 +2305,7 @@ jobs:
           context: .
           file: docker/opengeni.Dockerfile
           target: api
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-api:canary-sha-{0}', github.sha) || 'opengeni-api:ci' }}
           labels: |
@@ -2334,6 +2335,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up QEMU
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
@@ -2353,7 +2355,7 @@ jobs:
           context: .
           file: docker/opengeni.Dockerfile
           target: worker
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-worker:canary-sha-{0}', github.sha) || 'opengeni-worker:ci' }}
           labels: |
@@ -2436,6 +2438,7 @@ jobs:
           path: .release/artifact-runtime
 
       - name: Set up QEMU
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
@@ -2455,7 +2458,7 @@ jobs:
           context: .
           file: docker/opengeni.Dockerfile
           target: artifact-materializer
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-artifact-materializer:canary-sha-{0}', github.sha) || 'opengeni-artifact-materializer:ci' }}
           labels: |
@@ -2485,6 +2488,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up QEMU
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
@@ -2504,7 +2508,7 @@ jobs:
           context: .
           file: docker/opengeni.Dockerfile
           target: artifact-outbox-dispatcher
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher:canary-sha-{0}', github.sha) || 'opengeni-artifact-outbox-dispatcher:ci' }}
           labels: |
@@ -2534,6 +2538,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up QEMU
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
@@ -2552,7 +2557,7 @@ jobs:
         with:
           context: agent
           file: agent/crates/opengeni-relay/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-relay:canary-sha-{0}', github.sha) || 'opengeni-relay:ci' }}
           labels: |
@@ -2583,6 +2588,7 @@ jobs:
           name: ${{ needs.artifact-runtime.outputs.artifact_name }}
           path: .release/artifact-runtime
       - name: Set up QEMU
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
@@ -2601,7 +2607,7 @@ jobs:
         with:
           context: .
           file: docker/sandbox.Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:canary-sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}

@@ -201,6 +201,8 @@ export function useNativeFileAttachments(input: {
   client: FileAttachmentClientLike;
   workspaceId: string;
   sessionId: string;
+  /** `personal` keeps uploads Only me; omitted, the server (or a session proxy) decides. */
+  scope?: "workspace" | "personal" | undefined;
   files: NativeFileAdapter;
   crypto: NativeCryptoAdapter;
 }): NativeFileAttachmentsResult {
@@ -275,6 +277,7 @@ export function useNativeFileAttachments(input: {
           contentType: source.contentType,
           data,
           sha256,
+          ...(input.scope ? { scope: input.scope } : {}),
         });
         if (
           scopeGeneration.current !== generation ||
@@ -311,7 +314,7 @@ export function useNativeFileAttachments(input: {
         );
       }
     },
-    [input.client, input.crypto, input.files, input.workspaceId, t],
+    [input.client, input.crypto, input.files, input.scope, input.workspaceId, t],
   );
 
   const addFilesForGeneration = useCallback(

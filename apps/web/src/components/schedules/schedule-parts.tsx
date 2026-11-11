@@ -6,6 +6,7 @@
 import type { ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  BotIcon,
   CalendarClockIcon,
   CopyIcon,
   PauseIcon,
@@ -25,7 +26,7 @@ import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { useAppContext } from "@opengeni/react/app/app-context";
-import { creatorInitials } from "@opengeni/react/app/lib/creator-initials";
+import { creatorInitials, creatorType } from "@opengeni/react/app/lib/creator-initials";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { scheduledTaskStateLabel } from "@/lib/scheduled-tasks";
 import { scheduledRunSkippedForPausedChat } from "@/lib/scheduled-run-error";
@@ -280,11 +281,16 @@ export function OwnerValue({
     <span className="inline-flex max-w-full min-w-0 items-center gap-1.5 align-middle">
       <Avatar className={size === "md" ? "size-6" : "size-5"}>
         <AvatarFallback className="bg-surface-3 text-2xs font-semibold text-fg-muted">
-          {creatorInitials({
-            kind: "subject",
-            subjectId: task.ownerSubjectId ?? "",
-            label: name,
-          }) ?? "?"}
+          {creatorType({ kind: "subject", subjectId: task.ownerSubjectId ?? "" }) === "api_key" ? (
+            // An API key is not a person: no initials, the same bot icon as the sidebar.
+            <BotIcon aria-hidden="true" data-owner-api-key className="size-3" />
+          ) : (
+            (creatorInitials({
+              kind: "subject",
+              subjectId: task.ownerSubjectId ?? "",
+              label: name,
+            }) ?? "?")
+          )}
         </AvatarFallback>
       </Avatar>
       <span className="min-w-0 truncate">{name}</span>

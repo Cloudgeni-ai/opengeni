@@ -23,6 +23,7 @@ import {
   integrationDefinitionCardPostedMessage,
   integrationDefinitionSetupContext,
   integrationDefinitionSetup,
+  chatToolSelectionIncludes,
 } from "./integration-definition-capabilities";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import { sessionChatUrl, withUserSetupCard, type UserSetupCardPost } from "./user-setup-card";
@@ -7656,6 +7657,7 @@ function registerCapabilityDiscoveryTools(
     const availableFirstPartyTools = new Set<string>();
     const acceptedServerIds = new Set<string>();
     let accountSelectionKnown = false;
+    let chatIncludes = (_serverId: string) => true;
     if (
       items.some(
         (item) =>
@@ -7664,6 +7666,9 @@ function registerCapabilityDiscoveryTools(
       )
     ) {
       const claims = exactAgentCommandContext(grant, sessionId);
+      chatIncludes = chatToolSelectionIncludes(
+        await getSession(deps.db, grant.workspaceId, sessionId),
+      );
       const attemptCatalog = await getAttemptToolCatalog(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -7715,6 +7720,7 @@ function registerCapabilityDiscoveryTools(
                     accountSelectionKnown,
                     availableFirstPartyTools,
                     new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+                    chatIncludes,
                   ),
       ),
     );
@@ -8159,6 +8165,7 @@ async function capabilitySetupProjection(
   accountSelectionKnown: boolean,
   availableFirstPartyTools: ReadonlySet<string>,
   selectedFirstPartyTools: ReadonlySet<string>,
+  chatIncludes: (serverId: string) => boolean = () => true,
 ): Promise<CapabilitySetupProjection> {
   // The rule the Capabilities page uses to hide such entries: no card could
   // finish a connection this deployment cannot start.
@@ -8292,6 +8299,14 @@ async function capabilitySetupProjection(
         status: "ready",
         action: null,
         detail: "This capability has tools available in this turn.",
+      };
+    }
+    if (item.runtime.mcpServerId && !chatIncludes(item.runtime.mcpServerId)) {
+      return {
+        status: "unavailable",
+        action: null,
+        detail:
+          "This integration is enabled, but this chat's tool selection leaves it out. Include it in the chat's tools, then send a new message. This does not mean the account is disconnected; do not request reconnection based on missing tools alone.",
       };
     }
     if (

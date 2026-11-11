@@ -1749,7 +1749,7 @@ export function registerBrowserSessionRoutes(
       let resolvedFences: BrowserActionFences | null = null;
       // The response waits for the whole batch, which may outlast the
       // server's idle timeout.
-      const result = await withoutRequestIdleTimeout(
+      const controllerResult = await withoutRequestIdleTimeout(
         context,
         async () =>
           await withActiveBrowserController(
@@ -1895,7 +1895,9 @@ export function registerBrowserSessionRoutes(
             stages,
           ),
       );
-      observeBrowserActionResult(deps.observability, startedAtMs, request, result);
+      // The operator-only failure reason is for metrics; callers never see it.
+      const { failureReason, ...result } = controllerResult;
+      observeBrowserActionResult(deps.observability, startedAtMs, request, result, failureReason);
       reportInteractionRouteStages(context, deps.observability, stages);
       return context.json(result);
     },

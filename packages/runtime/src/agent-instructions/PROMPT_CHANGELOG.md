@@ -13,6 +13,15 @@ render it; legacy bytes are unchanged.
 + When most of the user's requests in a chat are the same kind of work, including the last three or more in a row, call `agent_suggest` once in that chat, preferring an agent that already does the work: it offers them an agent as a card and changes nothing until they accept.
 ```
 
+Integration discovery now reports an enabled connection-backed MCP excluded by
+the chat's tool selection as unavailable, rather than treating the absent turn
+account binding as a reason to connect. The catalog result explains the chat
+selection and does not offer a Connect card. Consequently `tool_search` no longer
+adds "Not connected yet" for that result on native or generic routes. No system
+or developer prompt bytes, tool schemas, historical messages, catalog authority,
+or account bindings change; only new discovery results change. An account truly
+missing from an included connector retains its setup path.
+
 An agent can change who can see an existing Site through the artifactId and
 visibility path `sandbox_file_publish` already offers for files, instead of
 publishing a copy to share it. Its description names Sites only for a grant
