@@ -497,15 +497,25 @@ function split<T>(items: T[]): [T[], T[]] {
 
 /**
  * A bisection's remaining groups as one group, in their order with the groups
- * that hold a priority PR first, as they would have run. A group of more than
- * a batch tests its first maxBatch PRs and keeps the others next in line as
- * their own group (see nextBatch).
+ * that hold a priority PR first, as they would have run. Two PRs that add the
+ * same migration number never share a batch, so a PR that would clash goes to
+ * the next group it fits in. A group of more than a batch tests its first
+ * maxBatch PRs and keeps the others next in line as their own group (see
+ * nextBatch).
  */
-function rejoined(pending: number[][], priority: (n: number) => boolean): number[][] {
+function rejoined(pending: number[][], pull: (n: number) => QueuedPull | undefined): number[][] {
+  const priority = (n: number) => pull(n)?.priority === true;
   const urgent = pending.filter((group) => group.some(priority));
   const rest = pending.filter((group) => !group.some(priority));
-  const all = [...urgent, ...rest].flat();
-  return all.length ? [all] : [];
+  const groups: { numbers: number[]; taken: Set<string> }[] = [];
+  for (const number of [...urgent, ...rest].flat()) {
+    const slots = pull(number)?.slots ?? [];
+    let group = groups.find((g) => !slots.some((slot) => g.taken.has(slot)));
+    if (!group) groups.push((group = { numbers: [], taken: new Set() }));
+    group.numbers.push(number);
+    for (const slot of slots) group.taken.add(slot);
+  }
+  return groups.map((g) => g.numbers);
 }
 
 /** The running batch: the newest one, as `decide` treats any others as extra. */
@@ -641,7 +651,7 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
           // they are.
           if (manifest.aheadOfBisection === true) pending = manifest.pending;
           else {
-            pending = rejoined(manifest.pending, (n) => byNumber.get(n)?.priority === true);
+            pending = rejoined(manifest.pending, (n) => byNumber.get(n));
             blame = [];
           }
         } else {

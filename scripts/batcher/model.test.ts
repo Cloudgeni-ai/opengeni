@@ -806,6 +806,15 @@ describe("decide", () => {
     expect(kept[1]).toMatchObject({ kind: "eject", number: 9 });
     expect(kept[2]).toMatchObject({ kind: "build", pending: [[4, 5], [6]] });
     expect(kept[2]?.kind === "build" && kept[2].members.map((p) => p.number)).toEqual([7, 8]);
+
+    // Two PRs adding the same migration number still never share a batch.
+    const clash = [3, 4, 5, 6].map((n) =>
+      pull(n, { slots: n === 4 || n === 6 ? ["packages/db/migrations/0042"] : [] }),
+    );
+    const split = batch([3], { runs: [run({ conclusion: "failure", attempt: 2 })] }, [[4, 5], [6]]);
+    const apart = decide(observe(clash, [split]));
+    expect(apart[2]).toMatchObject({ kind: "build", pending: [[6]] });
+    expect(apart[2]?.kind === "build" && apart[2].members.map((p) => p.number)).toEqual([4, 5]);
   });
 
   test("a bisection carries what it blamed to its own groups only, and drops it when it ends", () => {
