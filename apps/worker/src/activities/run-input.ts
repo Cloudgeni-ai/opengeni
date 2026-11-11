@@ -10,6 +10,7 @@ import {
   readTurnExecutionPolicyV1,
   readTurnServingPolicyV1,
   renderAppShotForModel,
+  repositorySkillsContextItem,
   type FileAsset,
   type ResourceRef,
 } from "@opengeni/contracts";
@@ -1081,6 +1082,30 @@ async function openSuffixMessageInput(
   );
 }
 
+type StoredHistoryRow = Awaited<ReturnType<ActiveHistoryLoader>>["items"][number];
+
+/**
+ * The rows as later turns load them once this run stores a Repository skills
+ * index: the item sits before the turn's first active row, or after the
+ * history when the turn has none yet.
+ */
+function rowsWithRepositorySkills(
+  rows: readonly StoredHistoryRow[],
+  turnId: string,
+  index: string,
+): StoredHistoryRow[] {
+  const first = rows.findIndex((row) => row.turnId === turnId);
+  const at = first === -1 ? rows.length : first;
+  const row: StoredHistoryRow = {
+    id: crypto.randomUUID(),
+    position: at < rows.length ? rows[at]!.position : (rows.at(-1)?.position ?? 0) + 1,
+    turnId,
+    item: repositorySkillsContextItem(index),
+    providerArtifactInvalidatedAt: null,
+  };
+  return [...rows.slice(0, at), row, ...rows.slice(at)];
+}
+
 /** Build one inference from canonical history plus attempt-local operational context. */
 async function messageInput(
   db: Database,
@@ -1098,7 +1123,8 @@ async function messageInput(
   preparationOptions: Pick<
     TurnInputOptions,
     "onPreparationPhase" | "servingProviderId" | "omitRemoteCompactionItems" | "searchRecords"
-  > = {},
+  > &
+    Partial<Pick<TurnInputOptions, "turnId">> = {},
 ): Promise<PreparedTurnInput> {
   const currentAttachmentRefs = currentAttachments.map((attachment) => attachment.resource);
   const [activeHistory, envelope] = await Promise.all([
@@ -1112,87 +1138,116 @@ async function messageInput(
   const stored = preparationOptions.omitRemoteCompactionItems
     ? activeHistory.items.filter((row) => row.item.type !== "compaction")
     : activeHistory.items;
-  const canonicalView = await measureHistoryPreparationPhase(
-    preparationOptions,
-    "canonical_projection",
-    async () => {
-      const provenance = preparationOptions.servingProviderId
-        ? await readSubscriptionHistoryProvenance(
-            db,
-            trigger.workspaceId,
-            trigger.sessionId,
-            stored.map((row) => row.id),
-          )
-        : null;
-      const active =
-        provenance && preparationOptions.servingProviderId
-          ? projectServingProviderArtifacts(
-              stored.map((row) => ({
-                ...row,
-                turnId: provenance.turnByHistoryId.get(row.id) ?? null,
-              })),
-              {
-                enabled: true,
-                servingProviderId: preparationOptions.servingProviderId,
-                turnMetadata: provenance.turnMetadata,
-              },
-            )
-          : projectRejectedProviderArtifacts(stored);
-      return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
-    },
-  );
   const searchRecords = preparationOptions.searchRecords;
-  if (searchRecords)
-    await settleTurnSearchRecords(
-      db,
-      trigger.workspaceId,
-      trigger.sessionId,
-      searchRecords,
-      canonicalView,
+  const storedIds = new Set(stored.map((row) => row.id));
+  /**
+   * Project durable rows for this inference. `measured` runs report their
+   * phases and settle search records; the Repository skills re-projection
+   * below repeats only the pure projection of the same rows.
+   */
+  const project = async (rows: readonly StoredHistoryRow[], measured: boolean) => {
+    const phases = measured ? preparationOptions : {};
+    const canonicalView = await measureHistoryPreparationPhase(
+      phases,
+      "canonical_projection",
+      async () => {
+        const provenance = preparationOptions.servingProviderId
+          ? await readSubscriptionHistoryProvenance(
+              db,
+              trigger.workspaceId,
+              trigger.sessionId,
+              rows.map((row) => row.id),
+            )
+          : null;
+        const active =
+          provenance && preparationOptions.servingProviderId
+            ? projectServingProviderArtifacts(
+                rows.map((row) => ({
+                  ...row,
+                  // Only the re-projection's new row is not stored yet.
+                  turnId:
+                    provenance.turnByHistoryId.get(row.id) ??
+                    (storedIds.has(row.id) ? null : row.turnId),
+                })),
+                {
+                  enabled: true,
+                  servingProviderId: preparationOptions.servingProviderId,
+                  turnMetadata: provenance.turnMetadata,
+                },
+              )
+            : projectRejectedProviderArtifacts([...rows]);
+        return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
+      },
     );
-  const providerView = await measureHistoryPreparationPhase(
-    preparationOptions,
-    "provider_projection",
-    () =>
+    if (measured && searchRecords)
+      await settleTurnSearchRecords(
+        db,
+        trigger.workspaceId,
+        trigger.sessionId,
+        searchRecords,
+        canonicalView,
+      );
+    const providerView = await measureHistoryPreparationPhase(phases, "provider_projection", () =>
       searchRecords
         ? projectTurnHistoryForProvider(canonicalView, providerApi, searchRecords)
         : projectHistoryForProvider(canonicalView, providerApi),
-  );
-  const referencedHistory = await measureHistoryPreparationPhase(
-    preparationOptions,
-    "attachment_ref_projection",
-    () => withCurrentUserAttachmentRefs(providerView, currentAttachmentRefs),
-  );
-  const materializedHistory = await measureHistoryPreparationPhase(
-    preparationOptions,
-    "screenshot_materialization",
-    async () =>
-      materializeModelHistory
-        ? await materializeModelHistory(referencedHistory)
-        : referencedHistory,
-  );
-  const historyItems = await measureHistoryPreparationPhase(
-    preparationOptions,
-    "model_attachment_projection",
-    async () =>
+    );
+    const referencedHistory = await measureHistoryPreparationPhase(
+      phases,
+      "attachment_ref_projection",
+      () => withCurrentUserAttachmentRefs(providerView, currentAttachmentRefs),
+    );
+    const materializedHistory = await measureHistoryPreparationPhase(
+      phases,
+      "screenshot_materialization",
+      async () =>
+        materializeModelHistory
+          ? await materializeModelHistory(referencedHistory)
+          : referencedHistory,
+    );
+    return await measureHistoryPreparationPhase(phases, "model_attachment_projection", async () =>
       projectModelHistory
         ? await projectModelHistory(materializedHistory, {
             inlineFiles: currentAttachments.map((attachment) => attachment.file),
           })
         : materializedHistory,
-  );
+    );
+  };
+  const historyItems = await project(stored, true);
+  const turnId = preparationOptions.turnId;
   const prepared = await measureHistoryPreparationPhase(
     preparationOptions,
     "runtime_input_assembly",
-    async () =>
-      await runtime.prepareInput(agent, {
+    async () => {
+      const assembled = await runtime.prepareInput(agent, {
         kind: "message",
         ...(text ? { text } : {}),
         ...(internalContext ? { internalContext } : {}),
         historyItems: historyItems as any,
         sandboxEnvelope: envelope,
         ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
-      }),
+      });
+      const { historyWithRepositorySkills: _atHistoryEnd, ...rest } = assembled;
+      if (!turnId) return rest;
+      return {
+        ...rest,
+        // A new index is shown in this run exactly as later turns load it:
+        // the same rows with the stored item, through the same projections.
+        historyWithRepositorySkills: async (index: string) => {
+          const withIndex = await runtime.prepareInput(agent, {
+            kind: "message",
+            historyItems: (await project(
+              rowsWithRepositorySkills(stored, turnId, index),
+              false,
+            )) as any,
+            ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
+          });
+          return Array.isArray(withIndex.input)
+            ? (withIndex.input.slice(0, withIndex.persistedHistoryCount) as any[])
+            : null;
+        },
+      };
+    },
   );
   const providerArtifactCandidates = await measureHistoryPreparationPhase(
     preparationOptions,

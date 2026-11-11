@@ -4258,7 +4258,6 @@ describe("runtime definers: granted ones require runtime EXECUTE, deferred ones 
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
-      "list_uncompacted_recording_tracks_v1(integer, text)",
       "end_agent_call_rings_v1(uuid)",
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",

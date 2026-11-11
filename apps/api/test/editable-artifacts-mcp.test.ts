@@ -453,7 +453,7 @@ function grant(): AccessGrant {
 function metadata(modality: "spreadsheet" | "document" | "presentation") {
   return {
     id: artifactId,
-    artifactReference: `[Open report](/workspaces/${workspaceId}/artifacts/editable/${artifactId})`,
+    artifactReference: `[Open report](artifact:${artifactId})`,
     modality,
     title: "Plan",
     lifecycle: "active" as const,

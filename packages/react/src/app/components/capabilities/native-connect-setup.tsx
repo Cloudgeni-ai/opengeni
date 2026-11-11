@@ -43,6 +43,11 @@ export type NativeConnectRequest = {
   requestedScopes?: string[] | undefined;
   installationTarget?: ConnectInstallationTarget | undefined;
   displayName?: string | undefined;
+  /**
+   * Replaces "Connect <name>", for a repair that names its fix ("Authorize acme").
+   * With a description, the setup drops its generic connection summary.
+   */
+  title?: string | undefined;
   description?: string | undefined;
   logoUrl?: string | undefined;
   authorizeLabel?: string | undefined;
@@ -152,7 +157,11 @@ export function NativeConnectSetup({
             attempt.providerId === request.providerId &&
             attempt.ownership === request.ownership &&
             attempt.installationTarget?.instanceKey === request.installationTarget?.instanceKey &&
-            (!request.reconnectAccountId || attempt.account?.id === request.reconnectAccountId) &&
+            // A reconnect resumes only its own account; a new connection never
+            // resumes another account's reconnect.
+            (request.reconnectAccountId
+              ? attempt.account?.id === request.reconnectAccountId
+              : attempt.account?.status !== "auth_needed") &&
             // A pending reconnect resumes only if it asks for the same access.
             sameScopes(attempt.requestedScopes, request.requestedScopes),
         );
@@ -254,7 +263,8 @@ export function NativeConnectSetup({
               tabIndex={-1}
               className="text-xl font-semibold tracking-tight outline-hidden"
             >
-              Connect {serviceName ?? request.installationTarget?.displayName ?? request.providerId}
+              {request.title ??
+                `Connect ${serviceName ?? request.installationTarget?.displayName ?? request.providerId}`}
             </DialogTitle>
             <DialogDescription
               className={approvalPending ? "sr-only" : "text-sm leading-6 text-fg-muted"}
@@ -317,7 +327,7 @@ export function NativeConnectSetup({
                     .catch(() => setFailed(true));
                 }}
               >
-                Connect a different account
+                {request.reconnectAccountId ? "Start over" : "Connect a different account"}
               </Button>
             </section>
           )}
@@ -333,13 +343,14 @@ export function NativeConnectSetup({
                   .finally(() => setPreparing(false));
               }}
             >
-              Connect a different account
+              {request.reconnectAccountId ? "Start over" : "Connect a different account"}
             </Button>
           )}
           {controller && !preparing && !failed && pending.length === 0 && (
             <ConnectSetup
               className="og-connect"
               authorizeLabel={request.authorizeLabel}
+              explained={!!request.title && !!request.description}
               serviceName={serviceName ?? request.installationTarget?.displayName}
               controller={controller}
               onRetry={() =>

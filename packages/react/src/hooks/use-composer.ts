@@ -235,6 +235,32 @@ function pendingComposerStorage(): Storage | null {
   }
 }
 
+/**
+ * Forget every in-flight composer operation in this tab, in memory and in
+ * session storage. Called when nobody is signed in any more, so the next person
+ * in the tab never sees another person's unsent message.
+ */
+export function forgetAllComposerOperations(): void {
+  pendingComposerOperations.clear();
+  optimisticSendOperations.clear();
+  const storage = pendingComposerStorage();
+  if (!storage) return;
+  try {
+    const keys: string[] = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (
+        key?.startsWith(PENDING_COMPOSER_STORAGE_PREFIX) ||
+        key?.startsWith(OPTIMISTIC_SEND_STORAGE_PREFIX)
+      )
+        keys.push(key);
+    }
+    for (const key of keys) storage.removeItem(key);
+  } catch {
+    // A blocked store holds nothing to forget.
+  }
+}
+
 function pendingComposerStorageKey(key: string): string {
   return `${PENDING_COMPOSER_STORAGE_PREFIX}${encodeURIComponent(key)}`;
 }

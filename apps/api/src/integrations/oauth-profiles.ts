@@ -71,6 +71,16 @@ export const OFFICIAL_GOOGLE_CALENDAR_MCP_SCOPES: readonly string[] =
   GOOGLE_CALENDAR_REQUESTED_SCOPES;
 
 const GOOGLE_OAUTH_ONLY_FOR = `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}, ${OFFICIAL_DRIVE_MCP_URL} or ${OFFICIAL_GOOGLE_CALENDAR_MCP_URL}`;
+/**
+ * Google connector sign-in: offline consent for a refresh token, and the
+ * account picker, so a person with several Google accounts chooses which one
+ * to connect instead of Google using whichever the browser used last.
+ * Reconnecting names the account instead (`reconnectLoginHint`).
+ */
+const GOOGLE_CONNECTOR_AUTHORIZE_PARAMS = {
+  access_type: "offline",
+  prompt: "consent select_account",
+} as const;
 
 const SLACK_OAUTH_ORIGIN = "https://slack.com";
 const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
@@ -143,6 +153,13 @@ export type OAuthProviderProfile = {
   sendResourceParameter: boolean;
   /** Extra authorize-URL query parameters (e.g. offline-consent opts). */
   extraAuthorizeParams?: Readonly<Record<string, string>>;
+  /**
+   * Reconnecting an existing account names it to the provider: `login_hint`
+   * set from this verified metadata key (an email address), with `prompt`
+   * replacing the profile's own, so the provider signs in that account rather
+   * than whichever one the browser used last.
+   */
+  reconnectLoginHint?: { metadataKey: string; prompt: string };
   /** Exact scope override; the caller can never widen past it. */
   requestedScopes?: readonly string[];
   /**
@@ -277,11 +294,12 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   // Explicit offline consent is required to obtain the refresh token used by
   // the durable connection broker. These are Gmail profile data, not behavior
   // implied by suppressing the resource parameter.
-  extraAuthorizeParams: {
-    access_type: "offline",
-    include_granted_scopes: "true",
-    prompt: "consent",
-  },
+  // `include_granted_scopes` is not sent: Gmail, Drive and Calendar share one
+  // Google client, so it would show and grant the Drive and Calendar access
+  // the person gave that client earlier. Reconnecting already asks for the
+  // Gmail scopes the account holds (chooseProfileAuthorizeScopes).
+  extraAuthorizeParams: GOOGLE_CONNECTOR_AUTHORIZE_PARAMS,
+  reconnectLoginHint: { metadataKey: "gmailEmail", prompt: "consent" },
   // The Gmail PRM advertises broader grants, including full-mail access. The
   // reviewed connector never lets a caller widen the capability contract: a
   // first connection asks only to read mail, and drafting, sending or
@@ -347,7 +365,8 @@ const OFFICIAL_DRIVE_PROFILE: OAuthProviderProfile = {
     message: `Google Drive OAuth must use ${OFFICIAL_DRIVE_MCP_URL}`,
   },
   sendResourceParameter: false,
-  extraAuthorizeParams: { access_type: "offline", prompt: "consent" },
+  extraAuthorizeParams: GOOGLE_CONNECTOR_AUTHORIZE_PARAMS,
+  reconnectLoginHint: { metadataKey: "googleDriveEmail", prompt: "consent" },
   requestedScopes: OFFICIAL_DRIVE_MCP_SCOPES,
   reportedScopesRequired: true,
   freshRefreshTokenRequired: true,
@@ -396,7 +415,8 @@ const OFFICIAL_GOOGLE_CALENDAR_PROFILE: OAuthProviderProfile = {
     message: GOOGLE_OAUTH_ONLY_FOR,
   },
   sendResourceParameter: false,
-  extraAuthorizeParams: { access_type: "offline", prompt: "consent" },
+  extraAuthorizeParams: GOOGLE_CONNECTOR_AUTHORIZE_PARAMS,
+  reconnectLoginHint: { metadataKey: "googleCalendarEmail", prompt: "consent" },
   requestedScopes: OFFICIAL_GOOGLE_CALENDAR_MCP_SCOPES,
   reportedScopesRequired: true,
   freshRefreshTokenRequired: true,
