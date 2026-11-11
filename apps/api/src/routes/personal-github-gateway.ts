@@ -30,6 +30,7 @@ import {
   type GitHubGatewayAction,
   type GitHubGatewayRepositoryRef,
 } from "../integrations/github-gateway-requests";
+import { gatewayRequestApprovalBody } from "../integrations/github-gateway-request-identity";
 import {
   assertCurrentPersonalGitHubConnection,
   authorizePersonalGitHubProviderRequest,
@@ -848,6 +849,7 @@ export async function handlePersonalGitHubGatewayRequest(
       repositoryNames.length > 0 ? ` on ${[...new Set(repositoryNames)].join(", ")}` : "";
     const title = `${action.title}${where}`.slice(0, 240);
     const contentLength = request.headers.get("content-length");
+    const approvalBody = gatewayRequestApprovalBody(method, pathname, bodyBytes, parsedBody);
     const decision = await services
       .decide(authority.identity, {
         action,
@@ -856,10 +858,10 @@ export async function handlePersonalGitHubGatewayRequest(
           target,
           method,
           path,
-          bodyBytes,
+          approvalBody.digest,
           bodyStream ? { contentLength, contentType: request.headers.get("content-type") } : null,
         ]),
-        reviewArguments: reviewArgumentsFor(method, path, parsedBody ?? null, {
+        reviewArguments: reviewArgumentsFor(method, path, approvalBody.review ?? null, {
           ...reviewExtra,
           ...(bodyStream && contentLength ? { bytes: Number(contentLength) } : {}),
         }),

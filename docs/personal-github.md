@@ -471,7 +471,13 @@ A request that needs approval is not sent. `gh` prints `Waiting for approval:
 the response carries `x-opengeni-approval: pending`, and the turn ends with
 the normal approval card. The approval is
 bound to a digest of the exact request (method, path, query and body bytes); after
-approval, running the same command again sends it once. A declined request
+approval, running the same command again sends it once. A secret write
+(`PUT …/secrets/{name}`, as `gh secret set` sends) is bound to everything but
+`encrypted_value` and `key_id`: `gh` seals the value with fresh randomness on
+every run, so the retry differs only in ciphertext. The repository,
+environment, secret name and any other fields (such as an organization
+secret's visibility) still have to match, and the approval card shows the
+value as `[sealed]`. A declined request
 answers `Declined by the person`. Outcomes are recorded in the same connector
 action ledger as tool calls: a 5xx or transport failure is outcome-unknown and
 is not replayed.
