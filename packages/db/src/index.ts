@@ -83810,6 +83810,7 @@ export type SessionWorkPeek =
       waitTurnId: string;
       deadlineAt: string;
     }
+  | { kind: "read-only" }
   | { kind: "idle" };
 
 /**
@@ -84220,11 +84221,20 @@ export async function peekSessionWork(
         compactRequested: schema.sessions.compactRequested,
         inputWaitTurnId: schema.sessions.inputWaitTurnId,
         inputWaitUntil: schema.sessions.inputWaitUntil,
+        contentArchiveState: schema.sessions.contentArchiveState,
+        importedArchiveImportId: schema.sessions.importedArchiveImportId,
       })
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!session) return { kind: observerAccountId ? "unavailable" : "idle" };
+    // An archived (or archiving) or imported session is read-only: the
+    // database refuses every turn, attempt and wake write for it, so there is
+    // no work to admit and no receipt that could still commit. Restoring its
+    // content makes it live again and the next wake peeks it afresh.
+    if (session.contentArchiveState !== null || session.importedArchiveImportId !== null) {
+      return { kind: "read-only" };
+    }
     // Pure event appends can leave the wide session projection behind. Admission
     // settlement fences against the allocation cursor, so observe that same
     // authority here without taking a writer lock during this advisory peek.
