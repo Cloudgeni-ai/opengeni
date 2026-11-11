@@ -1064,7 +1064,8 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     `computeControl.alerts.createFailureRatio` (a tenth) of
     `POST /v1/sandboxes` that did not fail for the caller's own mistake
     failed, for lack of room or in the service, a host or the store, over
-    half an hour with `computeControl.alerts.createMinimum` (5) or more.
+    half an hour with `computeControl.alerts.createMinimum` (5) or more
+    and at least two failures.
     Creates through the E2B front door are not counted.
 - **Read a host's journal in Cloud Logging.** The host's journal reaches
   its serial console (the GCE Ubuntu image forwards the system log to the

@@ -184,6 +184,8 @@ spec:
             value: '{{ "{{ $value | humanizePercentage }}" }} failing'
             user_impact: 'Some sandbox commands, file operations or wakes fail.'
             next_step: 'Check compute_control_requests_total by route and outcome, and the replicas'' logs.'
+        # CreatesFailing also needs two failures: one failed create among few
+        # is not a failing fleet.
         - alert: OpenGeniComputeCreatesFailing
           expr: |
             (
@@ -193,6 +195,8 @@ spec:
             ) > {{ $createRatio }}
             and
             sum(increase(compute_control_requests_total{ {{- $scope }},method="POST",route="/v1/sandboxes",outcome=~"ok|{{ $createFailures }}"}[30m])) >= {{ $createMinimum }}
+            and
+            sum(increase(compute_control_requests_total{ {{- $scope }},method="POST",route="/v1/sandboxes",outcome=~"{{ $createFailures }}"}[30m])) >= 2
           for: 10m
           labels:
             severity: warning

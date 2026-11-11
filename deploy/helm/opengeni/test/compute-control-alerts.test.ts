@@ -811,6 +811,13 @@ describe("compute alerts", () => {
         at: "40m",
         fires: [],
       },
+      {
+        name: "one failed create among a handful over the minimum",
+        series: [createsBy("ok", "0x20 8x80"), createsBy("unknown_outcome", "0x20 1x80")],
+        alert: "OpenGeniComputeCreatesFailing",
+        at: "40m",
+        fires: [],
+      },
     ]);
   }, 180_000);
 

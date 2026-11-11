@@ -1640,7 +1640,8 @@ computeControl:
     # group the service sizes. 0: no FleetFull alert.
     spareMemoryMib: 4096
     # OpenGeniComputeCreatesFailing: more than this share of sandbox creates
-    # (POST /v1/sandboxes) fail in 30 minutes, out of at least createMinimum.
+    # (POST /v1/sandboxes) fail in 30 minutes, out of at least createMinimum,
+    # with at least two failures.
     createFailureRatio: 0.1
     createMinimum: 5
     # OpenGeniComputeHostAgentRestarting: a host registers afresh this many
