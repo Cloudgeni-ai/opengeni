@@ -33,6 +33,7 @@ import {
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import {
   createObservability,
+  errorCauseAttributes,
   installCpuSamplingSignal,
   logStartupDependencyRetry,
   traceClientCalls,
@@ -105,6 +106,7 @@ import {
 } from "./http/server-drain";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
 import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
+import { lastResortErrorResponse, serveWithLastResortError } from "./http/nosniff";
 import {
   startComputeAgentGateway,
   type ComputeGatewayHandle,
@@ -712,18 +714,41 @@ export async function startApi(options: StartApiOptions = {}) {
     port: settings.apiPort,
     idleTimeout: API_SERVER_IDLE_TIMEOUT_SECONDS,
     fetch: httpDrain.fetch((request, bunServer: Bun.Server<ApiWebSocketConnection>) => {
-      const upgrade = dispatchApiWebSocketUpgrade(
-        request,
-        bunServer,
-        webSocketUpgrades,
-        localBrowserBoundary,
-      );
+      let upgrade: ReturnType<typeof dispatchApiWebSocketUpgrade>;
+      try {
+        upgrade = dispatchApiWebSocketUpgrade(
+          request,
+          bunServer,
+          webSocketUpgrades,
+          localBrowserBoundary,
+        );
+      } catch (error) {
+        observability.error("Opengeni API WebSocket upgrade failed", {
+          errorClass: "UnhandledUpgradeFailure",
+          errorCode: "unhandled_upgrade_failure",
+          origin: "api",
+          ...errorCauseAttributes(error),
+        });
+        return lastResortErrorResponse();
+      }
       if (upgrade.handled) return upgrade.response;
-      return app.fetch(request, {
-        ...apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
-        ...apiRequestBindingsForIdleTimeout((seconds) => bunServer.timeout(request, seconds)),
-        ...apiRequestBindingsForServerDrain(httpDrain.signal),
-      });
+      // Hono re-throws values that are not Error instances past its onError;
+      // answer those with a generic 500 that still carries nosniff.
+      return serveWithLastResortError(
+        () =>
+          app.fetch(request, {
+            ...apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
+            ...apiRequestBindingsForIdleTimeout((seconds) => bunServer.timeout(request, seconds)),
+            ...apiRequestBindingsForServerDrain(httpDrain.signal),
+          }),
+        (error) =>
+          observability.error("Opengeni API request failed outside the error handler", {
+            errorClass: "UnhandledRequestFailure",
+            errorCode: "unhandled_request_failure",
+            origin: "api",
+            ...errorCauseAttributes(error),
+          }),
+      );
     }),
     websocket: httpDrain.websocket<ApiWebSocketConnection>({
       maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,

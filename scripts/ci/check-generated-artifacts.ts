@@ -88,16 +88,24 @@ export type RegeneratedArtifact = Pick<
 /**
  * Generated files the merge batcher regenerates when they are the only files
  * a queued PR conflicts with main in, instead of ejecting the PR: the public
- * API snapshot plus every re-rendered artifact above. Two PRs that both
- * regenerated one of these conflict in Git although neither did anything
- * wrong. Entries run in this order, so an entry comes after every entry whose
- * artifacts it reads. See scripts/ci/regenerate-merge.ts.
+ * API snapshot, the workflow execution graph manifest and every re-rendered
+ * artifact above. Two PRs that both regenerated one of these conflict in Git
+ * although neither did anything wrong. Entries run in this order, so an entry
+ * comes after every entry whose artifacts it reads. See
+ * scripts/ci/regenerate-merge.ts.
  */
 export const REGENERATED_ON_CONFLICT: readonly RegeneratedArtifact[] = [
   {
     name: "Public API snapshot",
     artifacts: ["scripts/public-api/surface.gen.json"],
     regenerate: "bun run public-api:refresh",
+  },
+  {
+    // Hashes every workflow file, so two PRs that each change a different
+    // workflow conflict here; PR CI and Batch CI check it against the tree.
+    name: "Workflow execution graph manifest",
+    artifacts: ["scripts/workflow-execution-graph-manifest.json"],
+    regenerate: "bun run workflow-graph:refresh",
   },
   ...GENERATED_ARTIFACT_CHECKS,
 ];

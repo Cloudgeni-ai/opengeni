@@ -15,8 +15,14 @@ type OpenGeniCallNativeModule = {
   setMuted(callId: string, muted: boolean): Promise<void>;
   setSpeaker(on: boolean): Promise<void>;
   takePendingStartRequest(): Promise<{ target: string | null } | null>;
-  /** Android: whether calls are system calls and agents can ring (absent before them). */
-  capabilities?(): { systemCall: boolean; incoming: boolean };
+  /**
+   * Android: whether calls are system calls and agents can ring (absent
+   * before them), and whether a ring may show full screen now (absent before
+   * that check).
+   */
+  capabilities?(): { systemCall: boolean; incoming: boolean; fullScreenRing?: boolean };
+  /** Android: open the setting that lets rings show full screen (absent before it). */
+  openFullScreenRingSettings?(): Promise<boolean>;
   // Agent calls (absent in builds before them).
   getVoipToken?(): Promise<string | null>;
   takeIncomingCalls?(): Promise<RawNativeCallEvent[]>;
@@ -52,6 +58,21 @@ export function createExpoCallAdapter(
   const ios = Platform.OS === "ios";
   const capabilities = ios ? null : (native.capabilities?.() ?? null);
   const canRing = ios || capabilities?.incoming === true;
+  // Android 14 and later may need the person to allow full-screen rings; a
+  // build before the check, or iOS (CallKit), always rings full screen.
+  const fullScreenCheck =
+    !ios && typeof capabilities?.fullScreenRing === "boolean" && native.openFullScreenRingSettings
+      ? {
+          canRingFullScreen: () => {
+            try {
+              return native.capabilities?.().fullScreenRing !== false;
+            } catch {
+              return true;
+            }
+          },
+          openFullScreenRingSettings: () => native.openFullScreenRingSettings!(),
+        }
+      : {};
   // Call ids are UUIDs; CallKit reports them upper-case, the hook compares lower-case.
   const id = (callId: string) => callId.toLowerCase();
   return {
@@ -73,6 +94,7 @@ export function createExpoCallAdapter(
               }),
             endIncomingCall: (callId, reason) => native.endIncomingCall!(id(callId), reason),
             connectsBeforeAnswer: native.connectsBeforeAnswer?.() === true,
+            ...fullScreenCheck,
           }
         : undefined,
     subscribe(listener) {

@@ -488,7 +488,13 @@ describe("compact session view on the live local workspace route (API fixture)",
       if (path.endsWith("/realtime-model-catalog")) return json({ models: [] });
       if (path.endsWith("/knowledge/entries/search")) return json({ items: [], nextCursor: null });
       if (path.endsWith("/github/app"))
-        return json({ configured: false, missing: [], installUrl: null });
+        return json({
+          configured: false,
+          status: "disabled",
+          missing: [],
+          installUrl: null,
+          installations: [],
+        });
       if (path.endsWith("/connections/github")) return json({ enabled: false, connection: null });
       if (path.endsWith("/live-events/stream"))
         return route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" });

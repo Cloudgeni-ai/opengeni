@@ -5,7 +5,7 @@ import { CuaComputerBackend } from "./backend";
 import { computerNativeMacWindows } from "./macos-windows";
 import { macPersonInput } from "./macos-person-input";
 import { createCuaRuntime, missingLinuxLibraryError } from "./sdk";
-import type { CuaDesktopRuntime } from "./wire";
+import { cuaWorkerGone, type CuaDesktopRuntime } from "./wire";
 import { windowsFronting } from "./windows-foreground";
 
 /** The part of the CUA SDK a desktop runtime uses. */
@@ -38,10 +38,20 @@ function destroy(sdk: CuaSdk) {
   if (typeof sdk.uniffiDestroy === "function") sdk.uniffiDestroy();
 }
 
+/** Stops a worker. One whose process is already gone has nothing left to
+ * stop, and the SDK says so (Shutdown); that is not a failure. */
+async function shutdownSdk(sdk: CuaSdk): Promise<void> {
+  try {
+    await sdk.shutdown();
+  } catch (error) {
+    if (!cuaWorkerGone(error)) throw error;
+  }
+}
+
 async function stopWorker(worker: SeatWorker): Promise<void> {
   worker.shutdown ??= (async () => {
     try {
-      await worker.sdk.shutdown();
+      await shutdownSdk(worker.sdk);
     } finally {
       destroy(worker.sdk);
     }
@@ -158,56 +168,62 @@ export async function createCuaComputerDriver(
   // Lazy loading keeps the browser engine and normal native backend independent
   // of CUA's Node-API runtime. Never expose CUA browser tools or its raw SDK.
   const environment = { ...context.environment };
-  let runtime: CuaDesktopRuntime;
-  if (physical) {
-    runtime = await openSeatRuntime(() => createCuaRuntime(environment));
-  } else {
-    // An isolated Linux seat has its own display, so its own worker.
-    const sdk = await createCuaRuntime(environment).catch((error: unknown) => {
-      throw (process.platform === "linux" && missingLinuxLibraryError(error)) || error;
-    });
-    let closed = false;
-    runtime = {
-      listToolsJson: () => sdk.listToolsJson(),
-      callTool: (name, args) => sdk.callTool(name, args),
-      shutdown: async () => {
-        if (closed) return;
-        closed = true;
-        try {
-          await sdk.shutdown();
-        } finally {
-          destroy(sdk);
-        }
-      },
-    };
-  }
   // The agent installs computer-native beside browserd; on macOS it reads
   // and restores windows that CUA cannot.
   const nativeBinary = process.env.OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY;
-  // A failed open shuts its runtime down, which for a shared worker only
-  // leaves it.
-  const backend = await CuaComputerBackend.open(
-    runtime,
-    process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : "macos",
-    {
-      ...(context.cursorIdentity ? { cursorIdentity: context.cursorIdentity } : {}),
-      ...(process.platform === "darwin"
-        ? {
-            ...(nativeBinary
-              ? { macWindows: computerNativeMacWindows(resolve(nativeBinary)) }
-              : {}),
-            personInput: await macPersonInput(),
+  const openBackend = async () => {
+    let runtime: CuaDesktopRuntime;
+    if (physical) {
+      runtime = await openSeatRuntime(() => createCuaRuntime(environment));
+    } else {
+      // An isolated Linux seat has its own display, so its own worker.
+      const sdk = await createCuaRuntime(environment).catch((error: unknown) => {
+        throw (process.platform === "linux" && missingLinuxLibraryError(error)) || error;
+      });
+      let closed = false;
+      runtime = {
+        listToolsJson: () => sdk.listToolsJson(),
+        callTool: (name, args) => sdk.callTool(name, args),
+        shutdown: async () => {
+          if (closed) return;
+          closed = true;
+          try {
+            await shutdownSdk(sdk);
+          } finally {
+            destroy(sdk);
           }
-        : process.platform === "win32"
-          ? { frontWindow: windowsFronting() }
-          : {}),
-    },
-  );
+        },
+      };
+    }
+    // A failed open shuts its runtime down, which for a shared worker only
+    // leaves it.
+    return await CuaComputerBackend.open(
+      runtime,
+      process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : "macos",
+      {
+        ...(context.cursorIdentity ? { cursorIdentity: context.cursorIdentity } : {}),
+        ...(process.platform === "darwin"
+          ? {
+              ...(nativeBinary
+                ? { macWindows: computerNativeMacWindows(resolve(nativeBinary)) }
+                : {}),
+              personInput: await macPersonInput(),
+            }
+          : process.platform === "win32"
+            ? { frontWindow: windowsFronting() }
+            : {}),
+      },
+    );
+  };
+  const backend = await openBackend();
   return new ComputerDriver({
     computerSessionId: context.computerSessionId,
     controllerGeneration: context.controllerGeneration,
     client: backend,
-    // No automatic SDK reconstruction after an ambiguous native failure.
-    // A new ComputerSession establishes new observations/capture authority.
+    // A worker that stopped is replaced by a fresh one for the next read, so
+    // the session keeps working after its worker exits. The stopped worker's
+    // refs and frames go with it; an action that was sent when it stopped
+    // stays outcome-unknown and is never repeated.
+    clientFactory: openBackend,
   });
 }

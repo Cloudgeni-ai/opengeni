@@ -131,6 +131,148 @@ describe("native attachment upload scope", () => {
   });
 });
 
+describe("native streamed video upload", () => {
+  const clip = {
+    id: "clip-1",
+    uri: "file:///IMG_0042.MOV",
+    name: "IMG_0042.MOV",
+    contentType: "video/quicktime",
+    sizeBytes: 734_003_200,
+    kind: "video" as const,
+    durationSeconds: 42.5,
+  };
+
+  test("streams from disk unhashed, shows its progress and becomes ready", async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    let report: (fraction: number) => void = () => undefined;
+    let finishPut: () => void = () => undefined;
+    const streaming = {
+      uploadFile: async (_workspaceId: string, input: Record<string, unknown>) => {
+        sent.push(input);
+        const data = input.data as { send(target: unknown): Promise<{ status: number }> };
+        await data.send({ url: "https://storage.example.test", headers: {}, sizeBytes: 1 });
+        return { ...asset("video-1"), contentType: "video/quicktime", filename: clip.name };
+      },
+    } as unknown as FileAttachmentClientLike;
+    const hook = await renderHook(
+      () =>
+        useNativeFileAttachments({
+          client: streaming,
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          files: {
+            ...files,
+            readBytes: async () => {
+              throw new Error("a long video must never be read into memory");
+            },
+            uploadSource: (_file, onProgress) => {
+              report = onProgress;
+              return {
+                sizeBytes: 734_003_200,
+                send: () => new Promise((resolve) => (finishPut = () => resolve({ status: 200 }))),
+              };
+            },
+          },
+          crypto,
+        }),
+      undefined,
+    );
+    let adding: Promise<void> = Promise.resolve();
+    await act(async () => {
+      adding = hook.result.current.addFiles([clip]);
+      await Promise.resolve();
+    });
+    expect(hook.result.current.attachments[0]).toMatchObject({
+      kind: "video",
+      durationSeconds: 42.5,
+      status: "uploading",
+      progress: 0,
+    });
+    await act(async () => {
+      report(0.421);
+      report(0.425);
+    });
+    expect(hook.result.current.attachments[0]!.progress).toBe(0.42);
+    await act(async () => {
+      finishPut();
+      await adding;
+    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.sha256).toBeUndefined();
+    expect(sent[0]!.signal).toBeInstanceOf(AbortSignal);
+    expect(hook.result.current.attachments[0]).toMatchObject({ status: "ready" });
+    expect(hook.result.current.attachments[0]!.progress).toBeUndefined();
+    expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: "video-1" }]);
+    await hook.unmount();
+  });
+
+  test("removing a video mid-upload stops its transfer", async () => {
+    let signal: AbortSignal | undefined;
+    const streaming = {
+      uploadFile: (_workspaceId: string, input: Record<string, unknown>) => {
+        signal = input.signal as AbortSignal;
+        return new Promise<FileAsset>((_resolve, reject) =>
+          signal!.addEventListener("abort", () => reject(new Error("cancelled"))),
+        );
+      },
+    } as unknown as FileAttachmentClientLike;
+    const hook = await renderHook(
+      () =>
+        useNativeFileAttachments({
+          client: streaming,
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          files: {
+            ...files,
+            uploadSource: () => ({ sizeBytes: 734_003_200, send: async () => ({ status: 200 }) }),
+          },
+          crypto,
+        }),
+      undefined,
+    );
+    await act(async () => {
+      void hook.result.current.addFiles([clip]);
+      await Promise.resolve();
+    });
+    expect(signal?.aborted).toBe(false);
+    await act(async () => hook.result.current.remove(clip.id));
+    expect(signal?.aborted).toBe(true);
+    expect(hook.result.current.attachments).toEqual([]);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("leaving the chat stops uploads still in flight", async () => {
+    let signal: AbortSignal | undefined;
+    const streaming = {
+      uploadFile: (_workspaceId: string, input: Record<string, unknown>) => {
+        signal = input.signal as AbortSignal;
+        return new Promise<FileAsset>(() => undefined);
+      },
+    } as unknown as FileAttachmentClientLike;
+    const hook = await renderHook(
+      () =>
+        useNativeFileAttachments({
+          client: streaming,
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          files: {
+            ...files,
+            uploadSource: () => ({ sizeBytes: 734_003_200, send: async () => ({ status: 200 }) }),
+          },
+          crypto,
+        }),
+      undefined,
+    );
+    await act(async () => {
+      void hook.result.current.addFiles([clip]);
+      await Promise.resolve();
+    });
+    await hook.unmount();
+    expect(signal?.aborted).toBe(true);
+  });
+});
+
 describe("removeReadyNativeAttachments", () => {
   test("keeps unfinished uploads and unrelated ready files", () => {
     const current: NativeAttachment[] = [

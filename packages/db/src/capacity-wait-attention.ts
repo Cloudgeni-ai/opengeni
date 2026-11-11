@@ -19,6 +19,12 @@ export const CAPACITY_WAIT_ATTENTION_AFTER_MS = 15 * 60_000;
 
 /** Turn metadata recording the person's open capacity-wait notification. */
 export const CAPACITY_WAIT_NOTICE_KEY = "capacityWaitNoticeV1";
+/**
+ * Turn metadata recording the reset a worker's parent was last told in a
+ * `child_waiting_capacity` notice (the same marker shape, keyed by the
+ * notice's dedupe key). Nothing is withdrawn for it when the wait ends.
+ */
+export const CAPACITY_WAIT_PARENT_NOTICE_KEY = "capacityWaitParentNoticeV1";
 
 export type CapacityWaitAttention = {
   /** When capacity is expected back, when anything says so. */
@@ -89,8 +95,9 @@ export type CapacityWaitNoticeMarker = { key: string; resetsAt?: string | null }
 
 export function readCapacityWaitNotice(
   metadata: Record<string, unknown> | null | undefined,
+  metadataKey: string = CAPACITY_WAIT_NOTICE_KEY,
 ): CapacityWaitNoticeMarker | null {
-  const value = metadata?.[CAPACITY_WAIT_NOTICE_KEY];
+  const value = metadata?.[metadataKey];
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const { key, resetsAt } = value as { key?: unknown; resetsAt?: unknown };
   if (typeof key !== "string" || key.length === 0) return null;

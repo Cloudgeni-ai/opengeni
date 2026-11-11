@@ -1,4 +1,5 @@
 import { verifySocialSignupChallenge } from "../auth/signup-challenge";
+import { clearSiteDataOnSignOut } from "../http/clear-site-data";
 import {
   assertManagedUserAdmission,
   getManagedSession,
@@ -105,6 +106,9 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
   };
   app.use("/v1/auth/session-set", noStore);
   app.use("/v1/auth/session-set/*", noStore);
+  // Registered before the Better Auth handler, so its sign-out is covered too.
+  app.use("/v1/auth/sign-out", clearSiteDataOnSignOut);
+  app.use("/v1/auth/session-set/logout-all", clearSiteDataOnSignOut);
 
   // `currentActorEpoch`: a caller with no tab state (the marketing site) reads
   // the selected account the way a freshly loaded app tab does, which first

@@ -1,5 +1,25 @@
 # @opengeni/codex
 
+## 6.15.0
+
+### Patch Changes
+
+- 19ab8c3: Update the Codex client identity to 0.167.1: the backend now refuses GPT-6.1 Sol turns from older clients.
+- cd033ae: A Codex model gated above the client version Opengeni presents no longer strands turns. The version refusal ("requires a newer version of Codex") now fails the turn with `codex_client_version_rejected` and is never treated as a plan refusal, even when it carries an upgrade code. When the backend hides a model from every connected account's live model list, home-provider placement no longer waits behind another account's unrelated quota reset: it runs on capacity, and the provider's answer decides. Nothing is written against the account, so service returns as soon as the presented version is new enough.
+- 850b4d5: When a model refuses encrypted reasoning that another model or account left in the chat, the failed-turn banner now says "This model can’t read earlier reasoning in this chat." and points at the model picker, instead of "The session stopped unexpectedly." Retry stays, and the provider's exact text stays behind Details. The runtime's recovery and the banner share one rule for recognising this refusal (`@opengeni/contracts/encrypted-reasoning-refusal`).
+- Updated dependencies [708848c]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [dfeab20]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+  - @opengeni/network@6.15.0
+
 ## 6.14.0
 
 ### Patch Changes

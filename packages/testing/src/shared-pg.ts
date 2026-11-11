@@ -1229,7 +1229,7 @@ export async function acquireSharedTestDatabase(
  * routines (1002), the secret history scrub's reader and cell writer (1091),
  * the agent call and native push v2 routines (1107), the lock-free external
  * identity read (1172), the names-only member list (1211) and the inventory
- * of meeting tracks not yet kept compact (1240, withheld again by 1283). Tests that
+ * of meeting tracks not yet kept compact (1240, withheld again by 1283; 1361 grants it). Tests that
  * exercise them run as they will once they are granted.
  */
 export async function grantDeferredRuntimeAccess(

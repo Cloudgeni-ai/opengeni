@@ -80,6 +80,12 @@ and PR CI on the exact head. With PR CI green and `queue-ready` added, they land
 through the batcher alone, as a true merge commit, because release provenance
 needs it.
 
+The same holds for every PR a workflow here opens with `GITHUB_TOKEN`, such as
+the browser-engine and Grok client pin refreshes. PR CI accepts a
+`workflow_dispatch` run for a PR whose branch is in this repository and whose
+author is `github-actions[bot]`, and only on its exact head. To give such a PR
+CI, run `gh workflow run pr-ci.yml --ref <branch> -f pr_number=<n> -f head_sha=<head>`.
+
 Release source admission accepts an exact-head merge onto a moving `main` only
 when the merge keeps that head, the integration base keeps the reviewed base,
 and the reviewed file delta equals the landed delta. Extra or overlapping
