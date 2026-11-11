@@ -564,7 +564,8 @@ describe("a batcher pass", () => {
       { number: 5, body: expect.stringContaining("holding main for this Version PR") },
     ]);
     expect(gh.comments[0]!.body).toContain("remove the queue-ready label");
-    expect(new Set(gh.commentLookups)).toEqual(new Set([NOW - 600_000]));
+    // A day early, as a commit's date may run ahead of GitHub's clock.
+    expect(new Set(gh.commentLookups)).toEqual(new Set([NOW - 600_000 - 24 * 60 * 60_000]));
 
     gh.pulls.get(5)!.green = true;
     await run(gh, options());
@@ -1250,12 +1251,20 @@ describe("a batcher pass", () => {
     expect(gh.pulls.get(2)!.labels).not.toContain(IN_BATCH_LABEL);
     expect(gh.comments.map((c) => c.number)).toEqual([2]);
     expect(gh.comments[0]!.body).toContain(
-      "skipping this PR for now because it conflicts with main",
+      "took this PR out of the running batch because it conflicts with main",
     );
+    expect(gh.comments[0]!.body).not.toContain("merge-batcher:conflict");
     expect(gh.pulls.get(1)!.merged).toBeUndefined();
     expect(gh.refs.get(built.name)).toBeUndefined();
     // The rest is rebuilt without it.
     expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+    expect(gh.dispatches).toEqual([]);
+
+    // Out of the batch, the same head is checked again: its conflict may be
+    // only in generated files, which the batcher regenerates.
+    await run(gh, options());
+    expect(gh.dispatches.map((d) => [d.pull, d.head])).toEqual([[2, fresh]]);
+    expect(gh.comments).toHaveLength(1);
   });
 
   test("a Version PR's new head restarts its batch", async () => {
@@ -1633,7 +1642,7 @@ describe("the in-batch label", () => {
     gh.pulls.get(2)!.conflicting = true;
     await run(gh, options());
     expect(gh.comments.map((c) => c.number)).toEqual([2]);
-    expect(gh.comments[0]!.body).toContain("skipping this PR for now because it conflicts");
+    expect(gh.comments[0]!.body).toContain("took this PR out of the running batch");
     expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
     expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
     expect(gh.marked()).toEqual([1]);

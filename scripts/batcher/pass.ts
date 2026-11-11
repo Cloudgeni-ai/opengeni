@@ -60,6 +60,11 @@ export const couldNotRegenerate = (detail: string) =>
   `it conflicts with main and the batcher could not regenerate its generated files: ${detail}`;
 
 /** Marks the one notice per PR head that it conflicts with main and is skipped. */
+/**
+ * How far a commit's date may run ahead of GitHub's clock (it is set by
+ * whoever made the commit) when looking for the notices given about it.
+ */
+const COMMIT_DATE_SKEW_MS = 24 * 60 * 60_000;
 const conflictMarker = (headSha: string) => `<!-- merge-batcher:conflict ${headSha} -->`;
 
 /** File statuses that put a new path on main. */
@@ -187,11 +192,11 @@ async function observe(ctx: Context): Promise<Observation> {
     let parked: QueuedPull["parked"] = null;
     if (conflicting && (await parkNoted(gh, pull.number, pull.headSha)))
       parked = { reason: CONFLICTING, noted: true };
-    else if (
-      conflicting &&
-      (pull.headRef === PRODUCTION_BRANCH || pull.labels.includes(IN_BATCH_LABEL))
-    )
+    else if (conflicting && pull.headRef === PRODUCTION_BRANCH)
       parked = { reason: CONFLICTING, noted: false };
+    // Leaving the running batch, it is regenerated in the next pass.
+    else if (conflicting && pull.labels.includes(IN_BATCH_LABEL))
+      parked = { reason: CONFLICTING, noted: false, recheck: true };
     const regenerate = conflicting && parked === null;
     let conflict: string | null = null;
     if (regenerate)
@@ -389,8 +394,9 @@ async function eject(ctx: Context, number: number, reason: string) {
 
 /** Whether a PR was already told that this head conflicts with main and is skipped. */
 async function parkNoted(gh: GitHub, number: number, headSha: string): Promise<boolean> {
-  // A notice for a head can only be newer than that head.
-  const since = (await gh.commit(headSha)).date;
+  // A notice for a head is newer than that head, give or take a skewed
+  // commit date (a commit's date is set by whoever made it).
+  const since = (await gh.commit(headSha)).date - COMMIT_DATE_SKEW_MS;
   const marker = conflictMarker(headSha);
   return (await gh.commentBodies(number, since)).some((body) => body.includes(marker));
 }
@@ -401,8 +407,20 @@ async function parkNoted(gh: GitHub, number: number, headSha: string): Promise<b
  * cleanly and passes PR CI. It is told so once per head, naming what
  * conflicts.
  */
-async function park(ctx: Context, number: number, headSha: string, reason: string) {
+async function park(ctx: Context, number: number, headSha: string, reason: string, recheck?: true) {
+  const told = ctx.ejected.has(number);
   ctx.ejected.add(number);
+  if (recheck) {
+    // Unmarked, so the next pass, with the PR out of the batch, checks it
+    // again; this pass tells it once.
+    if (told) return;
+    ctx.log(`Taking #${number} out of the running batch: ${reason}`);
+    await ctx.gh.comment(
+      number,
+      `The merge queue took this PR out of the running batch because ${reason}. It keeps its \`${QUEUE_LABEL}\` label and its place in the queue. The queue checks it again shortly: it regenerates conflicting generated files itself, and otherwise says which files conflict. You don't need to queue it again.`,
+    );
+    return;
+  }
   if (await parkNoted(ctx.gh, number, headSha)) return;
   ctx.log(`Skipping #${number} until it merges main cleanly: ${reason}`);
   await ctx.gh.comment(
@@ -908,7 +926,7 @@ async function act(ctx: Context, action: Action) {
     case "eject":
       return eject(ctx, action.number, action.reason);
     case "park":
-      return park(ctx, action.number, action.headSha, action.reason);
+      return park(ctx, action.number, action.headSha, action.reason, action.recheck);
     case "renumber":
       return moveMigrations(ctx, action.number, action.paths);
     case "regenerate":
@@ -954,7 +972,12 @@ async function retry(ctx: Context, failed: Batch["runs"][number]) {
 async function noteVersionHold(ctx: Context, action: Extract<Action, { kind: "hold" }>) {
   const { number, headSha, headAt, behind } = action;
   const marker = behind ? versionBehindMarker(headSha) : versionHoldMarker(headSha);
-  if ((await ctx.gh.commentBodies(number, headAt)).some((body) => body.includes(marker))) return;
+  if (
+    (await ctx.gh.commentBodies(number, headAt - COMMIT_DATE_SKEW_MS)).some((body) =>
+      body.includes(marker),
+    )
+  )
+    return;
   ctx.log(
     behind
       ? `Asking for Version PR #${number} to be regenerated`
@@ -983,7 +1006,7 @@ export function describe(action: Action): string {
     case "renumber":
       return `move #${action.number}'s ${action.paths.map(fileName).join(", ")} to the next free number`;
     case "regenerate":
-      return `regenerate #${action.number}'s conflicting generated files, or eject it if other files conflict`;
+      return `regenerate #${action.number}'s conflicting generated files, or skip it if other files conflict`;
     case "build":
       return `build ${action.members.map((m) => `#${m.number}`).join(", ")}${action.pending.length ? ` (then ${JSON.stringify(action.pending)})` : ""}${action.blame?.length ? `, bisecting a failure in ${action.blame.join(", ")}` : ""}`;
     case "hold":

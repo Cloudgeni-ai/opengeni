@@ -131,8 +131,10 @@ export interface QueuedPull {
    * It conflicts with main in a way only its author can settle. It keeps its
    * place and label but is not batched until its branch merges main cleanly
    * and PR CI passes on that head. `noted` once it was told so for this head.
+   * `recheck`: it is skipped only while it is in the running batch, whose
+   * branch must not move; once out of it, it is checked (and regenerated) again.
    */
-  parked: { reason: string; noted: boolean } | null;
+  parked: { reason: string; noted: boolean; recheck?: true } | null;
   /**
    * Added files whose numbers main already uses, which the batcher moves to
    * free numbers on the PR's branch before testing it; empty when none.
@@ -250,9 +252,10 @@ export type Action =
     }
   /**
    * A PR that conflicts with main keeps its label and is skipped until its
-   * branch merges main cleanly; it is told so once per head.
+   * branch merges main cleanly; it is told so once per head. One parked only
+   * while in the running batch is told without that, as it is checked again.
    */
-  | { kind: "park"; number: number; headSha: string; reason: string }
+  | { kind: "park"; number: number; headSha: string; reason: string; recheck?: true }
   /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
   | {
       kind: "hold";
@@ -583,6 +586,7 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
           number: pull.number,
           headSha: pull.headSha,
           reason: pull.parked.reason,
+          ...(pull.parked.recheck ? { recheck: true as const } : {}),
         });
     } else if (pull.regenerate) actions.push({ kind: "regenerate", number: pull.number });
     else if (pull.renumber.length)
