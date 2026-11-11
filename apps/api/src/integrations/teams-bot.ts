@@ -324,7 +324,7 @@ export async function sendTeamsReply(
   return teamsReceipt(response);
 }
 const ONBOARDING_TEXT = {
-  setup: () => "Connect Teams to your Opengeni workspace.",
+  setup: () => "Connect Teams to Opengeni.",
   link: () => "Link your Opengeni account to use this bot.",
   connect: (appName: string) => `Welcome to ${appName}. ${teamsConnectText(appName)}`,
 } as const;

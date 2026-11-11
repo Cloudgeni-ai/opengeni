@@ -428,7 +428,7 @@ across the metadata.
 The short and full descriptions are generated for the enabled scopes. They name
 Microsoft Teams on first reference, say that the app is an AI agent whose
 replies can be wrong and how to report one, state the one-time administrator
-setup, the Opengeni account with access to the connected workspace and the
+setup, the Opengeni account in the connected organization and the
 account link, with the website as the way to sign up, and list the main
 limitations (text messages only; approvals and private information requests
 open Opengeni in a web browser). Copy `description.short` and
@@ -463,7 +463,7 @@ and the personal-only package. In it:
   messages, and in `help` and `unlink`, that Opengeni needs a work or school
   account and to sign in to Teams with one.
 - A linked person whose workspace access doesn't allow starting chats is told
-  so and asked to get access from an admin of the connected workspace.
+  so and asked to get access from an Opengeni admin in their organization.
 - A 1:1 message with only a file or an image, or no text, is told that
   Opengeni reads text messages only and to send the request as text.
 - Onboarding replies are limited per person, per tenant and across the

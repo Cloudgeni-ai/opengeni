@@ -250,11 +250,12 @@ describe("Teams app package", () => {
       // A way to sign up, and the one-time admin setup, are in the description.
       expect(full).toContain(`Visit ${options.websiteUrl} to sign up`);
       expect(full).toContain("an administrator must first connect");
-      expect(full).toContain("account with access to that workspace");
+      expect(full).toContain("Opengeni account in that organization");
+      expect(full).not.toContain("workspace");
       expect(full).toContain("thumbs down");
     }
     expect(buildTeamsAppManifest({ ...options, groupChats: true }).description.full).toContain(
-      "every participant must have linked an Opengeni account with access to that workspace",
+      "every participant must have linked an Opengeni account in that organization",
     );
     expect(buildTeamsAppManifest(options).description.full).not.toContain("group chat");
     const channelsOnly = buildTeamsAppManifest({ ...options, channels: true }).description.full;
@@ -284,7 +285,7 @@ describe("Teams app package", () => {
       expect(full).toContain(phrase);
     for (const phrase of [
       "tools your organization has connected to Opengeni.",
-      "to an Opengeni workspace",
+      "Microsoft Teams to Opengeni,",
       "you need an Opengeni account",
       "to your Opengeni account.",
       "open Opengeni in your web browser",
