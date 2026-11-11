@@ -367,7 +367,9 @@ test("without machine access the same refusal reads as a permission check that s
   await flush();
   expect(view.container.textContent).toContain("Permission needed");
   expect(view.container.textContent).toContain("A permission check stopped your next message.");
-  expect(view.container.textContent).toContain("It starts by itself once access");
+  expect(view.container.textContent).toContain(
+    "or a workspace admin, can fix it. It starts by itself once they do.",
+  );
   expect(view.container.querySelector("button")).toBeNull();
   await view.unmount();
 });

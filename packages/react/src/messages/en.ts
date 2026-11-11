@@ -4527,19 +4527,19 @@ export const englishMessages = {
   "sessionAdmission.grantNext":
     "The person it belongs to can allow it for this chat. It starts by itself once they do.",
   "sessionAdmission.grantTitle": "Not allowed for this chat",
-  "sessionAdmission.machineAccessBody": "This chat isn’t allowed to use “{machine}” right now.",
+  "sessionAdmission.machineAccessBody": "This chat isn’t allowed to use “{machine}”.",
   "sessionAdmission.machineAccessOthersBody":
-    "This chat isn’t allowed to use {owner}’s machine “{machine}” right now.",
+    "This chat isn’t allowed to use {owner}’s machine “{machine}”.",
   "sessionAdmission.machineAccessOthersNext":
     "Only {owner} can allow it. It starts by itself once they do.",
   "sessionAdmission.machineAccessOwnerNext":
     "Allow it for this chat and your message starts right away.",
   "sessionAdmission.machineAccessOwnerPausedNext":
-    "Allow it for this chat. Your message starts when the chat is resumed.",
+    "Allow it for this chat. It starts when the chat is resumed.",
   "sessionAdmission.machineAccessOwnerSettingsNext":
-    "You can allow it in the machine’s settings. Your message starts by itself once you do.",
+    "Allow it in the machine’s settings. It starts by itself once you do.",
   "sessionAdmission.machineAccessOwnerSettingsPausedNext":
-    "You can allow it in the machine’s settings. Your message starts when the chat is resumed.",
+    "Allow it in the machine’s settings. It starts when the chat is resumed.",
   "sessionAdmission.machineAccessSharedNote":
     "This chat is shared, so people in this workspace will see what the agent does on “{machine}”.",
   "sessionAdmission.machineAccessTitle": "Machine access needed",
@@ -4611,7 +4611,7 @@ export const englishMessages = {
   "sessionAdmission.pausedNote": "This chat is also paused. Your message starts when it’s resumed.",
   "sessionAdmission.permissionBody": "A permission check stopped your next message.",
   "sessionAdmission.permissionNext":
-    "It starts by itself once access to this chat’s machine or resources is fixed. Their owner or a workspace admin can fix it.",
+    "The owner of this chat’s machine or resources, or a workspace admin, can fix it. It starts by itself once they do.",
   "sessionAdmission.permissionTitle": "Permission needed",
   "sessionAdmission.preSendTitle": "Choose a machine before sending",
   "sessionAdmission.refreshFailed": "Session status could not be refreshed. Try refreshing again.",

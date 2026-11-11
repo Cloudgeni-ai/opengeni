@@ -155,7 +155,7 @@ describe("session admission notice", () => {
       onAllowMachine,
     });
     expect(container.textContent).toContain("Machine access needed");
-    expect(container.textContent).toContain("isn’t allowed to use “My machine” right now");
+    expect(container.textContent).toContain("isn’t allowed to use “My machine”.");
     expect(container.textContent).not.toContain("Permission needed");
     const buttons = [...container.querySelectorAll("button")];
     expect(buttons.map((button) => button.textContent)).toEqual(["Allow for this chat"]);
@@ -197,7 +197,7 @@ describe("session admission notice", () => {
       },
     });
     expect(container.textContent).toContain("Machine access needed");
-    expect(container.textContent).toContain("You can allow it in the machine’s settings.");
+    expect(container.textContent).toContain("Allow it in the machine’s settings.");
     expect(container.textContent).not.toContain("Allow it for this chat");
     expect(container.querySelector("button")).toBeNull();
   });
@@ -232,7 +232,7 @@ describe("session admission notice", () => {
   test("a paused owner reads one consistent line: it starts when the chat is resumed", async () => {
     await render({ paused: true, machineAccess: ownMachine, onAllowMachine: async () => {} });
     expect(container.textContent).toContain(
-      "Allow it for this chat. Your message starts when the chat is resumed.",
+      "Allow it for this chat. It starts when the chat is resumed.",
     );
     expect(container.textContent).not.toContain("right away");
     expect(container.textContent).not.toContain("This chat is also paused");
@@ -244,7 +244,7 @@ describe("session admission notice", () => {
   test("a paused owner without Allow here is told it starts once resumed, not by itself", async () => {
     await render({ paused: true, machineAccess: ownMachine });
     expect(container.textContent).toContain(
-      "You can allow it in the machine’s settings. Your message starts when the chat is resumed.",
+      "Allow it in the machine’s settings. It starts when the chat is resumed.",
     );
     expect(container.textContent).not.toContain("starts by itself");
     expect(container.textContent).not.toContain("This chat is also paused");
@@ -455,7 +455,9 @@ describe("session admission notice", () => {
     const onRecheck = await render();
     expect(container.textContent).toContain("Permission needed");
     expect(container.textContent).toContain("machine or resources");
-    expect(container.textContent).toContain("starts by itself once access");
+    expect(container.textContent).toContain(
+      "or a workspace admin, can fix it. It starts by itself once they do.",
+    );
     expect(container.querySelector("button")).toBeNull();
     expect(onRecheck).not.toHaveBeenCalled();
   });
