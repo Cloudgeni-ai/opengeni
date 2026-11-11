@@ -232,7 +232,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     // disks.
                     (*outcome == Outcome::Done && view.step == Some(Step::Pause))
                         || (matches!(view.state.level, Level::Saved | Level::Archived)
-                            && self.slots.get(sandbox).is_some_and(|slot| slot.vm.is_none()))
+                            && self
+                                .slots
+                                .get(sandbox)
+                                .is_some_and(|slot| slot.vm.is_none()))
                 }) =>
                 {
                     (Some(*sandbox), false)
