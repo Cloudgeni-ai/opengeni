@@ -804,11 +804,12 @@ export async function handlePersonalGitHubGatewayRequest(
         // Each mutation needs a repository of its own: one on an allowed
         // repository can't vouch for an organization or project write
         // bundled with it. An unrecognised or sensitive mutation that also
-        // touches a node outside any repository can't be confirmed either.
+        // touches a node outside any repository, or one GitHub won't show,
+        // can't be confirmed either.
         const scoped = graphql.fields.every((field) => {
           if (field.accountLevel) return true;
           const targets = field.nodeIds.map((id) => nodeRepositories.get(id));
-          if (field.sensitive && targets.includes("other")) return false;
+          if (field.sensitive && targets.some((t) => t === "other" || t === "unseen")) return false;
           return field.namesRepository || targets.some((target) => typeof target === "object");
         });
         if (!scoped) action = unscopedWrite(action);

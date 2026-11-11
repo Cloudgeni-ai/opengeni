@@ -913,6 +913,53 @@ function collectNodeIds(value: unknown, into: Set<string>, depth = 0): void {
 
 export const GRAPHQL_NODE_IDS_MAX = 50;
 
+/**
+ * Input keys GitHub type-checks as node IDs (`subjectId`, `labelIds`, `id`),
+ * so a value there can only name what that argument acts on. Free text such
+ * as `clientMutationId` can't scope a mutation.
+ */
+function isNodeIdKey(key: string | null): boolean {
+  return (
+    key !== null &&
+    key !== "clientMutationId" &&
+    (key === "id" || key === "ids" || /[a-z](?:Id|Ids)$/u.test(key))
+  );
+}
+
+/** Input keys that name the repository a mutation acts on. */
+const REPOSITORY_NAMING_KEYS = new Set(["repositoryNameWithOwner", "subIssueUrl"]);
+
+/**
+ * The targets that scope one mutation: node IDs under ID-typed keys, and
+ * whether a repository-naming key names a repository.
+ */
+function collectScopeTargets(
+  value: unknown,
+  into: { nodeIds: Set<string>; namesRepository: boolean },
+  key: string | null = null,
+  depth = 0,
+): void {
+  if (depth > GRAPHQL_MAX_DEPTH || into.nodeIds.size > GRAPHQL_NODE_IDS_MAX) return;
+  if (typeof value === "string") {
+    if (isNodeIdKey(key) && looksLikeGitHubNodeId(value)) into.nodeIds.add(value);
+    if (key !== null && REPOSITORY_NAMING_KEYS.has(key)) {
+      const named = new Map<string, { owner: string; name: string }>();
+      collectNamedRepositories(value, named, key);
+      if (named.size > 0) into.namesRepository = true;
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectScopeTargets(item, into, key, depth + 1);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const [child, item] of Object.entries(value)) {
+      collectScopeTargets(item, into, child, depth + 1);
+    }
+  }
+}
+
 export function looksLikeGitHubNodeId(value: string): boolean {
   return (
     value.length <= 128 &&
@@ -1008,12 +1055,17 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   // (null for viewer), so `repository(name:)` under it is scoped too. A
   // fragment is visited once per owner context.
   const visitedFragments = new Set<string>();
+  // Anything nested past the limit is unread, so the request is unrecognised.
+  let tooDeep = false;
   const visit = (
     selections: GraphqlSelection[],
     depth: number,
     owner: string | null | undefined,
   ) => {
-    if (depth > GRAPHQL_MAX_DEPTH) return;
+    if (depth > GRAPHQL_MAX_DEPTH) {
+      tooDeep = true;
+      return;
+    }
     for (const selection of selections) {
       if (selection.kind === "spread") {
         const key = `${selection.name}\u0000${owner === undefined ? "" : (owner ?? "@viewer")}`;
@@ -1053,6 +1105,7 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     }
   };
   visit(operation.selections, 0, undefined);
+  if (tooDeep) return unknown("Unrecognised GitHub GraphQL request");
 
   if (operation.type !== "mutation") {
     return {
@@ -1069,7 +1122,10 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   const topLevel: GraphqlField[] = [];
   const expanded = new Set<string>();
   const collectTopLevel = (selections: GraphqlSelection[], depth: number) => {
-    if (depth > GRAPHQL_MAX_DEPTH) return;
+    if (depth > GRAPHQL_MAX_DEPTH) {
+      tooDeep = true;
+      return;
+    }
     for (const selection of selections) {
       if (selection.kind === "field") topLevel.push(selection.field);
       else if (selection.kind === "inline") collectTopLevel(selection.selections, depth + 1);
@@ -1080,6 +1136,7 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     }
   };
   collectTopLevel(operation.selections, 0);
+  if (tooDeep) return unknown("Unrecognised GitHub GraphQL request");
   const mutations = topLevel.map((field) => field.name).filter((name) => name !== "__typename");
   if (mutations.length === 0) return unknown("Unrecognised GitHub GraphQL request");
 
@@ -1098,16 +1155,15 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     const args = Object.fromEntries(
       Object.entries(field.args).map(([key, value]) => [key, resolveValue(value, variables)]),
     );
-    const fieldNodeIds = new Set<string>();
-    const fieldNamed = new Map<string, { owner: string; name: string }>();
-    collectNodeIds(args, fieldNodeIds);
-    collectNamedRepositories(args, fieldNamed);
-    for (const id of fieldNodeIds) nodeIds.add(id);
-    for (const [key, repository] of fieldNamed) named.set(key, repository);
+    // Every ID and repository found is checked; only typed targets scope it.
+    collectNodeIds(args, nodeIds);
+    collectNamedRepositories(args, named);
+    const scope = { nodeIds: new Set<string>(), namesRepository: false };
+    collectScopeTargets(args, scope);
     const fieldTargets = {
       name: field.name,
-      nodeIds: [...fieldNodeIds],
-      namesRepository: fieldNamed.size > 0,
+      nodeIds: [...scope.nodeIds],
+      namesRepository: scope.namesRepository,
       accountLevel: ACCOUNT_LEVEL_MUTATIONS.has(field.name),
     };
     let mapped = GRAPHQL_MUTATIONS[field.name];

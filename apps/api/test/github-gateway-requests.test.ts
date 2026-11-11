@@ -193,6 +193,26 @@ describe("GitHub gateway GraphQL classification", () => {
 });
 
 describe("GitHub gateway review fixes", () => {
+  test("a fragment chain too deep to read is unrecognised, not a hidden mutation", () => {
+    const chain = Array.from({ length: 70 }, (_, index) =>
+      index === 69
+        ? `fragment F69 on Mutation { deleteProjectV2(input: {projectId: "PVT_kwDOProject1"}) { clientMutationId } }`
+        : `fragment F${index} on Mutation { ...F${index + 1} }`,
+    ).join("\n");
+    const result = classifyGitHubGraphqlRequest({
+      query: `mutation { addComment(input: {subjectId: "I_kwDOWidgets1", body: "hi"}) { clientMutationId } ...F0 }\n${chain}`,
+    });
+    expect(result.action).toMatchObject({ sensitive: true, unscoped: true });
+    // Scoping reads only ID-typed keys, never free text.
+    const sponsor = classifyGitHubGraphqlRequest({
+      query:
+        'mutation { createSponsorship(input: {sponsorableLogin: "x", clientMutationId: "R_kgDOWidgets", websiteUrl: "https://github.com/acme/widgets"}) { clientMutationId } }',
+    });
+    expect(sponsor.fields).toEqual([
+      expect.objectContaining({ nodeIds: [], namesRepository: false, sensitive: true }),
+    ]);
+  });
+
   test("only reruns and cancels are routine on a workflow run", () => {
     expect(
       rest("POST", "/repos/acme/widgets/actions/runs/9/rerun-failed-jobs").action,

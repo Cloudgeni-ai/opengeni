@@ -415,8 +415,11 @@ found, or a write names no repository (account and organization writes, or a
 request the gateway can't read), the allowlist can't apply, so the request
 asks whatever the person's policies say (Block still wins). This is decided
 per mutation: one on an allowed repository doesn't vouch for an organization
-or project write sent in the same request, and an unrecognised mutation that
-also touches a node outside any repository asks too. With All my
+or project write sent in the same request, only ID inputs (`subjectId`,
+`repositoryId`, …) and repository fields (`repositoryNameWithOwner`,
+`subIssueUrl`) count as its target, and an unrecognised mutation that also
+touches a node outside any repository, or one GitHub won't show, asks too.
+A request nested too deeply to read is treated as unrecognised. With All my
 repositories at write access and no repository removed from the chat there is
 no allowlist to step around, so the person's policies decide as usual. The gateway replaces
 `Authorization` with the person's token, never forwards the bearer, does not

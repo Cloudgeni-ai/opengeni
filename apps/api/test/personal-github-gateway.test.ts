@@ -409,6 +409,53 @@ describe("personal GitHub gateway", () => {
     });
     expect(await send(bundled, { authority: allWrite })).not.toHaveProperty("unscoped");
   });
+
+  test("a repository named in free text can't scope an account write", async () => {
+    const respond = (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(bodyText(init)) as { query: string; variables?: { ids?: string[] } };
+      return body.query.includes("OpengeniGatewayNodes")
+        ? Response.json({
+            data: {
+              nodes: (body.variables?.ids ?? []).map((id) =>
+                id === "R_kgDOWidgets"
+                  ? { __typename: "Repository", nameWithOwner: "acme/widgets" }
+                  : null,
+              ),
+            },
+          })
+        : Response.json({ data: {} });
+    };
+    const send = async (body: unknown) => {
+      const gateway = harness({ respond });
+      await gateway.send("/graphql", { method: "POST", body: JSON.stringify(body) });
+      return gateway.decisions[0]!.action;
+    };
+    const sponsor =
+      'createSponsorship(input: {sponsorableLogin: "someone", amount: 500, clientMutationId: "R_kgDOWidgets"}) { clientMutationId }';
+    expect(await send({ query: `mutation { ${sponsor} }` })).toMatchObject({ unscoped: true });
+    expect(
+      await send({
+        query:
+          "mutation($input: CreateSponsorshipInput!) { createSponsorship(input: $input) { clientMutationId } }",
+        variables: {
+          input: { sponsorableLogin: "someone", amount: 500, clientMutationId: "R_kgDOWidgets" },
+        },
+      }),
+    ).toMatchObject({ unscoped: true });
+    expect(
+      await send({
+        query:
+          'mutation { updateSponsorsListing(input: {websiteUrl: "https://github.com/acme/widgets"}) { clientMutationId } }',
+      }),
+    ).toMatchObject({ unscoped: true });
+    // A sensitive mutation on an allowed repository plus a node GitHub won't show.
+    expect(
+      await send({
+        query:
+          'mutation { updateRepository(input: {repositoryId: "R_kgDOWidgets", ownerId: "O_kgDOHidden1"}) { clientMutationId } }',
+      }),
+    ).toMatchObject({ unscoped: true });
+  });
 });
 
 describe("personal GitHub gateway review fixes", () => {
