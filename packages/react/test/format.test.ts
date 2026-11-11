@@ -599,8 +599,8 @@ describe("composerSubmissionErrorMessage", () => {
         JSON.stringify({ error, code: "BAD_REQUEST", details: { field: "latencyMode" } }),
         { outcomeUnknown: false, ...options },
       );
-    // A host endpoint's `{ error: "sentence" }` refusal, at any explained 4xx.
-    for (const status of [400, 403, 404, 409, 422]) {
+    // A host endpoint's `{ error: "sentence" }` refusal of the input or state.
+    for (const status of [400, 409, 422]) {
       expect(
         newConversationErrorMessage(
           englishText,
@@ -641,9 +641,27 @@ describe("composerSubmissionErrorMessage", () => {
     expect(newConversationErrorMessage(englishText, host(400, "invalid_request"))).toBe(
       "The request could not be accepted. Check your input and try again.",
     );
+    // Permission, missing-item and sign-in refusals keep their neutral copy.
     expect(newConversationErrorMessage(englishText, host(401, "Your sign-in expired"))).toBe(
       "Sign in to continue.",
     );
+    expect(
+      newConversationErrorMessage(englishText, host(403, "Opengeni denied sessions:create")),
+    ).toBe("You don’t have permission to do that.");
+    expect(newConversationErrorMessage(englishText, host(404, "Opengeni route missing"))).toBe(
+      "The requested item is unavailable.",
+    );
+    // Typed SDK copy at an explained status is not replaced by the body's text.
+    expect(
+      newConversationErrorMessage(
+        englishText,
+        new OpenGeniApiError(
+          409,
+          JSON.stringify({ code: "OPENGENI_SETUP_REQUIRED", message: "tenancy row missing" }),
+          { outcomeUnknown: false },
+        ),
+      ),
+    ).toBe("Private conversations are unavailable. Ask an administrator to enable them.");
     // Uncertain outcomes keep the neutral copy that goes with Retry.
     expect(
       newConversationErrorMessage(

@@ -534,8 +534,12 @@ function composerErrorReference(t: OpenGeniText, error: Error, message: string):
     : message;
 }
 
-/** Definite refusals whose own reason tells the person what to change; others have a fixed action. */
-const EXPLAINED_CREATE_REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 403, 404, 409, 422]);
+/**
+ * Definite refusals of what was asked (input or state) whose own reason tells
+ * the person what to change. Permission and missing-item refusals (403, 404)
+ * keep the neutral copy: their text can name internal permissions or brands.
+ */
+const EXPLAINED_CREATE_REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 409, 422]);
 
 /**
  * What a refused or failed new chat says. Typed refusals (a speed or model
@@ -550,12 +554,15 @@ export function newConversationErrorMessage(t: OpenGeniText, error: Error): stri
   if (
     !(error instanceof OpenGeniApiError) ||
     error.outcomeUnknown ||
-    !EXPLAINED_CREATE_REFUSAL_STATUSES.has(error.status) ||
-    // Anything other than the SDK's status copy is already a worded refusal.
-    message !== formatErrorMessage(error)
+    !EXPLAINED_CREATE_REFUSAL_STATUSES.has(error.status)
   )
     return message;
-  return serverRefusalReason(error) ?? message;
+  // Only the SDK's bare copy for this status is generic; typed copy (setup,
+  // seats, Site refusals, worded create refusals) already says what to do.
+  const generic = formatErrorMessage(
+    new OpenGeniApiError(error.status, "", { outcomeUnknown: false }),
+  );
+  return message === generic ? (serverRefusalReason(error) ?? message) : message;
 }
 
 /** These definitive refusals need a payment, allowance or model change, not an unchanged retry. */
