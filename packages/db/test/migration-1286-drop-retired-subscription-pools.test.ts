@@ -7,12 +7,7 @@ import {
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
-import {
-  bootstrapWorkspace,
-  createDb,
-  registerHostExportConsumer,
-  type DbClient,
-} from "../src";
+import { bootstrapWorkspace, createDb, registerHostExportConsumer, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
@@ -56,7 +51,6 @@ let exporter: DbClient | null = null;
 let owner: postgres.Sql | null = null;
 let prefix: string | null = null;
 let scope: { accountId: string; workspaceId: string };
-let sessionId: string;
 let turnId: string;
 let before: Awaited<ReturnType<typeof definitions>> = [];
 const credentialIds = new Map<string, string>();
@@ -103,7 +97,7 @@ beforeAll(async () => {
   });
   const grant = access.workspaceGrants[0]!;
   scope = { accountId: grant.accountId, workspaceId: grant.workspaceId! };
-  ({ sessionId, turnId } = await seedPrefixLedgerSession(owned.admin, {
+  ({ turnId } = await seedPrefixLedgerSession(owned.admin, {
     ...scope,
     initialMessage: "current queued work",
   }));
