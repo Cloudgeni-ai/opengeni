@@ -536,6 +536,27 @@ type Token =
 const GRAPHQL_QUERY_MAX_BYTES = 256 * 1024;
 const GRAPHQL_MAX_DEPTH = 64;
 
+/**
+ * A block string's value as GitHub reads it (GraphQL spec BlockStringValue):
+ * the common indent of the lines after the first is removed, and blank first
+ * and last lines are dropped.
+ */
+function blockStringValue(raw: string): string {
+  const lines = raw.split(/\r\n|[\n\r]/u);
+  let common: number | null = null;
+  for (const line of lines.slice(1)) {
+    const indent = /^[\t ]*/u.exec(line)![0].length;
+    if (indent < line.length && (common === null || indent < common)) common = indent;
+  }
+  const dedented = lines.map((line, index) =>
+    index > 0 && common !== null ? line.slice(common) : line,
+  );
+  const blank = (line: string) => /^[\t ]*$/u.test(line);
+  while (dedented.length > 0 && blank(dedented[0]!)) dedented.shift();
+  while (dedented.length > 0 && blank(dedented.at(-1)!)) dedented.pop();
+  return dedented.join("\n");
+}
+
 function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   let index = 0;
@@ -566,7 +587,7 @@ function tokenize(source: string): Token[] {
       if (close < 0) throw new Error("Unterminated block string");
       tokens.push({
         kind: "string",
-        value: source.slice(index + 3, close).replace(/\\"""/gu, '"""'),
+        value: blockStringValue(source.slice(index + 3, close).replace(/\\"""/gu, '"""')),
       });
       index = close + 3;
       continue;
@@ -935,13 +956,17 @@ const REPOSITORY_NAMING_KEYS = new Set(["repositoryNameWithOwner", "subIssueUrl"
  */
 function collectScopeTargets(
   value: unknown,
-  into: { nodeIds: Set<string>; namesRepository: boolean },
+  into: { nodeIds: Set<string>; namesRepository: boolean; unreadableId: boolean },
   key: string | null = null,
   depth = 0,
 ): void {
   if (depth > GRAPHQL_MAX_DEPTH || into.nodeIds.size > GRAPHQL_NODE_IDS_MAX) return;
   if (typeof value === "string") {
-    if (isNodeIdKey(key) && looksLikeGitHubNodeId(value)) into.nodeIds.add(value);
+    if (isNodeIdKey(key) && value !== "") {
+      // A value GitHub might read as an ID that the gateway can't: unscoped.
+      if (looksLikeGitHubNodeId(value)) into.nodeIds.add(value);
+      else into.unreadableId = true;
+    }
     if (key !== null && REPOSITORY_NAMING_KEYS.has(key)) {
       const named = new Map<string, { owner: string; name: string }>();
       collectNamedRepositories(value, named, key);
@@ -999,6 +1024,8 @@ export type GitHubGraphqlMutationField = {
   nodeIds: string[];
   /** Its input names a repository directly (`repositoryNameWithOwner`, a URL). */
   namesRepository: boolean;
+  /** An ID-typed input holds a value the gateway can't read as a node ID. */
+  unreadableId: boolean;
   /** It acts on the person's account only (stars, notifications). */
   accountLevel: boolean;
   /** Unrecognised, or mapped as sensitive: any node outside a repository leaves it unscoped. */
@@ -1158,12 +1185,13 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     // Every ID and repository found is checked; only typed targets scope it.
     collectNodeIds(args, nodeIds);
     collectNamedRepositories(args, named);
-    const scope = { nodeIds: new Set<string>(), namesRepository: false };
+    const scope = { nodeIds: new Set<string>(), namesRepository: false, unreadableId: false };
     collectScopeTargets(args, scope);
     const fieldTargets = {
       name: field.name,
       nodeIds: [...scope.nodeIds],
       namesRepository: scope.namesRepository,
+      unreadableId: scope.unreadableId,
       accountLevel: ACCOUNT_LEVEL_MUTATIONS.has(field.name),
     };
     let mapped = GRAPHQL_MUTATIONS[field.name];

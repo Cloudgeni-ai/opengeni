@@ -807,6 +807,7 @@ export async function handlePersonalGitHubGatewayRequest(
         // touches a node outside any repository, or one GitHub won't show,
         // can't be confirmed either.
         const scoped = graphql.fields.every((field) => {
+          if (field.unreadableId) return false;
           if (field.accountLevel) return true;
           const targets = field.nodeIds.map((id) => nodeRepositories.get(id));
           if (field.sensitive && targets.some((t) => t === "other" || t === "unseen")) return false;

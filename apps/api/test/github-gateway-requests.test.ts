@@ -213,6 +213,30 @@ describe("GitHub gateway review fixes", () => {
     ]);
   });
 
+  test("block strings are read as GitHub reads them, and unreadable IDs leave a mutation unscoped", () => {
+    const transfer = classifyGitHubGraphqlRequest({
+      query:
+        'mutation { transferIssue(input: {\n  issueId: """\n  I_kwDOForbidden1\n  """, repositoryId: "R_kgDOAllowed1" }) { issue { id } } }',
+    });
+    expect(transfer.nodeIds).toEqual(["I_kwDOForbidden1", "R_kgDOAllowed1"]);
+    expect(transfer.fields[0]).toMatchObject({
+      nodeIds: ["I_kwDOForbidden1", "R_kgDOAllowed1"],
+      unreadableId: false,
+    });
+    const padded = classifyGitHubGraphqlRequest({
+      query:
+        'mutation($issue: ID!) { transferIssue(input: {issueId: $issue, repositoryId: "R_kgDOAllowed1"}) { issue { id } } }',
+      variables: { issue: " I_kwDOForbidden1 " },
+    });
+    expect(padded.fields[0]).toMatchObject({ unreadableId: true });
+    // A body keeps its own text, and a block string's escaped quotes stay quotes.
+    const comment = classifyGitHubGraphqlRequest({
+      query:
+        'mutation { addComment(input: {subjectId: "I_kwDOWidgets1", body: """\n    hi \\""" there\n    """}) { clientMutationId } }',
+    });
+    expect(comment.fields[0]).toMatchObject({ nodeIds: ["I_kwDOWidgets1"], unreadableId: false });
+  });
+
   test("only reruns and cancels are routine on a workflow run", () => {
     expect(
       rest("POST", "/repos/acme/widgets/actions/runs/9/rerun-failed-jobs").action,

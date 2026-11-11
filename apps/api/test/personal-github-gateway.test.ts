@@ -312,6 +312,17 @@ describe("personal GitHub gateway", () => {
     });
     expect(response.status).toBe(403);
     expect(denied.decisions).toEqual([]);
+    // A node ID in an indented block string is the same ID to GitHub.
+    const hidden = harness({ respond });
+    const blockString = await hidden.send("/graphql", {
+      method: "POST",
+      body: JSON.stringify({
+        query:
+          'mutation { transferIssue(input: {\n  issueId: """\n  I_kwDOSecret1\n  """, repositoryId: "R_kgDOWidgets" }) { issue { id } } }',
+      }),
+    });
+    expect(blockString.status).toBe(403);
+    expect(hidden.decisions).toEqual([]);
   });
 
   test("GraphQL queries check the repositories they name", async () => {
