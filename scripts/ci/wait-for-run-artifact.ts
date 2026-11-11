@@ -16,18 +16,49 @@ export type Verdict =
 
 /** Polls in a row the producer may report success before its artifact is listed. */
 export const SETTLED_POLLS_WITHOUT_ARTIFACT = 6;
+/** Polls in a row the producer may show no job at all before the wait fails. */
+export const ABSENT_POLLS_WITHOUT_PRODUCER = 30;
+/** Reads in a row that may be refused (401, 403, 404) before the wait fails. */
+export const REFUSED_READS = 3;
+/**
+ * Below the wait step's 60-minute timeout, so the wait reports why it failed
+ * instead of being killed.
+ */
+export const DEADLINE_MS = 55 * 60_000;
+
+/** A GitHub read that answered with an error status. */
+export class GitHubReadError extends Error {
+  constructor(
+    readonly status: number,
+    path: string,
+  ) {
+    super(`GitHub ${status} for ${path}`);
+  }
+}
 
 /**
  * `jobs` is the run's latest attempt of every job. A called workflow's jobs are
  * named `<caller job name> / <job name>`; `producer` is the caller job name.
+ * The caller job itself is listed under `producer` when the called workflow
+ * never started its jobs, for example when it was skipped or failed to start.
  */
 export function verdict(
   artifactListed: boolean,
   jobs: readonly RunJob[],
   producer: string,
   settledPolls: number,
+  absentPolls = 0,
 ): Verdict {
   if (artifactListed) return { kind: "ready" };
+  const caller = jobs.find((job) => job.name === producer);
+  if (caller?.status === "completed" && caller.conclusion !== "success")
+    return {
+      kind: "failed",
+      reason:
+        caller.conclusion === "skipped"
+          ? `${producer} was skipped`
+          : `${producer} concluded ${caller.conclusion}`,
+    };
   const produced = jobs.filter((job) => job.name.startsWith(`${producer} / `));
   const failed = produced.find(
     (job) =>
@@ -35,6 +66,8 @@ export function verdict(
   );
   if (failed) return { kind: "failed", reason: `${failed.name} concluded ${failed.conclusion}` };
   const pending = produced.filter((job) => job.status !== "completed").length;
+  if (!caller && produced.length === 0 && absentPolls >= ABSENT_POLLS_WITHOUT_PRODUCER)
+    return { kind: "failed", reason: `${producer} has no job in this run` };
   if (produced.length > 0 && pending === 0 && settledPolls >= SETTLED_POLLS_WITHOUT_ARTIFACT) {
     const skipped = produced.find((job) => job.conclusion === "skipped");
     return {
@@ -63,7 +96,7 @@ export function githubRunReads(
   const headers = { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" };
   const get = async (path: string): Promise<Record<string, unknown>> => {
     const response = await retryingFetch(fetcher, `${api}/${path}`, { headers }, 30_000, retry);
-    if (!response.ok) throw new Error(`GitHub ${response.status} for runs/${runId}/${path}`);
+    if (!response.ok) throw new GitHubReadError(response.status, `runs/${runId}/${path}`);
     return (await response.json()) as Record<string, unknown>;
   };
   return {
@@ -90,7 +123,7 @@ export async function waitForArtifact(
   producer: string,
   {
     pollMs = 10_000,
-    deadlineMs = 60 * 60_000,
+    deadlineMs = DEADLINE_MS,
     now = () => Date.now(),
     sleep = (ms: number) => Bun.sleep(ms),
     log = (line: string) => console.log(line),
@@ -98,25 +131,33 @@ export async function waitForArtifact(
 ): Promise<Verdict> {
   const deadline = now() + deadlineMs;
   let settledPolls = 0;
+  let absentPolls = 0;
+  let refusedReads = 0;
   let lastPending = -1;
   for (;;) {
     try {
       const listed = await reads.artifactListed(name);
-      const result = verdict(
-        listed,
-        listed ? [] : await reads.latestJobs(),
-        producer,
-        settledPolls,
-      );
+      const jobs = listed ? [] : await reads.latestJobs();
+      refusedReads = 0;
+      const result = verdict(listed, jobs, producer, settledPolls, absentPolls);
       if (result.kind !== "wait") return result;
-      settledPolls = result.pending === 0 ? settledPolls + 1 : 0;
+      const present = jobs.some(
+        (job) => job.name === producer || job.name.startsWith(`${producer} / `),
+      );
+      absentPolls = present ? 0 : absentPolls + 1;
+      settledPolls = present && result.pending === 0 ? settledPolls + 1 : 0;
       if (result.pending !== lastPending) {
         log(`[wait-for-run-artifact] ${name}: ${result.pending} ${producer} job(s) still running`);
         lastPending = result.pending;
       }
     } catch (error) {
       // GitHub failing to answer is not evidence about the producer; keep
-      // waiting until the deadline.
+      // waiting until the deadline. A read refused again and again (a missing
+      // permission or a wrong run) will not recover, so fail it early.
+      const refused = error instanceof GitHubReadError && [401, 403, 404].includes(error.status);
+      refusedReads = refused ? refusedReads + 1 : 0;
+      if (refusedReads >= REFUSED_READS)
+        return { kind: "failed", reason: `GitHub refused ${refusedReads} reads: ${String(error)}` };
       log(`[wait-for-run-artifact] read failed, retrying: ${String(error)}`);
     }
     if (now() >= deadline) return { kind: "failed", reason: `${name} did not appear in time` };

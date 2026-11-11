@@ -2008,7 +2008,7 @@ ${parser}`,
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "fcea891e6564f38134a9e62c1e7cb03e2d2fab60e10beb070c350d93c905a893",
+        fingerprint: "9116995b607a2ea26ca2e12ed76fe026e64a0cbf3ac4ab319e92943b8fbc66f1",
       },
     ]);
 
@@ -2033,8 +2033,18 @@ ${parser}`,
       expect(warmBuilds).toHaveLength(1);
       const warm = warmBuilds[0]!;
       expect(warm.uses).toBe(finalBuild.uses);
-      for (const key of ["context", "file", "platforms", "build-args", "cache-from"])
+      for (const key of ["context", "file", "platforms", "cache-from"])
         expect(warm.with?.[key], `${jobName} ${key}`).toBe(finalBuild.with?.[key]);
+      // The final build also requires the runtime inputs it downloaded, so
+      // missing inputs fail it instead of yielding an image without the
+      // runtime. The Dockerfiles declare that argument only for the runtime
+      // layer, which the warm build cannot reuse anyway.
+      const buildArgs = (step: typeof warm) =>
+        String(step.with?.["build-args"]).trim().split(/\r?\n/);
+      expect(buildArgs(finalBuild), jobName).toEqual([
+        ...buildArgs(warm),
+        "OPENGENI_REQUIRE_ARTIFACT_RUNTIME=true",
+      ]);
       expect(warm.with?.push).toBeUndefined();
       expect(warm.with?.["cache-to"]).toBeUndefined();
       expect(warm.with?.["build-contexts"]).toBeUndefined();

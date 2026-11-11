@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ABSENT_POLLS_WITHOUT_PRODUCER,
+  DEADLINE_MS,
+  GitHubReadError,
   githubRunReads,
+  REFUSED_READS,
   SETTLED_POLLS_WITHOUT_ARTIFACT,
   verdict,
   waitForArtifact,
@@ -71,6 +75,35 @@ describe("verdict", () => {
 
   test("keeps waiting before the producer's jobs exist", () => {
     expect(verdict(false, [], producer, 100)).toEqual({ kind: "wait", pending: 0 });
+    expect(verdict(false, [], producer, 0, ABSENT_POLLS_WITHOUT_PRODUCER - 1)).toEqual({
+      kind: "wait",
+      pending: 0,
+    });
+  });
+
+  test("fails when the producer never shows a job", () => {
+    expect(verdict(false, [], producer, 0, ABSENT_POLLS_WITHOUT_PRODUCER)).toEqual({
+      kind: "failed",
+      reason: `${producer} has no job in this run`,
+    });
+  });
+
+  test("fails when the producer's caller job ends without starting its jobs", () => {
+    const caller = (status: string, conclusion: string | null) => [
+      { name: producer, status, conclusion },
+    ];
+    expect(verdict(false, caller("completed", "failure"), producer, 0)).toEqual({
+      kind: "failed",
+      reason: `${producer} concluded failure`,
+    });
+    expect(verdict(false, caller("completed", "skipped"), producer, 0)).toEqual({
+      kind: "failed",
+      reason: `${producer} was skipped`,
+    });
+    expect(verdict(false, caller("in_progress", null), producer, 0, 1000)).toEqual({
+      kind: "wait",
+      pending: 0,
+    });
   });
 });
 
@@ -138,6 +171,59 @@ describe("waitForArtifact", () => {
       log: () => {},
     });
     expect(result).toEqual({ kind: "failed", reason: "artifact did not appear in time" });
+  });
+
+  test("fails after the producer shows no job for the grace period", async () => {
+    const reads = scripted([{ listed: false, jobs: [] }]);
+    const result = await waitForArtifact(reads, "artifact", producer, {
+      sleep: async () => {},
+      log: () => {},
+    });
+    expect(result).toEqual({ kind: "failed", reason: `${producer} has no job in this run` });
+    expect(reads.polls).toBe(ABSENT_POLLS_WITHOUT_PRODUCER + 1);
+  });
+
+  test("ends before the wait step's 60-minute timeout", () => {
+    expect(DEADLINE_MS).toBeLessThan(60 * 60_000);
+  });
+
+  test("fails after GitHub refuses the reads repeatedly", async () => {
+    let calls = 0;
+    const reads: RunReads = {
+      async artifactListed() {
+        calls++;
+        throw new GitHubReadError(403, "runs/42/artifacts");
+      },
+      async latestJobs() {
+        return [];
+      },
+    };
+    const result = await waitForArtifact(reads, "artifact", producer, {
+      sleep: async () => {},
+      log: () => {},
+    });
+    expect(result.kind).toBe("failed");
+    expect(calls).toBe(REFUSED_READS);
+  });
+
+  test("a server error between refused reads keeps waiting", async () => {
+    const errors = [403, 403, 502, 403, 403];
+    let calls = 0;
+    const reads: RunReads = {
+      async artifactListed() {
+        const status = errors[calls++];
+        if (status) throw new GitHubReadError(status, "runs/42/artifacts");
+        return true;
+      },
+      async latestJobs() {
+        return [];
+      },
+    };
+    const result = await waitForArtifact(reads, "artifact", producer, {
+      sleep: async () => {},
+      log: () => {},
+    });
+    expect(result).toEqual({ kind: "ready" });
   });
 
   test("a failed GitHub read keeps waiting", async () => {
