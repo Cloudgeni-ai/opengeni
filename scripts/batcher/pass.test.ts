@@ -869,47 +869,66 @@ describe("a batcher pass", () => {
       { name: E2E, conclusion: "failure" },
       { name: UNIT, conclusion: "failure" },
     ]);
+    // Version PR validations are dispatched on main but test that PR.
+    gh.ciHistory.push(ciRun(5, { event: "workflow_dispatch", updatedAt: NOW - 30 * 60_000 }));
+    gh.jobsByRun.set(5, [{ name: E2E, conclusion: "failure" }]);
+    // A batch landing's push reports no lanes; it never hides older results.
+    gh.ciHistory.push(ciRun(4, { conclusion: "success", updatedAt: NOW - 20 * 60_000 }));
+    gh.jobsByRun.set(4, [{ name: "Batch receipt", conclusion: "skipped" }]);
     await run(gh, options());
     const first = gh.batch();
     gh.finishCi(first.sha, "failure", 2, [UNIT, E2E]);
     await run(gh, options());
-    // Nothing else fails E2E, so the batch is split as before.
+    // Nothing that tested main fails E2E, so the batch is split as before.
     expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
-
-    // Now main's latest run fails E2E too.
-    gh.jobsByRun.set(7, [
-      { name: E2E, conclusion: "failure" },
-      { name: "Deployment artifacts", conclusion: "success" },
-    ]);
+    expect(gh.batch().manifest.blame).toEqual([E2E, UNIT]);
+    // A half of that bisection is never held, even once main fails E2E too.
+    gh.jobsByRun.set(7, [{ name: E2E, conclusion: "failure" }]);
     const half = gh.batch();
     gh.finishCi(half.sha, "failure", 2, [UNIT, E2E]);
     await run(gh, options());
+    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+
+    // A new batch failing only in E2E while main fails it is held.
+    for (const number of [3, 4]) gh.addPull(number);
+    gh.finishCi(gh.batch().sha, "success");
+    await run(gh, options());
+    const fresh = gh.batch();
+    expect(fresh.manifest.members.map((m) => m.number)).toEqual([3, 4]);
+    gh.finishCi(fresh.sha, "failure", 2, [UNIT, E2E]);
+    await run(gh, options());
     // It waits out its backoff first: the failed batch stays.
-    expect(gh.batch().sha).toBe(half.sha);
-    expect(gh.comments).toEqual([]);
+    expect(gh.batch().sha).toBe(fresh.sha);
+    // #1's ejection is the only comment so far.
+    const notes = () => gh.comments.filter((c) => c.number !== 1);
+    expect(notes()).toEqual([]);
 
     const later = { ...options(), now: () => NOW + 11 * 60_000 };
     await run(gh, later);
     const held = gh.batch();
-    expect(held.sha).not.toBe(half.sha);
-    expect(held.manifest.members.map((m) => m.number)).toEqual([1]);
-    expect(held.manifest.pending).toEqual([[2]]);
-    expect(held.manifest.held).toEqual({ members: [1], count: 1, jobs: [E2E] });
-    expect(gh.comments).toHaveLength(1);
-    expect(gh.comments[0]!.number).toBe(1);
-    expect(gh.comments[0]!.body).toContain(`\`${E2E}\` (failing on main)`);
-    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+    expect(held.sha).not.toBe(fresh.sha);
+    expect(held.manifest.members.map((m) => m.number)).toEqual([3, 4]);
+    expect(held.manifest.held).toEqual({ members: [3, 4], count: 1, jobs: [E2E] });
+    expect(notes().map((c) => c.number)).toEqual([3, 4]);
+    expect(notes()[0]!.body).toContain(`\`${E2E}\` (failing on main)`);
 
-    // Held again, without another comment, then ejected once the holds run out.
+    // Held again, without another comment, then split once the holds run out,
+    // and its halves are not held.
     gh.finishCi(held.sha, "failure", 2, [UNIT, E2E]);
     await run(gh, { ...options(), now: () => NOW + 40 * 60_000 });
     const again = gh.batch();
-    expect(again.manifest.held).toEqual({ members: [1], count: 2, jobs: [E2E] });
-    expect(gh.comments).toHaveLength(1);
+    expect(again.manifest.held).toEqual({ members: [3, 4], count: 2, jobs: [E2E] });
+    expect(notes()).toHaveLength(2);
     gh.finishCi(again.sha, "failure", 2, [UNIT, E2E]);
     await run(gh, { ...options(), now: () => NOW + 80 * 60_000 });
-    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
-    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+    const split = gh.batch();
+    expect(split.manifest.members.map((m) => m.number)).toEqual([3]);
+    expect(split.manifest.held).toBeUndefined();
+    gh.finishCi(split.sha, "failure", 2, [UNIT, E2E]);
+    await run(gh, { ...options(), now: () => NOW + 81 * 60_000 });
+    expect(gh.pulls.get(3)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([4]);
   });
 
   test("another recent batch failing in the same lanes holds a batch; one sharing a PR or unreadable does not", async () => {
@@ -962,14 +981,26 @@ describe("a batcher pass", () => {
     await run(sharing, later);
     expect(sharing.batch().manifest.members.map((m) => m.number)).toEqual([1]);
 
+    // GitHub refusing the read splits the batch; a brief outage waits for
+    // the next pass instead.
     const unreadable = setup([20, 21]);
     unreadable.ciRuns = async () => {
-      throw new GitHubError(502, "actions/workflows/ci.yml/runs", "bad gateway");
+      throw new GitHubError(404, "actions/workflows/ci.yml/runs", "not found");
     };
     await run(unreadable, options());
     unreadable.finishCi(unreadable.batch().sha, "failure", 2, [E2E]);
     await run(unreadable, later);
     expect(unreadable.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+
+    const outage = setup([20, 21]);
+    await run(outage, options());
+    const failing = outage.batch();
+    outage.finishCi(failing.sha, "failure", 2, [E2E]);
+    outage.ciRuns = async () => {
+      throw new GitHubError(502, "actions/workflows/ci.yml/runs", "bad gateway");
+    };
+    await expect(run(outage, later)).rejects.toThrow("502");
+    expect(outage.batch().sha).toBe(failing.sha);
   });
 
   test("a run that failed before any job started, so GitHub will not rerun its failed jobs, runs again in full", async () => {

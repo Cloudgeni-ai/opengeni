@@ -295,6 +295,10 @@ async function observe(ctx: Context): Promise<Observation> {
 export const MAIN_RUNS_READ = 6;
 /** Main's CI results older than this say nothing about what fails now. */
 export const MAIN_LOOKBACK_MS = 24 * 60 * 60_000;
+/** Main's CI runs whose jobs are listed, at most, as batch landings report no lanes. */
+export const MAIN_RUNS_LISTED = 20;
+/** Other failed batches read for lanes that fail outside the running batch, at most. */
+export const OTHER_BATCHES_READ = 5;
 /** Another batch's failure older than this says nothing about what fails now. */
 export const BATCH_LOOKBACK_MS = 6 * 60 * 60_000;
 
@@ -314,21 +318,37 @@ async function externalFailures(ctx: Context, batch: Batch): Promise<ExternalFai
   try {
     const latest = new Map<string, boolean>();
     let read = 0;
+    let listed = 0;
     for (const ciRun of newest(await gh.ciRuns({ branch: "main" }))) {
-      if (read >= MAIN_RUNS_READ || now - ciRun.updatedAt > MAIN_LOOKBACK_MS) break;
+      if (read >= MAIN_RUNS_READ || listed >= MAIN_RUNS_LISTED) break;
+      if (now - ciRun.updatedAt > MAIN_LOOKBACK_MS) break;
+      // Only what tested main itself: a Version PR's exact-head validation is
+      // dispatched on main but tests that PR.
+      if (ciRun.event !== "push" && ciRun.event !== "schedule") continue;
       if (ciRun.conclusion !== "success" && ciRun.conclusion !== "failure") continue;
-      read++;
+      listed++;
+      let lanes = false;
       for (const job of await gh.jobResults(ciRun.id, ciRun.attempt)) {
-        if (AGGREGATE_JOBS.has(job.name) || latest.has(job.name)) continue;
-        if (job.conclusion === "success") latest.set(job.name, false);
-        else if (job.conclusion === "failure" || job.conclusion === "timed_out")
-          latest.set(job.name, true);
+        if (AGGREGATE_JOBS.has(job.name)) continue;
+        const failing =
+          job.conclusion === "failure" || job.conclusion === "timed_out"
+            ? true
+            : job.conclusion === "success"
+              ? false
+              : null;
+        if (failing === null) continue;
+        lanes = true;
+        if (!latest.has(job.name)) latest.set(job.name, failing);
       }
+      // A batch landing's push skips its lanes or runs nothing; only runs
+      // that report lane results count toward what is read.
+      if (lanes) read++;
     }
     const main = [...latest].flatMap(([job, failing]) => (failing ? [job] : [])).sort();
     const own = new Set(batch.manifest.members.map((m) => m.number));
+    const batches: NonNullable<ExternalFailures["batches"]> = [];
     for (const ciRun of newest(await gh.ciRuns({ failed: true }))) {
-      if (now - ciRun.updatedAt > BATCH_LOOKBACK_MS) break;
+      if (now - ciRun.updatedAt > BATCH_LOOKBACK_MS || batches.length >= OTHER_BATCHES_READ) break;
       if (
         !ciRun.branch.startsWith(BATCH_PREFIX) ||
         ciRun.branch === batch.branch ||
@@ -343,13 +363,13 @@ async function externalFailures(ctx: Context, batch: Batch): Promise<ExternalFai
       if (manifest.members.some((m) => own.has(m.number))) continue;
       const jobs = failedLanes([{ failedJobs: await gh.failedJobs(ciRun.id, ciRun.attempt) }]);
       if (!jobs) continue;
-      return {
-        main,
-        batch: { id: manifest.id, members: manifest.members.map((m) => m.number), jobs },
-      };
+      batches.push({ id: manifest.id, members: manifest.members.map((m) => m.number), jobs });
     }
-    return { main };
+    return { main, ...(batches.length ? { batches } : {}) };
   } catch (error) {
+    // A brief GitHub outage stops this pass, so the next one decides with the
+    // evidence instead of splitting a batch it would have held.
+    if (isTransientGitHubFailure(error)) throw error;
     ctx.log(`Could not read what fails outside ${batch.branch}: ${String(error)}`);
     return undefined;
   }

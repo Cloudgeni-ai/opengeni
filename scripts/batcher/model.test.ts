@@ -973,7 +973,7 @@ describe("held failures", () => {
   const onMain = (jobs: string[]): ExternalFailures => ({ main: jobs });
   const elsewhere = (jobs: string[], members = [20, 21]): ExternalFailures => ({
     main: [],
-    batch: { id: "fedcba987654", members, jobs },
+    batches: [{ id: "fedcba987654", members, jobs }],
   });
 
   test("compares lane jobs, not the aggregate jobs that fail with any lane", () => {
@@ -993,6 +993,17 @@ describe("held failures", () => {
     expect(heldFailure(b, runs, elsewhere([E2E, UNIT]))?.evidence).toBe(
       `\`${E2E}\` (failed also after a retry in batch \`fedcba987654\`: #20, #21)`,
     );
+    // Lanes may fail in different recent batches, as an outage moves between lanes.
+    const two: ExternalFailures = {
+      main: [UNIT],
+      batches: [
+        { id: "aaaaaaaaaaaa", members: [3, 20], jobs: ["Other"] },
+        { id: "bbbbbbbbbbbb", members: [21, 22], jobs: [E2E] },
+      ],
+    };
+    expect(heldFailure(b, [failed([E2E, UNIT])], two)?.evidence).toBe(
+      `\`${E2E}\` (failed also after a retry in batch \`bbbbbbbbbbbb\`: #21, #22), \`${UNIT}\` (failing on main)`,
+    );
     // Split as before: nothing read, a lane nothing else fails in, another
     // batch sharing a PR, a Version PR or a batch ahead of a bisection.
     expect(heldFailure(b, runs, undefined)).toBeNull();
@@ -1004,6 +1015,13 @@ describe("held failures", () => {
     const ahead = batch([1, 2]);
     ahead.manifest.aheadOfBisection = true;
     expect(heldFailure(ahead, runs, onMain([E2E]))).toBeNull();
+    // Nor a group of a bisection under way: it was split already, so holding
+    // each half again would multiply the holds a culprit costs.
+    const half = batch([1, 2], {}, [[3]]);
+    expect(heldFailure(half, runs, onMain([E2E]))).toBeNull();
+    const blamed = batch([1, 2]);
+    blamed.manifest.blame = [E2E];
+    expect(heldFailure(blamed, runs, onMain([E2E]))).toBeNull();
   });
 
   test("a held batch is held again only in the same jobs, at most MAX_HOLDS times", () => {
@@ -1023,12 +1041,9 @@ describe("held failures", () => {
     expect(heldFailure(b, [failed([E2E])], onMain([E2E]))?.hold.count).toBe(1);
   });
 
-  test("a held batch waits out its backoff, then is tested again whole with the bisection kept", () => {
+  test("a held batch waits out its backoff, then is tested again whole", () => {
     const pulls = [1, 2, 3, 4, 5].map((n) => pull(n));
-    const b = batch([1, 2, 3], { createdAt: NOW - 60 * MINUTE, runs: [failed([AGGREGATE, E2E])] }, [
-      [4],
-    ]);
-    b.manifest.blame = [UNIT];
+    const b = batch([1, 2, 3], { createdAt: NOW - 60 * MINUTE, runs: [failed([AGGREGATE, E2E])] });
     const waiting = decide({
       ...observe(pulls, [b]),
       now: NOW - 40 * MINUTE + holdBackoff(1) - 1,
@@ -1043,16 +1058,16 @@ describe("held failures", () => {
     expect(actions[1]).toMatchObject({ id: b.manifest.id, hold: { members: [1, 2, 3] } });
     expect(actions[2]).toMatchObject({
       kind: "build",
-      pending: [[4]],
-      blame: [UNIT],
+      pending: [],
       held: { members: [1, 2, 3], count: 1, jobs: [E2E] },
     });
+    expect(actions[2]).not.toHaveProperty("blame");
     expect(actions[2]?.kind === "build" && actions[2].members.map((p) => p.number)).toEqual([
       1, 2, 3,
     ]);
 
     // The second hold waits twice as long and tells nobody again.
-    const again = batch([1, 2, 3], { createdAt: NOW - 60 * MINUTE, runs: [failed([E2E])] }, [[4]]);
+    const again = batch([1, 2, 3], { createdAt: NOW - 60 * MINUTE, runs: [failed([E2E])] });
     again.manifest.held = { members: [1, 2, 3], count: 1, jobs: [E2E] };
     expect(
       decide({
@@ -1069,8 +1084,14 @@ describe("held failures", () => {
     again.manifest.held.count = MAX_HOLDS;
     const split = decide({ ...observe(pulls, [again]), external: onMain([E2E]) });
     expect(split.map((a) => a.kind)).toEqual(["abandon", "build"]);
-    expect(split[1]).toMatchObject({ pending: [[3], [4]], blame: [E2E] });
+    expect(split[1]).toMatchObject({ pending: [[3]], blame: [E2E] });
     expect(split[1]).not.toHaveProperty("held");
+    // Its halves carry the blame, so the bisection holds nothing more.
+    const half = batch([1, 2], { createdAt: NOW - 60 * MINUTE, runs: [failed([E2E])] }, [[3]]);
+    half.manifest.blame = [E2E];
+    expect(
+      decide({ ...observe(pulls, [half]), external: onMain([E2E]) }).map((a) => a.kind),
+    ).toEqual(["abandon", "build"]);
   });
 
   test("a lone PR is held before it is ejected, and ejected once the holds run out", () => {

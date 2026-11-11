@@ -186,21 +186,36 @@ and members of the running batch are never regenerated.
    the batch failed in (not the aggregate jobs such as `Typecheck and unit
    tests`, `Workload image builds` or `Validation before release image`, which
    fail whenever a lane fails; see `AGGREGATE_JOBS` in `scripts/batcher/model.ts`)
-   with two signals: the latest result of each lane job in `main`'s CI runs of
-   the last 24 hours (a deferred push that cancelled itself or an attested push
-   that skipped its lanes has none), and the lane jobs the latest other batch
-   of several PRs failed in also after a retry in the last 6 hours, when that
-   batch shares none of this batch's PRs. When every lane job the batch failed
-   in fails in one of those as well, the batch is **held**: it stays as it is
-   for a backoff (10 minutes, doubling with each hold), then is built and
-   tested again whole instead of being split. Its PRs get one comment saying
-   why; the manifest's `held` records the count and the jobs. A priority PR,
-   such as a fix for a broken `main`, goes ahead of the held batch as it would
-   go ahead of a bisection's half. A genuinely broken PR is still found: a
-   batch is held at most twice in a row (`MAX_HOLDS`), and a retest that
-   fails in a lane job it did not fail in before, or that GitHub could not
-   tell about, is split at once. A Version PR, and a batch built ahead of a
-   bisection, are never held.
+   with two signals:
+   - the latest result of each lane job in the last six `main` push (or
+     scheduled) runs of the last 24 hours that report lane results. A Version
+     PR's validation dispatched on `main` tests that PR and is not read. Batch
+     landings skip their lanes, so in practice this mostly covers `Deployment
+     artifacts` and the image jobs;
+   - the lane jobs that up to five other batches of several PRs failed in also
+     after a retry in the last 6 hours, when they share none of this batch's
+     PRs. Such a batch may itself have held a broken PR; the cap below bounds
+     what that costs.
+
+   Lanes are matched by name; a shard's tests depend on each run's impact
+   plan, so the same shard name in two runs need not be the same tests.
+   When every lane job the batch failed in fails in one of those as well, the
+   batch is **held**: it stays as it is for a backoff (10 minutes, doubling
+   with each hold), then is built and tested again whole instead of being
+   split. Its PRs get one comment saying why; the manifest's `held` records the
+   count and the jobs. A priority PR, such as a fix for a broken `main`, goes
+   ahead of the held batch as it would go ahead of a bisection's half. A
+   genuinely broken PR is still found:
+   - Only a batch outside a bisection (no `blame`, no groups still to test) is
+     held, at most twice (`MAX_HOLDS`). Then it is split as before, and its
+     halves carry the bisection's blame, so they are never held. A bisection
+     therefore costs at most two holds more than before.
+   - A retest that fails in a lane job it did not fail in before, or that
+     GitHub could not tell about, is split at once.
+   - A Version PR, and a batch built ahead of a bisection, are never held.
+
+   A GitHub outage while reading these signals ends the pass, so the next pass
+   decides with them; any other read error splits the batch as before.
 
 A batch is rebuilt from scratch whenever `main` moves under it, a member leaves
 the queue, or a member gets a new head that changes what the batch tests. The

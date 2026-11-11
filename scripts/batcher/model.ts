@@ -247,10 +247,11 @@ export interface ExternalFailures {
   /** Lane jobs whose latest result in main's recent CI runs is a failure. */
   main: string[];
   /**
-   * The latest other batch of several PRs that failed also after a retry,
-   * when none of its PRs is in the running batch, with the lane jobs it failed in.
+   * Other recent batches of several PRs that failed also after a retry and
+   * share none of the running batch's PRs, newest first, with the lane jobs
+   * each failed in.
    */
-  batch?: { id: string; members: number[]; jobs: string[] };
+  batches?: { id: string; members: number[]; jobs: string[] }[];
 }
 
 export type Action =
@@ -410,14 +411,17 @@ function sameMembers(a: number[], b: number[]): boolean {
 /**
  * Whether a failed batch's CI failure was probably not caused by its PRs, so
  * it is tested again whole instead of being split: every lane job it failed
- * in is also failing in main's latest CI, or failed also after a retry in the
- * latest other failed batch, which shares none of its PRs. A bisection then
+ * in is also failing in main's latest CI, or failed also after a retry in
+ * another recent failed batch that shares none of its PRs. A bisection then
  * would test every half against the same failure and could eject an innocent
- * PR. A genuinely broken PR is still found: a batch is held at most MAX_HOLDS
- * times in a row, and a retest that fails in a lane job it did not fail in
- * before is split at once. Version PRs and batches built ahead of a bisection
- * are never held: a Version PR holds the queue already, and a priority batch's
- * failure is split into its priority PRs and fill at once.
+ * PR. A genuinely broken PR is still found: only a batch outside a bisection
+ * is held (one carrying no blame and no groups still to test), at most
+ * MAX_HOLDS times, and a retest that fails in a lane job it did not fail in
+ * before is split at once. Once split, its halves carry the bisection's
+ * blame and are never held, so a bisection holds at most MAX_HOLDS times.
+ * Version PRs and batches built ahead of a bisection are never held either: a
+ * Version PR holds the queue already, and a priority batch's failure is split
+ * into its priority PRs and fill at once.
  */
 export function heldFailure(
   batch: Pick<Batch, "manifest">,
@@ -425,7 +429,13 @@ export function heldFailure(
   external: ExternalFailures | undefined,
 ): { hold: Hold; evidence: string } | null {
   const { manifest } = batch;
-  if (!external || manifest.aheadOfBisection || manifest.members.some((m) => m.version))
+  if (
+    !external ||
+    manifest.aheadOfBisection ||
+    manifest.members.some((m) => m.version) ||
+    manifest.blame?.length ||
+    manifest.pending.length
+  )
     return null;
   const jobs = failedLanes(runs);
   if (!jobs) return null;
@@ -435,19 +445,23 @@ export function heldFailure(
   if (before && (before.count >= MAX_HOLDS || jobs.some((job) => !before.jobs.includes(job))))
     return null;
   const onMain = new Set(external.main);
-  const other = external.batch?.members.some((n) => members.includes(n))
-    ? undefined
-    : external.batch;
-  const elsewhere = new Set(other?.jobs ?? []);
-  if (!jobs.every((job) => onMain.has(job) || elsewhere.has(job))) return null;
-  const evidence = jobs
-    .map((job) =>
-      onMain.has(job)
-        ? `\`${job}\` (failing on main)`
-        : `\`${job}\` (failed also after a retry in batch \`${other!.id}\`: ${other!.members.map((n) => `#${n}`).join(", ")})`,
-    )
-    .join(", ");
-  return { hold: { members, count: (before?.count ?? 0) + 1, jobs }, evidence };
+  const others = (external.batches ?? []).filter(
+    (other) => !other.members.some((n) => members.includes(n)),
+  );
+  const evidence: string[] = [];
+  for (const job of jobs) {
+    const other = others.find((b) => b.jobs.includes(job));
+    if (onMain.has(job)) evidence.push(`\`${job}\` (failing on main)`);
+    else if (other)
+      evidence.push(
+        `\`${job}\` (failed also after a retry in batch \`${other.id}\`: ${other.members.map((n) => `#${n}`).join(", ")})`,
+      );
+    else return null;
+  }
+  return {
+    hold: { members, count: (before?.count ?? 0) + 1, jobs },
+    evidence: evidence.join(", "),
+  };
 }
 
 function fifo(a: QueuedPull, b: QueuedPull) {
