@@ -35,6 +35,24 @@ The Entra app needs:
 It is separate from the Microsoft 365 and Teams apps so customers can consent
 to Dynamics on its own.
 
+Refreshes use the deployment's current client secret for connections made with
+this client ID, so rotating the secret (Entra secrets expire after at most two
+years) needs only a config change and no reconnects. Add the new secret in
+Entra, deploy it, then delete the old one.
+
+## Connecting
+
+- `capability_catalog_search` returns the agent-only entry
+  `api:microsoft-dynamics` when the client is configured. Its setup detail
+  (and `capability_authorization_request`, which answers `input_required`)
+  tells the agent to ask for the environment address and call
+  `custom_mcp_setup_request` with it.
+- `custom_mcp_setup_request` and capability creation store any Dynamics
+  environment address as its connection URL (`canonicalMcpEndpointUrl`).
+- The chat card for a Dynamics URL shows "Microsoft Dynamics" with one
+  Connect action; it adds the environment and opens the ordinary sign-in
+  dialog. Connections default to personal ownership.
+
 ## Sign-in
 
 `MICROSOFT_DYNAMICS_PROFILE` in `apps/api/src/integrations/oauth-profiles.ts`

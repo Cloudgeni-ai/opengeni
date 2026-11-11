@@ -31,6 +31,8 @@ export type SessionMcpCapabilityCardProps = {
    * to reconnect: the card says Reconnect and signs in to that same account.
    */
   reconnectConnectionId?: string | undefined;
+  /** Open setup at once: the person already chose to connect on the card before. */
+  openOnMount?: boolean | undefined;
 };
 
 export type McpConnectionCardProps = Omit<SessionMcpCapabilityCardProps, "sessionId"> & {
@@ -89,6 +91,7 @@ function ScopedCard({
   logoSrc,
   ownershipCopy,
   reconnectConnectionId,
+  openOnMount = false,
 }: McpConnectionCardProps) {
   const t = useOpenGeniText();
   const [windows] = useState(() => browserConnectWindowHost(window));
@@ -118,6 +121,16 @@ function ScopedCard({
       })} ${t("sessionMcpCapabilityCard.useYourLoginHereScope")}`
     : null;
   const [logo, setLogo] = useState<string | null>(null);
+  const openNow = flow.open;
+  useEffect(() => {
+    if (!openOnMount) return;
+    // After the card that asked to connect is gone: a dialog opened while its
+    // button still held focus would close again at once.
+    const frame = requestAnimationFrame(openNow);
+    return () => cancelAnimationFrame(frame);
+    // Once per mount; the flow's functions change on every render.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [openOnMount]);
 
   useEffect(() => {
     const path = item?.logoAssetPath;

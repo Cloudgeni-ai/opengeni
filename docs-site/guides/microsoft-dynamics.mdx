@@ -1,6 +1,6 @@
 ---
 title: "Microsoft Dynamics"
-description: "Connect Opengeni to Dynamics 365 Sales and other Dataverse apps, or Dynamics 365 Finance and Operations, through Microsoft's MCP servers."
+description: "Connect Opengeni to Dynamics 365 Sales and other Dataverse apps, or Dynamics 365 Finance and Operations, with each person's Microsoft work account."
 icon: "building"
 ---
 
@@ -16,10 +16,14 @@ every call runs with that person's Dynamics security roles.
 
 ## Connect
 
-1. Ask an agent to connect Microsoft Dynamics, or open **Capabilities** and
-   add it. Give your environment URL; the address from your browser's address
-   bar works, for example `https://contoso.crm4.dynamics.com/main.aspx?...`.
-2. Sign in with your Microsoft work account and accept the permissions.
+1. Ask an agent in chat to connect Microsoft Dynamics, and give it the address
+   you open Dynamics at. Any page of your environment works, for example
+   `https://contoso.crm4.dynamics.com/main.aspx?...`.
+2. Press **Connect** on the card, choose who can use the connection, and sign
+   in with your Microsoft work account.
+
+You can also add the same address as a custom server under **Capabilities**;
+Opengeni recognizes it as Microsoft Dynamics.
 
 To approve every change before it happens, open the connection's **Tool
 permissions**. Creating, updating and deleting records ask first unless an
@@ -39,8 +43,9 @@ don't use Copilot Credits.
 
 ## Administrator setup
 
-Opengeni's Microsoft Entra application ID is
-`2b52f1a0-3c32-4103-a554-e6e3f3d483ff` ("Opengeni Dynamics").
+On Opengeni's cloud service, the Microsoft Entra application ID is
+`2b52f1a0-3c32-4103-a554-e6e3f3d483ff` ("Opengeni Dynamics"). Self-hosted
+deployments use their own application; ask your operator for its ID.
 
 ### Consent in Microsoft Entra
 
@@ -95,7 +100,7 @@ Calls run under each user's own Finance and Operations security roles. See
 
 | Message                                           | What to do                                                                                      |
 | ------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Administrator approval needed                     | Send the consent link Opengeni shows to an administrator, then choose **Retry**.                |
+| Administrator approval needed                     | Send the consent link Opengeni shows to an administrator, then connect again.                   |
 | Approval requested                                | Wait for an administrator to approve the request in the Entra admin center, then connect again. |
 | Access denied, or missing a privilege             | The signed-in user's Dynamics security roles don't allow it.                                    |
 | The client isn't allowed (Finance and Operations) | Add Opengeni's application ID to **Allowed MCP clients**.                                       |

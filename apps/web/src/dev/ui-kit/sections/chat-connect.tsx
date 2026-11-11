@@ -39,6 +39,21 @@ const CATALOG = [
   }),
 ];
 
+/** The environment the Microsoft Dynamics card adds when the person presses Connect. */
+const DYNAMICS = CapabilityCatalogItem.parse({
+  id: "mcp:microsoft-dynamics-kit",
+  kind: "mcp",
+  source: "manual",
+  name: "Microsoft Dynamics",
+  description: "Microsoft Dynamics environment contoso.crm4.dynamics.com.",
+  providerDomain: "contoso.crm4.dynamics.com",
+  endpointUrl: "https://contoso.crm4.dynamics.com/api/mcp",
+  mcpUrl: "https://contoso.crm4.dynamics.com/api/mcp",
+  authKind: "oauth2",
+  runtime: { available: true, mcpServerId: "microsoft-dynamics-kit" },
+});
+const added: CapabilityCatalogItem[] = [];
+
 /** Every unknown list call resolves to an empty list that also has empty pages. */
 function emptyList(): unknown {
   return Object.assign([], { items: [], definitions: [], integrations: [], machines: [] });
@@ -81,7 +96,13 @@ const client = new Proxy(
   {
     catalogAssetUrl: () => null,
     connectTransport: () => ({}),
-    listCapabilities: async () => ({ items: CATALOG.map((item) => ({ ...item, enabled: false })) }),
+    listCapabilities: async () => ({
+      items: [...CATALOG, ...added].map((item) => ({ ...item, enabled: false })),
+    }),
+    createCapability: async () => {
+      if (!added.includes(DYNAMICS)) added.push(DYNAMICS);
+      return DYNAMICS;
+    },
     discoverPlugins: async () => ({ items: [PLUGIN], nextCursor: null }),
     listInstalledPlugins: async () => ({ plugins: [] }),
     previewPlugin: async () => {
@@ -117,7 +138,7 @@ const client = new Proxy(
 const context = new Proxy(
   {
     client,
-    workspaceCapabilityCatalog: CATALOG,
+    workspaceCapabilityCatalog: [...CATALOG, DYNAMICS],
     githubStatus: { status: "unbound" },
     githubRepos: [],
     githubCatalogReady: true,
@@ -234,6 +255,22 @@ const CARDS: Record<string, { label: string; item: AuthNeededItem; ask: [string,
     ask: [
       "Can you check our build status in Example Tools?",
       "Example Tools has an MCP server. Add it below and I'll check the builds.",
+    ],
+  },
+  dynamics: {
+    label: "Microsoft Dynamics environment",
+    item: notice("dynamics", {
+      providerDomain: "contoso.crm4.dynamics.com",
+      setupRequest: {
+        name: "Microsoft Dynamics",
+        endpointUrl: "https://contoso.crm4.dynamics.com/api/mcp",
+        rationale:
+          "Connect your Dynamics 365 environment so I can look up your open opportunities.",
+      },
+    } as Partial<AuthNeededItem>),
+    ask: [
+      "Which of my opportunities close this month?",
+      "Connect your Dynamics environment below and I'll look them up.",
     ],
   },
   github: {
@@ -425,6 +462,7 @@ function SignInCard({ entry }: { entry: (typeof SIGN_IN)[number] }) {
 
 export default function ChatConnectSection() {
   const oauth = CARDS.oauth!;
+  const dynamics = CARDS.dynamics!;
   return (
     <Provider>
       <KitSection sectionKey="chat-connect">
@@ -433,6 +471,11 @@ export default function ChatConnectSection() {
             <StateCell label={oauth.label} align="stretch">
               <ChatFrame events={lead(...oauth.ask)} status="idle" height={520}>
                 <Card item={oauth.item} />
+              </ChatFrame>
+            </StateCell>
+            <StateCell label={dynamics.label} align="stretch">
+              <ChatFrame events={lead(...dynamics.ask)} status="idle" height={520}>
+                <Card item={dynamics.item} />
               </ChatFrame>
             </StateCell>
           </StatesGrid>

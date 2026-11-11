@@ -518,6 +518,8 @@ const MICROSOFT_DYNAMICS_PROFILE: OAuthProviderProfile = {
   },
   sendResourceParameter: false,
   sendScopeOnRefresh: true,
+  // Each person reaches Dynamics with their own security roles.
+  defaultOwnership: "personal",
 };
 
 const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [

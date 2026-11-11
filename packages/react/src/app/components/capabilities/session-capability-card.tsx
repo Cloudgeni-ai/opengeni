@@ -220,6 +220,7 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
         reconnectConnectionId={capabilityReconnectConnectionId(item)}
         returnUrl={page.href()}
         onConfigured={props.onConfigured}
+        openOnMount={registered?.open ?? false}
       />
     );
   }
@@ -248,7 +249,7 @@ function ScopedSessionCapabilityCard({
 }) {
   const context = useAppContext();
   const recommendation = item.capability!;
-  const [expanded, setExpanded] = useState(openSetup);
+  const [expanded, setExpanded] = useState(false);
   const [complete, setComplete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [resolvedItem, setResolvedItem] = useState<CapabilityCatalogItem | null>(null);
@@ -257,6 +258,13 @@ function ScopedSessionCapabilityCard({
   // Read with the card rather than the dialog, so the answer is known before
   // the person opens setup and the sharing question never flashes.
   const nobodyToShareWith = useNobodyToShareWith(context.client, workspaceId);
+  useEffect(() => {
+    if (!openSetup) return;
+    // After the card that asked to connect is gone: a dialog opened while its
+    // button still held focus would close again at once.
+    const frame = requestAnimationFrame(() => setExpanded(true));
+    return () => cancelAnimationFrame(frame);
+  }, [openSetup]);
   useEffect(() => {
     if (!restoreFocus) return;
     // The review dialog's opener is removed when the new connection card

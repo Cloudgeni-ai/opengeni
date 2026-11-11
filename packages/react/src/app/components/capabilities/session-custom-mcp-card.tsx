@@ -98,12 +98,12 @@ function MicrosoftDynamicsCard({ item, workspaceId, onRegistered }: Props) {
             endpointUrl,
           })
         ).id;
-      onRegistered(id, true, true);
+      onRegistered(id, false, true);
     } catch (failure) {
       // A lost response may still have added it: look again before retrying.
       const found = await existing().catch(() => undefined);
       if (found) {
-        onRegistered(found.id, true, true);
+        onRegistered(found.id, false, true);
         return;
       }
       setError(`Couldn't connect. ${userErrorText(failure)}`);
