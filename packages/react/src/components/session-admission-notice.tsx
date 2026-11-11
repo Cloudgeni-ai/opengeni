@@ -280,6 +280,12 @@ export type SessionAdmissionNoticeProps = {
    * blocked chat and refresh. Omit where the host cannot.
    */
   onContinueWaitingWork?: (() => Promise<void>) | undefined;
+  /**
+   * Other people in the workspace can see this chat (workspace visibility,
+   * outside a Personal workspace). The owner then learns that allowing their
+   * machine lets them see what the agent does on it. Defaults to false.
+   */
+  sharedChat?: boolean | undefined;
 };
 
 /**
@@ -304,6 +310,7 @@ export function SessionAdmissionNotice({
   onMoveToMachine,
   onRefresh,
   onContinueWaitingWork,
+  sharedChat = false,
 }: SessionAdmissionNoticeProps) {
   const t = useOpenGeniText();
   const descriptionId = useId();
@@ -371,7 +378,7 @@ export function SessionAdmissionNotice({
       ? sessionAdmissionMachineAccessCopy(t, machineAccess, {
           canAllowHere: onAllowMachine !== undefined,
           paused,
-          shared: session.tenancy?.visibility === "workspace",
+          shared: sharedChat,
         })
       : sessionAdmissionCopy(t, reason);
   const allowing = !machineChanged && needsMachineAccess && machineAccess?.isOwner === true;
@@ -711,6 +718,7 @@ export function SessionStartNotice({
           onAllowMachine={start.allowMachine}
           onRefresh={start.refresh}
           onContinueWaitingWork={start.continueWaitingWork}
+          sharedChat={start.sharedChat}
         />
       ) : null}
       {showPreSendWarning && start.warnBeforeSending ? (

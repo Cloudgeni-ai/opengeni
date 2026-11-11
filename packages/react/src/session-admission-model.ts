@@ -138,6 +138,7 @@ export function savedMessageApprovedMachines(
 export type ApprovedElsewhereCopy = {
   title: string;
   body: string;
+  /** What happens next; empty when the body already says it. */
   next: string;
   /** "Run it on …" for the machine the chat can move to now; null when there is none. */
   action: string | null;
@@ -289,8 +290,9 @@ export function sessionAdmissionNeedsMachineAccess(
 
 /**
  * Words for a saved message waiting for approval to use the chat's personal
- * machine. The owner gets "Allow for this chat", which starts it right away;
- * everyone else learns who can allow it and that it then starts by itself.
+ * machine. The owner gets "Allow for this chat", which starts it right away
+ * (or when a paused chat is resumed); everyone else learns who can allow it
+ * and that it then starts by itself.
  */
 export function sessionAdmissionMachineAccessCopy(
   t: OpenGeniText,
@@ -299,7 +301,10 @@ export function sessionAdmissionMachineAccessCopy(
     canAllowHere?: boolean;
     /** Paused: allowing it starts nothing until the chat is resumed. */
     paused?: boolean;
-    /** A chat the workspace can see: allowing it shares what runs on the machine. */
+    /**
+     * Other people in the workspace can see the chat (workspace visibility,
+     * outside a Personal workspace): allowing it shares what runs on the machine.
+     */
     shared?: boolean;
   } = {},
 ): SessionAdmissionCopy {

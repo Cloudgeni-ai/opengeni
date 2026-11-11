@@ -768,7 +768,7 @@ function StuckCard({
       ? sessionAdmissionMachineAccessCopy(t, start.machineAccess, {
           canAllowHere: start.allowMachine !== undefined,
           paused,
-          shared: session.tenancy?.visibility === "workspace",
+          shared: start.sharedChat,
         })
       : sessionAdmissionCopy(t, reason)
     : null;

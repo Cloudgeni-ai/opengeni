@@ -303,6 +303,7 @@ export default function ChatAdmissionSection() {
                   busy={false}
                   onRecheck={async () => {}}
                   onAllowMachine={state.allow ? async () => {} : undefined}
+                  sharedChat={state.session.tenancy?.visibility === "workspace"}
                 />
               </div>
             </StateCell>

@@ -4531,21 +4531,21 @@ export const englishMessages = {
   "sessionAdmission.machineAccessOthersBody":
     "This chat isn’t allowed to use {owner}’s machine “{machine}”.",
   "sessionAdmission.machineAccessOthersNext":
-    "Only {owner} can allow it. It starts by itself once they do.",
+    "Only {owner} can allow it. Your message starts by itself once they do.",
   "sessionAdmission.machineAccessOwnerNext":
     "Allow it for this chat and your message starts right away.",
   "sessionAdmission.machineAccessOwnerPausedNext":
-    "Allow it for this chat. It starts when the chat is resumed.",
+    "Allow it for this chat. Your message starts when the chat is resumed.",
   "sessionAdmission.machineAccessOwnerSettingsNext":
-    "Allow it in the machine’s settings. It starts by itself once you do.",
+    "Allow it in the machine’s settings. Your message starts by itself once you do.",
   "sessionAdmission.machineAccessOwnerSettingsPausedNext":
-    "Allow it in the machine’s settings. It starts when the chat is resumed.",
+    "Allow it in the machine’s settings. Your message starts when the chat is resumed.",
   "sessionAdmission.machineAccessSharedNote":
     "This chat is shared, so people in this workspace will see what the agent does on “{machine}”.",
   "sessionAdmission.machineAccessTitle": "Machine access needed",
   "sessionAdmission.machineChangeFailed":
     "The machine change could not be confirmed. Refresh and try again.",
-  "sessionAdmission.machineChangedNext": "It starts by itself on the new machine.",
+  "sessionAdmission.machineChangedNext": "Your message starts by itself.",
   "sessionAdmission.machineChangedTitle": "Starting on the new machine",
   "sessionAdmission.membershipBody":
     "The person who sent this message no longer has access to this workspace.",

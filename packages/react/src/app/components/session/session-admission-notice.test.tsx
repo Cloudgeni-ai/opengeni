@@ -98,7 +98,9 @@ describe("session admission notice", () => {
       ),
     );
     expect(container.textContent).toContain("Starting on the new machine");
-    expect(container.textContent).toContain("It starts by itself on the new machine");
+    expect(container.textContent).toContain("Your message starts by itself.");
+    // One line under the title: where it starts is already said once.
+    expect(container.textContent!.split("new machine")).toHaveLength(2);
     expect(container.querySelector("button")).toBeNull();
     expect(onRecheck).not.toHaveBeenCalled();
   });
@@ -216,7 +218,7 @@ describe("session admission notice", () => {
     });
     expect(container.textContent).toContain("Machine access needed");
     expect(container.textContent).toContain(
-      "Only Alex can allow it. It starts by itself once they do.",
+      "Only Alex can allow it. Your message starts by itself once they do.",
     );
     expect(container.querySelector("button")).toBeNull();
   });
@@ -232,7 +234,7 @@ describe("session admission notice", () => {
   test("a paused owner reads one consistent line: it starts when the chat is resumed", async () => {
     await render({ paused: true, machineAccess: ownMachine, onAllowMachine: async () => {} });
     expect(container.textContent).toContain(
-      "Allow it for this chat. It starts when the chat is resumed.",
+      "Allow it for this chat. Your message starts when the chat is resumed.",
     );
     expect(container.textContent).not.toContain("right away");
     expect(container.textContent).not.toContain("This chat is also paused");
@@ -244,7 +246,7 @@ describe("session admission notice", () => {
   test("a paused owner without Allow here is told it starts once resumed, not by itself", async () => {
     await render({ paused: true, machineAccess: ownMachine });
     expect(container.textContent).toContain(
-      "Allow it in the machine’s settings. It starts when the chat is resumed.",
+      "Allow it in the machine’s settings. Your message starts when the chat is resumed.",
     );
     expect(container.textContent).not.toContain("starts by itself");
     expect(container.textContent).not.toContain("This chat is also paused");
@@ -252,15 +254,29 @@ describe("session admission notice", () => {
 
   test("in a shared chat, the owner learns Allow shows the workspace what runs on the machine", async () => {
     const shared = { ...session(), tenancy: { visibility: "workspace" } } as unknown as Session;
-    await render({ session: shared, machineAccess: ownMachine, onAllowMachine: async () => {} });
+    await render({
+      session: shared,
+      sharedChat: true,
+      machineAccess: ownMachine,
+      onAllowMachine: async () => {},
+    });
     expect(container.textContent).toContain(
       "This chat is shared, so people in this workspace will see what the agent does on “My machine”.",
     );
     await act(async () => root!.unmount());
     root = undefined;
     container.remove();
-    await render({ machineAccess: ownMachine, onAllowMachine: async () => {} });
+    // Workspace visibility in a Personal workspace: nobody else sees the chat.
+    await render({ session: shared, machineAccess: ownMachine, onAllowMachine: async () => {} });
     expect(container.textContent).not.toContain("This chat is shared");
+  });
+
+  test("route: the shared line follows the heads-up's rule, and the heads-up steps aside", async () => {
+    const route = await Bun.file(`${import.meta.dir}/../../routes/session.tsx`).text();
+    expect(route).toContain("sharedChat={sharedChat}");
+    // While the owner is asked to allow the machine, the notice carries the
+    // shared line, so the composer heads-up doesn't repeat it.
+    expect(route).toContain("(sharedChat && !ownerAskedToAllow)");
   });
 
   test("someone else in a paused chat still sees the paused note", async () => {
