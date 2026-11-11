@@ -98,8 +98,11 @@ export type GatewayPolicyLookup = (input: {
  * repositories the gateway can't confirm (`unscoped`) asks even when every
  * policy allows it; Block still wins.
  *
- * The recorded action doesn't depend on the decisions, so an approved request
- * still matches its approval when it runs again after a policy change.
+ * The recorded action is the one whose policy decided, preferring Settings and
+ * deletions when it is among the strictest, so the approval card names what
+ * asked. A request run again after its approval reuses the action its approval
+ * recorded (see `databaseGatewayDecider`), so a later policy change can't
+ * break the match.
  */
 export async function strictestGatewayPolicy(
   action: GatewayDecisionInput["action"],
@@ -109,19 +112,22 @@ export async function strictestGatewayPolicy(
     ...(action.tools.length > 0 ? action.tools : [UNMAPPED_REQUEST_TOOL]),
     ...(action.sensitive ? [GITHUB_SENSITIVE_REQUEST_POLICY_NAME] : []),
   ];
+  const decisions = new Map<string, "allow" | "ask" | "block">();
   let strictest: "allow" | "ask" | "block" = "allow";
   for (const toolName of tools) {
     const decision =
       toolName === GITHUB_SENSITIVE_REQUEST_POLICY_NAME
         ? await lookup({ toolName, defaultDecision: "ask", decide: githubSensitiveRequestDecision })
         : await lookup({ toolName, defaultDecision: "allow" });
+    if (!decisions.has(toolName)) decisions.set(toolName, decision);
     if (DECISION_RANK[decision] > DECISION_RANK[strictest]) strictest = decision;
   }
+  const toolName =
+    decisions.get(GITHUB_SENSITIVE_REQUEST_POLICY_NAME) === strictest
+      ? GITHUB_SENSITIVE_REQUEST_POLICY_NAME
+      : tools.find((tool) => decisions.get(tool) === strictest)!;
   if (action.unscoped && strictest === "allow") strictest = "ask";
-  return {
-    decision: strictest,
-    toolName: action.sensitive ? GITHUB_SENSITIVE_REQUEST_POLICY_NAME : tools[0]!,
-  };
+  return { decision: strictest, toolName };
 }
 
 /**

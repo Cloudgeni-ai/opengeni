@@ -84,8 +84,8 @@ describe("Settings and deletions in the gateway's decision", () => {
     ];
     expect(await strictestGatewayPolicy(tagDeletion, lookupIn(askFirst))).toEqual({
       decision: "ask",
-      // Not the deciding action: an approval must still match after a policy change.
-      toolName: GITHUB_SENSITIVE_REQUEST_POLICY_NAME,
+      // The action whose policy asked; a re-run reuses its approval's recorded action.
+      toolName: "ref_create",
     });
     const blocked = [
       policy("ref_create", "allow"),
@@ -141,7 +141,7 @@ describe("Settings and deletions in the gateway's decision", () => {
     ).toBe("block");
   });
 
-  test("records the same action whatever the decisions", async () => {
+  test("records the action whose policy decided", async () => {
     const routine: GatewayDecisionInput["action"] = {
       kind: "write",
       tools: ["issue_create", "ref_create"],
@@ -150,6 +150,21 @@ describe("Settings and deletions in the gateway's decision", () => {
     };
     expect(
       (await strictestGatewayPolicy(routine, lookupIn([policy("ref_create", "ask")]))).toolName,
-    ).toBe("issue_create");
+    ).toBe("ref_create");
+    expect((await strictestGatewayPolicy(routine, lookupIn([]))).toolName).toBe("issue_create");
+    // Settings and deletions is named only when it is among the strictest.
+    const sensitive = { ...routine, sensitive: true };
+    expect(
+      await strictestGatewayPolicy(
+        sensitive,
+        lookupIn([
+          policy(GITHUB_SENSITIVE_REQUEST_POLICY_NAME, "allow"),
+          policy("ref_create", "ask"),
+        ]),
+      ),
+    ).toEqual({ decision: "ask", toolName: "ref_create" });
+    expect(
+      await strictestGatewayPolicy(sensitive, lookupIn([policy("ref_create", "ask")])),
+    ).toEqual({ decision: "ask", toolName: GITHUB_SENSITIVE_REQUEST_POLICY_NAME });
   });
 });
