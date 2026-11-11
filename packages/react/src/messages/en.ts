@@ -3722,6 +3722,12 @@ export const englishMessages = {
   "native.realtime.callView.reconnecting": "Reconnecting…",
   "native.realtime.callView.speaker": "Speaker",
   "native.realtime.callView.unmute": "Unmute",
+  /** Android 14+: asking the person to let agents' calls ring over the lock screen. */
+  "native.realtime.fullScreenRings.message":
+    "Android shows agents' calls only as a notification until you allow full-screen notifications for this app. Allow them so a call rings over the lock screen like a phone call.",
+  "native.realtime.fullScreenRings.notNow": "Not now",
+  "native.realtime.fullScreenRings.openSettings": "Open settings",
+  "native.realtime.fullScreenRings.title": "Let calls ring full screen",
   "native.realtime.nativeCall.couldNotStartTheCall": "Could not start the call.",
   "native.realtime.nativeCall.noInputAudio":
     "Your microphone isn't picking up any sound. Check that no other app is using it.",
