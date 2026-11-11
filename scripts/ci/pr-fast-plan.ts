@@ -19,13 +19,19 @@ export const PR_UNIT_FILE_CAP = 40;
  * Authored tests (changed, or importing a changed helper or fixture) may use
  * the whole budget; tests that only depend directly on a touched workspace
  * fill at most one shard. Batch still runs the complete impacted set.
+ *
+ * A shard's measured time has run up to about 1.6 times its profile estimate
+ * (slower runners, timings measured on older trees), so the target is half
+ * the shard deadline: a PR shard must not time out on estimate error alone.
  */
-export const PR_E2E_BUDGET_SECONDS = 1_800;
-export const PR_E2E_DIRECT_BUDGET_SECONDS = 480;
 /** At most this many PR E2E shard jobs; Batch uses up to eight. */
 export const PR_E2E_SHARD_CAP = 4;
-/** Target estimated seconds per PR E2E shard (Batch's shard deadline is 720 s). */
-export const PR_E2E_SHARD_TARGET_SECONDS = 480;
+/** The E2E shard deadline (ci-e2e-shards.yml `--timeout-seconds`). */
+export const E2E_SHARD_DEADLINE_SECONDS = 720;
+/** Target estimated seconds per PR E2E shard. */
+export const PR_E2E_SHARD_TARGET_SECONDS = E2E_SHARD_DEADLINE_SECONDS / 2;
+export const PR_E2E_BUDGET_SECONDS = PR_E2E_SHARD_CAP * PR_E2E_SHARD_TARGET_SECONDS;
+export const PR_E2E_DIRECT_BUDGET_SECONDS = PR_E2E_SHARD_TARGET_SECONDS;
 type Input = Pick<ImpactPlan, "schemaVersion" | "mode" | "changedFiles" | "unitTests" | "reasons"> &
   Partial<Pick<ImpactPlan, "affectedPackages">>;
 

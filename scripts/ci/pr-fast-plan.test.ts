@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import {
+  E2E_SHARD_DEADLINE_SECONDS,
   PR_E2E_BUDGET_SECONDS,
   PR_E2E_DIRECT_BUDGET_SECONDS,
   PR_E2E_SHARD_CAP,
+  PR_E2E_SHARD_TARGET_SECONDS,
   PR_INVENTORY_TESTS,
   PR_LANE_DEFINITIONS,
   PR_UNIT_FILE_CAP,
@@ -288,13 +290,19 @@ test("authored tests take the budget first; the direct sample fills one shard, c
   const sample = selected.e2eTests.filter((path) => !authored.includes(path));
   expect(sample).toEqual(direct.slice(0, sample.length));
   const sampleSeconds = sample.reduce((sum, path) => sum + seconds(path), 0);
-  expect(sampleSeconds).toBeLessThanOrEqual(PR_E2E_DIRECT_BUDGET_SECONDS);
-  expect(sampleSeconds + seconds(direct[sample.length]!)).toBeGreaterThan(
+  // The sample stops at its own budget or at what is left of the whole one.
+  const sampleLimit = Math.min(
     PR_E2E_DIRECT_BUDGET_SECONDS,
+    PR_E2E_BUDGET_SECONDS - authored.reduce((sum, path) => sum + seconds(path), 0),
   );
+  expect(sampleSeconds).toBeLessThanOrEqual(sampleLimit);
+  expect(sampleSeconds + seconds(direct[sample.length]!)).toBeGreaterThan(sampleLimit);
   expect(selected.summary.e2eDeferredDirectCount).toBe(direct.length - sample.length);
   expect(selected.e2eShards).toBe(
-    Math.min(PR_E2E_SHARD_CAP, Math.ceil(selected.summary.e2eEstimatedSeconds / 480)),
+    Math.min(
+      PR_E2E_SHARD_CAP,
+      Math.ceil(selected.summary.e2eEstimatedSeconds / PR_E2E_SHARD_TARGET_SECONDS),
+    ),
   );
   // Authored tests beyond the whole budget are deferred and named.
   const many = Array.from({ length: 5 }, (_, i) => `test/e2e/heavy-${i}.browser.e2e.ts`);
@@ -305,6 +313,13 @@ test("authored tests take the budget first; the direct sample fills one shard, c
   expect(capped.e2eTests).toHaveLength(Math.floor(PR_E2E_BUDGET_SECONDS / 600));
   expect(capped.summary.e2eDeferredAuthored).toHaveLength(5 - capped.e2eTests.length);
   expect(capped.e2eShards).toBeLessThanOrEqual(PR_E2E_SHARD_CAP);
+  // The per-shard target keeps a deadline margin for estimate error, and the
+  // deadline it is derived from is the one the shard job enforces.
+  expect(PR_E2E_SHARD_TARGET_SECONDS * 2).toBeLessThanOrEqual(E2E_SHARD_DEADLINE_SECONDS);
+  expect(PR_E2E_BUDGET_SECONDS).toBeLessThanOrEqual(PR_E2E_SHARD_CAP * PR_E2E_SHARD_TARGET_SECONDS);
+  expect(
+    require("node:fs").readFileSync(".github/workflows/ci-e2e-shards.yml", "utf8") as string,
+  ).toContain(`--timeout-seconds ${E2E_SHARD_DEADLINE_SECONDS}`);
   // The selection does not depend on input order.
   expect(
     selectPrBrowserE2e(

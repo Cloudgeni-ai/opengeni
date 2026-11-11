@@ -12,7 +12,9 @@ choice in the plan's `prBrowserE2e` summary:
 - then E2E tests whose own or declared workspaces a changed file belongs to,
   cheapest first, within `PR_E2E_DIRECT_BUDGET_SECONDS` (about one shard);
 - shard count is the estimate over `PR_E2E_SHARD_TARGET_SECONDS`, at most
-  `PR_E2E_SHARD_CAP`. Estimates come from `e2e-shard-profile.json`; without
+  `PR_E2E_SHARD_CAP`. The target is half the shard deadline, because a shard
+  has measured up to about 1.6 times its estimate; the whole budget is the
+  cap times the target. Estimates come from `e2e-shard-profile.json`; without
   a usable profile a file counts as one minute.
 
 Batch impact is transitive, so most product PRs select nearly every browser
