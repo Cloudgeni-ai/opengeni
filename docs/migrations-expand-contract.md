@@ -295,6 +295,13 @@ immediately.** Until 0937 commits, the previous release's readiness rejects
 those grants, so the old fleet stays unready. The gap is normally only the
 seconds the migrations before rollout (`--phase=maintenance`) take.
 
+**The same holds between 1282 and 1283.** On a database that has not applied
+1282 yet, the two run back to back. If `migrate` stops after 1282 commits and
+before 1283 does (a lock timeout, for example), a previous release that
+predates 1240, such as `6327db2c`, rejects the grant and its fleet stays
+unready until `migrate` is rerun. Hosted production applied both in the 6.14.0
+release (`1396c6d3`).
+
 Every existing check for **known** objects remains exact: missing objects and
 privileges, excess grants, owner relationships, RLS, capability predicates,
 search paths and cutover receipts. Caller-specific contract overrides cannot
