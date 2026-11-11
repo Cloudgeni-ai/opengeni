@@ -4,6 +4,28 @@ Pull requests land through the [merge batcher](merge-batcher.md), whose batch
 CI runs what the combined change affects. `main` itself runs the **full** suite
 and builds the release images; releases deploy only a SHA whose full run passed.
 
+## PR CI
+
+`pr-ci.yml` gives each PR one required result, **PR CI**, which the batcher
+needs on the exact head. Beside the fast checks (lint, guards, affected types,
+a capped unit sample and the web bundle), it runs part of the browser and E2E
+coverage that batches run, so a PR's own deterministic browser failure shows on
+the PR instead of failing a batch of PRs:
+
+- The jobs are Batch's own: `ci-e2e-shards.yml` and `ci-browser-acceptance.yml`
+  are reusable workflows that `ci.yml` and `pr-ci.yml` both call.
+- `scripts/ci/pr-fast-plan.ts` picks from the impact plan. Authored tests (a
+  changed test, or one that imports a changed helper or fixture) run in E2E
+  and in their browser acceptance lanes. E2E tests that depend directly on a
+  touched workspace add a cheapest-first sample of about one shard. A CI or
+  toolchain fence does not hide either.
+- E2E has a budget of estimated profile seconds and at most four shards.
+  Whatever does not fit is deferred to Batch, which still runs the complete
+  impacted set. The plan step's summary lists the selection and what it
+  deferred.
+- Docs-only PRs select nothing and stay fast. The aggregate requires each
+  selected lane to succeed and each unselected one to be skipped.
+
 ## Full CI on main
 
 - `ci.yml` uses a full plan on `main`: every test lane, deployment artifacts,

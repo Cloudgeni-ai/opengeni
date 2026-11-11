@@ -1,3 +1,25 @@
+# PR browser and E2E selection
+
+`pr-fast-plan.ts` also chooses which of Batch's E2E files and browser
+acceptance lanes PR CI runs (`docs/main-ci.md`, "PR CI"). It starts from the
+impact plan, so the PR never runs a test Batch would not, and records its
+choice in the plan's `prBrowserE2e` summary:
+
+- authored tests first: a changed E2E or browser acceptance test, or one that
+  imports (transitively, through relative imports outside workspaces) a
+  changed helper or fixture. They select their browser acceptance lanes, and
+  E2E files use up to `PR_E2E_BUDGET_SECONDS`;
+- then E2E tests whose own or declared workspaces a changed file belongs to,
+  cheapest first, within `PR_E2E_DIRECT_BUDGET_SECONDS` (about one shard);
+- shard count is the estimate over `PR_E2E_SHARD_TARGET_SECONDS`, at most
+  `PR_E2E_SHARD_CAP`. Estimates come from `e2e-shard-profile.json`; without
+  a usable profile a file counts as one minute.
+
+Batch impact is transitive, so most product PRs select nearly every browser
+test there. Running all of them on each PR push would add about eleven jobs
+per run; this selection keeps the PR cost near one job per run. Tests that
+do not fit are listed as deferred and still run in Batch.
+
 # Test shard timing profiles
 
 `run-test-shard.ts` uses deterministic longest-first placement, then runs each

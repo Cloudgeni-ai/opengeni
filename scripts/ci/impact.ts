@@ -587,6 +587,9 @@ const BROWSER_ACCEPTANCE_TESTS: Readonly<Record<BrowserAcceptanceLane, readonly 
   ],
 };
 
+/** The curated browser acceptance lanes and the tests each runs. */
+export { BROWSER_ACCEPTANCE_TESTS };
+
 for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
   ROOT_TEST_DEPENDENCIES[path] = [...TEMPORAL_WORKFLOW_DEPENDENCIES];
 }
@@ -709,6 +712,19 @@ function rootTestDependencies(graph: WorkspaceGraph, path: string): string[] | n
   const declared = ROOT_TEST_DEPENDENCIES[path];
   if (!declared) return null;
   return [...new Set([...declared, ...importedWorkspaceDependencies(graph, path)])].sort();
+}
+
+/**
+ * The workspaces a test depends on directly: its own workspace, or for a root
+ * test its declared and imported workspaces. Null for an unmapped root test.
+ */
+export function directTestWorkspaces(
+  path: string,
+  graph: WorkspaceGraph = createWorkspaceGraph(),
+): string[] | null {
+  const pkg = workspaceForPath(graph, path);
+  if (pkg) return [pkg.name];
+  return rootTestDependencies(graph, path);
 }
 
 function selectedBrowserAcceptanceLanes(

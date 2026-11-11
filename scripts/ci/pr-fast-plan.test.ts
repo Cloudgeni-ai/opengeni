@@ -1,7 +1,21 @@
 import { expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { PR_INVENTORY_TESTS, PR_UNIT_FILE_CAP, selectPrFastPlan } from "./pr-fast-plan";
-import { createImpactPlan } from "./impact";
+import {
+  PR_E2E_BUDGET_SECONDS,
+  PR_E2E_DIRECT_BUDGET_SECONDS,
+  PR_E2E_SHARD_CAP,
+  PR_INVENTORY_TESTS,
+  PR_LANE_DEFINITIONS,
+  PR_UNIT_FILE_CAP,
+  browserLaneMatrix,
+  repositoryHelperImports,
+  selectPrBrowserE2e,
+  selectPrFastPlan,
+  shardMatrix,
+  type PrBrowserE2eContext,
+} from "./pr-fast-plan";
+import { BROWSER_ACCEPTANCE_TESTS, createImpactPlan } from "./impact";
+import { createWorkspaceGraph } from "./workspace";
 
 const plan = {
   schemaVersion: 1 as const,
@@ -175,4 +189,189 @@ test("duplicates count once and ordering uses code units", () => {
     selectedCount: 2,
     deferredCount: 0,
   });
+});
+
+const lanePlan = {
+  mode: "focused" as const,
+  changedFiles: ["apps/web/src/app.tsx"],
+  e2eTests: ["test/e2e/a.browser.e2e.ts", "test/e2e/b.browser.e2e.ts", "test/e2e/c.e2e.ts"],
+  browserAcceptanceLanes: ["accounts", "interaction", "knowledge"] as (
+    | "accounts"
+    | "interaction"
+    | "knowledge"
+  )[],
+};
+const laneContext = (overrides: Partial<PrBrowserE2eContext> = {}): PrBrowserE2eContext => ({
+  touchedWorkspaces: new Set(["opengeni-web"]),
+  testWorkspaces: (path) =>
+    path.includes("browser") ? ["opengeni-web", "@opengeni/testing"] : ["@opengeni/runtime"],
+  testHelpers: (path) => (path.includes("/b.") ? ["test/e2e/fixtures/shared.ts"] : []),
+  seconds: () => 30,
+  laneTests: {
+    accounts: ["test/e2e/accounts.e2e.ts"],
+    interaction: ["test/e2e/queue.browser.e2e.ts"],
+    knowledge: ["test/e2e/pins.browser.e2e.ts"],
+    onboarding: [],
+    workbench: [],
+  },
+  ...overrides,
+});
+
+test("PR E2E runs authored and directly affected impacted tests, never unimpacted ones", () => {
+  const selected = selectPrBrowserE2e(lanePlan, laneContext());
+  expect(selected.e2eTests).toEqual(["test/e2e/a.browser.e2e.ts", "test/e2e/b.browser.e2e.ts"]);
+  expect(selected.e2eShards).toBe(1);
+  expect(selected.summary).toMatchObject({ e2eImpactedCount: 3, e2eAuthored: 0, e2eDirect: 2 });
+  // Docs plans list no E2E tests or lanes, so nothing runs.
+  const docs = selectPrBrowserE2e(
+    { ...lanePlan, mode: "docs", e2eTests: [], browserAcceptanceLanes: [] },
+    laneContext(),
+  );
+  expect(docs).toMatchObject({ e2eTests: [], e2eShards: 0, browserAcceptanceLanes: [] });
+  // A test outside the impact plan is never added, even when authored.
+  const outside = selectPrBrowserE2e(
+    { ...lanePlan, changedFiles: ["test/e2e/z.browser.e2e.ts"] },
+    laneContext({ touchedWorkspaces: new Set() }),
+  );
+  expect(outside.e2eTests).toEqual([]);
+});
+
+test("a changed fixture selects its importers and their lanes, even behind a CI fence", () => {
+  const context = laneContext({
+    touchedWorkspaces: new Set(),
+    testHelpers: (path) =>
+      ["test/e2e/b.browser.e2e.ts", "test/e2e/pins.browser.e2e.ts"].includes(path)
+        ? ["test/e2e/fixtures/shared.ts"]
+        : [],
+  });
+  const selected = selectPrBrowserE2e(
+    {
+      ...lanePlan,
+      mode: "full",
+      changedFiles: [".github/workflows/ci.yml", "test/e2e/fixtures/shared.ts"],
+    },
+    context,
+  );
+  expect(selected.e2eTests).toEqual(["test/e2e/b.browser.e2e.ts"]);
+  expect(selected.browserAcceptanceLanes).toEqual(["knowledge"]);
+  expect(selected.summary.browserJobCount).toBe(1);
+  // Only authored tests select browser lanes; a touched workspace alone does not.
+  expect(selectPrBrowserE2e(lanePlan, laneContext()).browserAcceptanceLanes).toEqual([]);
+  // A lane Batch did not select is never run on the PR.
+  expect(
+    selectPrBrowserE2e(
+      {
+        ...lanePlan,
+        browserAcceptanceLanes: ["accounts"],
+        changedFiles: ["test/e2e/pins.browser.e2e.ts"],
+      },
+      context,
+    ).browserAcceptanceLanes,
+  ).toEqual([]);
+});
+
+test("authored tests take the budget first; the direct sample fills one shard, cheapest first", () => {
+  const direct = Array.from(
+    { length: 30 },
+    (_, i) => `test/e2e/d${String(i).padStart(2, "0")}.browser.e2e.ts`,
+  );
+  const authored = ["test/e2e/heavy-a.browser.e2e.ts", "test/e2e/heavy-b.browser.e2e.ts"];
+  const seconds = (path: string) =>
+    path.includes("heavy") ? 600 : 20 + Number(/d(\d+)/.exec(path)?.[1] ?? 0);
+  const directPlan = {
+    ...lanePlan,
+    changedFiles: ["apps/web/src/app.tsx", ...authored],
+    e2eTests: [...direct, ...authored],
+  };
+  const selected = selectPrBrowserE2e(directPlan, laneContext({ seconds }));
+  for (const path of authored) expect(selected.e2eTests).toContain(path);
+  const sample = selected.e2eTests.filter((path) => !authored.includes(path));
+  expect(sample).toEqual(direct.slice(0, sample.length));
+  const sampleSeconds = sample.reduce((sum, path) => sum + seconds(path), 0);
+  expect(sampleSeconds).toBeLessThanOrEqual(PR_E2E_DIRECT_BUDGET_SECONDS);
+  expect(sampleSeconds + seconds(direct[sample.length]!)).toBeGreaterThan(
+    PR_E2E_DIRECT_BUDGET_SECONDS,
+  );
+  expect(selected.summary.e2eDeferredDirectCount).toBe(direct.length - sample.length);
+  expect(selected.e2eShards).toBe(
+    Math.min(PR_E2E_SHARD_CAP, Math.ceil(selected.summary.e2eEstimatedSeconds / 480)),
+  );
+  // Authored tests beyond the whole budget are deferred and named.
+  const many = Array.from({ length: 5 }, (_, i) => `test/e2e/heavy-${i}.browser.e2e.ts`);
+  const capped = selectPrBrowserE2e(
+    { ...directPlan, changedFiles: many, e2eTests: many },
+    laneContext({ seconds, touchedWorkspaces: new Set() }),
+  );
+  expect(capped.e2eTests).toHaveLength(Math.floor(PR_E2E_BUDGET_SECONDS / 600));
+  expect(capped.summary.e2eDeferredAuthored).toHaveLength(5 - capped.e2eTests.length);
+  expect(capped.e2eShards).toBeLessThanOrEqual(PR_E2E_SHARD_CAP);
+  // The selection does not depend on input order.
+  expect(
+    selectPrBrowserE2e(
+      { ...directPlan, e2eTests: [...directPlan.e2eTests].reverse() },
+      laneContext({ seconds }),
+    ).e2eTests,
+  ).toEqual(selected.e2eTests);
+});
+
+test("changing a lane's definition runs that lane on the PR", () => {
+  const context = laneContext({ touchedWorkspaces: new Set() });
+  const none = selectPrBrowserE2e({ ...lanePlan, changedFiles: ["docs/x.md"] }, context);
+  expect(none).toMatchObject({ e2eTests: [], browserAcceptanceLanes: [] });
+  const browser = selectPrBrowserE2e(
+    { ...lanePlan, mode: "full", changedFiles: [".github/workflows/ci-browser-acceptance.yml"] },
+    context,
+  );
+  expect(browser.browserAcceptanceLanes).toEqual(lanePlan.browserAcceptanceLanes);
+  expect(browser.e2eTests).toEqual([]);
+  const e2e = selectPrBrowserE2e(
+    { ...lanePlan, mode: "full", changedFiles: ["scripts/ci/run-test-shard.ts"] },
+    context,
+  );
+  expect(e2e.browserAcceptanceLanes).toEqual([]);
+  expect(e2e.e2eTests).toEqual(lanePlan.e2eTests);
+  const both = selectPrBrowserE2e(
+    { ...lanePlan, mode: "full", changedFiles: [".github/actions/playwright-browsers/action.yml"] },
+    context,
+  );
+  expect(both.summary.laneDefinitionsChanged).toEqual({ e2e: true, browser: true });
+  for (const paths of Object.values(PR_LANE_DEFINITIONS))
+    for (const path of paths) expect(existsSync(path)).toBe(true);
+});
+
+test("PR matrices match ci.yml's lane expansion and shard list", () => {
+  expect(browserLaneMatrix(["accounts", "workbench"])).toEqual([
+    { lane: "accounts", engine: "chromium" },
+    { lane: "accounts", engine: "firefox" },
+    { lane: "accounts", engine: "webkit" },
+    { lane: "workbench", engine: "chromium" },
+  ]);
+  expect(shardMatrix(2)).toEqual([
+    { index: 0, number: 1, total: 2 },
+    { index: 1, number: 2, total: 2 },
+  ]);
+  const ci = require("node:fs").readFileSync(".github/workflows/ci.yml", "utf8") as string;
+  expect(ci).toContain(
+    `map(if . == "accounts" then [{lane:.,engine:"chromium"},{lane:.,engine:"firefox"},{lane:.,engine:"webkit"}] else [{lane:.,engine:"chromium"}] end)`,
+  );
+  expect(ci).toContain("'[range(0; $total) | {index: ., number: (. + 1), total: $total}]'");
+});
+
+test("helper imports follow relative repository files outside workspaces", () => {
+  const graph = createWorkspaceGraph();
+  const files: Record<string, string> = {
+    "test/e2e/x.browser.e2e.ts": `import { a } from "./fixtures/a"; import "@opengeni/sdk"; import "../../apps/web/src/main";`,
+    "test/e2e/fixtures/a.ts": `export { b } from "./b.ts"; export const a = 1;`,
+    "test/e2e/fixtures/b.ts": `import "./a"; export const b = 2;`,
+    "apps/web/src/main.ts": `import "../../../test/e2e/fixtures/c";`,
+  };
+  expect(
+    repositoryHelperImports("test/e2e/x.browser.e2e.ts", graph, (path) => files[path] ?? null),
+  ).toEqual(["test/e2e/fixtures/a.ts", "test/e2e/fixtures/b.ts"]);
+  // Every curated browser acceptance test resolves in the real repository.
+  for (const testPath of Object.values(BROWSER_ACCEPTANCE_TESTS).flat()) {
+    expect(existsSync(testPath)).toBe(true);
+    for (const helper of repositoryHelperImports(testPath, graph))
+      expect(existsSync(helper)).toBe(true);
+  }
 });

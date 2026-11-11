@@ -1,8 +1,31 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { createImpactPlan, type ImpactPlan } from "./impact";
-import { createWorkspaceGraph } from "./workspace";
+import { dirname, join, normalize } from "node:path";
+import {
+  BROWSER_ACCEPTANCE_TESTS,
+  createImpactPlan,
+  directTestWorkspaces,
+  type ImpactPlan,
+} from "./impact";
+import {
+  createWorkspaceGraph,
+  e2eShardWeights,
+  workspaceForPath,
+  type WorkspaceGraph,
+} from "./workspace";
 
 export const PR_UNIT_FILE_CAP = 40;
+/**
+ * PR E2E budgets, in estimated serial seconds from the E2E shard profile.
+ * Authored tests (changed, or importing a changed helper or fixture) may use
+ * the whole budget; tests that only depend directly on a touched workspace
+ * fill at most one shard. Batch still runs the complete impacted set.
+ */
+export const PR_E2E_BUDGET_SECONDS = 1_800;
+export const PR_E2E_DIRECT_BUDGET_SECONDS = 480;
+/** At most this many PR E2E shard jobs; Batch uses up to eight. */
+export const PR_E2E_SHARD_CAP = 4;
+/** Target estimated seconds per PR E2E shard (Batch's shard deadline is 720 s). */
+export const PR_E2E_SHARD_TARGET_SECONDS = 480;
 type Input = Pick<ImpactPlan, "schemaVersion" | "mode" | "changedFiles" | "unitTests" | "reasons"> &
   Partial<Pick<ImpactPlan, "affectedPackages">>;
 
@@ -75,6 +98,189 @@ export const PR_INVENTORY_TESTS: readonly { test: string; areas: readonly string
 
 /** Workspaces whose change can break the production web bundle Batch builds. */
 export const PR_WEB_BUNDLE_PACKAGES = ["opengeni-web", "@opengeni/browser-extension"];
+
+type LanePlan = Pick<ImpactPlan, "mode" | "changedFiles" | "e2eTests" | "browserAcceptanceLanes">;
+type BrowserLane = ImpactPlan["browserAcceptanceLanes"][number];
+
+/** The same lane-to-job expansion as ci.yml's `browser_lane_matrix`. */
+export function browserLaneMatrix(
+  lanes: readonly BrowserLane[],
+): { lane: BrowserLane; engine: "chromium" | "firefox" | "webkit" }[] {
+  return lanes.flatMap((lane) =>
+    (lane === "accounts"
+      ? (["chromium", "firefox", "webkit"] as const)
+      : (["chromium"] as const)
+    ).map((engine) => ({ lane, engine })),
+  );
+}
+
+/** The same shard list shape as ci.yml's `e2e_matrix`. */
+export function shardMatrix(total: number) {
+  return Array.from({ length: total }, (_, index) => ({ index, number: index + 1, total }));
+}
+
+const SOURCE_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".mjs", "/index.ts", "/index.tsx"];
+
+/**
+ * Repository files outside every workspace (shared E2E helpers and fixtures)
+ * that a test reaches through relative imports, followed transitively.
+ */
+export function repositoryHelperImports(
+  test: string,
+  graph: WorkspaceGraph,
+  read: (path: string) => string | null = (path) => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return null; // Missing, or a directory.
+    }
+  },
+): string[] {
+  const seen = new Set<string>();
+  const pending = [test];
+  while (pending.length > 0) {
+    const from = pending.pop()!;
+    const source = read(from);
+    if (source === null) continue;
+    const loader = from.endsWith(".tsx") ? "tsx" : from.endsWith(".js") ? "js" : "ts";
+    let specifiers: string[];
+    try {
+      specifiers = new Bun.Transpiler({ loader }).scanImports(source).map(({ path }) => path);
+    } catch {
+      continue; // Not a parseable module (for example JSON); nothing to follow.
+    }
+    for (const specifier of specifiers) {
+      if (!specifier.startsWith(".")) continue;
+      const base = normalize(join(dirname(from), specifier));
+      const resolved = SOURCE_EXTENSIONS.map((ext) => `${base}${ext}`).find(
+        (candidate) => read(candidate) !== null,
+      );
+      if (!resolved || seen.has(resolved) || workspaceForPath(graph, resolved)) continue;
+      seen.add(resolved);
+      pending.push(resolved);
+    }
+  }
+  return [...seen].sort();
+}
+
+export type PrBrowserE2eContext = {
+  /** Workspaces that own a changed file. */
+  touchedWorkspaces: ReadonlySet<string>;
+  /** A test's own or declared/imported workspaces; null when unmapped. */
+  testWorkspaces: (test: string) => readonly string[] | null;
+  /** Repository files outside workspaces (helpers, fixtures) a test imports. */
+  testHelpers: (test: string) => readonly string[];
+  /** Estimated serial seconds of one E2E file. */
+  seconds: (test: string) => number;
+  laneTests: Readonly<Record<BrowserLane, readonly string[]>>;
+};
+
+/**
+ * Files that define how a lane runs (its reusable job, its PR caller and its
+ * runners). Changing one runs that lane on the PR even when no test changed,
+ * so a broken lane definition fails the PR rather than a batch.
+ */
+export const PR_LANE_DEFINITIONS = {
+  e2e: [
+    ".github/workflows/ci-e2e-shards.yml",
+    ".github/workflows/pr-ci.yml",
+    ".github/actions/playwright-browsers/",
+    "scripts/ci/run-test-shard.ts",
+    "scripts/run-browser-e2e.ts",
+  ],
+  browser: [
+    ".github/workflows/ci-browser-acceptance.yml",
+    ".github/workflows/pr-ci.yml",
+    ".github/actions/playwright-browsers/",
+    "scripts/run-browser-e2e.ts",
+  ],
+} as const;
+
+/**
+ * The E2E files and browser acceptance lanes PR CI runs, so a PR's own
+ * deterministic browser failure is found before it can fail a batch of PRs.
+ * Batch still runs the complete impacted set; this only runs part of it first.
+ *
+ * Batch impact is transitive, so most product changes select nearly every
+ * browser test, too many to run on every PR push. The PR runs, from the
+ * impacted set:
+ * - authored tests: a changed test, or one importing a changed helper or
+ *   fixture, in E2E and in the browser acceptance lanes;
+ * - a sample of the E2E tests that depend directly on a touched workspace,
+ *   cheapest first, within one shard's budget;
+ * - when a lane's own definition changes (PR_LANE_DEFINITIONS), that lane:
+ *   every impacted browser lane, or the cheapest one-shard E2E sample.
+ * A CI or toolchain fence does not hide either. Whatever does not fit is
+ * listed as deferred to Batch.
+ */
+export function selectPrBrowserE2e(plan: LanePlan, context: PrBrowserE2eContext) {
+  const changed = new Set(plan.changedFiles);
+  const defines = (paths: readonly string[]) =>
+    plan.changedFiles.some((file) =>
+      paths.some((path) => file === path || (path.endsWith("/") && file.startsWith(path))),
+    );
+  const e2eDefinition = defines(PR_LANE_DEFINITIONS.e2e);
+  const browserDefinition = defines(PR_LANE_DEFINITIONS.browser);
+  const authored = (test: string) =>
+    changed.has(test) || context.testHelpers(test).some((path) => changed.has(path));
+  const direct = (test: string) =>
+    e2eDefinition ||
+    (context.testWorkspaces(test) ?? []).some((name) => context.touchedWorkspaces.has(name));
+  const impacted = [...new Set(plan.e2eTests)];
+  const cost = new Map(impacted.map((path) => [path, Math.max(0, context.seconds(path))]));
+  const cheapest = (a: string, b: string) =>
+    cost.get(a)! - cost.get(b)! || (a < b ? -1 : a > b ? 1 : 0);
+  const authoredTests = impacted.filter(authored).sort(cheapest);
+  const directTests = impacted.filter((path) => !authored(path) && direct(path)).sort(cheapest);
+  const e2eTests: string[] = [];
+  let estimatedSeconds = 0;
+  const fill = (tests: readonly string[], budget: number) => {
+    for (const path of tests) {
+      if (estimatedSeconds + cost.get(path)! > budget) continue;
+      e2eTests.push(path);
+      estimatedSeconds += cost.get(path)!;
+    }
+  };
+  fill(authoredTests, PR_E2E_BUDGET_SECONDS);
+  fill(
+    directTests,
+    Math.min(PR_E2E_BUDGET_SECONDS, estimatedSeconds + PR_E2E_DIRECT_BUDGET_SECONDS),
+  );
+  e2eTests.sort();
+  const selected = new Set(e2eTests);
+  const deferred = (tests: readonly string[]) => tests.filter((path) => !selected.has(path)).sort();
+  const e2eShards =
+    e2eTests.length === 0
+      ? 0
+      : Math.min(
+          PR_E2E_SHARD_CAP,
+          e2eTests.length,
+          Math.max(1, Math.ceil(estimatedSeconds / PR_E2E_SHARD_TARGET_SECONDS)),
+        );
+  const browserAcceptanceLanes = plan.browserAcceptanceLanes.filter(
+    (lane) => browserDefinition || (context.laneTests[lane] ?? []).some(authored),
+  );
+  return {
+    e2eTests,
+    e2eShards,
+    browserAcceptanceLanes,
+    summary: {
+      policy: "authored-plus-direct-sample-v1",
+      laneDefinitionsChanged: { e2e: e2eDefinition, browser: browserDefinition },
+      e2eImpactedCount: impacted.length,
+      e2eAuthored: authoredTests.length,
+      e2eDirect: directTests.length,
+      e2eSelectedCount: e2eTests.length,
+      e2eEstimatedSeconds: Math.round(estimatedSeconds),
+      e2eShards,
+      e2eDeferredAuthored: deferred(authoredTests),
+      e2eDeferredDirectCount: deferred(directTests).length,
+      browserImpactedLanes: plan.browserAcceptanceLanes,
+      browserAcceptanceLanes,
+      browserJobCount: browserLaneMatrix(browserAcceptanceLanes).length,
+    },
+  };
+}
 
 /** Admission sampling only; the original full Batch plan is never changed. */
 export function selectPrFastPlan<T extends Input>(
@@ -165,10 +371,39 @@ if (import.meta.main) {
   if (args.length !== 4 || args[0] !== "--plan" || args[2] !== "--output")
     throw new Error("usage: pr-fast-plan.ts --plan <impact.json> --output <pr-plan.json>");
   const plan = JSON.parse(readFileSync(args[1]!, "utf8")) as ImpactPlan;
+  const graph = createWorkspaceGraph();
   const selected = selectPrFastPlan(
     plan,
-    createWorkspaceGraph().packages.map((pkg) => pkg.dir),
+    graph.packages.map((pkg) => pkg.dir),
   );
-  writeFileSync(args[3]!, JSON.stringify(selected, null, 2));
+  // Without a usable profile every file is assumed to take a minute.
+  const { weights } = e2eShardWeights();
+  const touchedWorkspaces = new Set(
+    plan.changedFiles.flatMap((path) => workspaceForPath(graph, path)?.name ?? []),
+  );
+  const lanes = selectPrBrowserE2e(plan, {
+    touchedWorkspaces,
+    testWorkspaces: (test) => directTestWorkspaces(test, graph),
+    testHelpers: (test) => repositoryHelperImports(test, graph),
+    seconds: (path) => (weights?.get(path) ?? 60_000) / 1000,
+    laneTests: BROWSER_ACCEPTANCE_TESTS,
+  });
+  writeFileSync(
+    args[3]!,
+    JSON.stringify(
+      {
+        ...selected,
+        // run-test-shard.ts reads e2eTests: the PR's selection, not Batch's.
+        e2eTests: lanes.e2eTests,
+        browserAcceptanceLanes: lanes.browserAcceptanceLanes,
+        prBrowserE2e: lanes.summary,
+        prE2eMatrix: shardMatrix(lanes.e2eShards),
+        prBrowserLaneMatrix: browserLaneMatrix(lanes.browserAcceptanceLanes),
+      },
+      null,
+      2,
+    ),
+  );
   console.log(JSON.stringify(selected.prAdmissionUnits));
+  console.log(JSON.stringify(lanes.summary));
 }

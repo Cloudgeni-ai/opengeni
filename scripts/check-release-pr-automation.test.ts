@@ -29,6 +29,39 @@ const releasePublicationAdmissionPath = join(
 );
 const releaseAutomationPath = join(root, "scripts/check-release-pr-automation.mjs");
 const sourceAdmissionHelperPath = join(root, "scripts/check-source-admission.mjs");
+
+/**
+ * ci.yml calls its E2E and browser lanes as reusable workflows that PR CI
+ * shares. For the contracts below, view each such call as the job it runs:
+ * the called job with the caller's needs/if and its `inputs.*` replaced by the
+ * caller's `with` expressions, so the effective ci.yml job is still checked.
+ */
+const INLINED_REUSABLE_CI_JOBS = ["e2e-shards", "browser-acceptance"] as const;
+function inlineReusableJobs(workflow: any): any {
+  for (const name of INLINED_REUSABLE_CI_JOBS) {
+    const caller = workflow.jobs[name];
+    const called = Bun.YAML.parse(
+      readFileSync(join(root, String(caller.uses).replace(/^\.\//, "")), "utf8"),
+    ) as any;
+    expect(Object.keys(called.jobs)).toEqual([name]);
+    let text = JSON.stringify(called.jobs[name]);
+    for (const [input, value] of Object.entries(caller.with as Record<string, string>)) {
+      const expression = /^\$\{\{ (.*) \}\}$/.exec(value)?.[1];
+      text = text.replaceAll(`\${{ inputs.${input} }}`, value);
+      if (expression) text = text.replaceAll(`inputs.${input}`, expression);
+    }
+    for (const input of Object.keys(called.on.workflow_call.inputs))
+      expect(text).not.toMatch(new RegExp(`\\binputs\\.${input}\\b`));
+    workflow.jobs[name] = {
+      ...JSON.parse(text),
+      needs: caller.needs,
+      if: caller.if,
+      uses: caller.uses,
+      with: caller.with,
+    };
+  }
+  return workflow;
+}
 const baseSha = "b".repeat(40);
 const headSha = "c".repeat(40);
 const mergeSha = "d".repeat(40);
@@ -4803,7 +4836,7 @@ describe("workflow contracts", () => {
   const releaseAutomationText = readFileSync(releaseAutomationPath, "utf8");
   const sourceAdmissionHelperText = readFileSync(sourceAdmissionHelperPath, "utf8");
   const release = Bun.YAML.parse(releaseText) as any;
-  const ci = Bun.YAML.parse(ciText) as any;
+  const ci = inlineReusableJobs(Bun.YAML.parse(ciText) as any);
   const seal = Bun.YAML.parse(sealText) as any;
   const retainController = Bun.YAML.parse(retainControllerText) as any;
 
